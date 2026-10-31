@@ -242,6 +242,79 @@ def parse_tool_calls(text: str):
     return calls, content.strip()
 
 
+def _as_bool(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "on", "yes", "enabled"}
+    return None
+
+
+def _thinking_value(value):
+    if isinstance(value, dict):
+        kind = value.get("type")
+        if isinstance(kind, str):
+            return kind.strip().lower() in {"enabled", "on", "true"}
+        enabled = value.get("enabled")
+        if isinstance(enabled, bool):
+            return enabled
+        effort = value.get("effort")
+        return _thinking_value(effort) if effort is not None else None
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"none", "off", "minimal", "disabled"}:
+            return False
+        if text in {"low", "medium", "high", "max", "xhigh"}:
+            return True
+    return _as_bool(value)
+
+
+def thinking_from_request(body: dict) -> bool:
+    """Read thinking controls used by common OpenAI-compatible clients.
+
+    Supported forms:
+      chat_template_kwargs.open_thinking / enable_thinking
+      thinking: bool or {"type": "enabled"|"disabled"}
+      enable_thinking: bool
+      reasoning_effort: none|minimal|low|medium|high|max
+      reasoning: bool or {"enabled": bool, "effort": ...}
+    Absent means off; there is no content-based heuristic.
+    """
+    kwargs = body.get("chat_template_kwargs")
+    if isinstance(kwargs, dict):
+        for key in ("open_thinking", "enable_thinking", "thinking"):
+            if key in kwargs:
+                value = _thinking_value(kwargs[key])
+                if value is not None:
+                    return value
+    extra = body.get("extra_body")
+    if isinstance(extra, dict):
+        for key in ("enable_thinking", "thinking"):
+            if key in extra:
+                value = _thinking_value(extra[key])
+                if value is not None:
+                    return value
+        extra_kwargs = extra.get("chat_template_kwargs")
+        if isinstance(extra_kwargs, dict):
+            for key in ("open_thinking", "enable_thinking", "thinking"):
+                if key in extra_kwargs:
+                    value = _thinking_value(extra_kwargs[key])
+                    if value is not None:
+                        return value
+    for key in ("thinking", "enable_thinking", "reasoning"):
+        if key in body:
+            value = _thinking_value(body[key])
+            if value is not None:
+                return value
+    if "reasoning_effort" in body:
+        value = _thinking_value(body["reasoning_effort"])
+        if value is not None:
+            return value
+    return False
+
+
 def build_prompt(body: dict) -> tuple[str, bool]:
     messages = body.get("messages")
     if not isinstance(messages, list) or not messages:
@@ -285,17 +358,7 @@ def build_prompt(body: dict) -> tuple[str, bool]:
             text += "<|im_start|>user\n<tool_response>\n" + content_text(msg) + "\n</tool_response><|im_end|>\n"
         else:
             text += "<|im_start|>user\n" + content_text(msg) + "<|im_end|>\n"
-    kwargs = body.get("chat_template_kwargs")
-    if not isinstance(kwargs, dict):
-        kwargs = {}
-    if "open_thinking" in kwargs:
-        thinking = bool(kwargs.get("open_thinking"))
-    elif "enable_thinking" in kwargs:
-        thinking = bool(kwargs.get("enable_thinking"))
-    elif "thinking" in body:
-        thinking = bool(body.get("thinking"))
-    else:
-        thinking = False
+    thinking = thinking_from_request(body)
     text += "<|im_start|>assistant\n"
     text += "<think>\n" if thinking else "<think>\n\n</think>\n\n"
     return text, thinking

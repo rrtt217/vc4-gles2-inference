@@ -76,6 +76,21 @@ Thinking:
 }
 ```
 
+Thinking is request-driven.  The server accepts the common client spellings:
+
+```json
+{"thinking": true}
+{"thinking": {"type": "enabled"}}
+{"reasoning_effort": "low"}
+{"reasoning": {"enabled": true}}
+{"enable_thinking": true}
+{"chat_template_kwargs": {"enable_thinking": true}}
+{"extra_body": {"chat_template_kwargs": {"enable_thinking": true}}}
+```
+
+`thinking: false`, `{"type": "disabled"}`, `reasoning_effort: "none"`,
+and an absent flag all mean **off**.  There is no content-based heuristic.
+
 ## Tool calls
 
 The server uses the standard OpenAI flow: it returns `tool_calls`, the client

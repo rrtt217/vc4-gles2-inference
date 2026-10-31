@@ -83,6 +83,21 @@ Thinking：
 }
 ```
 
+思考模式完全由请求参数决定，支持常见客户端的写法：
+
+```json
+{"thinking": true}
+{"thinking": {"type": "enabled"}}
+{"reasoning_effort": "low"}
+{"reasoning": {"enabled": true}}
+{"enable_thinking": true}
+{"chat_template_kwargs": {"enable_thinking": true}}
+{"extra_body": {"chat_template_kwargs": {"enable_thinking": true}}}
+```
+
+`thinking: false`、`{"type": "disabled"}`、`reasoning_effort: "none"`
+以及不传参数都表示**关闭**；没有基于文本内容猜测的规则。
+
 ## 工具调用
 
 服务器使用标准 OpenAI 流程：返回 `tool_calls`，客户端执行工具，然后发回
