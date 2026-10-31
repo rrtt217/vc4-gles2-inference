@@ -1,0 +1,170 @@
+# GLES2 inference engine
+
+A small GLES2/EGL inference engine for llama2.c-family and Qwen3-style
+checkpoints. It runs headless on Raspberry Pi Zero (VC4 V3D 2.1) and on
+desktop GLES2 drivers.
+
+This README is the quick start. Deep notes are in [../docs/](../docs/):
+
+- [model formats](../docs/model-formats.md)
+- [VC4 / engine internals](../docs/engine-internals.md)
+- [quantization and Q4M1](../docs/quantization.md)
+- [performance](../docs/performance.md)
+- [test hooks](../docs/test-hooks.md)
+- [source layout and split decision](../docs/engine-layout.md)
+
+## Source layout
+
+| Path | Purpose |
+|---|---|
+| `engine.cpp` | EGL/GLES2, loaders, tokenizer, session, CLI |
+| `make_i16.py` | F16/llama2.c -> I16M1/M2 |
+| `make_q8_from_i16.py` | I16 -> Q8M1/M2 |
+| `make_q4.py` | F16 safetensors -> Q4M1 (offline q4) |
+| `Makefile` | local and Pi build flags |
+| `vc4_*.cpp` | minimal VC4 probes |
+
+## Build
+
+Local:
+
+```bash
+cd engine
+make engine_mm3
+```
+
+Pi Zero, build separately from the run (about 3–4 minutes):
+
+```bash
+make -B engine_mm3 CXXFLAGS='-O2 -march=armv6 -mfpu=vfp -mfloat-abi=hard -ffast-math -std=c++17'
+```
+
+Do not build under a short timeout: a stale binary makes results look
+nondeterministic.
+
+## Run
+
+Smallest example:
+
+```bash
+MODEL=$PWD/../models/llama2c/stories15M.i16 \
+TOKENIZER=../models/llama2c/tokenizer.bin \
+./engine --prompt "One day, Lily" --gen 8
+```
+
+MiniMind3 q8, GPU layers and packed KV:
+
+```bash
+MODEL=../models/minimind3/minimind3.q8 \
+TOKENIZER=../models/minimind3/minimind3.tok \
+GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat --template minimind3 \
+  --prompt "请写一段关于春天的短文。" --gen 64 --greedy
+```
+
+MiniMind3 offline q4 (45 MB, recommended q4 path):
+
+```bash
+MODEL=../models/minimind3/minimind3.q4 \
+TOKENIZER=../models/minimind3/minimind3.tok \
+GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat --template minimind3 \
+  --prompt "用一句话介绍你自己。" --gen 64 --greedy
+```
+
+Do not set `Q4_WEIGHTS` when the model file is already Q4M1.
+
+## MiniMind3 64M
+
+64M Qwen3-style dense model: 8 layers, 768 hidden, 2432 FFN, 8 Q / 4 KV
+heads, head_dim 96, vocab 6400, RoPE theta 1e6, tied embedding, per-head
+Q/K RMSNorm.
+
+`--template minimind3` uses ChatML, an empty `<think>` block, and the
+MiniMind system prompt. Add `TIMING=1` for prefill/decode timing.
+
+Pi Zero q8, 82-token prefill + 64 generated tokens:
+
+| item | value |
+|---|---:|
+| prefill | 42.7 s |
+| decode | **520.9 ms/token** |
+| CPU-attention path | 559.5 ms/token |
+| q8 weights | 66 MB |
+
+The FFN hidden width 2432 exceeds the VC4 2048-pixel FBO limit.
+`Model::split_ffn()` splits W1/W3 rows and W2 columns into 1216-wide chunks;
+the second W2 matvec adds into the first residual.
+
+## Thinking and tools
+
+```bash
+# explicit thinking
+... --template minimind3 --thinking --prompt "1+1等于几？" --gen 64
+
+# tool definitions
+... --template minimind3 --tools-file minimind3/tools.json \
+  --prompt "现在几点了？" --gen 64 --greedy
+```
+
+Tool prompts are longer than 256 tokens; with tools configured the engine
+raises the KV cache to 768 unless `SEQ` is set explicitly.
+
+Built-in tools:
+
+- `get_current_time` — IANA timezone;
+- `calculate_math` — safe recursive-descent arithmetic (`+ - * / % ^`,
+  parentheses, unary, Python-style `**`).
+
+The native tool loop generates until `<|im_end|>`, parses all complete
+`<tool_call>` blocks, executes them, appends one user turn with
+`<tool_response>` blocks, and re-prefills. Up to 3 rounds.
+
+Thinking mode often fails to close `</think>` within 64 tokens on the 64M
+model; tool calls are much more reliable.
+
+## Environment variables
+
+| Variable | Meaning |
+|---|---|
+| `MODEL`, `TOKENIZER` | checkpoint and tokenizer paths |
+| `SEQ` | KV cache length; tools auto-raise to 768 |
+| `GPU_ATTN=1` | GPU RoPE + KV cache + attention |
+| `GPU_LAYER=1` | hidden state, attention, RMSNorm, FFN on GPU |
+| `KV_PACK=16` | packed q16 KV (two int16 per texel) |
+| `KV_PACK=8` | packed q8 KV; quality is not default-safe |
+| `KV_SCALE` | KV fixed-point scale |
+| `Q4_WEIGHTS=1` | runtime q4 conversion (experiments only) |
+| `KEEP_CPU_WEIGHTS=1` | keep CPU weights after upload (debug) |
+| `TIMING=1` | print prefill/decode timing |
+| `LAYER_PROFILE=1` | per-layer timing |
+| `TOPK`, `TOPK_FAST` | candidate Top-K paths |
+
+See [test hooks](../docs/test-hooks.md) for the full list.
+
+## Documentation map
+
+| Document | Read it for |
+|---|---|
+| [model-formats.md](../docs/model-formats.md) | byte layouts |
+| [quantization.md](../docs/quantization.md) | q4/q6, Q4M1, packed KV, quality |
+| [engine-internals.md](../docs/engine-internals.md) | VC4 shader/FBO quirks |
+| [performance.md](../docs/performance.md) | Pi/laptop numbers |
+| [prefix-cache.md](../docs/prefix-cache.md) | worker and disk KV cache |
+| [engine-layout.md](../docs/engine-layout.md) | whether to split the source |
+
+## Server
+
+The OpenAI-compatible Python server lives in [../server/](../server/):
+
+```bash
+python3 server.py --seq 768 --kv-pack 16 \
+  --prefix-cache prefix_tools_pack16_768.kv
+```
+
+See [server/README.md](../server/README.md).
+
+## Shutdown
+
+`SIGINT`/`SIGTERM` set a flag instead of tearing down EGL inside the signal
+handler. The current GPU call/layer/token finishes, then `glFinish()` and
+normal EGL teardown run. In chat mode Ctrl+C stops the current turn and
+returns to the prompt; Ctrl+C at the prompt exits.

@@ -1,0 +1,132 @@
+# VC4 / GLES2 MiniMind3 推理
+
+在树莓派 Zero（BCM2835 / VC4 V3D 2.1）上通过 GLES2/EGL 做实用的小模型
+无头推理。它不是演示程序：可以跑 Qwen3 风格 64M 模型、原生工具调用、
+OpenAI 兼容 HTTP 服务器和磁盘 KV prefix cache。
+
+[English](README.md)
+
+## 目前可用
+
+- **MiniMind3 64M** — 8 层、768 hidden、2432 FFN、8 Q / 4 KV heads、
+  head_dim 96、vocab 6400、RoPE theta 1e6、per-head Q/K RMSNorm。
+- **格式** — legacy llama2.c、Q8M1、I16M1、Q8M2/I16M2、离线 **Q4M1**。
+- **KV cache** — 24-bit 基线、packed q16（推荐默认）、packed q8
+  （质量有风险）。
+- **服务器** — Python 标准库 OpenAI 兼容接口、SSE、标准 tool calls、
+  usage 统计。
+- **工具** — 内置时间/算术工具；模型输出 tool call，worker 执行后把
+  tool response 喂回。
+- **Prefix cache** — worker 内 token/KV 复用，以及 `MMKV1` 磁盘缓存。
+
+## 快速开始
+
+### 笔记本
+
+```bash
+cd engine
+make engine_mm3
+
+MODEL=../models/minimind3/minimind3.q8 \
+TOKENIZER=../models/minimind3/minimind3.tok \
+GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat --template minimind3 \
+  --prompt "用一句话介绍你自己。" --gen 64 --greedy
+```
+
+### Pi Zero
+
+在 Pi 上单独构建，构建和运行分开：
+
+```bash
+cd engine
+make -B engine_mm3 CXXFLAGS='-O2 -march=armv6 -mfpu=vfp -mfloat-abi=hard -ffast-math -std=c++17'
+```
+
+运行：
+
+```bash
+cd engine
+MODEL=../models/minimind3/minimind3.q8 \
+TOKENIZER=../models/minimind3/minimind3.tok \
+GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat --template minimind3 \
+  --prompt "用一句话介绍你自己。" --gen 64 --greedy
+```
+
+### 离线 q4
+
+```bash
+python3 engine/make_q4.py --input models/minimind3 --output models/minimind3/minimind3.q4 --seq 512
+
+cd engine
+MODEL=../models/minimind3/minimind3.q4 \
+TOKENIZER=../models/minimind3/minimind3.tok \
+GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat --template minimind3 \
+  --prompt "用一句话介绍你自己。" --gen 64 --greedy
+```
+
+离线 Q4M1 为 45 MB，q8 为 66 MB。shader unroll 后本地约
+16–23 ms/token（q8 约 14–20 ms/token），但省权重显存。要从 F16 源量化；q8 -> q4 是二次
+量化，质量会下降。
+
+### OpenAI 兼容服务器
+
+```bash
+cd server
+python3 server.py --seq 768 --kv-pack 16 \
+  --prefix-cache prefix_tools_pack16_768.kv
+```
+
+接口、工具和缓存细节见 [server/README.zh-CN.md](server/README.zh-CN.md)。
+
+## 仓库结构
+
+| 路径 | 内容 |
+|---|---|
+| [engine/](engine/) | GLES2 引擎、转换器、探针 |
+| [models/](models/) | 统一模型目录（gitignore） |
+| [minimind3/](minimind3/) | MiniMind3 源配置、tokenizer 源和参考实现 |
+| [server/](server/) | OpenAI 兼容 Python 服务器 |
+| [docs/](docs/) | 深入文档：格式、内部、量化、性能 |
+
+## 模型大小和速度
+
+| 路径 | 大小 | 本地 decode |
+|---|---:|---:|
+| MiniMind3 q8 | 66 MB | ~17 ms/token |
+| MiniMind3 离线 q4 | 45 MB | ~16–23 ms/token |
+| MiniMind3 i16 | 132 MB | 参考/量化源 |
+
+Pi Zero q8：decode 约 520 ms/token，82-token prefill 约 42.7 s。
+具体数字与机器有关，见 [performance.md](docs/performance.md)。
+
+## 文档
+
+- [引擎快速开始](engine/README.zh-CN.md)
+- [模型格式](docs/model-formats.md)
+- [量化与 Q4M1](docs/quantization.md)
+- [VC4 / 引擎内部](docs/engine-internals.md)
+- [Prefix cache](docs/prefix-cache.md)
+- [性能](docs/performance.md)
+- [测试开关](docs/test-hooks.md)
+- [源码布局 / 拆分建议](docs/engine-layout.md)
+- [Agent 说明](AGENTS.md)
+
+深入文档目前以英文为主；项目总览、引擎和服务器快速开始有中文版。
+
+## 模型与致谢
+
+模型权重和 tokenizer **不包含在仓库中**，请按 [models/README.md](models/README.md) 放到 `models/`。
+MiniMind3 架构/tokenizer 参考 [jingyaogong/minimind](https://github.com/jingyaogong/minimind)（Apache-2.0）；基础引擎参考 [karpathy/llama2.c](https://github.com/karpathy/llama2.c)（MIT）。
+
+## 已知限制
+
+- Pi 和笔记本生成的 KV cache **不是逐字节相同**；磁盘缓存要在目标机器上生成。
+- `CmaFree` 是真实 CMA 占用。调小 `gpu_mem` 或 `cma` 不会凭空增加 CMA，
+  反而可能让压力更大。
+- Pi Zero 上 `SEQ=768` + packed q16 很紧（加载后 `CmaFree` 约 2 MB）；
+  要用实际模型/缓存组合验证。
+- q8 KV 流畅但质量不安全；packed q16 是安全的 KV 默认。
+- q4 不是 bit-exact，算术质量依赖 prompt。
+- 引擎目前是单个 translation unit；分阶段拆分见
+  [engine-layout.md](docs/engine-layout.md)。
+

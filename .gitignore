@@ -1,0 +1,48 @@
+# Large model / tokenizer artifacts
+/models/*
+!/models/README.md
+*.bin
+*.i16
+*.q8
+*.q4
+*.safetensors
+*.gguf
+*.tok
+
+# KV / quant experiment artifacts
+*.kv
+*.npz
+*.tokens
+*.npy
+
+# Logs and runtime files
+*.log
+*.pid
+*.tmp
+core
+core.*
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
+# Engine/build outputs
+engine/engine
+engine/engine_mm3
+engine/engine_attn
+engine/engine_layer
+engine/engine_profile
+engine/vc4_probe
+engine/vc4_ffn_probe
+engine/vc4_topk_probe
+
+# Editor / OS
+.DS_Store
+*.swp
+*~
+
+# Local upstream references / model assets
+/refs/
+/minimind3/tokenizer.json
