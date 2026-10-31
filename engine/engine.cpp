@@ -26,6 +26,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #ifndef GL_COLOR_ATTACHMENT1
@@ -2504,6 +2505,66 @@ private:
 // -----------------------------------------------------------------------------
 // Sampling and CLI.
 // -----------------------------------------------------------------------------
+struct SamplingSettings {
+    float repetition_penalty = 1.0f;
+    float frequency_penalty = 0.0f;
+    float presence_penalty = 0.0f;
+    int no_repeat_ngram = 0;
+    float min_p = 0.0f;
+};
+
+static SamplingSettings g_sampling;
+
+static bool sampling_penalties_active() {
+    return g_sampling.repetition_penalty != 1.0f ||
+           g_sampling.frequency_penalty != 0.0f ||
+           g_sampling.presence_penalty != 0.0f ||
+           g_sampling.no_repeat_ngram > 1 ||
+           g_sampling.min_p > 0.0f;
+}
+
+static void apply_sampling_penalties(vector<float>& logits, const vector<int>& recent) {
+    if (recent.empty() && g_sampling.min_p <= 0.0f) return;
+    unordered_map<int, int> counts;
+    for (int t : recent) ++counts[t];
+    if (g_sampling.repetition_penalty != 1.0f) {
+        for (const auto& kv : counts) {
+            int t = kv.first;
+            if (t < 0 || t >= (int)logits.size()) continue;
+            if (logits[t] > 0) logits[t] /= g_sampling.repetition_penalty;
+            else logits[t] *= g_sampling.repetition_penalty;
+        }
+    }
+    if (g_sampling.frequency_penalty != 0.0f || g_sampling.presence_penalty != 0.0f) {
+        for (const auto& kv : counts) {
+            int t = kv.first;
+            if (t < 0 || t >= (int)logits.size()) continue;
+            logits[t] -= g_sampling.frequency_penalty * kv.second;
+            logits[t] -= g_sampling.presence_penalty;
+        }
+    }
+    const int n = g_sampling.no_repeat_ngram;
+    if (n > 1 && (int)recent.size() >= n) {
+        vector<int> prefix(recent.end() - (n - 1), recent.end());
+        for (size_t i = 0; i + n <= recent.size(); ++i) {
+            bool match = true;
+            for (int j = 0; j < n - 1; ++j) {
+                if (recent[i + j] != prefix[j]) { match = false; break; }
+            }
+            if (match) {
+                int banned = recent[i + n - 1];
+                if (banned >= 0 && banned < (int)logits.size()) logits[banned] = -1e30f;
+            }
+        }
+    }
+    if (g_sampling.min_p > 0.0f) {
+        float mx = -1e30f;
+        for (float v : logits) mx = max(mx, v);
+        float cutoff = mx + logf(g_sampling.min_p);
+        for (float& v : logits) if (v < cutoff) v = -1e30f;
+    }
+}
+
 static int sample_token(const vector<float>& logits, float temp, float top_p, mt19937& rng) {
     vector<pair<float, int>> p(logits.size());
     float mx = -1e30f;
@@ -2880,6 +2941,11 @@ int main(int argc, char** argv) {
     uint32_t seed = 1234;
     float temp = 1.0f, top_p = 0.9f;
     int topk = getenv("TOPK") ? atoi(getenv("TOPK")) : 0;
+    if (getenv("REPETITION_PENALTY")) g_sampling.repetition_penalty = atof(getenv("REPETITION_PENALTY"));
+    if (getenv("FREQUENCY_PENALTY")) g_sampling.frequency_penalty = atof(getenv("FREQUENCY_PENALTY"));
+    if (getenv("PRESENCE_PENALTY")) g_sampling.presence_penalty = atof(getenv("PRESENCE_PENALTY"));
+    if (getenv("NO_REPEAT_NGRAM")) g_sampling.no_repeat_ngram = atoi(getenv("NO_REPEAT_NGRAM"));
+    if (getenv("MIN_P")) g_sampling.min_p = atof(getenv("MIN_P"));
 
     for (int i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--prompt") && i + 1 < argc) { prompt = argv[++i]; prompt_set = true; }
@@ -2908,6 +2974,11 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--seed") && i + 1 < argc) seed = (uint32_t)strtoul(argv[++i], nullptr, 10);
         else if (!strcmp(argv[i], "--temp") && i + 1 < argc) temp = atof(argv[++i]);
         else if (!strcmp(argv[i], "--topp") && i + 1 < argc) top_p = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--repeat-penalty") && i + 1 < argc) g_sampling.repetition_penalty = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--frequency-penalty") && i + 1 < argc) g_sampling.frequency_penalty = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--presence-penalty") && i + 1 < argc) g_sampling.presence_penalty = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--no-repeat-ngram") && i + 1 < argc) g_sampling.no_repeat_ngram = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--min-p") && i + 1 < argc) g_sampling.min_p = atof(argv[++i]);
     }
     if (chat && !gen_set) gen = 128;
 
@@ -3019,8 +3090,10 @@ int main(int argc, char** argv) {
             int generated = 0;
             int prev = tokens.back();
             vector<int> all_tokens = tokens;
+            vector<int> recent;
             for (int i = 0; i < max_new; ++i) {
                 if (g_stop) { finish = "stop"; break; }
+                apply_sampling_penalties(logits, recent);
                 int next = greedy_req ? argmax_token(logits)
                                       : sample_token(logits, wt, wp, rng);
                 if (next == 1 || next == 2) {
@@ -3039,6 +3112,7 @@ int main(int argc, char** argv) {
                 prev = next;
                 ++generated;
                 all_tokens.push_back(next);
+                recent.push_back(next);
                 logits = session.step(next, pos++, true);
             }
             if (!pending.empty()) {
@@ -3112,7 +3186,7 @@ int main(int argc, char** argv) {
         for (int i = 0; i < skip; ++i) pos = i + 1;
         vector<float> logits;
         CandidateResult cand;
-        bool cand_mode = topk != 0 && !greedy;
+        bool cand_mode = topk != 0 && !greedy && !sampling_penalties_active();
         for (size_t i = skip; i < tokens.size(); ++i) {
             if (g_stop) { gpu.sync(); return; }
             if (pos >= model.seq) { cout << "[context full]\n"; return; }
@@ -3133,8 +3207,10 @@ int main(int argc, char** argv) {
         }
         cout << "Assistant: "; cout.flush();
         int prev = tokens.empty() ? 1 : tokens.back();
+        vector<int> recent;
         for (int i = 0; i < gen && pos < model.seq; ++i) {
             if (g_stop) { gpu.sync(); return; }
+            apply_sampling_penalties(logits, recent);
             int next = greedy ? argmax_token(logits)
                               : (cand_mode ? sample_candidate_result(cand, temp, top_p, rng)
                                            : sample_token(logits, temp, top_p, rng));
@@ -3144,6 +3220,7 @@ int main(int argc, char** argv) {
             }
             cout << tokenizer.decode({next}, prev); cout.flush();
             tokens.push_back(next);
+            recent.push_back(next);
             ++generated;
             prev = next;
             if (cand_mode) {
@@ -3188,7 +3265,7 @@ int main(int argc, char** argv) {
             if ((int)tokens.size() >= model.seq) { cout << "[context full]\n"; return; }
             vector<float> logits;
             CandidateResult cand;
-            bool cand_mode = topk != 0 && !greedy;
+            bool cand_mode = topk != 0 && !greedy && !sampling_penalties_active();
             int skip = (first && round == 0 && !cli_cache_tokens.empty()) ? cache_prefix_len(tokens) : 0;
             for (size_t i = skip; i < tokens.size(); ++i) {
                 if (g_stop) { gpu.sync(); return; }
@@ -3205,8 +3282,10 @@ int main(int argc, char** argv) {
             string out;
             int prev = tokens.empty() ? 1 : tokens.back();
             int pos = (int)tokens.size();
+            vector<int> recent;
             for (int i = 0; i < gen && pos < model.seq; ++i) {
                 if (g_stop) { gpu.sync(); return; }
+                apply_sampling_penalties(logits, recent);
                 int next = greedy ? argmax_token(logits)
                                   : (cand_mode ? sample_candidate_result(cand, temp, top_p, rng)
                                                : sample_token(logits, temp, top_p, rng));
@@ -3217,6 +3296,7 @@ int main(int argc, char** argv) {
                 string piece = tokenizer.decode({next}, prev);
                 cout << piece; cout.flush();
                 out += piece;
+                recent.push_back(next);
                 prev = next;
                 if (cand_mode) {
                     cand = session.step_candidates(next, pos++, topk, temp, top_p);
@@ -3277,7 +3357,7 @@ int main(int argc, char** argv) {
     auto start = Clock::now();
     vector<float> logits;
     CandidateResult cand;
-    bool cand_mode = topk != 0 && !greedy;
+    bool cand_mode = topk != 0 && !greedy && !sampling_penalties_active();
     for (size_t i = 0; i < tokens.size(); ++i) {
         if (g_stop) break;
         bool last = (i + 1 == tokens.size());
@@ -3297,14 +3377,17 @@ int main(int argc, char** argv) {
     }
     int generated = 0;
     double decode_ms = 0;
+    vector<int> recent;
     for (int i = 0; i < gen; ++i) {
         if (g_stop) break;
+        apply_sampling_penalties(logits, recent);
         int next = greedy ? argmax_token(logits)
                           : (cand_mode ? sample_candidate_result(cand, temp, top_p, rng)
                                        : sample_token(logits, temp, top_p, rng));
         if (!getenv("IGNORE_EOS") && (next == 1 || next == 2)) break;
         cout << tokenizer.decode({next}, tokens.empty() ? 1 : tokens.back()); cout.flush();
         tokens.push_back(next);
+        recent.push_back(next);
         auto a = Clock::now();
         if (cand_mode) {
             cand = session.step_candidates(next, (int)tokens.size() - 1, topk, temp, top_p);
