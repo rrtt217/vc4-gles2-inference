@@ -285,8 +285,17 @@ def build_prompt(body: dict) -> tuple[str, bool]:
             text += "<|im_start|>user\n<tool_response>\n" + content_text(msg) + "\n</tool_response><|im_end|>\n"
         else:
             text += "<|im_start|>user\n" + content_text(msg) + "<|im_end|>\n"
-    kwargs = body.get("chat_template_kwargs") or {}
-    thinking = bool(kwargs.get("open_thinking", body.get("thinking", False)))
+    kwargs = body.get("chat_template_kwargs")
+    if not isinstance(kwargs, dict):
+        kwargs = {}
+    if "open_thinking" in kwargs:
+        thinking = bool(kwargs.get("open_thinking"))
+    elif "enable_thinking" in kwargs:
+        thinking = bool(kwargs.get("enable_thinking"))
+    elif "thinking" in body:
+        thinking = bool(body.get("thinking"))
+    else:
+        thinking = False
     text += "<|im_start|>assistant\n"
     text += "<think>\n" if thinking else "<think>\n\n</think>\n\n"
     return text, thinking
