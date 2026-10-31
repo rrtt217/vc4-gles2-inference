@@ -2823,7 +2823,7 @@ static string run_tool(const string& name, const string& args) {
         else snprintf(buf, sizeof(buf), "%.6g", v);
         return "{\"result\":\"" + string(buf) + "\"}";
     }
-    if (name == "system_status" || name == "get_status") {
+    if (name == "system_status" || name.find("status") != string::npos) {
         double mem_free = 0, mem_avail = 0;
         {
             ifstream in("/proc/meminfo");
@@ -3060,6 +3060,20 @@ int main(int argc, char** argv) {
     }
 
 
+    vector<int> cli_cache_tokens;
+    if (!worker && !prefix_cache_path.empty()) {
+        if (session.load_prefix_cache(prefix_cache_path, cli_cache_tokens))
+            cerr << "PREFIX_CACHE loaded " << cli_cache_tokens.size() << " tokens\n";
+        else
+            cerr << "PREFIX_CACHE ignored " << prefix_cache_path << "\n";
+    }
+    auto cache_prefix_len = [&](const vector<int>& tokens) {
+        size_t n = 0;
+        while (n < cli_cache_tokens.size() && n < tokens.size() &&
+               cli_cache_tokens[n] == tokens[n]) ++n;
+        return (int)n;
+    };
+
     mt19937 rng(seed);
     auto run_turn = [&](const string& user, bool first, int pos) {
         auto turn_start = Clock::now();
@@ -3094,10 +3108,12 @@ int main(int argc, char** argv) {
                 text = "[INST] " + user + " [/INST]";
         }
         auto tokens = tokenizer.encode(text, !qwen_template, !qwen_template);
+        int skip = (first && !cli_cache_tokens.empty()) ? cache_prefix_len(tokens) : 0;
+        for (int i = 0; i < skip; ++i) pos = i + 1;
         vector<float> logits;
         CandidateResult cand;
         bool cand_mode = topk != 0 && !greedy;
-        for (size_t i = 0; i < tokens.size(); ++i) {
+        for (size_t i = skip; i < tokens.size(); ++i) {
             if (g_stop) { gpu.sync(); return; }
             if (pos >= model.seq) { cout << "[context full]\n"; return; }
             bool last = (i + 1 == tokens.size());
@@ -3173,7 +3189,8 @@ int main(int argc, char** argv) {
             vector<float> logits;
             CandidateResult cand;
             bool cand_mode = topk != 0 && !greedy;
-            for (size_t i = 0; i < tokens.size(); ++i) {
+            int skip = (first && round == 0 && !cli_cache_tokens.empty()) ? cache_prefix_len(tokens) : 0;
+            for (size_t i = skip; i < tokens.size(); ++i) {
                 if (g_stop) { gpu.sync(); return; }
                 bool last = (i + 1 == tokens.size());
                 if (last && cand_mode) {
