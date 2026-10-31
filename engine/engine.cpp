@@ -22,6 +22,7 @@
 #include <string>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <unordered_map>
@@ -2821,6 +2822,45 @@ static string run_tool(const string& name, const string& args) {
         if (fabs(v - round(v)) < 1e-9) snprintf(buf, sizeof(buf), "%.0f", v);
         else snprintf(buf, sizeof(buf), "%.6g", v);
         return "{\"result\":\"" + string(buf) + "\"}";
+    }
+    if (name == "system_status" || name == "get_status") {
+        double mem_free = 0, mem_avail = 0;
+        {
+            ifstream in("/proc/meminfo");
+            string key;
+            while (in >> key) {
+                long value = 0;
+                string unit;
+                if (!(in >> value)) break;
+                getline(in, unit);
+                if (key == "MemFree:") mem_free = value / 1024.0;
+                else if (key == "MemAvailable:") mem_avail = value / 1024.0;
+            }
+        }
+        double temp_c = 0;
+        {
+            ifstream in("/sys/class/thermal/thermal_zone0/temp");
+            long milli = 0;
+            if (in >> milli) temp_c = milli / 1000.0;
+        }
+        double uptime_s = 0, load1 = 0;
+        {
+            ifstream in("/proc/uptime");
+            in >> uptime_s;
+        }
+        {
+            ifstream in("/proc/loadavg");
+            in >> load1;
+        }
+        double disk_free_mb = 0;
+        struct statvfs st {};
+        if (statvfs("/", &st) == 0) disk_free_mb = (double)st.f_bavail * st.f_frsize / 1048576.0;
+        char buf[512];
+        snprintf(buf, sizeof(buf),
+                 "{\"temp_c\":%.1f,\"mem_free_mb\":%.1f,\"mem_avail_mb\":%.1f,"
+                 "\"disk_free_mb\":%.1f,\"uptime_s\":%.0f,\"load1\":%.2f}",
+                 temp_c, mem_free, mem_avail, disk_free_mb, uptime_s, load1);
+        return string(buf);
     }
     return "{\"error\":\"unknown tool\"}";
 }
