@@ -1,0 +1,1 @@
+{"type":"function","function":{"name":"system_status","description":"Read Raspberry Pi temperature, memory, disk, uptime and load.","parameters":{"type":"object","properties":{}}}}
