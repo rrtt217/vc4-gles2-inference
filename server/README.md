@@ -91,6 +91,8 @@ Thinking is request-driven.  The server accepts the common client spellings:
 `thinking: false`, `{"type": "disabled"}`, `reasoning_effort: "none"`,
 and an absent flag all mean **off**.  There is no content-based heuristic.
 
+Chatbox appends `Additional info` / `## Runtime` metadata to the system prompt. The server strips that metadata and replaces a generic `You are a helpful assistant.` prompt with the MiniMind prompt; a custom prompt containing `MiniMind` is preserved.
+
 ## Tool calls
 
 The server uses the standard OpenAI flow: it returns `tool_calls`, the client

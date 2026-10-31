@@ -315,6 +315,41 @@ def thinking_from_request(body: dict) -> bool:
     return False
 
 
+_CHATBOX_META_MARKERS = (
+    "\n\nAdditional info for this conversation:",
+    "\n## Runtime\nCurrent model:",
+)
+_GENERIC_SYSTEMS = {
+    "you are a helpful assistant.",
+    "you are a helpful assistant",
+    "你是一个乐于助人的助手。",
+    "你是一个乐于助人的助手",
+}
+
+
+def normalize_system_prompt(system: str) -> str:
+    """Remove Chatbox runtime metadata from the system prompt.
+
+    Chatbox appends model/date metadata and a system-reminder contract to the
+    user's prompt.  That is useful for large models, but it dilutes MiniMind's
+    short identity prompt.  Strip the known metadata and fall back to the
+    MiniMind prompt unless the client supplied its own MiniMind prompt.
+    """
+    text = system or ""
+    had_metadata = False
+    for marker in _CHATBOX_META_MARKERS:
+        index = text.find(marker)
+        if index >= 0:
+            text = text[:index]
+            had_metadata = True
+    text = text.strip()
+    if not text or text.lower() in _GENERIC_SYSTEMS:
+        return DEFAULT_SYSTEM
+    if had_metadata and "minimind" not in text.lower():
+        return DEFAULT_SYSTEM
+    return text
+
+
 def build_prompt(body: dict) -> tuple[str, bool]:
     messages = body.get("messages")
     if not isinstance(messages, list) or not messages:
@@ -323,7 +358,7 @@ def build_prompt(body: dict) -> tuple[str, bool]:
     system = DEFAULT_SYSTEM
     for msg in messages:
         if isinstance(msg, dict) and msg.get("role") == "system":
-            system = content_text(msg) or system
+            system = normalize_system_prompt(content_text(msg)) or system
             break
     text = "<|im_start|>system\n" + system + render_tools(tools) + "<|im_end|>\n"
     for msg in messages:
