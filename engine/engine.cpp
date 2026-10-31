@@ -2546,7 +2546,7 @@ static void apply_sampling_penalties(vector<float>& logits, const vector<int>& r
     const int n = g_sampling.no_repeat_ngram;
     if (n > 1 && (int)recent.size() >= n) {
         vector<int> prefix(recent.end() - (n - 1), recent.end());
-        for (size_t i = 0; i + n <= recent.size(); ++i) {
+        for (size_t i = 0; i + n < recent.size(); ++i) {
             bool match = true;
             for (int j = 0; j < n - 1; ++j) {
                 if (recent[i + j] != prefix[j]) { match = false; break; }
