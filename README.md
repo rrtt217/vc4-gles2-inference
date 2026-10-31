@@ -113,6 +113,7 @@ Numbers are machine-specific; see [performance.md](docs/performance.md).
 - [Performance](docs/performance.md)
 - [Test hooks](docs/test-hooks.md)
 - [Source layout / split decision](docs/engine-layout.md)
+- [Future optimization directions](docs/future-optimization.md)
 - [Agent notes](AGENTS.md)
 
 ## Models and credits

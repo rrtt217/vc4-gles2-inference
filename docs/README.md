@@ -20,6 +20,7 @@ Deep dives:
 | [test-hooks.md](test-hooks.md) | environment switches for A/B tests |
 | [prefix-cache.md](prefix-cache.md) | in-memory and disk KV prefix cache, packed cache |
 | [engine-layout.md](engine-layout.md) | source layout and whether to split `engine.cpp` |
+| [future-optimization.md](future-optimization.md) | prioritized future work and explicit non-goals |
 
 Conventions:
 

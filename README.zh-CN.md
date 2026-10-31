@@ -111,6 +111,7 @@ Pi Zero q8：decode 约 520 ms/token，82-token prefill 约 42.7 s。
 - [性能](docs/performance.md)
 - [测试开关](docs/test-hooks.md)
 - [源码布局 / 拆分建议](docs/engine-layout.md)
+- [未来优化方向](docs/future-optimization.md)
 - [Agent 说明](AGENTS.md)
 
 深入文档目前以英文为主；项目总览、引擎和服务器快速开始有中文版。
