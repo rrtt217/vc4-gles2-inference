@@ -7,6 +7,8 @@ and a disk KV prefix cache.
 
 [中文说明](README.zh-CN.md)
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 ## What works
 
 - **MiniMind3 64M** — 8 layers, 768 hidden, 2432 FFN, 8 Q / 4 KV heads,
@@ -117,6 +119,11 @@ Numbers are machine-specific; see [performance.md](docs/performance.md).
 
 Model weights and tokenizers are **not included**; put them under `models/` as described in [models/README.md](models/README.md).
 The MiniMind3 architecture/tokenizer follows [jingyaogong/minimind](https://github.com/jingyaogong/minimind) (Apache-2.0); the base engine follows [karpathy/llama2.c](https://github.com/karpathy/llama2.c) (MIT).
+
+## License
+
+MIT. See [LICENSE](LICENSE). Model weights and third-party model assets are
+not covered by this repository license; see the credits above.
 
 ## Known caveats
 

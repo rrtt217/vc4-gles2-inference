@@ -6,6 +6,8 @@ OpenAI 兼容 HTTP 服务器和磁盘 KV prefix cache。
 
 [English](README.md)
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 ## 目前可用
 
 - **MiniMind3 64M** — 8 层、768 hidden、2432 FFN、8 Q / 4 KV heads、
@@ -117,6 +119,11 @@ Pi Zero q8：decode 约 520 ms/token，82-token prefill 约 42.7 s。
 
 模型权重和 tokenizer **不包含在仓库中**，请按 [models/README.md](models/README.md) 放到 `models/`。
 MiniMind3 架构/tokenizer 参考 [jingyaogong/minimind](https://github.com/jingyaogong/minimind)（Apache-2.0）；基础引擎参考 [karpathy/llama2.c](https://github.com/karpathy/llama2.c)（MIT）。
+
+## 许可证
+
+MIT，见 [LICENSE](LICENSE)。模型权重和第三方模型资源不包含在本仓库许可证范围内，
+其归属见上面的致谢。
 
 ## 已知限制
 
