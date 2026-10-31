@@ -3046,6 +3046,7 @@ int main(int argc, char** argv) {
                        "<|im_end|>\n<|im_start|>user\n" + user + "<|im_end|>\n<|im_start|>assistant\n";
             else
                 text = "<|im_start|>user\n" + user + "<|im_end|>\n<|im_start|>assistant\n";
+            if (open_thinking) text += "<think>\n";
         } else {
             if (first && !system_prompt.empty())
                 text = "[INST] <<SYS>>\n" + system_prompt + "\n<</SYS>>\n\n" + user + " [/INST]";
