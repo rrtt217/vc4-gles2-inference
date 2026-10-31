@@ -5,9 +5,9 @@
 
 You may call one or more functions to assist with the user query.
 
-You are provided with function signatures within <tools>{"type":"function","function":{"name":"system_status","description":"Read Raspberry Pi temperature, memory, disk, uptime and load.","parameters":{"type":"object","properties":{}}}}
-</tools> XML tags:
+You are provided with function signatures within <tools></tools> XML tags:
 <tools>
+{"type":"function","function":{"name":"system_status","description":"Read Raspberry Pi temperature, memory, disk, uptime and load.","parameters":{"type":"object","properties":{}}}}
 </tools>
 
 For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
