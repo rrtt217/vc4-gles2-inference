@@ -46,7 +46,7 @@ class EngineWorker:
         if kv_pack:
             env["KV_PACK"] = str(kv_pack)
         self.log = open(log_path, "ab", buffering=0)
-        cmd = [engine, "--worker"]
+        cmd = [engine, "--worker", "--template", "qwen"]
         if prefix_cache:
             cmd += ["--prefix-cache", prefix_cache]
         self.prefix_cache_tokens = 0
