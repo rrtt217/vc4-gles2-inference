@@ -43,6 +43,20 @@ make -B engine_mm3 CXXFLAGS='-O2 -march=armv6 -mfpu=vfp -mfloat-abi=hard -ffast-
 Do not build under a short timeout: a stale binary makes results look
 nondeterministic.
 
+### Cross build on VLAB
+
+VLAB has `arm-linux-gnueabihf-g++-12` and a Raspbian trixie rootfs at
+`$HOME/raspi-root4`. Build the Pi binary there (about 25 seconds):
+
+```bash
+make -B pi CROSS_SYSROOT=$HOME/raspi-root4
+```
+
+The target uses `--sysroot` plus `-B` for the sysroot's own GCC startfiles;
+the sysroot is a complete Raspbian root filesystem (ARMv6, VFPv2), not a
+hand-picked set of libraries. The output is `engine_mm3_pi`; copy it to the Pi
+only after checking `readelf -A` reports `Tag_CPU_arch: v6`.
+
 ## Run
 
 Smallest example:
