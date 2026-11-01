@@ -59,6 +59,60 @@ engine keeps `glFlush(); glFinish();` on VC4:
 
 Iris does not force these finishes.
 
+### 4. Activation textures hold two int16 values per texel
+
+Every texture passed as `X` to a matvec program contains **two** int16
+activations per RGBA8 texel: `(r,g)` is element `2t`, `(b,a)` is `2t+1`, both
+big-endian in the same way as before.  Texture width is therefore
+`(cols + 1) / 2`, not `cols`.
+
+Why: before this change each multiply-accumulate cost one activation fetch plus
+a quarter of a weight fetch (weights are 4-per-texel), i.e. 1.25 texture samples
+per MAC.  Packing the activations halves the activation traffic to 0.75 samples
+per MAC.  The logits pass predicted 6.14M samples / ~185 Msamples/s = 32ms and
+measured 33.4ms, which is what identified texture sampling as the bottleneck.
+
+Producers of an `X` texture — **all four must use the packed layout**:
+
+| producer | where |
+|---|---|
+| host upload | `upload_activations` (used by `upload_input`, `logits`) |
+| RMSNorm output | `rms_norm_program` (writes pairs, width `att_dim_/2`) |
+| SwiGLU output | `swiglu_2row_program`, `swiglu_program` (width `hidden/2`) |
+| attention output | `v_program` (width `att_dim_/2`) |
+
+Residual (`R`) textures, matvec outputs and the KV cache are **unchanged**: one
+value per texel.  `rms_stats_program` and `rms_norm_program` still *read* their
+input one value per texel, because their input is a residual, not an `X`.
+
+Missing any one of the four producers silently degrades generation into
+repeated single tokens (the model sees near-constant activations).  That is what
+`engine/verify_packing.sh` guards: it compares the first 16 greedy tokens
+against the pre-packing engine byte for byte.
+
+
+### 5. Texture limits: 2048 per side, no half-float, so every weight is decoded
+
+Probed with `engine/texsize_probe.cpp` on this board (Mesa 26.2.2, VC4 V3D 2.1):
+
+| check | result |
+|---|---|
+| `GL_MAX_TEXTURE_SIZE` | 2048 |
+| `glTexImage2D(192 x 2432)` | `GL_INVALID_VALUE` (0x501) |
+| `OES_texture_half_float` / `OES_texture_float` | **not exposed** |
+
+Two consequences:
+
+- **Anything taller than 2048 rows must be tiled.** The FFN matrices are chunked
+  (`ffn_split_chunked`, `m_.ffn_chunk`) and the logits pass draws per 1536-row
+  tile; a single 2432-row weight texture silently fails to upload.
+- **There is no free-precision path.** Weights can only live in RGBA8, so every
+  weight is decoded in the fragment shader. An "I16 is much faster" note in this
+  repo's older tables does not hold on this driver: the INT16 format is also
+  packed as bytes and decoded (`int16_program` spends *more* ops per weight than
+  int8). Any further speedup has to come from doing less ALU per weight, not
+  from a wider texture format.
+
 ## FFN policy
 
 - VC4, split W1/W3 models: **GPU FFN** (W1/W3 -> SwiGLU -> W2, only W2 read back).
