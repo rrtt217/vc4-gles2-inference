@@ -24,6 +24,9 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import localtools as local_tools  # noqa: E402  (deterministic tools, same directory)
+
 DEFAULT_SYSTEM = (
     "你的名字叫MiniMind，你是一个乐于助人、知识渊博的AI助手。"
     "请用完整且友好的方式回答用户问题，当被问到名字时请回答MiniMind。"
@@ -34,10 +37,26 @@ class WorkerError(RuntimeError):
     pass
 
 
+class ContextFull(WorkerError):
+    """The prompt plus max_tokens does not fit the engine's context window."""
+
+
 class EngineWorker:
     def __init__(self, engine: str, model: str, tokenizer: str, seq: int,
                  gpu_layer: bool = True, log_path: str = "worker.log",
-                 prefix_cache: str | None = None, kv_pack: int = 0):
+                 prefix_cache: str | None = None, kv_pack: int = 0,
+                 auto_restart: bool = True, max_restarts: int = 5):
+        # Kept so a dead worker can be rebuilt without restarting the HTTP server.
+        self._init_args = dict(engine=engine, model=model, tokenizer=tokenizer, seq=seq,
+                               gpu_layer=gpu_layer, log_path=log_path,
+                               prefix_cache=prefix_cache, kv_pack=kv_pack,
+                               auto_restart=auto_restart, max_restarts=max_restarts)
+        self.auto_restart = auto_restart
+        self.max_restarts = max_restarts
+        self.restarts = 0
+        self._open(engine, model, tokenizer, seq, gpu_layer, log_path, prefix_cache, kv_pack)
+
+    def _open(self, engine, model, tokenizer, seq, gpu_layer, log_path, prefix_cache, kv_pack):
         env = os.environ.copy()
         env["MODEL"] = model
         env["TOKENIZER"] = tokenizer
@@ -90,19 +109,59 @@ class EngineWorker:
                 raise WorkerError(ev.get("message", "worker startup error"))
         return False
 
+    @property
+    def alive(self) -> bool:
+        return self.proc.poll() is None
+
+    def restart(self) -> bool:
+        """Rebuild a crashed worker.  False when restarts are disabled/exhausted."""
+        if not self.auto_restart or self.restarts >= self.max_restarts:
+            return False
+        self.restarts += 1
+        try:
+            self.close()
+        except Exception:
+            pass
+        a = self._init_args
+        self._open(a["engine"], a["model"], a["tokenizer"], a["seq"], a["gpu_layer"],
+                   a["log_path"], a["prefix_cache"], a["kv_pack"])
+        return True
+
+    def ensure_alive(self) -> None:
+        if self.alive:
+            return
+        if not self.restart():
+            raise WorkerError("engine worker exited (auto-restart disabled or exhausted)")
+
     def generate(self, prompt: str, max_tokens: int, temperature: float,
-                 top_p: float, seed: int, on_token=None):
-        """Return (text, finish_reason, usage).  on_token(text) is optional."""
-        if self.proc.poll() is not None:
-            raise WorkerError("engine worker exited")
+                 top_p: float, seed: int, on_token=None, penalties: dict | None = None):
+        """Return (text, finish_reason, usage).  on_token(text) is optional.
+
+        ``penalties`` carries the optional worker columns 6..10; any field left
+        out keeps the engine's process-level default.
+        """
+        p = penalties or {}
+        def field(key, default=""):
+            value = p.get(key)
+            if value is None:
+                return default
+            return f"{float(value):.6g}" if isinstance(value, float) or isinstance(value, int) else str(value)
         req = "\t".join([
             base64.b64encode(prompt.encode("utf-8")).decode("ascii"),
             str(max(0, int(max_tokens))),
             f"{float(temperature):.6g}",
             f"{float(top_p):.6g}",
             str(int(seed)),
+            field("repetition_penalty"),
+            field("frequency_penalty"),
+            field("presence_penalty"),
+            str(int(p.get("no_repeat_ngram"))) if p.get("no_repeat_ngram") else "",
+            field("min_p"),
         ]) + "\n"
         with self.lock:
+            # A crashed worker used to surface as "engine worker exited" on every
+            # later request until someone restarted the server; rebuild it instead.
+            self.ensure_alive()
             assert self.proc.stdin is not None and self.proc.stdout is not None
             self.proc.stdin.write(req)
             self.proc.stdin.flush()
@@ -139,7 +198,10 @@ class EngineWorker:
                                 callback_error = e
                                 on_token = None
                 elif kind == "error":
-                    raise WorkerError(ev.get("message", "worker error"))
+                    message = ev.get("message", "worker error")
+                    if "context full" in str(message).lower():
+                        raise ContextFull(message)
+                    raise WorkerError(message)
                 elif kind == "done":
                     text = ev.get("text", text)
                     finish = ev.get("finish_reason", "length")
@@ -192,11 +254,42 @@ def content_text(msg) -> str:
     return str(c)
 
 
+def canonical_tools(tools):
+    """Put the local tool pack in a stable order and shape.
+
+    The prefix cache matches on exact tokens, so a client that paraphrases a
+    description, reorders the tools or omits a field would otherwise miss it and
+    pay a full prefill (measured: 83 s vs 6 s).  Tools whose name matches the
+    server's pack are replaced by the canonical definition; anything unknown is
+    passed through untouched.
+    """
+    if not tools:
+        return tools
+    known = {name: spec for name, spec in local_tools.TOOL_SPECS.items()}
+    out = []
+    for t in tools:
+        name = None
+        if isinstance(t, dict):
+            fn = t.get("function")
+            if isinstance(fn, dict):
+                name = fn.get("name")
+            name = name or t.get("name")
+        if name in known:
+            out.append({"type": "function", "function": known[name]})
+        else:
+            out.append(t)
+    order = {name: i for i, name in enumerate(local_tools.TOOL_SPECS)}
+    def key(t):
+        fn = t.get("function") if isinstance(t, dict) else None
+        return order.get((fn or {}).get("name"), len(order))
+    return sorted(out, key=key)
+
+
 def render_tools(tools) -> str:
     if not tools:
         return ""
     lines = []
-    for t in tools:
+    for t in canonical_tools(tools):
         lines.append(json.dumps(t, ensure_ascii=False))
     return (
         "\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\n"
@@ -399,12 +492,248 @@ def build_prompt(body: dict) -> tuple[str, bool]:
     return text, thinking
 
 
+def prune_messages(messages):
+    """Drop the oldest non-system message, or shorten the last one.
+
+    Returns a new list, or None when there is nothing left to trim.  Used when
+    the engine reports that the prompt does not fit: a long chat should degrade
+    (forget the oldest turns) instead of failing the request.
+    """
+    if not isinstance(messages, list):
+        return None
+    out = [m for m in messages]
+    keep_system = [m for m in out if isinstance(m, dict) and m.get("role") == "system"]
+    rest = [m for m in out if not (isinstance(m, dict) and m.get("role") == "system")]
+    if len(rest) > 1:
+        return keep_system + rest[1:]
+    if len(rest) == 1:
+        msg = dict(rest[0])
+        text = content_text(msg)
+        if len(text) < 200:
+            return None
+        msg["content"] = text[: len(text) // 2] + "\n[earlier text trimmed to fit the context window]"
+        return keep_system + [msg]
+    return None
+
+
+def tool_choice_name(body: dict):
+    """Resolve request.tool_choice to (mode, tool_name).
+
+    mode is one of "auto" (default), "none", "required", "named".
+    Accepts the OpenAI forms:
+      "none" | "auto" | "required"
+      {"type": "function", "function": {"name": "calculate_math"}}
+      "calculate_math"            (shortcut several local clients use)
+    """
+    raw = body.get("tool_choice")
+    if raw is None:
+        return "auto", None
+    if isinstance(raw, str):
+        text = raw.strip()
+        low = text.lower()
+        if low in {"none", "auto", "required"}:
+            return low, None
+        if text:
+            return "named", text
+        return "auto", None
+    if isinstance(raw, dict):
+        if raw.get("type") in {"none", "auto", "required"} and "function" not in raw:
+            return str(raw["type"]), None
+        fn = raw.get("function")
+        if isinstance(fn, dict) and isinstance(fn.get("name"), str) and fn["name"].strip():
+            return "named", fn["name"].strip()
+    return "auto", None
+
+
+def deterministic_arguments(body: dict, tool_name: str) -> dict:
+    """Arguments for a directly-routed tool.
+
+    Order: request.tool_arguments → tool name in the last user turn → empty.
+    For calculate_math the user text is the expression, which is what the
+    /math route does too; anything else falls back to {} so the tool reports a
+    clean argument error instead of guessing.
+    """
+    explicit = body.get("tool_arguments")
+    if isinstance(explicit, dict):
+        return explicit
+    messages = body.get("messages")
+    text = ""
+    if isinstance(messages, list):
+        for msg in reversed(messages):
+            if isinstance(msg, dict) and msg.get("role") == "user":
+                text = content_text(msg).strip()
+                break
+    if tool_name == "calculate_math" and text:
+        prefix = "/math"
+        if text.lower().startswith(prefix):
+            text = text[len(prefix):].strip()
+        return {"expression": text}
+    return {}
+
+
+def build_tool_completion(cid: str, created: int, model: str, payload: dict) -> dict:
+    """OpenAI-shaped chat completion for a tool that ran without the model.
+
+    The JSON result goes into `content` so a plain client sees an answer, and
+    the same call is also reported in `tool_calls` so an agentic client can
+    continue the normal tool loop.
+    """
+    name = payload.get("tool") or ""
+    arguments = json.dumps(payload.get("arguments", {}), ensure_ascii=False)
+    text = local_tools.tool_result_text(payload)
+    message = {
+        "role": "assistant",
+        "content": text,
+        "tool_calls": [{
+            "id": "call_" + uuid.uuid4().hex[:24],
+            "type": "function",
+            "function": {"name": name, "arguments": arguments},
+        }],
+    }
+    return {
+        "id": cid,
+        "object": "chat.completion",
+        "created": created,
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "message": message,
+            "finish_reason": "tool_calls" if payload.get("ok") else "stop",
+        }],
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        "tool_result": payload,
+    }
+
+
+class StopFilter:
+    """Apply OpenAI ``stop`` sequences to a token stream.
+
+    A stop string can straddle token boundaries, so the tail that could still
+    become a stop sequence is held back instead of emitted.
+    """
+
+    def __init__(self, stops: list[str], emit):
+        self.stops = [s for s in stops if s]
+        self.emit = emit
+        self.buf = ""
+        self.hit = False
+        self.held = 0
+
+    def feed(self, piece: str) -> None:
+        if self.hit or not piece:
+            return
+        self.buf += piece
+        for s in self.stops:
+            index = self.buf.find(s)
+            if index >= 0:
+                if index:
+                    self.emit(self.buf[:index])
+                self.buf = ""
+                self.hit = True
+                return
+        if not self.stops:
+            self.emit(self.buf)
+            self.buf = ""
+            return
+        keep = 0
+        for s in self.stops:
+            for k in range(min(len(s) - 1, len(self.buf)), 0, -1):
+                if self.buf.endswith(s[:k]):
+                    keep = max(keep, k)
+                    break
+        if len(self.buf) > keep:
+            cut = len(self.buf) - keep
+            self.emit(self.buf[:cut])
+            self.buf = self.buf[cut:]
+        self.held = len(self.buf)
+
+    def finish(self) -> None:
+        if not self.hit and self.buf:
+            self.emit(self.buf)
+        self.buf = ""
+
+
+def sampling_penalties(body: dict) -> dict:
+    """Optional sampling knobs, forwarded to the worker.
+
+    repetition_penalty is not an OpenAI field but every local runtime has one;
+    frequency/presence follow the OpenAI ranges.  Values are clamped here and
+    again in the engine.
+    """
+    out = {}
+    def num(key, lo, hi, cast=float):
+        if key not in body:
+            return None
+        try:
+            value = cast(body[key])
+        except (TypeError, ValueError):
+            return None
+        return max(lo, min(hi, value))
+
+    rep = num("repetition_penalty", 0.5, 2.0)
+    if rep is not None:
+        out["repetition_penalty"] = rep
+    freq = num("frequency_penalty", -2.0, 2.0)
+    if freq is not None:
+        out["frequency_penalty"] = freq
+    pres = num("presence_penalty", -2.0, 2.0)
+    if pres is not None:
+        out["presence_penalty"] = pres
+    ngram = num("no_repeat_ngram", 0, 8, int)
+    if ngram:
+        out["no_repeat_ngram"] = ngram
+    minp = num("min_p", 0.0, 1.0)
+    if minp is not None:
+        out["min_p"] = minp
+    return out
+
+
+def stop_strings(body: dict) -> list[str]:
+    raw = body.get("stop")
+    if raw is None:
+        return []
+    items = [raw] if isinstance(raw, str) else raw if isinstance(raw, list) else []
+    out = []
+    for item in items:
+        if isinstance(item, str) and item and len(item) <= 64:
+            out.append(item)
+    return out[:4]
+
+
+def apply_stop_text(text: str, stops: list[str]) -> tuple[str, bool]:
+    """Truncate at the earliest stop occurrence.  Returns (text, stopped)."""
+    cut = None
+    for s in stops:
+        index = text.find(s)
+        if index >= 0 and (cut is None or index < cut):
+            cut = index
+    if cut is None:
+        return text, False
+    return text[:cut], True
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "MiniMindOpenAI/0.1"
 
     def log_message(self, fmt, *args):
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
+
+    def _stats(self, **fields):
+        """Append one JSON line per request when --stats-file is set."""
+        path = getattr(self.server, "stats_file", None)
+        if not path:
+            return
+        rec = getattr(self, "_rec", None)
+        if rec is None:
+            rec = {"ts": time.time()}
+        rec.update(fields)
+        try:
+            with self.server.stats_lock:
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
 
     def _send_json(self, obj, status=200):
         data = json.dumps(obj, ensure_ascii=False).encode("utf-8")
@@ -416,7 +745,64 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _error(self, message, status=400, typ="invalid_request_error"):
+        self._stats(status=status, error=str(message)[:200])
         self._send_json({"error": {"message": message, "type": typ, "param": None, "code": None}}, status)
+
+    def _handle_tool_post(self, path: str):
+        """POST /v1/math (or /math), POST /v1/tool (or /tool) — never touch the model."""
+        try:
+            n = int(self.headers.get("Content-Length", "0"))
+            body = json.loads(self.rfile.read(n).decode("utf-8")) if n else {}
+            if not isinstance(body, dict):
+                raise ValueError("body must be an object")
+        except Exception as e:
+            self._error(str(e), 400)
+            return
+        if path in {"/v1/math", "/math"}:
+            expr = body.get("expression", body.get("expr", body.get("prompt", "")))
+            name, args = "calculate_math", {"expression": expr}
+        else:
+            name = body.get("name") or body.get("tool") or ""
+            args = body.get("arguments", body.get("args", {}))
+        payload = local_tools.run_tool(name, args)
+        payload["arguments"] = args if isinstance(args, dict) else {}
+        self._send_json(payload, 200 if payload.get("ok") else 400)
+
+    def _send_tool_stream(self, result: dict, include_usage: bool = False):
+        """SSE twin of build_tool_completion: one content delta, then the call."""
+        cid, created, model = result["id"], result["created"], result["model"]
+        choice = result["choices"][0]
+        msg = choice["message"]
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+
+        def chunk(obj):
+            data = ("data: " + json.dumps(obj, ensure_ascii=False) + "\n\n").encode("utf-8")
+            self.wfile.write(("%X\r\n" % len(data)).encode("ascii") + data + b"\r\n")
+            self.wfile.flush()
+
+        def frame(delta, finish=None):
+            chunk({"id": cid, "object": "chat.completion.chunk", "created": created,
+                   "model": model, "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]})
+
+        frame({"role": "assistant"})
+        frame({"content": msg.get("content") or ""})
+        calls = msg.get("tool_calls") or []
+        if calls:
+            frame({"tool_calls": [dict(c, index=i) for i, c in enumerate(calls)]})
+        frame({}, choice.get("finish_reason") or "stop")
+        if include_usage:
+            chunk({"id": cid, "object": "chat.completion.chunk", "created": created,
+                   "model": model, "choices": [], "usage": result.get("usage")})
+        done = b"data: [DONE]\n\n"
+        self.wfile.write(("%X\r\n" % len(done)).encode("ascii") + done + b"\r\n")
+        self.wfile.write(b"0\r\n\r\n")
+        self.wfile.flush()
 
     def do_OPTIONS(self):
         self.send_response(204)
@@ -426,9 +812,18 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        if self.path.rstrip("/") == "/health":
-            self._send_json({"status": "ok", "prefix_cache_tokens": self.server.worker.prefix_cache_tokens})
-        elif self.path.rstrip("/") == "/v1/models":
+        path = self.path.split("?", 1)[0].rstrip("/")
+        query = self.path.split("?", 1)[1] if "?" in self.path else ""
+        if path == "/health":
+            worker = self.server.worker
+            alive = bool(getattr(worker, "alive", True))
+            self._send_json({
+                "status": "ok" if alive else "degraded",
+                "worker_alive": alive,
+                "restarts": int(getattr(worker, "restarts", 0)),
+                "prefix_cache_tokens": worker.prefix_cache_tokens,
+            }, 200 if alive else 503)
+        elif path == "/v1/models":
             now = int(time.time())
             self._send_json({
                 "object": "list",
@@ -439,18 +834,49 @@ class Handler(BaseHTTPRequestHandler):
                     "owned_by": "local",
                 }],
             })
+        elif path in {"/status", "/time", "/tools"}:
+            # Deterministic routes: no model, no KV cache, sub-millisecond.
+            if path == "/tools":
+                self._send_json({
+                    "object": "list",
+                    "data": list(local_tools.TOOL_SPECS.values()),
+                })
+                return
+            name = "system_status" if path == "/status" else "get_current_time"
+            payload = local_tools.run_tool(name, {})
+            payload["arguments"] = {}
+            self._send_json(payload, 200 if payload.get("ok") else 500)
+        elif path == "/math":
+            from urllib.parse import parse_qs
+            expr = (parse_qs(query).get("expr") or parse_qs(query).get("expression") or [""])[0]
+            payload = local_tools.run_tool("calculate_math", {"expression": expr})
+            payload["arguments"] = {"expression": expr}
+            self._send_json(payload, 200 if payload.get("ok") else 400)
         else:
             self._error("not found", 404, "not_found")
 
     def do_POST(self):
-        if self.path.rstrip("/") != "/v1/chat/completions":
+        path = self.path.split("?", 1)[0].rstrip("/")
+        if path in {"/v1/math", "/math", "/v1/tool", "/tool"}:
+            self._handle_tool_post(path)
+            return
+        if path != "/v1/chat/completions":
             self._error("not found", 404, "not_found")
             return
+        self._rec = {"ts": time.time()}
         try:
             n = int(self.headers.get("Content-Length", "0"))
             body = json.loads(self.rfile.read(n).decode("utf-8"))
             if not isinstance(body, dict):
                 raise ValueError("body must be an object")
+            only_tool = getattr(self.server, "only_tool", None)
+            if only_tool and isinstance(body.get("tools"), list) and body["tools"]:
+                # "Keep one tool in the prompt whenever possible": a 64M model
+                # picks better when the choice is not a choice.
+                kept = [t for t in body["tools"]
+                        if isinstance(t, dict)
+                        and (t.get("function") or {}).get("name") == only_tool]
+                body["tools"] = kept or body["tools"]
             prompt, thinking = build_prompt(body)
             max_tokens = int(body.get("max_tokens", body.get("max_completion_tokens", 64)) or 64)
             if max_tokens < 1:
@@ -463,24 +889,93 @@ class Handler(BaseHTTPRequestHandler):
             model = str(body.get("model") or self.server.model_id)
             if int(body.get("n", 1) or 1) != 1:
                 raise ValueError("only n=1 is supported")
+            stops = stop_strings(body)
+            penalties = sampling_penalties(body)
         except Exception as e:
             self._error(str(e), 400)
             return
 
         cid = "chatcmpl-" + uuid.uuid4().hex
         created = int(time.time())
-        if not stream:
+
+        # --- deterministic tool routing (docs/future-optimization.md, P0-2) ---
+        # A named tool that exists locally runs without the model: no prefill, no
+        # KV cache, no chance of the 64M model inventing tool names or arguments.
+        # `tool_choice: "required"` with exactly one local tool in the list is the
+        # same situation -- there is nothing to choose, so do not ask.
+        mode, tool_name = tool_choice_name(body)
+        if not tool_name and mode == "required":
+            offered = body.get("tools")
+            if isinstance(offered, list) and len(offered) == 1:
+                fn = (offered[0] or {}).get("function") if isinstance(offered[0], dict) else None
+                if isinstance(fn, dict) and isinstance(fn.get("name"), str):
+                    tool_name = fn["name"]
+        if tool_name:
             try:
-                text, finish, usage = self.server.worker.generate(
-                    prompt, max_tokens, temperature, top_p, seed)
-            except WorkerError as e:
-                self._error(str(e), 500, "server_error")
+                resolved = local_tools.resolve_tool_name(tool_name)
+            except local_tools.ToolError:
+                resolved = None
+            if resolved is not None:
+                args = deterministic_arguments(body, resolved)
+                payload = local_tools.run_tool(resolved, args)
+                payload["arguments"] = args
+                result = build_tool_completion(cid, created, model, payload)
+                if not stream:
+                    self._send_json(result)
+                    return
+                self._send_tool_stream(
+                    result,
+                    include_usage=bool((body.get("stream_options") or {}).get("include_usage")))
                 return
+
+        # Streaming cannot retry once headers are out, so trim up front using a
+        # conservative character estimate (~3 chars/token for mixed CJK + markup).
+        seq = int(getattr(self.server, "seq", 0) or 0)
+        if seq > 0:
+            for _ in range(8):
+                if len(prompt) // 3 + max_tokens <= seq:
+                    break
+                trimmed = prune_messages(body.get("messages") or [])
+                if trimmed is None:
+                    break
+                body["messages"] = trimmed
+                prompt, _thinking = build_prompt(body)
+
+        if not stream:
+            # A long chat must not fail outright: if the engine says the prompt
+            # does not fit, forget the oldest turns and try again.
+            for _attempt in range(4):
+                try:
+                    text, finish, usage = self.server.worker.generate(
+                        prompt, max_tokens, temperature, top_p, seed, penalties=penalties)
+                    break
+                except ContextFull as e:
+                    trimmed = prune_messages(body.get("messages") or [])
+                    if trimmed is None:
+                        self._error(f"prompt exceeds the context window: {e}", 400,
+                                    "context_length_exceeded")
+                        return
+                    body["messages"] = trimmed
+                    prompt, _thinking = build_prompt(body)
+                except WorkerError as e:
+                    self._error(str(e), 500, "server_error")
+                    return
+            else:
+                self._error("prompt still exceeds the context window after trimming history",
+                            400, "context_length_exceeded")
+                return
+            if stops:
+                text, stopped = apply_stop_text(text, stops)
+                if stopped:
+                    finish = "stop"
             calls, content = parse_tool_calls(text)
             message = {"role": "assistant", "content": content or (None if calls else "")}
             if calls:
                 message["tool_calls"] = calls
                 finish = "tool_calls"
+            self._stats(wall_s=round(time.time() - getattr(self, "_rec", {"ts": time.time()})["ts"], 3),
+                        usage=usage, finish=finish, stream=False, status=200,
+                        tools=len(body.get("tools") or []))
             self._send_json({
                 "id": cid,
                 "object": "chat.completion",
@@ -531,7 +1026,11 @@ class Handler(BaseHTTPRequestHandler):
                 # Tool-call deltas are assembled only after the native
                 # <tool_call> block is complete; do not stream partial JSON.
                 text, finish, usage = self.server.worker.generate(
-                    prompt, max_tokens, temperature, top_p, seed)
+                    prompt, max_tokens, temperature, top_p, seed, penalties=penalties)
+                if stops:
+                    text, stopped = apply_stop_text(text, stops)
+                    if stopped:
+                        finish = "stop"
                 calls, content = parse_tool_calls(text)
                 if calls:
                     if content:
@@ -542,9 +1041,13 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     delta(content or "")
             else:
+                stop_filter = StopFilter(stops, delta)
                 text, finish, usage = self.server.worker.generate(
                     prompt, max_tokens, temperature, top_p, seed,
-                    on_token=lambda s: delta(s))
+                    on_token=stop_filter.feed, penalties=penalties)
+                stop_filter.finish()
+                if stop_filter.hit:
+                    finish = "stop"
             delta(None, finish)
             if (body.get("stream_options") or {}).get("include_usage"):
                 chunk({
@@ -556,6 +1059,9 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(("%X\r\n" % len(done)).encode("ascii") + done + b"\r\n")
             self.wfile.write(b"0\r\n\r\n")
             self.wfile.flush()
+            self._stats(wall_s=round(time.time() - getattr(self, "_rec", {"ts": time.time()})["ts"], 3),
+                        usage=usage, finish=finish, stream=True, status=200,
+                        tools=len(body.get("tools") or []))
         except (BrokenPipeError, ConnectionResetError):
             pass
         except WorkerError:
@@ -582,15 +1088,53 @@ def main():
     ap.add_argument("--prefix-cache", default=None)
     ap.add_argument("--kv-pack", type=int, choices=[0, 8, 16], default=0,
                     help="0=24-bit KV, 16=packed q16, 8=packed q8")
+    ap.add_argument("--no-auto-restart", action="store_true",
+                    help="Do not rebuild the engine worker after it exits")
+    ap.add_argument("--max-restarts", type=int, default=5,
+                    help="Give up after this many automatic worker restarts")
+    ap.add_argument("--stats-file", default=None,
+                    help="Append one JSON line per chat request (timings, tokens, "
+                         "cache hits) to this file. Off by default.")
+    ap.add_argument("--warmup", action="store_true",
+                    help="Run one 1-token generation at startup with the cached "
+                         "prefix text, so shader compilation does not land on the "
+                         "first real request (~13 s on the Pi).")
+    ap.add_argument("--only-tool", default=None,
+                    help="Reduce the tool list in the prompt to this one tool name. "
+                         "A 64M model chooses more reliably when there is no choice.")
     a = ap.parse_args()
 
     os.makedirs(os.path.dirname(os.path.abspath(a.worker_log)), exist_ok=True)
     worker = EngineWorker(a.engine, a.model, a.tokenizer, a.seq,
                           gpu_layer=not a.no_gpu_layer, log_path=a.worker_log,
-                          prefix_cache=a.prefix_cache, kv_pack=a.kv_pack)
+                          prefix_cache=a.prefix_cache, kv_pack=a.kv_pack,
+                          auto_restart=not a.no_auto_restart, max_restarts=a.max_restarts)
     httpd = ThreadingHTTPServer((a.host, a.port), Handler)
     httpd.model_id = a.model_id
     httpd.worker = worker
+    httpd.only_tool = a.only_tool
+    httpd.seq = int(a.seq)
+    httpd.stats_file = a.stats_file
+    httpd.stats_lock = threading.Lock()
+
+    if a.warmup:
+        # The first generation after a process start pays shader compilation and
+        # pipeline setup (~13 s on the Pi).  Do it here, with the prefix text the
+        # cache was built from, so the KV chain still starts at the cached header.
+        text = ""
+        if a.prefix_cache:
+            prompt_path = Path(str(a.prefix_cache) + ".prompt.txt")
+            if prompt_path.exists():
+                text = prompt_path.read_text(encoding="utf-8")
+        if not text:
+            text = "<|im_start|>system\n" + DEFAULT_SYSTEM + "<|im_end|>\n"
+        t0 = time.time()
+        try:
+            worker.generate(text, 1, 0.0, 0.9, 1234)
+            print(f"warmup done in {time.time() - t0:.1f}s "
+                  f"({len(text)} chars, prefix_cache_tokens={worker.prefix_cache_tokens})", flush=True)
+        except WorkerError as e:
+            print(f"warmup failed: {e}", flush=True)
     print(f"listening on http://{a.host}:{a.port}  model={a.model_id}", flush=True)
 
     def stop(signum, frame):

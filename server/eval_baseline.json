@@ -1,0 +1,124 @@
+{
+ "base": "http://127.0.0.1:8014",
+ "passed": 15,
+ "total": 15,
+ "cma_free_kb_start": 72956,
+ "cma_free_kb_end": 63272,
+ "cases": [
+  {
+   "case": "health",
+   "ok": true,
+   "detail": "{'status': 'ok', 'worker_alive': True, 'restarts': 0, 'prefix_cache_tokens': 277}",
+   "seconds": 0.98,
+   "extra": {}
+  },
+  {
+   "case": "/status returns host",
+   "ok": true,
+   "detail": "{'ok': True, 'tool': 'system_status', 'result': {'host': 'raspberrypi', 'machine': 'armv6l', 'uptime_s': 10412, 'load': [1.48, 1.36, 1.67], 'mem_total_kb': 437128, 'mem_available_kb': 128296, 'swap_free_kb': 390524, 'cpu_temp_c': 42.2, 'cma_free_kb': 68120, 'cma_total_kb': 262144}, 'arguments': {}}",
+   "seconds": 0.04,
+   "extra": {}
+  },
+  {
+   "case": "/time returns iso",
+   "ok": true,
+   "detail": "{'ok': True, 'tool': 'get_current_time', 'result': {'iso': '2026-11-01T07:41:14+0800', 'epoch_s': 1793490074, 'timezone': 'CST'}, 'arguments': {}}",
+   "seconds": 0.02,
+   "extra": {}
+  },
+  {
+   "case": "/math 256*37 == 9472",
+   "ok": true,
+   "detail": "{'ok': True, 'tool': 'calculate_math', 'result': {'expression': '256*37', 'result': 9472}, 'arguments': {'expression': '256*37'}}",
+   "seconds": 0.02,
+   "extra": {}
+  },
+  {
+   "case": "/math rejects 1/0",
+   "ok": true,
+   "detail": "{'ok': False, 'tool': 'calculate_math', 'error': 'division by zero', 'arguments': {'expression': '1/0'}}",
+   "seconds": 0.02,
+   "extra": {}
+  },
+  {
+   "case": "/v1/tool alias -> system_status",
+   "ok": true,
+   "detail": "{'ok': True, 'tool': 'system_status', 'result': {'host': 'raspberrypi', 'machine': 'armv6l', 'uptime_s': 10412, 'load': [1.48, 1.36, 1.67], 'mem_total_kb': 437128, 'mem_available_kb': 128296, 'swap_free_kb': 390532, 'cpu_temp_c': 42.2, 'cma_free_kb': 68120, 'cma_total_kb': 262144}, 'arguments': {}}",
+   "seconds": 0.02,
+   "extra": {}
+  },
+  {
+   "case": "network_info has interfaces",
+   "ok": true,
+   "detail": "{'ok': True, 'tool': 'network_info', 'result': {'host': 'raspberrypi', 'interfaces': [{'if': 'eth0', 'ip': '114.214.194.135', 'state': 'up'}, {'if': 'wlan0', 'ip': '100.64.158.115', 'state': 'up'}, {'if': 'tailscale0', 'ip': '100.113.179.96', 'state': 'unknown'}, {'if': 'docker0', 'ip': '172.17.0.1', 'state': 'up'}], 'gateway': '100.64.128.1', 'dns': ['223.5.5.5', '223.6.6.6', '202.38.64.18'], 'wi",
+   "seconds": 0.07,
+   "extra": {}
+  },
+  {
+   "case": "disk_usage alias -> usage",
+   "ok": true,
+   "detail": "{'ok': True, 'tool': 'disk_usage', 'result': {'path': '/', 'total_mb': 28829, 'used_mb': 25909, 'free_mb': 2920, 'used_pct': 89.9}, 'arguments': {}}",
+   "seconds": 0.03,
+   "extra": {}
+  },
+  {
+   "case": "named tool_choice -> 9472",
+   "ok": true,
+   "detail": "{'id': 'chatcmpl-dd97587aecb54000a5b010471915ee16', 'object': 'chat.completion', 'created': 1793490074, 'model': 'minimind3-64m', 'choices': [{'index': 0, 'message': {'role': 'assistant', 'content': '{\"ok\":true,\"tool\":\"calculate_math\",\"result\":{\"expression\":\"256*37\",\"result\":9472},\"arguments\":{\"expression\":\"256*37\"}}', 'tool_calls': [{'id': 'call_ac15642c582b44e694511555', 'type': 'function', 'fun",
+   "seconds": 0.03,
+   "extra": {
+    "no_model": true
+   }
+  },
+  {
+   "case": "identity mentions MiniMind",
+   "ok": true,
+   "detail": "作为一个AI助手，我没有名字，但我可以告诉你：\n\n- MiniMind是一个非常智能的AI助手，能够回答各种问题，提供信息和帮助。",
+   "seconds": 19.84,
+   "extra": {
+    "text": "作为一个AI助手，我没有名字，但我可以告诉你：\n\n- MiniMind是一个非常智能的AI助手，能够回答各种问题，提供信息和帮助。"
+   }
+  },
+  {
+   "case": "natural-language arithmetic contains 2",
+   "ok": true,
+   "detail": "1+1等于2。",
+   "seconds": 9.72,
+   "extra": {
+    "text": "1+1等于2。"
+   }
+  },
+  {
+   "case": "multi-turn produces text",
+   "ok": true,
+   "detail": "如果你想在树莓派项目中使用，可以按照以下步骤操作",
+   "seconds": 20.73,
+   "extra": {
+    "text": "如果你想在树莓派项目中使用，可以按照以下步骤操作"
+   }
+  },
+  {
+   "case": "long prompt survives",
+   "ok": true,
+   "detail": "好的，我来帮你回答这个问题",
+   "seconds": 94.9,
+   "extra": {
+    "prompt_tokens": 320
+   }
+  },
+  {
+   "case": "streaming has [DONE] + usage",
+   "ok": true,
+   "detail": "odel\": \"minimind3-64m\", \"choices\": [], \"usage\": {\"prompt_tokens\": 75, \"completion_tokens\": 8, \"total_tokens\": 83, \"prompt_tokens_details\": {\"cached_tokens\": 59}, \"prefill_tokens\": 16}}\n\ndata: [DONE]\n\n",
+   "seconds": 7.4,
+   "extra": {}
+  },
+  {
+   "case": "malformed body rejected",
+   "ok": true,
+   "detail": "http=400",
+   "seconds": null,
+   "extra": {}
+  }
+ ]
+}

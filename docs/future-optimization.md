@@ -18,8 +18,11 @@ Last updated: 2026-11-01.
 | Direct chat cache | --chat --prefix-cache skips the cached prefix |
 | Sampling | temperature, top-p, greedy, repetition/frequency/presence, no-repeat n-gram, min-p |
 | Server | OpenAI-compatible server; per-request tool/sampling control is partial |
+| Deterministic tools | `/status` `/time` `/math` `/v1/tool` + `tool_choice` routing: 10–30 ms, no model |
+| Prefix cache automation | `server/build_prefix_cache.py build|verify`, sidecar metadata, refuses stale caches |
+| Eval harness | `server/eval_suite.py` (fixed cases, JSON output) + `server/selftest.py` (54 assertions, no GPU) |
 | Thinking | format works, but MiniMind3 q4/q8 does not reliably close think tags |
-| Effective throughput | MiniMind2-Small i16 on Pi: about 0.12 GFLOPS, about 0.5 percent of the common 24 GFLOPS VC4 peak |
+| Effective throughput | q8 on Pi: 37.5 s prefill / 517 ms per decode token (79-token prompt), i.e. ~1.9 tok/s |
 
 ## P0: highest-value work
 
@@ -29,12 +32,31 @@ The engine currently advances one token at a time even for prompt prefill.
 That is the largest avoidable cost: a 31-token MiniMind2 prompt took 12.6 s,
 while decode was about 0.44 s/token.
 
-Work:
+**Measured on MiniMind3 q8 (2026-11-01), before writing any batching code:**
 
-- Add a matmul/tile path for multiple prompt positions.
+- prefill 37.5 s for 79 prompt tokens = **474 ms/token**
+- decode **517 ms/token**
+
+So one prefilled position costs the same as one decoded position.  The matvec
+shaders are per-output-fragment loops over the weight columns: rendering *B*
+positions means *B*× the fragments, so batching alone removes only per-draw
+overhead (the attention block is 15.2 ms of a ~70 ms layer, and most of that is
+the QKV matvec, not the fixed cost).
+
+The win therefore has to come from **packing positions into the RGBA channels**
+of the activation texture: one weight fetch would then feed four positions
+(~4× on the matvec, which is 61% of a token) at the cost of rewriting every
+activation layout, the rmsnorm/attention shaders and the KV write path.
+
+Work, in order:
+
+- Measure the per-draw overhead with a null shader before committing to batching.
+- Prototype 2-position batching in the FFN path only (w1/w3 + w2) and compare
+  greedy tokens against the serial path; any token mismatch means the packing
+  is wrong, not "close enough".
+- Only then consider 4-position RGBA packing, which is the version that can pay
+  off.
 - Keep causal masking for transformer attention.
-- Measure prefill and decode separately; do not trade decode latency for a
-  cosmetic prefill gain.
 - Start with no-tool chat; add tool prompts only after the basic path is
   correct.
 
@@ -43,24 +65,58 @@ quality. This is more valuable than another small prompt tweak.
 
 ### 2. Deterministic tool routing
 
-The 64M model cannot reliably choose among three tools. In local tests:
+**Done (2026-11-01).** `server/localtools.py` implements `system_status`,
+`get_current_time` and `calculate_math` with a restricted-AST evaluator;
+`server.py` routes `tool_choice: <name>` (string or OpenAI object form) straight
+to the tool, returning the JSON in `content`, the call in `tool_calls` and the
+payload in `tool_result`, with zero model tokens.  `/status`, `/time`, `/math`
+and `/v1/tool` do the same over plain HTTP.  `--only-tool NAME` prunes the
+prompt to a single tool for the cases that still go through the model.
 
-- system_status was sometimes called as get_status or get_status_task;
-- calculate_math changed 256*37 into 32 + 45 * 3;
-- the full tool list selected get_current_time for a system-status request.
+Measured: 10–30 ms per call on the Pi versus 25–185 s through the model, and
+the model's observed mistakes (get_status / get_status_task / `32 + 45 * 3`)
+disappear because it is no longer asked.
 
-Work:
+Remaining work: expose the same routing in `run.sh`, and add `set_timer` /
+`network_info` once their side effects are decided.
 
-- Add explicit routes such as /status, /time, /math EXPR.
-- Add a tool_choice or --tool NAME path that does not ask the model to pick.
-- For deterministic tools, return the raw JSON result and optionally skip the
-  second generation.
-- Keep one tool in the prompt whenever possible.
-- Validate JSON arguments before execution; reject or retry malformed calls.
 
-This is the most practical way to make tools useful on this hardware.
+### 2b. Where the remaining matvec time goes
+
+Current per-phase numbers live in `performance.md` ("where the remaining matvec
+time goes"); after activation packing the split is w1+w3 33%, w2 22%, attention
+20%, wo 8.5%, norms 9%, logits 6%.  Prefill costs ~470 ms/token and decode ~480
+ms/token — the same per token, which rules out draw-call overhead as the driver
+and points at the per-weight work inside the fragment shaders.
+
+Scalar ops per weight in the q8 path (per weight texel = 4 weights): fetch 1,
+int8 decode `floor(c*255+0.5)-128` 16, activation decode (two int16 from one
+texel) ~32, MACs 4.  That is ~13 ops per multiply-accumulate, and at 12–16
+lanes the engine lands at ~0.25 GFLOPS, i.e. roughly half of what the op count
+predicts — the rest is texture-fetch latency.
+
+Ranked ideas, none of them started:
+
+1. **Fold the -128 bias out of the decode.** `Σ(w-128)·x = Σw·x - 128·Σx`, and
+   `Σx` is shared by every output row, so it can be computed once per fragment.
+   Roughly 3 of 13 ops per weight disappear; no numeric change if the final
+   rounding is kept.
+2. **int8 activations (4 per texel).** Would halve the activation decode again,
+   but needs a quality metric this repo does not have yet (no perplexity
+   harness).  Do not ship it without one.
+3. **Two output rows per fragment.** Reuses the activation decode across rows,
+   but GLES2 has a single colour attachment, so it needs either two passes or
+   interleaved output — a real refactor.
 
 ### 3. Sampling controls
+
+**Over the wire (2026-11-01).** The worker protocol now carries optional columns
+6–10 (`repetition_penalty`, `frequency_penalty`, `presence_penalty`,
+`no_repeat_ngram`, `min_p`); the server clamps them and forwards per request
+instead of pinning them at worker start.  Five-column clients still work.
+`stop` (string or list) is implemented in both non-streaming and streaming
+modes, with the streaming tail held back so a stop string split across tokens
+never leaks.
 
 Implemented:
 
@@ -81,42 +137,32 @@ Next:
 
 ### 4. Prefix-cache automation
 
-Current cache loading and direct CLI use are implemented, but cache creation is
-still manual and error-prone.
+**Done (2026-11-01).** `server/build_prefix_cache.py build --tools ... --out ...`
+writes the chat header to a temp file (the engine takes a file, not inline
+text), builds the cache on the target machine, and writes a sidecar `.json`
+with engine hash, model hash, size, seq, KV packing, prompt hash and tool list.
+`verify` re-derives the header, compares every field, and refuses to load a
+cache whose metadata no longer matches; it then proves the engine really loads
+it (`PREFIX_CACHE loaded N tokens`).
 
-Work:
+Measured on the Pi: a 299-token tool request went from 184.9 s (cold, no cache)
+to 25.0 s with a 277-token header cache.
 
-- Add a script that builds a cache from model + seq + KV + tools and verifies
-  PREFIX_CACHE loaded N tokens.
-- Put model source size/mtime, seq, KV packing, prompt hash, and tool hash in
-  the cache metadata (already partly present).
-- Refuse to use a cache built for another model or tool set.
-- Build caches on the target machine; laptop and Pi caches are not
-  interchangeable.
-- Keep a single-tool cache for system_status and build the full-tool cache
-  only when needed.
+Remaining work: a wrapper that rebuilds the cache when the tool list or system
+prompt changes (the sidecar already contains everything needed), and a second
+cache per tool set (`--only-tool`) once the server runs that mode by default.
 
 ### 5. Evaluation harness
 
-Single-prompt impressions are not enough. Add a small fixed suite:
+**Started (2026-11-01).** `server/eval_suite.py` runs a fixed case set against a
+live server and writes JSON: deterministic routes, named-tool routing,
+identity, natural-language arithmetic, multi-turn, long prompt, streaming and
+malformed-body handling.  `server/selftest.py` covers the same routing logic
+with a stub worker (54 assertions, no GPU, ~1 s), which is what makes it safe
+to change the server without a Pi in the loop.
 
-- identity and language;
-- simple arithmetic;
-- tool selection and arguments;
-- multi-turn context;
-- long prompt / context boundary;
-- q4 vs q8;
-- q8 with and without tool cache;
-- sampling settings A/B.
-
-Record:
-
-- tool name accuracy;
-- argument accuracy;
-- final answer accuracy;
-- prefill/decode time;
-- CmaFree;
-- malformed JSON / missing think close.
+Still to add: q4 vs q8, tool-name/argument accuracy over several prompts,
+`CmaFree` capture, and storing a baseline file to diff against.
 
 ### 6. Pi tool pack
 
@@ -130,6 +176,15 @@ Keep the set small and deterministic:
 
 Do not add arbitrary shell, Python execution, arbitrary file paths, or GPIO
 writes. Every tool result should be short JSON.
+
+### 6b. Server resilience
+
+**Done (2026-11-01).** `/health` reports `worker_alive` / `restarts` and returns
+503 when the engine is gone instead of a cheerful "ok"; a dead worker is rebuilt
+in place on the next request (`--no-auto-restart`, `--max-restarts N`).  This
+was a real failure mode: after another GPU client starved CMA, the worker died
+and every later request returned `engine worker exited` until the whole server
+was restarted by hand.
 
 ### 7. Server ergonomics
 
