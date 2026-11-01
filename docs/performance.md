@@ -41,6 +41,30 @@ position and is the largest phase by ~250 tokens (15.9 ms/layer vs 14.7 for the
 FFN). See "Long prompts did not get faster" at the end.
 
 
+## Available-model baseline (Pi Zero, 2026-11-01)
+
+Engine commit: 0d06392 (attention hoist enabled by default).
+All runs use KV_PACK=16, GPU_LAYER=1, greedy sampling, one warm process.
+
+| model | file | seq | prompt / generation | prefill | decode |
+|---|---|---:|---|---:|---:|
+| MiniMind3 64M q8 | minimind3.q8 (66 MB) | 768 | short Chinese identity / 16 | 17.56 s | 295.3 ms/token |
+| MiniMind3 64M q4 | minimind3.q4 (45 MB) | 768 | same / 16 | 25.99 s | 418.7 ms/token |
+| MiniMind2 Small i16 | minimind2-small.i16 (58 MB) | 1024 | Chinese arithmetic / 6 | 8.23 s | 234.5 ms/token |
+| TinyChat15M q8 | TinyChat15M.q8 (24 MB) | 512 | English chat / 15 | 4.78 s | 134.6 ms/token |
+
+MiniMind3 q8 is the fastest usable Chinese chat model. q4 is a memory mode,
+not a speed mode: it uses 21 MB less weight storage but is about 1.42x slower
+per decoded token in this run.
+
+MiniMind2 Small answers simple arithmetic but has weak identity/instruction
+following. TinyChat15M is much faster and is suitable for simple English chat
+only. The Pi model store currently has no stories15M/42M or MiniMind3 i16.
+
+These are single-run baselines, not statistical measurements. Pi timing varies
+with thermal state, SD-card activity, and shader compilation; expect several
+percent of run-to-run noise.
+
 ## Measured performance
 
 Pi Zero, q8, after the draw fix:
