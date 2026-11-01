@@ -694,7 +694,7 @@ private:
     Target sum_target_;
     Target ffn_a_, ffn_b_, ffn_h_, ffn_ab_;
     Target ffn_ab_a_, ffn_ab_b_, ffn_h_a_, ffn_h_b_;
-    Target qkv_target_, att_scores_, att_stats_, att_probs_, att_out_;
+    Target qkv_target_, att_scores_, att_stats_, att_probs_, att_out_, qrot_target_, qscale_target_;
     vector<Target> kv_cache_;
     Target hidden_a_, hidden_b_, xb_, xbf_, xf_, rms_stats_, rms_partial_;
     bool layer_fast_finish_ = false;
@@ -1316,6 +1316,58 @@ private:
         return p;
     }
 
+    // qk-norm factor per head: was recomputed inside every score fragment.
+    GLuint qnorm_scale_program() {
+        string key = "qnorm_" + to_string(att_dim_) + "_" + to_string(att_heads_) + "_" +
+                     to_string(att_head_dim_) + "_" + (att_qk_norm_ ? "1" : "0");
+        auto it = programs_.find(key);
+        if (it != programs_.end()) return it->second;
+        string fs = "precision highp float;\n" + att_defs() + att_helpers() +
+            "uniform sampler2D R;"
+            "void main(){int h=int(gl_FragCoord.x);float ss=0.0;"
+            "for(int z=0;z<HEADDIM;z++){"
+            "float zq=dec24q(texture2D(R,vec2((float(h*HEADDIM+z)+0.5)/float(QKVDIM),0.5)));"
+            "ss+=zq*zq;}"
+            "float rq=1.0/sqrt(ss/float(HEADDIM)+QKEPS);"
+            // scale 65536 keeps the re-quantisation error ~1e-5, below the score
+            // field's own 1/1024 step; clamp so a degenerate head cannot overflow.
+            "gl_FragColor=enc24s(min(rq,127.0),65536.0);}";
+        GLuint p = link_program(fs);
+        programs_[key] = p;
+        return p;
+    }
+
+    // Rotated + normed q, one fragment per (head, dim); position-only work.
+    GLuint qrot_program() {
+        string key = "qrot_" + to_string(att_dim_) + "_" + to_string(att_heads_) + "_" +
+                     to_string(att_head_dim_) + "_" + to_string(att_seq_) + "_" +
+                     (att_qk_norm_ ? "1" : "0") + "_" + (att_rope_half_ ? "1" : "0");
+        auto it = programs_.find(key);
+        if (it != programs_.end()) return it->second;
+        string fs = "precision highp float;\n" + att_defs() + att_helpers() +
+            "uniform sampler2D R,RT,QN,QS;uniform float pos;"
+            "void main(){int x=int(gl_FragCoord.x);int h=x/HEADDIM;int i=x-h*HEADDIM;"
+            "float rq=1.0;"
+            "if(QKNORM==1){rq=dec24s(texture2D(QS,vec2((float(h)+0.5)/float(HEADS),0.5)),65536.0);}"
+            "float qv=dec24q(texture2D(R,vec2((float(h*HEADDIM+i)+0.5)/float(QKVDIM),0.5)));"
+            "int j,ti;int even=i-(i/2)*2;"
+            "if(ROPEHALF==1){if(i<HALF){j=i+HALF;ti=i;}else{j=i-HALF;ti=i-HALF;}}"
+            "else{j=(even==0)?i+1:i-1;ti=i/2;}"
+            "float b=dec24q(texture2D(R,vec2((float(h*HEADDIM+j)+0.5)/float(QKVDIM),0.5)));"
+            "if(QKNORM==1){"
+            "qv=qv*rq*dec16(texture2D(QN,vec2((float(i)+0.5)/float(HEADDIM),0.5)).rg);"
+            "b=b*rq*dec16(texture2D(QN,vec2((float(j)+0.5)/float(HEADDIM),0.5)).rg);}"
+            "vec4 rc=texture2D(RT,vec2((float(2*ti)+0.5)/float(2*HALF),(pos+0.5)/float(SEQ)));"
+            "vec4 rs=texture2D(RT,vec2((float(2*ti+1)+0.5)/float(2*HALF),(pos+0.5)/float(SEQ)));"
+            "float c=dec24s(rc,4096.0),sn=dec24s(rs,4096.0);"
+            "bool first=(ROPEHALF==1)?(i<HALF):(even==0);"
+            "float q=first?qv*c-b*sn:b*sn+qv*c;"
+            "gl_FragColor=enc24s(q,256.0);}";
+        GLuint p = link_program(fs);
+        programs_[key] = p;
+        return p;
+    }
+
     GLuint score_program() {
         string key = "att_score_" + to_string(att_dim_) + "_" + to_string(att_kv_dim_) + "_" +
                      to_string(att_heads_) + "_" + to_string(att_head_dim_) + "_" +
@@ -1323,27 +1375,48 @@ private:
                      "_" + (att_kv_packed_ ? "1" : "0") + "_" + to_string(att_kv_scale_);
         auto it = programs_.find(key);
         if (it != programs_.end()) return it->second;
+        static const bool hoist = !(getenv("ATTN_HOIST") && strcmp(getenv("ATTN_HOIST"), "0") == 0);
+        if (!hoist) {
+            // Original per-fragment path: q rotation and qk-norm recomputed for
+            // every (head, t).  Kept as the reference and for short contexts.
+            string fin = "precision highp float;\n" + att_defs() + att_helpers() +
+                "uniform sampler2D R,KV,RT,QN;uniform float pos,invsqrt;"
+                "void main(){int t=int(gl_FragCoord.x);int h=int(gl_FragCoord.y);"
+                "if(float(t)>pos){gl_FragColor=enc24s(0.0,1024.0);return;}int kvh=h/GROUP;float s=0.0;"
+                "float rq=1.0;"
+                "if(QKNORM==1){float ss=0.0;for(int z=0;z<HEADDIM;z++){"
+                "float zq=dec24q(texture2D(R,vec2((float(h*HEADDIM+z)+0.5)/float(QKVDIM),0.5)));ss+=zq*zq;}"
+                "rq=1.0/sqrt(ss/float(HEADDIM)+QKEPS);}"
+                "for(int i=0;i<HEADDIM;i++){"
+                "float qv=dec24q(texture2D(R,vec2((float(h*HEADDIM+i)+0.5)/float(QKVDIM),0.5)));"
+                "int j,ti;int even=i-(i/2)*2;"
+                "if(ROPEHALF==1){if(i<HALF){j=i+HALF;ti=i;}else{j=i-HALF;ti=i-HALF;}}"
+                "else{j=(even==0)?i+1:i-1;ti=i/2;}"
+                "float b=dec24q(texture2D(R,vec2((float(h*HEADDIM+j)+0.5)/float(QKVDIM),0.5)));"
+                "if(QKNORM==1){qv=qv*rq*dec16(texture2D(QN,vec2((float(i)+0.5)/float(HEADDIM),0.5)).rg);"
+                "b=b*rq*dec16(texture2D(QN,vec2((float(j)+0.5)/float(HEADDIM),0.5)).rg);}"
+                "vec4 rc=texture2D(RT,vec2((float(2*ti)+0.5)/float(2*HALF),(pos+0.5)/float(SEQ)));"
+                "vec4 rs=texture2D(RT,vec2((float(2*ti+1)+0.5)/float(2*HALF),(pos+0.5)/float(SEQ)));"
+                "float c=dec24s(rc,4096.0),sn=dec24s(rs,4096.0);"
+                "bool first=(ROPEHALF==1)?(i<HALF):(even==0);"
+                "float q=first?qv*c-b*sn:b*sn+qv*c;"
+                "int ki=kvh*HEADDIM+i;int tx=ki;int odd=0;"
+                "if(KVPACK==16){tx=ki/2;odd=ki-tx*2;}else if(KVPACK==8){tx=ki/4;odd=ki-tx*4;}"
+                "float k=decKV(texture2D(KV,vec2((float(tx)+0.5)/float(KVWIDTH),(float(t)+0.5)/float(SEQ))),odd);"
+                "s+=q*k;}"
+                "gl_FragColor=enc24s(s*invsqrt,1024.0);}";
+            GLuint p = link_program(fin);
+            programs_[key] = p;
+            return p;
+        }
         string fs = "precision highp float;\n" + att_defs() + att_helpers() +
-            "uniform sampler2D R,KV,RT,QN;uniform float pos,invsqrt;"
+            "uniform sampler2D Q,KV;uniform float pos,invsqrt;"
             "void main(){int t=int(gl_FragCoord.x);int h=int(gl_FragCoord.y);"
             "if(float(t)>pos){gl_FragColor=enc24s(0.0,1024.0);return;}int kvh=h/GROUP;float s=0.0;"
-            "float rq=1.0;"
-            "if(QKNORM==1){float ss=0.0;for(int z=0;z<HEADDIM;z++){"
-            "float zq=dec24q(texture2D(R,vec2((float(h*HEADDIM+z)+0.5)/float(QKVDIM),0.5)));ss+=zq*zq;}"
-            "rq=1.0/sqrt(ss/float(HEADDIM)+QKEPS);}"
             "for(int i=0;i<HEADDIM;i++){"
-            "float qv=dec24q(texture2D(R,vec2((float(h*HEADDIM+i)+0.5)/float(QKVDIM),0.5)));"
-            "int j,ti;int even=i-(i/2)*2;"
-            "if(ROPEHALF==1){if(i<HALF){j=i+HALF;ti=i;}else{j=i-HALF;ti=i-HALF;}}"
-            "else{j=(even==0)?i+1:i-1;ti=i/2;}"
-            "float b=dec24q(texture2D(R,vec2((float(h*HEADDIM+j)+0.5)/float(QKVDIM),0.5)));"
-            "if(QKNORM==1){qv=qv*rq*dec16(texture2D(QN,vec2((float(i)+0.5)/float(HEADDIM),0.5)).rg);"
-            "b=b*rq*dec16(texture2D(QN,vec2((float(j)+0.5)/float(HEADDIM),0.5)).rg);}"
-            "vec4 rc=texture2D(RT,vec2((float(2*ti)+0.5)/float(2*HALF),(pos+0.5)/float(SEQ)));"
-            "vec4 rs=texture2D(RT,vec2((float(2*ti+1)+0.5)/float(2*HALF),(pos+0.5)/float(SEQ)));"
-            "float c=dec24s(rc,4096.0),sn=dec24s(rs,4096.0);"
-            "bool first=(ROPEHALF==1)?(i<HALF):(even==0);"
-            "float q=first?qv*c-b*sn:b*sn+qv*c;"
+            // dec24q wraps at 2^15 because stored q always fits int16; the rotated q
+            // can exceed that, so decode the full 24-bit field here.
+            "float q=dec24raw(texture2D(Q,vec2((float(h*HEADDIM+i)+0.5)/float(DIM),0.5)))/256.0;"
             "int ki=kvh*HEADDIM+i;int tx=ki;int odd=0;"
             "if(KVPACK==16){tx=ki/2;odd=ki-tx*2;}else if(KVPACK==8){tx=ki/4;odd=ki-tx*4;}"
             "float k=decKV(texture2D(KV,vec2((float(tx)+0.5)/float(KVWIDTH),(float(t)+0.5)/float(SEQ))),odd);"
@@ -1439,20 +1512,78 @@ private:
     }
 
     void att_scores(int layer, int pos) {
+        static const bool hoist = !(getenv("ATTN_HOIST") && strcmp(getenv("ATTN_HOIST"), "0") == 0);
+        if (!hoist) {
+            GLuint pi = score_program();
+            glBindFramebuffer(GL_FRAMEBUFFER, att_scores_.fbo);
+            glViewport(0, 0, att_seq_, att_heads_);
+            glUseProgram(pi);
+            glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, qkv_target_.tex);
+            glUniform1i(glGetUniformLocation(pi, "R"), 0);
+            glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, kv_cache_[layer].tex);
+            glUniform1i(glGetUniformLocation(pi, "KV"), 1);
+            glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, rope_tex_);
+            glUniform1i(glGetUniformLocation(pi, "RT"), 2);
+            if (att_qk_norm_) {
+                glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, q_norm_tex_[layer]);
+                glUniform1i(glGetUniformLocation(pi, "QN"), 3);
+            }
+            glUniform1f(glGetUniformLocation(pi, "pos"), (float)pos);
+            glUniform1f(glGetUniformLocation(pi, "invsqrt"), 1.0f / sqrtf((float)att_head_dim_));
+            GLuint li = glGetAttribLocation(pi, "p");
+            glEnableVertexAttribArray(li);
+            glVertexAttribPointer(li, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+            att_finish();
+            return;
+        }
+        // Position-only work first: qk-norm factor per head, then the rotated q.
+        if (att_qk_norm_) {
+            if (qscale_target_.tex == 0 || qscale_target_.w != att_heads_)
+                qscale_target_ = make_target(att_heads_, 1);
+            GLuint pq = qnorm_scale_program();
+            glBindFramebuffer(GL_FRAMEBUFFER, qscale_target_.fbo);
+            glViewport(0, 0, att_heads_, 1);
+            glUseProgram(pq);
+            glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, qkv_target_.tex);
+            glUniform1i(glGetUniformLocation(pq, "R"), 0);
+            GLuint lq = glGetAttribLocation(pq, "p");
+            glEnableVertexAttribArray(lq);
+            glVertexAttribPointer(lq, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+            att_finish();
+        }
+        if (qrot_target_.tex == 0 || qrot_target_.w != att_dim_)
+            qrot_target_ = make_target(att_dim_, 1);
+        GLuint pr = qrot_program();
+        glBindFramebuffer(GL_FRAMEBUFFER, qrot_target_.fbo);
+        glViewport(0, 0, att_dim_, 1);
+        glUseProgram(pr);
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, qkv_target_.tex);
+        glUniform1i(glGetUniformLocation(pr, "R"), 0);
+        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, rope_tex_);
+        glUniform1i(glGetUniformLocation(pr, "RT"), 1);
+        if (att_qk_norm_) {
+            glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, q_norm_tex_[layer]);
+            glUniform1i(glGetUniformLocation(pr, "QN"), 2);
+            glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, qscale_target_.tex);
+            glUniform1i(glGetUniformLocation(pr, "QS"), 3);
+        }
+        glUniform1f(glGetUniformLocation(pr, "pos"), (float)pos);
+        GLuint lr = glGetAttribLocation(pr, "p");
+        glEnableVertexAttribArray(lr);
+        glVertexAttribPointer(lr, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        att_finish();
+
         GLuint p = score_program();
         glBindFramebuffer(GL_FRAMEBUFFER, att_scores_.fbo);
         glViewport(0, 0, att_seq_, att_heads_);
         glUseProgram(p);
-        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, qkv_target_.tex);
-        glUniform1i(glGetUniformLocation(p, "R"), 0);
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, qrot_target_.tex);
+        glUniform1i(glGetUniformLocation(p, "Q"), 0);
         glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, kv_cache_[layer].tex);
         glUniform1i(glGetUniformLocation(p, "KV"), 1);
-        glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, rope_tex_);
-        glUniform1i(glGetUniformLocation(p, "RT"), 2);
-        if (att_qk_norm_) {
-            glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, q_norm_tex_[layer]);
-            glUniform1i(glGetUniformLocation(p, "QN"), 3);
-        }
         glUniform1f(glGetUniformLocation(p, "pos"), (float)pos);
         glUniform1f(glGetUniformLocation(p, "invsqrt"), 1.0f / sqrtf((float)att_head_dim_));
         GLuint loc = glGetAttribLocation(p, "p");

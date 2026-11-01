@@ -10,12 +10,13 @@ MiniMind3-64M, q8, Pi Zero, same 73-token prompt, greedy:
 | build | prefill | decode |
 |---|---:|---:|
 | before | 37.95 s | 507.5 ms/token |
-| **after** | **24.2 s** | **314.7 ms/token** |
+| after the decoder work | 24.2 s | 314.7 ms/token |
+| **after attention hoist** | **24.3 s** | **303.1 ms/token** |
 
-**1.56x prefill, 1.61x decode** (2.0 -> 3.2 tokens/s), with the generated text
+**1.56x prefill, 1.67x decode** (2.0 -> 3.3 tokens/s), with the generated text
 byte-identical to the pre-change engine for both q8 and q4.
 
-Three changes, in the order they paid:
+Four changes, in the order they paid:
 
 1. **Two int16 activations per texture texel** (+5.5% decode). Halves the
    activation fetches per MAC; the weights, which still stream every token, do
@@ -27,6 +28,9 @@ Three changes, in the order they paid:
 3. **Parallel RMS sum of squares** (32 fragments + reduce, +3%). The serial
    768-iteration fragment was 3.5 ms per call; a draw+finish costs ~1 ms on this
    driver, which caps what pass-splitting can buy.
+4. **Hoist the position-only part of attention** (-5% decode at 73 tokens,
+   -12% at 267). q rotation, qk-norm and RoPE were recomputed for every
+   (head, t); they now run once per token in two small passes.
 
 Rejected after measurement: I16/mixed precision (the driver exposes no
 half-float or float textures, and the INT16 checkpoint format also decodes), and
@@ -485,3 +489,43 @@ Merging any two passes would save about a millisecond per layer (~2.5% of a
 token) and each merge needs the intermediate result to be complete, which is
 exactly what the finish buys — that is why the block is left as it is rather
 than micro-merged.
+
+
+## Hoisting the position-only part of attention (+5% short, +12% long)
+
+`score_program` runs one fragment per (head, t).  For every one of the 96 head
+dimensions it decoded q[i], decoded the RoPE partner q[j], **recomputed the qk-norm
+factor with a second 96-iteration loop**, fetched cos/sin and decoded K.  All of
+that except the K fetch depends only on the current position, so it was recomputed
+`pos` times per token.
+
+It is now three passes: `qnorm_scale` (one fragment per head, the norm factor),
+`qrot` (one fragment per (head, dim), the rotated+normed q) and a score pass that
+only does `q_rot[i] * k[i]`.  That is two extra draws+finishes per layer against a
+per-element drop from five fetches / four decodes to two fetches / two decodes.
+
+Interleaved A/B on the Pi, greedy, `TIMING=1`:
+
+| context | path | prefill | decode |
+|---|---|---:|---:|
+| 73 tokens | inline (old) | 24.2 / 25.2 s | 311.4 / 323.9 ms/token |
+| 73 tokens | **hoisted** | 24.9 / 24.1 s | **300.6 / 301.7** |
+| 267 tokens | inline (old) | 89.5 / 91.8 s | 413.9 / (1056.7 outlier) |
+| 267 tokens | **hoisted** | **83.0 / 84.3 s** | **359.7 / 370.5** |
+
+Short context: **-5% decode**, prefill unchanged.  Long context: **-7.7% prefill,
+-12% decode**.  Output stays byte-identical for q8 and q4.
+
+With the hoist as the default path the canonical 16-token prompt now decodes at
+**303.1 ms/token** (was 314.7), and the server eval's long-prompt case drops from
+94.5 s to **85.5 s** (15/15 still passing, baseline refreshed).
+
+Two extra draws were expected to cost ~2 ms/layer and make short contexts a wash;
+they did not, because the per-fragment work they remove is larger than the
+draw+finish overhead even at 73 positions.  `ATTN_HOIST=0` keeps the old path
+compiled in for comparison.
+
+**The bug worth remembering:** the new qrot texture is `DIM` wide, but the score
+shader indexed it with `QKVDIM` (1536, the qkv width).  Sampling the wrong half of
+a texture produces *no GL error* — the model simply emitted EOS immediately and
+the output was empty.  Any texture you create must be indexed with its own width.

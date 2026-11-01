@@ -258,3 +258,32 @@ length. Report:
     tool name / arguments / result
 
 Do not compare a laptop run with a Pi run as if they were the same machine.
+
+
+### Attention is now pass-count bound, not ALU bound (2026-11-01, after the hoist)
+
+The block is eight draws per layer: qkv matvec, qk-norm factor, rotated q, KV
+rope write, scores, softmax stats, probabilities, p·V.  Per-call profile after
+the hoist (pos ~73, profiled so the numbers include the sync):
+
+| pass | ms/layer | what is left in it |
+|---|---:|---|
+| qkv matvec | ~5.3 | 1536x768 GEMV, already at the measured matvec rate |
+| scores | ~4.0 | one q fetch + one KV fetch per element |
+| att_v | ~2.7 | one p decode + one KV decode per (dim, t) |
+| KV rope write | ~2.5 | one draw, no loop: almost all of it is the draw |
+| probabilities | ~1.7 | one exp per (head, t): the draw, not the math |
+| normalise / stats | ~1.8 | 8 serial fragments, one draw |
+
+Roughly 1.3 ms per draw+finish * eight passes means about half the block is
+overhead, which is why the remaining ideas are all worth under 1%:
+
+- probabilities as q16 instead of 24-bit: saves ~0.3 ms/layer in att_v (~1%).
+- parallelising the softmax stats: the draw it adds costs what the shorter
+  serial chain saves (~0-2%).
+- fusing qk-norm + rotation into one pass: the per-fragment 96-iteration loop
+  that replaces the extra draw costs more than the draw (net negative).
+
+To move the needle further you have to remove passes or change the KV layout so
+scores and p·V run as ordinary matvecs (K contiguous per head, V^T contiguous
+per head).  That is a redesign of the KV cache, not a tuning change.
