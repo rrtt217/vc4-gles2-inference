@@ -9,7 +9,7 @@ The earlier failures were not one bug.  Three separate things mattered.
 
 ### 1. `gl_FragCoord` is integer on VC4
 
-`vc4_probe.cpp` shows:
+`probes/vc4_probe.cpp` shows:
 
 | renderer | first pixel |
 |---|---|

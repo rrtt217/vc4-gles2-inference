@@ -1,13 +1,13 @@
 #!/bin/sh
 # Correctness + speed check for the packed-activation layout.
 #
-# The reference is a binary built from the pre-packing sources:
-#   git show HEAD:engine/engine.cpp > /tmp/engine_base.cpp
-#   g++ -O2 ... -o /tmp/engine_base /tmp/engine_base.cpp -lEGL -lGLESv2 -lm
+# The reference is a binary built from the pre-packing tree (or any known
+# good engine binary).  Set REF to point at it; otherwise the script only
+# reports the new binary's output and timing.
 # Both engines must produce the same token text byte for byte; a packing bug
 # shows up as repeated single tokens, which still looks "fluent" at a glance.
 set -eu
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 export TOKENIZER=../models/minimind3/minimind3.tok
 export GPU_LAYER=1 KV_PACK=16 TIMING=1
 REF="${REF:-/tmp/engine_base}"

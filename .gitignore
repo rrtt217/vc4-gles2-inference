@@ -37,6 +37,11 @@ engine/engine_profile
 engine/vc4_probe
 engine/vc4_ffn_probe
 engine/vc4_topk_probe
+engine/probes/vc4_probe
+engine/probes/vc4_ffn_probe
+engine/probes/vc4_topk_probe
+engine/probes/matvec_probe
+engine/probes/texsize_probe
 
 # Editor / OS
 .DS_Store

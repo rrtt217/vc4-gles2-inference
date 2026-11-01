@@ -34,7 +34,7 @@ Rebuild MiniMind3 artifacts from the repository root:
 minimind3/convert.sh
 
 # or just Q4 from F16
-python3 engine/make_q4.py --input models/minimind3 \
+python3 engine/quantize/make_q4.py --input models/minimind3 \
   --output models/minimind3/minimind3.q4 --seq 512
 ```
 

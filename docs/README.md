@@ -19,7 +19,7 @@ Deep dives:
 | [performance.md](performance.md) | Pi/laptop timing tables and regression baselines |
 | [test-hooks.md](test-hooks.md) | environment switches for A/B tests |
 | [prefix-cache.md](prefix-cache.md) | in-memory and disk KV prefix cache, packed cache |
-| [engine-layout.md](engine-layout.md) | source layout and whether to split `engine.cpp` |
+| [engine-layout.md](engine-layout.md) | source layout, X formats, regression rule |
 | [future-optimization.md](future-optimization.md) | prioritized future work and explicit non-goals |
 | [deterministic-tools.md](deterministic-tools.md) | model-free tool routing, argument validation, cache interaction |
 

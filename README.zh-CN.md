@@ -57,7 +57,7 @@ GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat --template minimind3 \
 ### 离线 q4
 
 ```bash
-python3 engine/make_q4.py --input models/minimind3 --output models/minimind3/minimind3.q4 --seq 512
+python3 engine/quantize/make_q4.py --input models/minimind3 --output models/minimind3/minimind3.q4 --seq 512
 
 cd engine
 MODEL=../models/minimind3/minimind3.q4 \

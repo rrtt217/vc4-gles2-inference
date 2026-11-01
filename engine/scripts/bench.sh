@@ -3,7 +3,7 @@
 # Usage: bash bench.sh [prompt] [gen]
 # Prints one line per config: tag, prefill seconds, decode ms/token, CmaFree delta.
 set -u
-cd "$(dirname "$0")" || exit 1
+cd "$(dirname "$0")/.." || exit 1
 PROMPT="${1:-用一句话介绍你自己。}"
 GEN="${2:-16}"
 export TOKENIZER=../models/minimind3/minimind3.tok

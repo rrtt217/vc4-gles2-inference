@@ -39,7 +39,7 @@ drops from ~119 MB to ~56 MB.  This is system RAM, not CMA.
 `make_q4.py` quantizes directly from `model.safetensors` (F16), not from q8:
 
 ```bash
-python3 engine/make_q4.py --input models/minimind3 --output models/minimind3/minimind3.q4 --seq 512
+python3 engine/quantize/make_q4.py --input models/minimind3 --output models/minimind3/minimind3.q4 --seq 512
 ```
 
 The Q4M1 file stores q4 block32 asymmetric linear weights (qkv/wo/W1/W3/W2),

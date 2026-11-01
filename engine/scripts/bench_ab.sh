@@ -4,7 +4,7 @@
 # Alternating the runs keeps thermal drift and background load from favouring
 # whichever binary happened to run first.
 set -eu
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 export TOKENIZER=../models/minimind3/minimind3.tok
 export GPU_LAYER=1 KV_PACK=16 TIMING=1
 export MODEL=../models/minimind3/minimind3.q8

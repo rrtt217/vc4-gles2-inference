@@ -12,6 +12,10 @@ production settings.
 - `GPU_LAYER=1` — hidden state, attention, RMSNorm and FFN all on GPU.
 - `LAYER_SAFE_FINISH=1` — disable the GPU_LAYER selective-finish shortcut.
 - `FFN_SYNC=1` — finish after FFN passes.
+- `FFN_PAIR=0` — disable the paired gate matvec.
+- `RES_PACK=1` — store two q16 residual values per texel (neutral, opt-in).
+- `ACT8=2` — FFN hidden state in I8_4 (q8 weights only, opt-in).
+- `ACT8=1` — all matvec inputs in I8_4 (q8 weights only, opt-in).
 - `FORCE_GLFINISH=1` — force the VC4 finish path on other drivers.
 - `Q8_LAYERS=all|0,1,...`, `Q8_PARTS=qkv,wo,ffn,w2,logits,emb` — precision mix.
 - `LOGITS_OUT=path` — write float32 logits after prefill.
@@ -31,6 +35,10 @@ production settings.
 - `--build-prefix-cache PROMPT_FILE CACHE_FILE` — prefill a fixed prefix and
   dump the per-layer KV textures.
 - `--prefix-cache CACHE_FILE` — load a validated KV prefix at worker startup.
+  The cache header binds the activation format, so an `ACT8` cache is not
+  accepted by a non-ACT8 process (and vice versa).
+- `--ppl FILE` — teacher-forced perplexity over FILE; use the same corpus for
+  format comparisons.
 - `KV_SCALE=N` — KV fixed-point scale (default 16384; q16 uses 2048,
   q8 uses 16).
 - `KV_PACK=16|8` — packed KV layout: two int16 per RGBA8 texel (width 384)

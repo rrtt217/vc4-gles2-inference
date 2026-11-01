@@ -2,7 +2,7 @@
 # Long-context decode cost: does KV packing matter once the cache is deep?
 # Usage: bash longctx.sh [repeats]
 set -u
-cd "$(dirname "$0")" || exit 1
+cd "$(dirname "$0")/.." || exit 1
 REPEATS="${1:-45}"
 export TOKENIZER=../models/minimind3/minimind3.tok
 export GPU_LAYER=1 TIMING=1

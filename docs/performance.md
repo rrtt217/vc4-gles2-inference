@@ -322,7 +322,7 @@ The old MiniMind q8 file was converted with the wrong q/k rope permutation.
 Convert from a good I16 checkpoint instead:
 
 ```bash
-python3 engine/make_q8_from_i16.py models/llama2c/minimind2-small.i16 models/llama2c/minimind2-small.q8
+python3 engine/quantize/make_q8_from_i16.py models/llama2c/minimind2-small.i16 models/llama2c/minimind2-small.q8
 ```
 
 The corrected file is 28 MB and needs `ROPE_THETA=1000000 ROPE_HALF=1`.
@@ -649,3 +649,38 @@ These are inflated by the profiler's per-phase `glFinish` (the sum is ~58 ms/lay
 against ~35 ms of real time), so read them as shares, not absolutes.  Attention is
 again the largest block; the FFN gate is now the second, and the paired matvec is
 what moved it down.
+
+
+## X-format activation layouts and ACT8 (2026-11-01)
+
+The activation texture layout is now explicit in `src/xformat.*`:
+
+| layout | values / texel | notes |
+|---|---:|---|
+| `I16_1` | 1 | q16 in `.rg`; default residual stream |
+| `I16_2` | 2 | default matvec input and `RES_PACK` residual |
+| `I8_4` | 4 | signed int8, 1/16 scale; `ACT8` |
+
+Hot matvec kernels use the q16-domain macros (`X4Q`, `R1Q`) so the inner
+loop keeps the original integer arithmetic; producers use `XST*` and generic
+attention/RMS code uses the real-valued `X1/X2/X4` variants.  This removed the
+per-shader layout strings that caused the earlier ACT8 patch failures.
+
+`--ppl` is the quality gate.  On the fixed 254-token corpus in
+`engine/data/ppl_test.txt` and a second 254-token Chinese corpus (q8,
+GPU_LAYER, KV_PACK=16):
+
+| path | corpus A PPL | corpus B PPL |
+|---|---:|---:|
+| baseline | 313.94 | 909.12 |
+| `ACT8=2` (FFN hidden only) | 320.77 (+2.2%) | 931.71 (+2.5%) |
+| `ACT8=1` (all matvec inputs) | 315.38 (+0.5%) | 1024.38 (+12.7%) |
+
+Corpus B is `README.zh-CN.md` (254 tokens); it deliberately differs in style
+from corpus A.  Neither ACT8 mode is a safe default: the full path is nearly
+neutral on A and clearly worse on B.  Both stay opt-in; the greedy q8/q4
+strings remain byte-identical with `ACT8` unset.
+
+This is the same lesson as q4: a small fixed corpus can rank a lossy format
+wrongly.  Keep the harness and compare at least two corpora before changing a
+default.

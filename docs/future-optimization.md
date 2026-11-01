@@ -101,9 +101,9 @@ Ranked ideas, none of them started:
    `Σx` is shared by every output row, so it can be computed once per fragment.
    Roughly 3 of 13 ops per weight disappear; no numeric change if the final
    rounding is kept.
-2. **int8 activations (4 per texel).** Would halve the activation decode again,
-   but needs a quality metric this repo does not have yet (no perplexity
-   harness).  Do not ship it without one.
+2. **int8 activations (4 per texel).** Implemented behind `ACT8` (X8_4) and
+   measured with the `--ppl` harness.  The quality trade is corpus-dependent,
+   so it stays opt-in; see the X-format section below.
 3. **Two output rows per fragment.** Reuses the activation decode across rows,
    but GLES2 has a single colour attachment, so it needs either two passes or
    interleaved output — a real refactor.
@@ -315,8 +315,8 @@ V transposed per head would let `scores` and `p*V` reuse the existing matvec
 kernel, but the fetch and decode counts per element are already at 2 and 2 after
 the hoist, so the win is in code reuse, not in throughput.
 
-**4. int8 activations (quality risk, ~1.6x on every matvec).** Storing activations
-one byte per value would cut the dominant decode from 5 ops to 2.  The current
-scheme is 1/256 fixed point; 1/8 or 1/16 would be visible in the output.  Only
-worth it with a real perplexity harness to prove it, which this repo does not
-have — the golden-string test cannot tell a small degradation from none.
+**4. int8 activations (quality risk, ~1.6x on every matvec).** Implemented as
+`X8_4` and exposed by `ACT8=1` (all matvec inputs) / `ACT8=2` (FFN hidden only).
+The `--ppl` harness exists; greedy text can stay identical while PPL moves, so
+both must be checked.  Keep it opt-in unless a corpus-wide quality run says
+otherwise.

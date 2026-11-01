@@ -11,18 +11,19 @@ This README is the quick start. Deep notes are in [../docs/](../docs/):
 - [quantization and Q4M1](../docs/quantization.md)
 - [performance](../docs/performance.md)
 - [test hooks](../docs/test-hooks.md)
-- [source layout and split decision](../docs/engine-layout.md)
+- [source layout](../docs/engine-layout.md)
 
 ## Source layout
 
 | Path | Purpose |
 |---|---|
-| `engine.cpp` | EGL/GLES2, loaders, tokenizer, session, CLI |
-| `make_i16.py` | F16/llama2.c -> I16M1/M2 |
-| `make_q8_from_i16.py` | I16 -> Q8M1/M2 |
-| `make_q4.py` | F16 safetensors -> Q4M1 (offline q4) |
+| `src/` | EGL/GLES2 engine, model, session, tokenizer, CLI |
+| `src/xformat.*` | activation layout and GLSL X macros |
+| `src/shaders*.cpp` | GLSL source builders |
+| `probes/` | standalone VC4 probes, not linked into the engine |
+| `quantize/` | F16/I16/q8/q4 converters |
+| `scripts/` | benchmark and regression helpers |
 | `Makefile` | local and Pi build flags |
-| `vc4_*.cpp` | minimal VC4 probes |
 
 ## Build
 
@@ -33,7 +34,7 @@ cd engine
 make engine_mm3
 ```
 
-Pi Zero, build separately from the run (about 3–4 minutes):
+Pi Zero, build separately from the run (8–10 minutes; never run two builds):
 
 ```bash
 make -B engine_mm3 CXXFLAGS='-O2 -march=armv6 -mfpu=vfp -mfloat-abi=hard -ffast-math -std=c++17'
@@ -137,8 +138,23 @@ model; tool calls are much more reliable.
 | `TIMING=1` | print prefill/decode timing |
 | `LAYER_PROFILE=1` | per-layer timing |
 | `TOPK`, `TOPK_FAST` | candidate Top-K paths |
+| `RES_PACK=1` | two q16 residual values/texel; neutral, opt-in |
+| `ACT8=2` | FFN hidden state in I8_4, q8 weights only; opt-in |
+| `ACT8=1` | all matvec inputs in I8_4, q8 weights only; opt-in |
 
 See [test hooks](../docs/test-hooks.md) for the full list.
+
+## Perplexity
+
+Teacher-forced perplexity is the quality gate for lossy activation formats:
+
+```bash
+MODEL=../models/minimind3/minimind3.q8 TOKENIZER=../models/minimind3/minimind3.tok \
+GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --template minimind3 --ppl data/ppl_test.txt
+```
+
+Use the same corpus when comparing formats; `ACT8=1` and `ACT8=2` are not
+default-safe on every corpus.
 
 ## Documentation map
 

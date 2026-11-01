@@ -1,0 +1,301 @@
+#include "shaders.h"
+
+#include <cstdlib>
+#include <cstring>
+
+#include <string>
+
+using std::string;
+using std::to_string;
+
+string att_defs(const AttnConfig& c) {
+    return string("#define DIM ") + to_string(c.dim) + "\n" +
+           "#define KVDIM " + to_string(c.kv_dim) + "\n" +
+           "#define QKVDIM " + to_string(c.dim + 2 * c.kv_dim) + "\n" +
+           "#define HEADS " + to_string(c.heads) + "\n" +
+           "#define KVHEADS " + to_string(c.kv_heads) + "\n" +
+           "#define GROUP " + to_string(c.heads / c.kv_heads) + "\n" +
+           "#define HEADDIM " + to_string(c.head_dim) + "\n" +
+           "#define HALF " + to_string(c.head_dim / 2) + "\n" +
+           "#define SEQ " + to_string(c.seq) + "\n" +
+           "#define ROPEHALF " + string(c.rope_half ? "1" : "0") + "\n" +
+           "#define QKNORM " + string(c.qk_norm ? "1" : "0") + "\n" +
+           "#define QKEPS 0.000001\n" +
+           "#define KVSCALE " + to_string(c.kv_scale) + "\n" +
+           "#define KVPACK " + to_string(c.kv_bits) + "\n" +
+           "#define KVWIDTH " + to_string(c.kv_width) + "\n";
+}
+
+string att_helpers() {
+    return
+        "vec4 q16(float v){float q=clamp(floor(v*256.0+0.5),-32768.0,32767.0);if(q<0.0)q+=65536.0;float hi=floor(q/256.0),lo=q-hi*256.0;return vec4(hi/255.0,lo/255.0,0.0,1.0);}\n"
+        "float dec24raw(vec4 c){return floor(c.r*255.0+0.5)*16777216.0+floor(c.g*255.0+0.5)*65536.0+floor(c.b*255.0+0.5)*256.0+floor(c.a*255.0+0.5)-8388608.0;}\n"
+        "float dec24q(vec4 c){float u=dec24raw(c);if(u>=32768.0)u-=65536.0;return u/256.0;}\n"
+        "vec4 enc24s(float v,float s){float q=floor(v*s+0.5)+8388608.0;float r0=floor(q/16777216.0),g=floor(q/65536.0)-r0*256.0,b=floor(q/256.0)-r0*65536.0-g*256.0,a=q-r0*16777216.0-g*65536.0-b*256.0;return vec4(r0/255.0,g/255.0,b/255.0,a/255.0);}\n"
+        "float dec24s(vec4 c,float s){return dec24raw(c)/s;}\n"
+        "float dec16(vec2 c){float u=c.x*65280.0+c.y*255.0;if(u>=32768.0)u-=65536.0;return u/256.0;}\n"
+        "vec4 encKV(float v0,float v1){if(KVPACK==16){float q0=clamp(floor(v0*KVSCALE+0.5),-32768.0,32767.0);if(q0<0.0)q0+=65536.0;float q1=clamp(floor(v1*KVSCALE+0.5),-32768.0,32767.0);if(q1<0.0)q1+=65536.0;float h0=floor(q0/256.0),l0=q0-h0*256.0,h1=floor(q1/256.0),l1=q1-h1*256.0;return vec4(h0/255.0,l0/255.0,h1/255.0,l1/255.0);}return enc24s(v0,KVSCALE);}\n"
+        "vec4 encKV8(float v0,float v1,float v2,float v3){float q0=clamp(floor(v0*KVSCALE+0.5),-128.0,127.0);if(q0<0.0)q0+=256.0;float q1=clamp(floor(v1*KVSCALE+0.5),-128.0,127.0);if(q1<0.0)q1+=256.0;float q2=clamp(floor(v2*KVSCALE+0.5),-128.0,127.0);if(q2<0.0)q2+=256.0;float q3=clamp(floor(v3*KVSCALE+0.5),-128.0,127.0);if(q3<0.0)q3+=256.0;return vec4(q0/255.0,q1/255.0,q2/255.0,q3/255.0);}\n"
+        "float decKV8(vec4 c,int idx){float q=(idx==0)?c.r:(idx==1)?c.g:(idx==2)?c.b:c.a;float u=floor(q*255.0+0.5);if(u>=128.0)u-=256.0;return u/KVSCALE;}\n"
+        "float decKV(vec4 c,int odd){if(KVPACK==16){float hi=(odd==1)?c.b:c.r;float lo=(odd==1)?c.a:c.g;float u=floor(hi*255.0+0.5)*256.0+floor(lo*255.0+0.5);if(u>=32768.0)u-=65536.0;return u/KVSCALE;}if(KVPACK==8)return decKV8(c,odd);return dec24s(c,KVSCALE);}\n";
+}
+
+string att_kv_rope(const AttnConfig& c) {
+    return "precision highp float;\n" + att_defs(c) + att_helpers() +
+        "uniform sampler2D QKV,RT,KN;uniform float pos;"
+        "void main(){int x=int(gl_FragCoord.x);"
+        "if(KVPACK==8){"
+        "if(x<KVDIM/4){"
+        "int base=4*x;int h=base/HEADDIM;int li0=base-h*HEADDIM;"
+        "float rk=1.0;"
+        "if(QKNORM==1){float ss=0.0;for(int z=0;z<HEADDIM;z++){"
+        "float zk=dec24q(texture2D(QKV,vec2((float(DIM+h*HEADDIM+z)+0.5)/float(QKVDIM),0.5)));ss+=zk*zk;}"
+        "rk=1.0/sqrt(ss/float(HEADDIM)+QKEPS);}"
+        "float o0=0.0,o1=0.0,o2=0.0,o3=0.0;"
+        "for(int k=0;k<4;k++){int ii=base+k;int li=li0+k;int j,ti;int even=li-(li/2)*2;"
+        "float vv=dec24q(texture2D(QKV,vec2((float(DIM+ii)+0.5)/float(QKVDIM),0.5)));"
+        "if(QKNORM==1)vv=vv*rk*dec16(texture2D(KN,vec2((float(li)+0.5)/float(HEADDIM),0.5)).rg);"
+        "if(ROPEHALF==1){if(li<HALF){j=li+HALF;ti=li;}else{j=li-HALF;ti=li-HALF;}}"
+        "else{j=(even==0)?li+1:li-1;ti=li/2;}"
+        "int pc=DIM+h*HEADDIM+j;"
+        "float bb=dec24q(texture2D(QKV,vec2((float(pc)+0.5)/float(QKVDIM),0.5)));"
+        "if(QKNORM==1)bb=bb*rk*dec16(texture2D(KN,vec2((float(j)+0.5)/float(HEADDIM),0.5)).rg);"
+        "vec4 rc=texture2D(RT,vec2((float(2*ti)+0.5)/float(2*HALF),(pos+0.5)/float(SEQ)));"
+        "vec4 rs=texture2D(RT,vec2((float(2*ti+1)+0.5)/float(2*HALF),(pos+0.5)/float(SEQ)));"
+        "float co=dec24s(rc,4096.0),sn=dec24s(rs,4096.0);"
+        "bool first=(ROPEHALF==1)?(li<HALF):(even==0);"
+        "float oo=first?vv*co-bb*sn:bb*sn+vv*co;if(k==0)o0=oo;else if(k==1)o1=oo;else if(k==2)o2=oo;else o3=oo;}"
+        "gl_FragColor=encKV8(o0,o1,o2,o3);return;}"
+        "int vb=4*(x-KVDIM/4);"
+        "float v0=dec24q(texture2D(QKV,vec2((float(DIM+KVDIM+vb)+0.5)/float(QKVDIM),0.5)));"
+        "float v1=dec24q(texture2D(QKV,vec2((float(DIM+KVDIM+vb+1)+0.5)/float(QKVDIM),0.5)));"
+        "float v2=dec24q(texture2D(QKV,vec2((float(DIM+KVDIM+vb+2)+0.5)/float(QKVDIM),0.5)));"
+        "float v3=dec24q(texture2D(QKV,vec2((float(DIM+KVDIM+vb+3)+0.5)/float(QKVDIM),0.5)));"
+        "gl_FragColor=encKV8(v0,v1,v2,v3);return;}"
+        "if(KVPACK==16){"
+        "if(x<KVDIM/2){"
+        "int i0=2*x;int h=i0/HEADDIM;int li0=i0-h*HEADDIM;"
+        "float rk=1.0;"
+        "if(QKNORM==1){float ss=0.0;for(int z=0;z<HEADDIM;z++){"
+        "float zk=dec24q(texture2D(QKV,vec2((float(DIM+h*HEADDIM+z)+0.5)/float(QKVDIM),0.5)));ss+=zk*zk;}"
+        "rk=1.0/sqrt(ss/float(HEADDIM)+QKEPS);}"
+        "float o0=0.0,o1=0.0;"
+        "for(int k=0;k<2;k++){int ii=i0+k;int li=li0+k;int j,ti;int even=li-(li/2)*2;"
+        "float vv=dec24q(texture2D(QKV,vec2((float(DIM+ii)+0.5)/float(QKVDIM),0.5)));"
+        "if(QKNORM==1)vv=vv*rk*dec16(texture2D(KN,vec2((float(li)+0.5)/float(HEADDIM),0.5)).rg);"
+        "if(ROPEHALF==1){if(li<HALF){j=li+HALF;ti=li;}else{j=li-HALF;ti=li-HALF;}}"
+        "else{j=(even==0)?li+1:li-1;ti=li/2;}"
+        "int pc=DIM+h*HEADDIM+j;"
+        "float bb=dec24q(texture2D(QKV,vec2((float(pc)+0.5)/float(QKVDIM),0.5)));"
+        "if(QKNORM==1)bb=bb*rk*dec16(texture2D(KN,vec2((float(j)+0.5)/float(HEADDIM),0.5)).rg);"
+        "vec4 rc=texture2D(RT,vec2((float(2*ti)+0.5)/float(2*HALF),(pos+0.5)/float(SEQ)));"
+        "vec4 rs=texture2D(RT,vec2((float(2*ti+1)+0.5)/float(2*HALF),(pos+0.5)/float(SEQ)));"
+        "float co=dec24s(rc,4096.0),sn=dec24s(rs,4096.0);"
+        "bool first=(ROPEHALF==1)?(li<HALF):(even==0);"
+        "float oo=first?vv*co-bb*sn:bb*sn+vv*co;if(k==0)o0=oo;else o1=oo;}"
+        "gl_FragColor=encKV(o0,o1);return;}"
+        "int vb=2*(x-KVDIM/2);"
+        "float v0=dec24q(texture2D(QKV,vec2((float(DIM+KVDIM+vb)+0.5)/float(QKVDIM),0.5)));"
+        "float v1=dec24q(texture2D(QKV,vec2((float(DIM+KVDIM+vb+1)+0.5)/float(QKVDIM),0.5)));"
+        "gl_FragColor=encKV(v0,v1);return;}"
+        "float v=dec24q(texture2D(QKV,vec2((float(DIM+x)+0.5)/float(QKVDIM),0.5)));"
+        "if(x>=KVDIM){gl_FragColor=enc24s(v,KVSCALE);return;}"
+        "int h=x/HEADDIM;int i=x-h*HEADDIM;int j,ti;int even=i-(i/2)*2;"
+        "float rk=1.0;"
+        "if(QKNORM==1){float ss=0.0;for(int z=0;z<HEADDIM;z++){"
+        "float zk=dec24q(texture2D(QKV,vec2((float(DIM+h*HEADDIM+z)+0.5)/float(QKVDIM),0.5)));ss+=zk*zk;}"
+        "rk=1.0/sqrt(ss/float(HEADDIM)+QKEPS);}"
+        "float vn=v;if(QKNORM==1)vn=v*rk*dec16(texture2D(KN,vec2((float(i)+0.5)/float(HEADDIM),0.5)).rg);"
+        "if(ROPEHALF==1){if(i<HALF){j=i+HALF;ti=i;}else{j=i-HALF;ti=i-HALF;}}"
+        "else{j=(even==0)?i+1:i-1;ti=i/2;}"
+        "int pc=DIM+h*HEADDIM+j;"
+        "float b=dec24q(texture2D(QKV,vec2((float(pc)+0.5)/float(QKVDIM),0.5)));"
+        "float bn=b;if(QKNORM==1)bn=b*rk*dec16(texture2D(KN,vec2((float(j)+0.5)/float(HEADDIM),0.5)).rg);"
+        "vec4 rc=texture2D(RT,vec2((float(2*ti)+0.5)/float(2*HALF),(pos+0.5)/float(SEQ)));"
+        "vec4 rs=texture2D(RT,vec2((float(2*ti+1)+0.5)/float(2*HALF),(pos+0.5)/float(SEQ)));"
+        "float co=dec24s(rc,4096.0),sn=dec24s(rs,4096.0);"
+        "bool first=(ROPEHALF==1)?(i<HALF):(even==0);"
+        "float o=first?vn*co-bn*sn:bn*sn+vn*co;gl_FragColor=enc24s(o,KVSCALE);}";
+}
+
+string att_qnorm_scale(const AttnConfig& c) {
+    return "precision highp float;\n" + att_defs(c) + att_helpers() +
+        "uniform sampler2D R;"
+        "void main(){int h=int(gl_FragCoord.x);float ss=0.0;"
+        "for(int z=0;z<HEADDIM;z++){"
+        "float zq=dec24q(texture2D(R,vec2((float(h*HEADDIM+z)+0.5)/float(QKVDIM),0.5)));"
+        "ss+=zq*zq;}"
+        "float rq=1.0/sqrt(ss/float(HEADDIM)+QKEPS);"
+        "gl_FragColor=enc24s(min(rq,127.0),65536.0);}";
+}
+
+string att_qrot(const AttnConfig& c) {
+    return "precision highp float;\n" + att_defs(c) + att_helpers() +
+        "uniform sampler2D R,RT,QN,QS;uniform float pos;"
+        "void main(){int x=int(gl_FragCoord.x);int h=x/HEADDIM;int i=x-h*HEADDIM;"
+        "float rq=1.0;"
+        "if(QKNORM==1){rq=dec24s(texture2D(QS,vec2((float(h)+0.5)/float(HEADS),0.5)),65536.0);}"
+        "float qv=dec24q(texture2D(R,vec2((float(h*HEADDIM+i)+0.5)/float(QKVDIM),0.5)));"
+        "int j,ti;int even=i-(i/2)*2;"
+        "if(ROPEHALF==1){if(i<HALF){j=i+HALF;ti=i;}else{j=i-HALF;ti=i-HALF;}}"
+        "else{j=(even==0)?i+1:i-1;ti=i/2;}"
+        "float b=dec24q(texture2D(R,vec2((float(h*HEADDIM+j)+0.5)/float(QKVDIM),0.5)));"
+        "if(QKNORM==1){"
+        "qv=qv*rq*dec16(texture2D(QN,vec2((float(i)+0.5)/float(HEADDIM),0.5)).rg);"
+        "b=b*rq*dec16(texture2D(QN,vec2((float(j)+0.5)/float(HEADDIM),0.5)).rg);}"
+        "vec4 rc=texture2D(RT,vec2((float(2*ti)+0.5)/float(2*HALF),(pos+0.5)/float(SEQ)));"
+        "vec4 rs=texture2D(RT,vec2((float(2*ti+1)+0.5)/float(2*HALF),(pos+0.5)/float(SEQ)));"
+        "float co=dec24s(rc,4096.0),sn=dec24s(rs,4096.0);"
+        "bool first=(ROPEHALF==1)?(i<HALF):(even==0);"
+        "float q=first?qv*co-b*sn:b*sn+qv*co;"
+        "gl_FragColor=enc24s(q,256.0);}";
+}
+
+string att_score(const AttnConfig& c, bool hoist) {
+    if (!hoist) {
+        return "precision highp float;\n" + att_defs(c) + att_helpers() +
+            "uniform sampler2D R,KV,RT,QN;uniform float pos,invsqrt;"
+            "void main(){int t=int(gl_FragCoord.x);int h=int(gl_FragCoord.y);"
+            "if(float(t)>pos){gl_FragColor=enc24s(0.0,1024.0);return;}int kvh=h/GROUP;float s=0.0;"
+            "float rq=1.0;"
+            "if(QKNORM==1){float ss=0.0;for(int z=0;z<HEADDIM;z++){"
+            "float zq=dec24q(texture2D(R,vec2((float(h*HEADDIM+z)+0.5)/float(QKVDIM),0.5)));ss+=zq*zq;}"
+            "rq=1.0/sqrt(ss/float(HEADDIM)+QKEPS);}"
+            "for(int i=0;i<HEADDIM;i++){"
+            "float qv=dec24q(texture2D(R,vec2((float(h*HEADDIM+i)+0.5)/float(QKVDIM),0.5)));"
+            "int j,ti;int even=i-(i/2)*2;"
+            "if(ROPEHALF==1){if(i<HALF){j=i+HALF;ti=i;}else{j=i-HALF;ti=i-HALF;}}"
+            "else{j=(even==0)?i+1:i-1;ti=i/2;}"
+            "float b=dec24q(texture2D(R,vec2((float(h*HEADDIM+j)+0.5)/float(QKVDIM),0.5)));"
+            "if(QKNORM==1){qv=qv*rq*dec16(texture2D(QN,vec2((float(i)+0.5)/float(HEADDIM),0.5)).rg);"
+            "b=b*rq*dec16(texture2D(QN,vec2((float(j)+0.5)/float(HEADDIM),0.5)).rg);}"
+            "vec4 rc=texture2D(RT,vec2((float(2*ti)+0.5)/float(2*HALF),(pos+0.5)/float(SEQ)));"
+            "vec4 rs=texture2D(RT,vec2((float(2*ti+1)+0.5)/float(2*HALF),(pos+0.5)/float(SEQ)));"
+            "float co=dec24s(rc,4096.0),sn=dec24s(rs,4096.0);"
+            "bool first=(ROPEHALF==1)?(i<HALF):(even==0);"
+            "float q=first?qv*co-b*sn:b*sn+qv*co;"
+            "int ki=kvh*HEADDIM+i;int tx=ki;int odd=0;"
+            "if(KVPACK==16){tx=ki/2;odd=ki-tx*2;}else if(KVPACK==8){tx=ki/4;odd=ki-tx*4;}"
+            "float k=decKV(texture2D(KV,vec2((float(tx)+0.5)/float(KVWIDTH),(float(t)+0.5)/float(SEQ))),odd);"
+            "s+=q*k;}"
+            "gl_FragColor=enc24s(s*invsqrt,1024.0);}";
+    }
+    return "precision highp float;\n" + att_defs(c) + att_helpers() +
+        "uniform sampler2D Q,KV;uniform float pos,invsqrt;"
+        "void main(){int t=int(gl_FragCoord.x);int h=int(gl_FragCoord.y);"
+        "if(float(t)>pos){gl_FragColor=enc24s(0.0,1024.0);return;}int kvh=h/GROUP;float s=0.0;"
+        "for(int i=0;i<HEADDIM;i++){"
+        "float q=dec24raw(texture2D(Q,vec2((float(h*HEADDIM+i)+0.5)/float(DIM),0.5)))/256.0;"
+        "int ki=kvh*HEADDIM+i;int tx=ki;int odd=0;"
+        "if(KVPACK==16){tx=ki/2;odd=ki-tx*2;}else if(KVPACK==8){tx=ki/4;odd=ki-tx*4;}"
+        "float k=decKV(texture2D(KV,vec2((float(tx)+0.5)/float(KVWIDTH),(float(t)+0.5)/float(SEQ))),odd);"
+        "s+=q*k;}"
+        "gl_FragColor=enc24s(s*invsqrt,1024.0);}";
+}
+
+string att_stats(const AttnConfig& c) {
+    return "precision highp float;\n" + att_defs(c) + att_helpers() +
+        "uniform sampler2D S;uniform float pos;"
+        "void main(){int x=int(gl_FragCoord.x);int h=x/2;int kind=x-h*2;float mx=-1e30;"
+        "for(int t=0;t<SEQ;t++){if(float(t)>pos)break;"
+        "mx=max(mx,dec24s(texture2D(S,vec2((float(t)+0.5)/float(SEQ),(float(h)+0.5)/float(HEADS))),1024.0));}"
+        "float sum=0.0;"
+        "for(int t=0;t<SEQ;t++){if(float(t)>pos)break;"
+        "sum+=exp(dec24s(texture2D(S,vec2((float(t)+0.5)/float(SEQ),(float(h)+0.5)/float(HEADS))),1024.0)-mx);}"
+        "gl_FragColor=enc24s(kind==0?mx:sum,1024.0);}";
+}
+
+string att_prob(const AttnConfig& c) {
+    return "precision highp float;\n" + att_defs(c) + att_helpers() +
+        "uniform sampler2D S,ST;uniform float pos;"
+        "void main(){int t=int(gl_FragCoord.x);int h=int(gl_FragCoord.y);"
+        "vec4 sm=texture2D(ST,vec2((float(2*h)+0.5)/float(2*HEADS),0.5));"
+        "vec4 ss=texture2D(ST,vec2((float(2*h+1)+0.5)/float(2*HEADS),0.5));"
+        "float mx=dec24s(sm,1024.0);float sum=dec24s(ss,1024.0);float p=0.0;"
+        "if(float(t)<=pos && sum>0.0)p=exp(dec24s(texture2D(S,vec2((float(t)+0.5)/float(SEQ),(float(h)+0.5)/float(HEADS))),1024.0)-mx)/sum;"
+        "gl_FragColor=enc24s(p,65536.0);}";
+}
+
+string att_v(const AttnConfig& c, XFormat out) {
+    static const bool fuse_prob = !(getenv("ATTN_FUSE_PROB") && strcmp(getenv("ATTN_FUSE_PROB"), "0") == 0);
+    const string prob_bind = fuse_prob ? "S,ST,KV" : "P,KV";
+    const string prob_body = fuse_prob
+        ? string("vec4 sm=texture2D(ST,vec2((float(2*h)+0.5)/float(2*HEADS),0.5));"
+                 "vec4 su=texture2D(ST,vec2((float(2*h+1)+0.5)/float(2*HEADS),0.5));"
+                 "float mx=dec24s(sm,1024.0);float sum=dec24s(su,1024.0);"
+                 "float invs=(sum>0.0)?(1.0/sum):0.0;")
+        : string("");
+    const string prob_read = fuse_prob
+        ? string("float sc=dec24s(texture2D(S,vec2((float(t)+0.5)/float(SEQ),(float(h)+0.5)/float(HEADS))),1024.0);"
+                 "float p=exp(sc-mx)*invs;")
+        : string("float p=dec24s(texture2D(P,vec2((float(t)+0.5)/float(SEQ),(float(h)+0.5)/float(HEADS))),65536.0);");
+    string main;
+    if (out == XFormat::I8_4) {
+        main = "void main(){int t=int(gl_FragCoord.x);int x0=4*t;"
+               "gl_FragColor=x_i8enc4(att(x0),att(x0+1),att(x0+2),att(x0+3));}";
+    } else {
+        main = "void main(){int t=int(gl_FragCoord.x);int x0=2*t;"
+               "gl_FragColor=x_st2(att(x0),att(x0+1));}";
+    }
+    return "precision highp float;\n" + x_glsl(out) + att_defs(c) + att_helpers() +
+        "uniform sampler2D " + prob_bind + ";uniform float pos;"
+        "float att(int x){int h=x/HEADDIM;int i=x-h*HEADDIM;int kvh=h/GROUP;float acc=0.0;" +
+        prob_body +
+        "for(int t=0;t<SEQ;t++){if(float(t)>pos)break;" +
+        prob_read +
+        "int vi=kvh*HEADDIM+i;int tx=KVDIM+vi;int odd=0;"
+        "if(KVPACK==16){tx=KVDIM/2+vi/2;odd=vi-(vi/2)*2;}else if(KVPACK==8){tx=KVDIM/4+vi/4;odd=vi-(vi/4)*4;}"
+        "float v=decKV(texture2D(KV,vec2((float(tx)+0.5)/float(KVWIDTH),(float(t)+0.5)/float(SEQ))),odd);"
+        "acc+=p*v;}return acc;}" + main;
+}
+
+string sum_logits() {
+    return "precision highp float;"
+        "uniform sampler2D L;uniform float tr,nr,mrows,invt;"
+        "float dec(vec4 c){return (floor(c.r*255.0+0.5)*16777216.0+floor(c.g*255.0+0.5)*65536.0+"
+        "floor(c.b*255.0+0.5)*256.0+floor(c.a*255.0+0.5)-8388608.0)/256.0;}"
+        "void main(){float mx=-1e30;for(int i=0;i<1536;i++){if(float(i)>=mrows)break;"
+        "vec4 c=texture2D(L,vec2((float(i)+0.5)/1536.0,(tr+0.5)/nr));mx=max(mx,dec(c));}"
+        "float sum=0.0;for(int i=0;i<1536;i++){if(float(i)>=mrows)break;"
+        "vec4 c=texture2D(L,vec2((float(i)+0.5)/1536.0,(tr+0.5)/nr));sum+=exp((dec(c)-mx)*invt);}"
+        "float v=floor(sum*4096.0+0.5)+8388608.0;"
+        "float r0=floor(v/16777216.0);float g=floor(v/65536.0)-r0*256.0;"
+        "float b=floor(v/256.0)-r0*65536.0-g*256.0;float a=v-r0*16777216.0-g*65536.0-b*256.0;"
+        "gl_FragColor=vec4(r0/255.0,g/255.0,b/255.0,a/255.0);}";
+}
+
+string top2_fast(int rows, int chunk) {
+    return "precision highp float;"
+        "uniform sampler2D L;uniform float tr,nr;"
+        "float dec(vec4 c){return (floor(c.r*255.0+0.5)*16777216.0+floor(c.g*255.0+0.5)*65536.0+"
+        "floor(c.b*255.0+0.5)*256.0+floor(c.a*255.0+0.5)-8388608.0)/256.0;}"
+        "void main(){int x=int(gl_FragCoord.x);int ch=x/2;int rank=x-ch*2;int start=ch*" + to_string(chunk) + ";"
+        "float best1=-1e30,best2=-1e30;int i1=0,i2=0;"
+        "for(int k=0;k<" + to_string(chunk) + ";k++){int idx=start+k;if(idx>=" + to_string(rows) + ")break;"
+        "vec4 c=texture2D(L,vec2((float(idx)+0.5)/1536.0,(tr+0.5)/nr));float v=dec(c);"
+        "if(v>best1){best2=best1;i2=i1;best1=v;i1=idx;}else if(v>best2){best2=v;i2=idx;}}"
+        "float bv=(rank==0?best1:best2)*256.0;int bi=rank==0?i1:i2;"
+        "if(bv<0.0)bv+=65536.0;float vh=floor(bv/256.0),vl=bv-vh*256.0;"
+        "float ih=floor(float(bi)/256.0),il=float(bi)-ih*256.0;"
+        "gl_FragColor=vec4(vh/255.0,vl/255.0,ih/255.0,il/255.0);}";
+}
+
+string top2(int rows, int chunk) {
+    return "precision highp float;"
+        "uniform sampler2D L;uniform float tr,nr,invt;"
+        "float dec(vec4 c){return (floor(c.r*255.0+0.5)*16777216.0+floor(c.g*255.0+0.5)*65536.0+"
+        "floor(c.b*255.0+0.5)*256.0+floor(c.a*255.0+0.5)-8388608.0)/256.0;}"
+        "void main(){int x=int(gl_FragCoord.x);int ch=x/3;int rank=x-ch*3;int start=ch*" + to_string(chunk) + ";"
+        "float best1=-1e30,best2=-1e30,lm=-1e30,ls=0.0;int i1=0,i2=0;"
+        "for(int k=0;k<" + to_string(chunk) + ";k++){int idx=start+k;if(idx>=" + to_string(rows) + ")break;"
+        "vec4 c=texture2D(L,vec2((float(idx)+0.5)/1536.0,(tr+0.5)/nr));float v=dec(c);"
+        "if(v>best1){best2=best1;i2=i1;best1=v;i1=idx;}else if(v>best2){best2=v;i2=idx;}"
+        "if(v>lm){ls=ls*exp((lm-v)*invt)+1.0;lm=v;}else{ls+=exp((v-lm)*invt);}}"
+        "if(rank<2){float bv=(rank==0?best1:best2)*256.0;int bi=rank==0?i1:i2;"
+        "if(bv<0.0)bv+=65536.0;float vh=floor(bv/256.0),vl=bv-vh*256.0;"
+        "float ih=floor(float(bi)/256.0),il=float(bi)-ih*256.0;"
+        "gl_FragColor=vec4(vh/255.0,vl/255.0,ih/255.0,il/255.0);return;}"
+        "float sum=ls;float mv=lm*256.0;if(mv<0.0)mv+=65536.0;float mh=floor(mv/256.0),ml=mv-mh*256.0;"
+        "float sv=floor(sum*2048.0+0.5);float sh=floor(sv/256.0),sl=sv-sh*256.0;"
+        "gl_FragColor=vec4(mh/255.0,ml/255.0,sh/255.0,sl/255.0);}";
+}

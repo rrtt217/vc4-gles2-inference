@@ -1,82 +1,60 @@
-# Engine source layout and split decision
+# Engine source layout
 
-## Current state
+The engine is no longer one translation unit. The split is intentionally by
+responsibility, not by line count:
 
-`engine/engine.cpp` is one 3175-line translation unit (~148 KB), containing:
+| File | Responsibility |
+|---|---|
+| `src/common.h/.cpp` | shared types, q16 helpers, signals, file helpers |
+| `src/xformat.h/.cpp` | **the only activation-layout definition** (I16_1, I16_2, I8_4) and its GLSL macros |
+| `src/shaders.h/.cpp` | matvec / FFN / RMS shader builders |
+| `src/shaders_attn.cpp` | attention, KV and logits shader builders |
+| `src/gpu.h/.cpp` | EGL context, textures, targets, program cache, GPU passes |
+| `src/model.h/.cpp` | model metadata, format readers, q4/q8/i16 conversion |
+| `src/session.h/.cpp` | KV cache, RoPE, attention, transformer forward |
+| `src/tokenizer.h/.cpp` | llama2.c tokenizer and byte-level BPE |
+| `src/sampling.h/.cpp` | sampling, penalties, top-p/min-p |
+| `src/tools.h/.cpp` | tool JSON, restricted arithmetic, built-in handlers |
+| `src/engine.cpp` | CLI, worker protocol, chat loop |
 
-| Area | Approx. lines | Coupling |
+`engine/probes/`, `engine/quantize/` and `engine/scripts/` are separate:
+they are not linked into `engine_mm3`.
+
+## X formats
+
+Every activation texture is RGBA8. `XFormat` decides the byte layout and the
+quantization scale:
+
+| X format | values / texel | storage |
 |---|---:|---|
-| EGL/GLES helpers, shaders, GPU passes | ~1500 | high: GL state, FBOs, shader cache |
-| Tokenizer | ~120 | low |
-| Model loaders / formats | ~430 | medium |
-| Session / forward | ~380 | high: GPU + model |
-| CLI, sampling, tools, worker | ~700 | low-medium |
+| `I16_1` | 1 | q16 in `.rg` |
+| `I16_2` | 2 | q16 pair: `.rg`, `.ba` |
+| `I8_4` | 4 | signed int8 in RGBA, 1/16 scale |
 
-It builds in one command on both x86 and Pi, and there is no unit-test
-harness. That is why the source has stayed a single file.
+Producers call `XST1/XST2/XST4`; consumers call `X1/X2/X4`. Hot matvec kernels
+use the q16-domain variants `X1Q/X2Q/X4Q` and `R1Q` so the inner loop does not
+pay a divide per activation. The residual stream has its own `R1/R2/R1Q`
+macros and is never assumed to have the activation layout.
 
-## Should it be split?
+This is the fix for the previous ACT8 failures: adding a format changes
+`xformat.cpp`, not seven shader strings. `ACT8=1` selects `I8_4` for all
+matvec inputs, `ACT8=2` only for the FFN hidden state; both are opt-in.
 
-**Yes, eventually; not as a cosmetic refactor right now.**
+## Build
 
-The file is large because the GPU code is genuinely stateful, not because it
-is disorganized. A blind split of `GPU` across files would move GL state
-ownership and shader-program caching across translation units, which is the
-highest-risk change in this project. The q4 residual-output bug showed how
-easy it is to break a format contract that is only visible at runtime.
-
-The q4 format and FFN slicing are now implemented and tested; that is a good
-point to freeze behavior before moving code.
-
-## Recommended staged split
-
-### Stage 1 — low risk
-
-1. Move GLSL shader string builders to `engine/shaders.cpp` /
-   `engine/shaders.h`, keeping the `GPU` class as the only caller.
-2. Move tokenizer to `engine/tokenizer.h/.cpp` — pure CPU, easy to test.
-3. Move tool JSON/arithmetic helpers to `engine/tools.h/.cpp` — pure CPU.
-4. Keep `engine.cpp` as the CLI/session/GPU orchestration unit.
-
-This reduces the file by ~700 lines without changing GPU behavior.
-
-### Stage 2 — format layer
-
-Move model format readers/writers to:
-
-```text
-engine/model.h        Mat, WeightType, Model metadata
-engine/model_q8.cpp   Q8M1/Q8M2 + I16M1/I16M2 readers
-engine/model_q4.cpp   Q4M1 reader
+```bash
+make -C engine -B engine_mm3 CXXFLAGS='-O2 -std=c++17'
 ```
 
-Add round-trip tests for the q4 header, block scale/min, and FFN slicing
-before moving anything.
+The Pi build uses the ARMv6 flags in the Makefile/AGENTS.md. Probes have their
+own targets under `engine/probes/`.
 
-### Stage 3 — only if needed
+## Regression rule
 
-Split `GPU` into:
-- `gpu_context` (EGL, textures, targets, programs);
-- `gpu_matvec` (q4/q8/q16 shaders);
-- `gpu_attention` (RoPE, KV cache, scores, V).
+A change to GPU state, X formats or shader text must preserve:
 
-Do this only with a VC4 regression suite (text outputs, logits, cache
-equality), because GL state and finish points are subtle.
+1. q8 greedy output for the canonical prompt;
+2. q4 greedy output for the canonical prompt;
+3. `--ppl` on the fixed corpus, within the recorded tolerance.
 
-## What not to do
-
-- Do not split `GPU` and `Session` into separate libraries just to reduce
-  line count.
-- Do not move shader strings into many files before adding a test that
-  compiles all programs.
-- Do not change the q4 add-output format (q16) while refactoring; the
-  downstream RMSNorm/attention path depends on it.
-- Do not create a header-only split that still includes one giant
-  `engine.cpp`; that adds include churn without isolation.
-
-## Decision
-
-Keep the single translation unit for the current release. Do Stage 1 when
-the next feature touches tokenizer/tools/shaders; do Stage 2 when a new model
-format is added. A full `GPU` split is justified only after a regression
-harness exists.
+Only after those pass should `ACT8` or performance numbers be compared.

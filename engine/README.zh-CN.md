@@ -16,12 +16,13 @@
 
 | 路径 | 用途 |
 |---|---|
-| `engine.cpp` | EGL/GLES2、加载器、tokenizer、session、CLI |
-| `make_i16.py` | F16/llama2.c -> I16M1/M2 |
-| `make_q8_from_i16.py` | I16 -> Q8M1/M2 |
-| `make_q4.py` | F16 safetensors -> Q4M1（离线 q4） |
+| `src/` | EGL/GLES2 引擎、模型、session、tokenizer、CLI |
+| `src/xformat.*` | 激活纹理布局和 GLSL X 宏 |
+| `src/shaders*.cpp` | GLSL 源码构建 |
+| `probes/` | 独立 VC4 探针，不链接进引擎 |
+| `quantize/` | F16/I16/q8/q4 转换脚本 |
+| `scripts/` | 基准和回归脚本 |
 | `Makefile` | 本地和 Pi 构建参数 |
-| `vc4_*.cpp` | 最小 VC4 探针 |
 
 ## 构建
 
@@ -32,7 +33,7 @@ cd engine
 make engine_mm3
 ```
 
-Pi Zero（构建约 3–4 分钟，构建和运行分开）：
+Pi Zero（构建约 8–10 分钟，构建和运行分开；不要同时跑两个构建）：
 
 ```bash
 make -B engine_mm3 CXXFLAGS='-O2 -march=armv6 -mfpu=vfp -mfloat-abi=hard -ffast-math -std=c++17'

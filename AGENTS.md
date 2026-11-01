@@ -12,10 +12,12 @@ replace working paths with demos or cosmetic rewrites.
 
 | Path | Contents |
 |---|---|
-| `engine/engine.cpp` | EGL/GLES2, loaders, tokenizer, session, CLI (single TU) |
-| `engine/make_i16.py` | F16/llama2.c -> I16M1/M2 |
-| `engine/make_q8_from_i16.py` | I16 -> Q8M1/M2 |
-| `engine/make_q4.py` | F16 safetensors -> Q4M1 |
+| `engine/src/` | EGL/GLES2 engine: X-format layouts, shader builders, GPU, model, session, tokenizer, CLI |
+| `engine/probes/` | standalone VC4 feature/throughput probes (not linked into the engine) |
+| `engine/quantize/make_i16.py` | F16/llama2.c -> I16M1/M2 |
+| `engine/quantize/make_q8_from_i16.py` | I16 -> Q8M1/M2 |
+| `engine/quantize/make_q4.py` | F16 safetensors -> Q4M1 |
+| `engine/scripts/` | benchmark and regression helpers |
 | `server/server.py` | OpenAI-compatible HTTP server and worker protocol |
 | `models/` | central model store (gitignored) |
 | `minimind3/` | MiniMind3 source config/tokenizer/reference; artifacts live in `models/` |
@@ -26,11 +28,10 @@ replace working paths with demos or cosmetic rewrites.
 Local:
 
 ```bash
-cd engine
-g++ -O2 -std=c++17 -Wall -Wextra -o engine_mm3 engine.cpp -lEGL -lGLESv2 -lm
+make -C engine -B engine_mm3 CXXFLAGS='-O2 -std=c++17 -Wall -Wextra'
 ```
 
-Pi (build separately from the run; about 3–4 minutes):
+Pi (build separately from the run; 8–10 minutes on a Zero; never run two builds):
 
 ```bash
 make -B engine_mm3 CXXFLAGS='-O2 -march=armv6 -mfpu=vfp -mfloat-abi=hard -ffast-math -std=c++17'
@@ -93,6 +94,8 @@ Expected q8 starts with `MiniMind是一个高效的小...`.
 
 ## Source split policy
 
-The engine is currently one translation unit. See
-`docs/engine-layout.md`. Do not perform a full `GPU` split without a
-regression harness. Safe first steps: shader strings, tokenizer, tools.
+The engine is split into `engine/src/` modules; see `docs/engine-layout.md`.
+Shader text belongs in `shaders.cpp` / `shaders_attn.cpp`, and activation
+layout knowledge belongs in `xformat.h/.cpp`. Do not reintroduce per-shader
+activation-layout strings. Run q8, q4 and `--ppl` comparisons after any GPU or
+format change; a byte-identical greedy string is the minimum gate.
