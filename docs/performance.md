@@ -553,3 +553,99 @@ compiled in for comparison.
 shader indexed it with `QKVDIM` (1536, the qkv width).  Sampling the wrong half of
 a texture produces *no GL error* — the model simply emitted EOS immediately and
 the output was empty.  Any texture you create must be indexed with its own width.
+
+
+### Cost model correction: draws are pipelined, only GPU work counts
+
+The earlier note in this file ("a draw+finish costs ~1 ms, so splitting a pass
+needs to save more than that") was an artefact of `LAYER_PROFILE`, which calls
+`glFinish()` between phases to attribute time.  Under `GPU_LAYER=1` the real
+`att_finish()` is a **no-op** (`layer_finish` skips `NF_ATT`), so the CPU submits
+all passes back to back and the GPU executes them in order: per-draw overhead is
+hidden, and only the total GPU work matters.
+
+Evidence: folding the softmax normalisation into `att_v` removes a whole pass
+(probabilities) and is **exactly neutral** (301.1 vs 301.6 ms/token), because the
+inline `exp` costs about what the extra pass did.  Conversely the attention hoist
+added two passes and still won 5%, because it removed far more work than it added.
+
+So the levers are, in order:
+
+1. **Ops per multiply-accumulate.** The q8 matvec spends about 8 scalar ops per
+   weight: ~2 decoding the weight, ~5 decoding the two activations, 1 MAC.  The
+   activation decode dominates and is paid once per output row, i.e. 2432 times
+   for the FFN gate.
+2. **Share the activation decode across rows.** A fragment can compute two output
+   rows and write them as two int16 in one texel; pairing w1 row r with w3 row r
+   would also give swiglu its two inputs from a single texel.  That halves the
+   activation decode per weight (8 -> ~4.3 ops) and halves the FFN draw count,
+   at the cost of a 1216-row tiling (2432 > the 2048 texture limit) and a new
+   packed input layout for w2.
+3. **Fewer MACs**, which means a different model or sparsity — out of scope here.
+
+
+## Paired FFN gate matvec (-6.6% decode, -7.4% prefill)
+
+The q8 matvec spends about five of its eight scalar ops per weight decoding the
+two activations, and that decode is repeated for **every output row** — 2432
+times per layer for the FFN gate.  One fragment now computes row r of `w1` *and*
+row r of `w3`, sharing the decode, and writes both results into one texel as two
+int16.  That is one draw instead of two and roughly half the activation traffic.
+
+`engine/matvec_probe.cpp` measures it in isolation (2048x768, two rows per
+fragment): 7.30 ms for both matrices against 2 x 5.46 ms separately.
+
+Pi, greedy, interleaved A/B (`FFN_PAIR=0` keeps the old path):
+
+| path | prefill | decode |
+|---|---:|---:|
+| old (two draws) | 24.2 / 24.4 s | 299.1 / (597.4 outlier) ms/token |
+| **paired** | **22.2 / 22.7 s** | **279.6 / 279.2 ms/token** |
+
+**-7.4% prefill, -6.6% decode**, output byte-identical for q8 (q4 keeps the old
+path: the paired shader assumes int8 weights, and the code checks the type).
+
+Cumulative against the original sources: 507.5 -> 279.4 ms/token (**1.82x**) and
+37.95 -> 22.5 s prefill (**1.69x**).
+
+The same trick applies to `w2`, whose activation is 2432 wide and decoded once
+per output row (768 of them).  Pairing its rows needs the residual stream kept
+two-per-texel too, because `matvec_add` adds the residual one value per texel and
+`rmsnorm` reads it the same way — that is the next step, worth roughly another
+10% if it lands.
+
+
+## Packed residual stream: implemented, measured, neutral
+
+`matvec_add` (the `wo` and `w2` passes) had the same shape of waste as the FFN
+gate: one activation decode per output row, and a residual stream stored as one
+int16 per texel with the (b, a) bytes unused.  Storing two residual values per
+texel lets the same fragment produce rows 2t and 2t+1 and share the decode.
+
+It is implemented (`RES_PACK=1`) and byte-identical, but **neutral**: 280.7 /
+280.1 ms/token against 281.7 / 278.8 unpacked.  Unlike the gate, `w2` has only
+768 output rows, so there is half as much decode to amortise, and the kernel now
+carries two accumulators and two weight fetches per iteration, which this
+driver's small register file does not absorb for free.  It stays off by default.
+
+The interesting part is the bug it exposed: `upload_hidden` was rewritten to pack
+pairs and indexed `x[2 * t]` unconditionally, so with packing disabled the
+embedding upload took every other element.  The GPU path produced garbage while
+the CPU path (`GPU_LAYER=0`) stayed correct, which is what localised it.  Lesson:
+when a layout change has two variants, check the *old* variant too.
+
+
+### Where the 280 ms/token goes now (LAYER_PROFILE, per layer)
+
+| phase | ms/layer | notes |
+|---|---:|---|
+| attention | 18.6 | 7 passes: qkv, qk-norm, q-rot, KV rope, scores, stats, p*V (fused) |
+| FFN gate | 12.4 | was 14.7 before the paired matvec |
+| w2 | 10.9 | two column-chunked `matvec_add` passes |
+| rms_att + rms_ffn + rms_final | 8.3 | three stats+reduce+norm groups |
+| wo | 4.3 | one `matvec_add` |
+
+These are inflated by the profiler's per-phase `glFinish` (the sum is ~58 ms/layer
+against ~35 ms of real time), so read them as shares, not absolutes.  Attention is
+again the largest block; the FFN gate is now the second, and the paired matvec is
+what moved it down.

@@ -213,8 +213,55 @@ public:
         return swiglu_fused(ffn_a_, hidden);
     }
 
+    // Paired gate matvec + swiglu for one FFN chunk.
+    GLuint ffn_pair_chunk(const Mat& w1, const Mat& w3, GLuint x, int hidden, Target& pair_buf, Target& out) {
+        if (pair_buf.tex == 0 || pair_buf.w != hidden) pair_buf = make_target(hidden, 1);
+        const int aw = (hidden + 1) / 2;
+        if (out.tex == 0 || out.w != aw) out = make_target(aw, 1);
+        GLuint pp = int8_pair_program(hidden, w1.cols);
+        glBindFramebuffer(GL_FRAMEBUFFER, pair_buf.fbo);
+        glViewport(0, 0, hidden, 1);
+        glUseProgram(pp);
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, w1.tex);
+        glUniform1i(glGetUniformLocation(pp, "W1"), 0);
+        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, w3.tex);
+        glUniform1i(glGetUniformLocation(pp, "W2"), 1);
+        glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, x);
+        glUniform1i(glGetUniformLocation(pp, "X"), 2);
+        glUniform1f(glGetUniformLocation(pp, "ws1"), w1.scale);
+        glUniform1f(glGetUniformLocation(pp, "ws2"), w3.scale);
+        GLuint loc = glGetAttribLocation(pp, "p");
+        glEnableVertexAttribArray(loc);
+        glVertexAttribPointer(loc, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
+
+        GLuint ps = swiglu_pair_program(hidden);
+        glBindFramebuffer(GL_FRAMEBUFFER, out.fbo);
+        glViewport(0, 0, aw, 1);
+        glUseProgram(ps);
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, pair_buf.tex);
+        glUniform1i(glGetUniformLocation(ps, "A"), 0);
+        loc = glGetAttribLocation(ps, "p");
+        glEnableVertexAttribArray(loc);
+        glVertexAttribPointer(loc, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
+        else layer_finish("NF_FFN");
+        if (getenv("FFN_SYNC")) { glFlush(); glFinish(); }
+        return out.tex;
+    }
+
     void ffn_split_chunked(const Mat& w1a, const Mat& w3a, const Mat& w1b, const Mat& w3b,
                            GLuint x, int n1, int n2, GLuint& ha, GLuint& hb) {
+        static const bool pair_env = !(getenv("FFN_PAIR") && strcmp(getenv("FFN_PAIR"), "0") == 0);
+        // The paired shader assumes int8 weights; q4/i16 keep the old path.
+        const bool pair = pair_env && w1a.type == WeightType::INT8 && w3a.type == WeightType::INT8;
+        if (pair) {
+            ha = ffn_pair_chunk(w1a, w3a, x, n1, ffn_pair_a_, ffn_h_a_);
+            hb = ffn_pair_chunk(w1b, w3b, x, n2, ffn_pair_b_, ffn_h_b_);
+            return;
+        }
         if (ffn_ab_a_.tex == 0 || ffn_ab_a_.w != n1) ffn_ab_a_ = make_target(n1, 2);
         if (ffn_ab_b_.tex == 0 || ffn_ab_b_.w != n2) ffn_ab_b_ = make_target(n2, 2);
         matvec_to_row(w1a, x, ffn_ab_a_, 0);
@@ -530,7 +577,11 @@ public:
         lap("scores");
         att_stats(pos);
         lap("stats");
-        att_probs(pos);
+        if (getenv("ATTN_FUSE_PROB") == nullptr || strcmp(getenv("ATTN_FUSE_PROB"), "0") != 0) {
+            // fused into att_v; the pass is skipped
+        } else {
+            att_probs(pos);
+        }
         lap("probs");
         att_v(layer, pos);
         lap("v");
@@ -540,13 +591,14 @@ public:
     void init_persistent(int dim, int layers, const vector<float>& rms_att,
                         const vector<float>& rms_ffn, const vector<float>& rms_final) {
         layer_fast_finish_ = true;
-        hidden_a_ = make_target(dim, 1);
-        hidden_b_ = make_target(dim, 1);
+        const int rw = res_pack_ ? (dim + 1) / 2 : dim;
+        hidden_a_ = make_target(rw, 1);
+        hidden_b_ = make_target(rw, 1);
         xb_ = make_target(dim, 1);
         xbf_ = make_target(dim, 1);
         xf_ = make_target(dim, 1);
         rms_stats_ = make_target(1, 1);
-        hidden_in_ = make_texture(dim, 1, nullptr);
+        hidden_in_ = make_texture(res_pack_ ? (dim + 1) / 2 : dim, 1, nullptr);
         rms_att_tex_.clear(); rms_ffn_tex_.clear();
         for (int l = 0; l < layers; ++l) {
             vector<float> a(rms_att.begin() + (size_t)l * dim, rms_att.begin() + (size_t)(l + 1) * dim);
@@ -558,14 +610,22 @@ public:
     }
 
     GLuint upload_hidden(const vector<float>& x) {
-        vector<uint8_t> data((size_t)x.size() * 4);
-        for (size_t i = 0; i < x.size(); ++i) {
-            uint16_t u = (uint16_t)quantize_act(x[i]);
-            data[i * 4 + 0] = u >> 8; data[i * 4 + 1] = u & 255;
-            data[i * 4 + 2] = 0; data[i * 4 + 3] = 255;
+        const int n = (int)x.size();
+        const int tw = res_pack_ ? (n + 1) / 2 : n;
+        vector<uint8_t> data((size_t)tw * 4);
+        for (int t = 0; t < tw; ++t) {
+            uint16_t u0 = (uint16_t)quantize_act(res_pack_ ? x[2 * t] : x[t]);
+            uint16_t u1 = (res_pack_ && 2 * t + 1 < n) ? (uint16_t)quantize_act(x[2 * t + 1]) : 0;
+            if (res_pack_) {
+                data[t * 4 + 0] = u0 >> 8; data[t * 4 + 1] = u0 & 255;
+                data[t * 4 + 2] = u1 >> 8; data[t * 4 + 3] = u1 & 255;
+            } else {
+                data[t * 4 + 0] = u0 >> 8; data[t * 4 + 1] = u0 & 255;
+                data[t * 4 + 2] = 0; data[t * 4 + 3] = 255;
+            }
         }
         glBindTexture(GL_TEXTURE_2D, hidden_in_);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, (int)x.size(), 1, GL_RGBA, GL_UNSIGNED_BYTE, data.data());
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, tw, 1, GL_RGBA, GL_UNSIGNED_BYTE, data.data());
         layer_finish("NF_UPLOAD");
         return hidden_in_;
     }
@@ -618,8 +678,11 @@ public:
     }
 
     void matvec_add(const Mat& m, GLuint x, GLuint residual, Target& out) {
-        if (out.tex == 0 || out.w != m.rows) out = make_target(m.rows, 1);
-        GLuint p = (m.type == WeightType::INT8) ? int8_add_program(m.rows, m.cols)
+        const bool pair = res_pack_ && m.type == WeightType::INT8;
+        const int ow = pair ? (m.rows + 1) / 2 : m.rows;
+        if (out.tex == 0 || out.w != ow) out = make_target(ow, 1);
+        GLuint p = pair ? int8_add_pair_program(m.rows, m.cols)
+                  : (m.type == WeightType::INT8) ? int8_add_program(m.rows, m.cols)
                   : (m.type == WeightType::INT4) ? int4_add_program(m.rows, m.cols)
                                                  : int16_add_program(m.rows, m.cols);
         glBindFramebuffer(GL_FRAMEBUFFER, out.fbo);
@@ -641,7 +704,8 @@ public:
         GLuint loc = glGetAttribLocation(p, "p");
         glEnableVertexAttribArray(loc);
         glVertexAttribPointer(loc, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
-        const int strip = (m.rows == 1536) ? 768 : m.rows;
+        const int strip = pair ? ((m.rows == 1536) ? 384 : (m.rows + 1) / 2)
+                               : ((m.rows == 1536) ? 768 : m.rows);
         for (int x0 = 0; x0 < m.rows; x0 += strip) {
             int w = min(strip, m.rows - x0);
             glViewport(x0, 0, w, 1);
@@ -696,8 +760,9 @@ private:
     Target ffn_ab_a_, ffn_ab_b_, ffn_h_a_, ffn_h_b_;
     Target qkv_target_, att_scores_, att_stats_, att_probs_, att_out_, qrot_target_, qscale_target_;
     vector<Target> kv_cache_;
-    Target hidden_a_, hidden_b_, xb_, xbf_, xf_, rms_stats_, rms_partial_;
+    Target hidden_a_, hidden_b_, xb_, xbf_, xf_, rms_stats_, rms_partial_, ffn_pair_a_, ffn_pair_b_;
     bool layer_fast_finish_ = false;
+    bool res_pack_ = false;   // residual stream holds two int16 per texel
     GLuint hidden_in_ = 0;
     vector<GLuint> rms_att_tex_, rms_ffn_tex_;
     GLuint rms_final_tex_ = 0;
@@ -952,6 +1017,56 @@ private:
         return p;
     }
 
+    // w1 row r and w3 row r in one fragment, sharing the activation decode.
+    GLuint int8_pair_program(int rows, int cols) {
+        string key = "i8pair_" + to_string(rows) + "_" + to_string(cols);
+        auto it = programs_.find(key);
+        if (it != programs_.end()) return it->second;
+        string fs =
+            "precision highp float;uniform sampler2D W1,W2,X;uniform float ws1,ws2;"
+            "float dA(vec4 c){float u=c.r*65280.0+c.g*255.0;return u>=32768.0?u-65536.0:u;}"
+            "float dB(vec4 c){float u=c.b*65280.0+c.a*255.0;return u>=32768.0?u-65536.0:u;}"
+            "vec2 enc16(float s,float w){float v=clamp(floor(s*w+0.5),-32768.0,32767.0);"
+            "if(v<0.0)v+=65536.0;float hi=floor(v/256.0);return vec2(hi/255.0,(v-hi*256.0)/255.0);}"
+            "void main(){int r=int(gl_FragCoord.x);float s1=0.0,s2=0.0;"
+            "for(int q=0;q<" + to_string(cols / 4) + ";q++){"
+            "vec4 c1=texture2D(W1,vec2((float(q)+0.5)/float(" + to_string(cols / 4) + "),(float(r)+0.5)/float(" + to_string(rows) + ")));"
+            "vec4 c2=texture2D(W2,vec2((float(q)+0.5)/float(" + to_string(cols / 4) + "),(float(r)+0.5)/float(" + to_string(rows) + ")));"
+            "vec4 w1=c1*255.0-128.0;vec4 w2=c2*255.0-128.0;"
+            "vec4 xa=texture2D(X,vec2((float(2*q)+0.5)/float(" + to_string((cols + 1) / 2) + "),0.5));"
+            "vec4 xb=texture2D(X,vec2((float(2*q+1)+0.5)/float(" + to_string((cols + 1) / 2) + "),0.5));"
+            "float a0=dA(xa),a1=dB(xa),a2=dA(xb),a3=dB(xb);"
+            "s1+=w1.x*a0+w1.y*a1+w1.z*a2+w1.w*a3;"
+            "s2+=w2.x*a0+w2.y*a1+w2.z*a2+w2.w*a3;}"
+            "vec2 p1=enc16(s1,ws1),p2=enc16(s2,ws2);"
+            "gl_FragColor=vec4(p1.x,p1.y,p2.x,p2.y);}";
+        GLuint p = link_program(fs);
+        programs_[key] = p;
+        return p;
+    }
+
+    // SwiGLU over the paired gate: (gate, up) already share a texel.
+    GLuint swiglu_pair_program(int hidden) {
+        string key = "swiglu_pair_" + to_string(hidden);
+        auto it = programs_.find(key);
+        if (it != programs_.end()) return it->second;
+        string fs =
+            "precision highp float;uniform sampler2D A;"
+            "float dec16(vec2 c){float u=c.x*65280.0+c.y*255.0;if(u>=32768.0)u-=65536.0;return u/256.0;}"
+            "vec2 enc(float y){float q=clamp(floor(y*256.0+0.5),-32768.0,32767.0);if(q<0.0)q+=65536.0;"
+            "float hi=floor(q/256.0);return vec2(hi/255.0,(q-hi*256.0)/255.0);}"
+            "float act(vec4 c){float a=dec16(c.rg),b=dec16(c.ba);return (a/(1.0+exp(-a)))*b;}"
+            "void main(){int t=int(gl_FragCoord.x);int i0=2*t;int i1=i0+1;"
+            "vec4 c0=texture2D(A,vec2((float(i0)+0.5)/float(" + to_string(hidden) + "),0.5));"
+            "float y0=act(c0);float y1=0.0;"
+            "if(i1<" + to_string(hidden) + "){"
+            "vec4 c1=texture2D(A,vec2((float(i1)+0.5)/float(" + to_string(hidden) + "),0.5));y1=act(c1);}"
+            "vec2 p0=enc(y0),p1=enc(y1);gl_FragColor=vec4(p0.x,p0.y,p1.x,p1.y);}";
+        GLuint p = link_program(fs);
+        programs_[key] = p;
+        return p;
+    }
+
     GLuint int8_add_program(int rows, int cols) {
         string key = "i8add_" + to_string(rows) + "_" + to_string(cols);
         auto it = programs_.find(key);
@@ -978,6 +1093,42 @@ private:
             "float oq=v+dr(rc)*256.0;"
             "float q=clamp(floor(oq+0.5),-32768.0,32767.0);if(q<0.0)q+=65536.0;"
             "float hi=floor(q/256.0),lo=q-hi*256.0;gl_FragColor=vec4(hi/255.0,lo/255.0,0.0,1.0);}";
+        GLuint p = link_program(fs);
+        programs_[key] = p;
+        return p;
+    }
+
+    // Two residual rows per fragment: rows 2t/2t+1 share one activation decode
+    // and one residual fetch, and are written back as two int16 in one texel.
+    GLuint int8_add_pair_program(int rows, int cols) {
+        string key = "i8addp_" + to_string(rows) + "_" + to_string(cols);
+        auto it = programs_.find(key);
+        if (it != programs_.end()) return it->second;
+        const int axw = (cols + 1) / 2;
+        const int rw = (rows + 1) / 2;
+        string fs =
+            "precision highp float;"
+            "uniform sampler2D W,X,R;uniform float ws;"
+            "float dA(vec4 c){float u=c.r*65280.0+c.g*255.0;return u>=32768.0?u-65536.0:u;}"
+            "float dB(vec4 c){float u=c.b*65280.0+c.a*255.0;return u>=32768.0?u-65536.0:u;}"
+            "float dr(vec2 c){float u=c.x*65280.0+c.y*255.0;if(u>=32768.0)u-=65536.0;return u/256.0;}"
+            "vec2 enc(float v){float q=clamp(floor(v+0.5),-32768.0,32767.0);if(q<0.0)q+=65536.0;"
+            "float hi=floor(q/256.0);return vec2(hi/255.0,(q-hi*256.0)/255.0);}"
+            "void main(){int t=int(gl_FragCoord.x);int r0=2*t;int r1=r0+1;"
+            "vec4 rc=texture2D(R,vec2((float(t)+0.5)/float(" + to_string(rw) + "),0.5));"
+            "float res0=dr(rc.rg),res1=dr(rc.ba);"
+            "float s0=0.0,s1=0.0;"
+            "for(int q=0;q<" + to_string(cols / 4) + ";q++){"
+            "vec4 c0=texture2D(W,vec2((float(q)+0.5)/float(" + to_string(cols / 4) + "),(float(r0)+0.5)/float(" + to_string(rows) + ")));"
+            "vec4 c1=texture2D(W,vec2((float(q)+0.5)/float(" + to_string(cols / 4) + "),(float(min(r1," + to_string(rows - 1) + "))+0.5)/float(" + to_string(rows) + ")));"
+            "vec4 w0=c0*255.0-128.0;vec4 w1=c1*255.0-128.0;"
+            "vec4 xa=texture2D(X,vec2((float(2*q)+0.5)/float(" + to_string(axw) + "),0.5));"
+            "vec4 xb=texture2D(X,vec2((float(2*q+1)+0.5)/float(" + to_string(axw) + "),0.5));"
+            "float a0=dA(xa),a1=dB(xa),a2=dA(xb),a3=dB(xb);"
+            "s0+=w0.x*a0+w0.y*a1+w0.z*a2+w0.w*a3;"
+            "s1+=w1.x*a0+w1.y*a1+w1.z*a2+w1.w*a3;}"
+            "vec2 p0=enc(s0*ws+res0*256.0),p1=enc(s1*ws+res1*256.0);"
+            "gl_FragColor=vec4(p0.x,p0.y,p1.x,p1.y);}";
         GLuint p = link_program(fs);
         programs_[key] = p;
         return p;
@@ -1470,13 +1621,29 @@ private:
         if (it != programs_.end()) return it->second;
         // Two attention outputs per fragment: downstream matvec shaders expect
         // two int16 activations per texel (see upload_activations).
+        static const bool fuse_prob = !(getenv("ATTN_FUSE_PROB") && strcmp(getenv("ATTN_FUSE_PROB"), "0") == 0);
+        // Fused path: p is normalised inside this pass, so the probabilities
+        // texture and its draw disappear.  Same arithmetic as prob_program, just
+        // without writing and re-decoding the result.
+        const string prob_bind = fuse_prob ? "S,ST,KV" : "P,KV";
+        const string prob_body = fuse_prob
+            ? string("vec4 sm=texture2D(ST,vec2((float(2*h)+0.5)/float(2*HEADS),0.5));"
+                     "vec4 su=texture2D(ST,vec2((float(2*h+1)+0.5)/float(2*HEADS),0.5));"
+                     "float mx=dec24s(sm,1024.0);float sum=dec24s(su,1024.0);"
+                     "float invs=(sum>0.0)?(1.0/sum):0.0;")
+            : string("");
+        const string prob_read = fuse_prob
+            ? string("float sc=dec24s(texture2D(S,vec2((float(t)+0.5)/float(SEQ),(float(h)+0.5)/float(HEADS))),1024.0);"
+                     "float p=exp(sc-mx)*invs;")
+            : string("float p=dec24s(texture2D(P,vec2((float(t)+0.5)/float(SEQ),(float(h)+0.5)/float(HEADS))),65536.0);");
         string fs = "precision highp float;\n" + att_defs() + att_helpers() +
-            "uniform sampler2D P,KV;uniform float pos;"
+            "uniform sampler2D " + prob_bind + ";uniform float pos;"
             "vec2 q16p(float v){float q=clamp(floor(v*256.0+0.5),-32768.0,32767.0);if(q<0.0)q+=65536.0;"
             "float hi=floor(q/256.0),lo=q-hi*256.0;return vec2(hi/255.0,lo/255.0);}"
-            "float att(int x){int h=x/HEADDIM;int i=x-h*HEADDIM;int kvh=h/GROUP;float acc=0.0;"
-            "for(int t=0;t<SEQ;t++){if(float(t)>pos)break;"
-            "float p=dec24s(texture2D(P,vec2((float(t)+0.5)/float(SEQ),(float(h)+0.5)/float(HEADS))),65536.0);"
+            "float att(int x){int h=x/HEADDIM;int i=x-h*HEADDIM;int kvh=h/GROUP;float acc=0.0;" +
+            prob_body +
+            "for(int t=0;t<SEQ;t++){if(float(t)>pos)break;" +
+            prob_read +
             "int vi=kvh*HEADDIM+i;int tx=KVDIM+vi;int odd=0;"
             "if(KVPACK==16){tx=KVDIM/2+vi/2;odd=vi-(vi/2)*2;}else if(KVPACK==8){tx=KVDIM/4+vi/4;odd=vi-(vi/4)*4;}"
             "float v=decKV(texture2D(KV,vec2((float(tx)+0.5)/float(KVWIDTH),(float(t)+0.5)/float(SEQ))),odd);"
@@ -1626,12 +1793,20 @@ private:
     }
 
     void att_v(int layer, int pos) {
+        static const bool fuse_prob = !(getenv("ATTN_FUSE_PROB") && strcmp(getenv("ATTN_FUSE_PROB"), "0") == 0);
         GLuint p = v_program();
         glBindFramebuffer(GL_FRAMEBUFFER, att_out_.fbo);
         glViewport(0, 0, att_out_.w, 1);
         glUseProgram(p);
-        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, att_probs_.tex);
-        glUniform1i(glGetUniformLocation(p, "P"), 0);
+        if (fuse_prob) {
+            glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, att_scores_.tex);
+            glUniform1i(glGetUniformLocation(p, "S"), 0);
+            glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, att_stats_.tex);
+            glUniform1i(glGetUniformLocation(p, "ST"), 2);
+        } else {
+            glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, att_probs_.tex);
+            glUniform1i(glGetUniformLocation(p, "P"), 0);
+        }
         glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, kv_cache_[layer].tex);
         glUniform1i(glGetUniformLocation(p, "KV"), 1);
         glUniform1f(glGetUniformLocation(p, "pos"), (float)pos);
@@ -1657,7 +1832,10 @@ private:
             "float dec16(vec2 c){float u=c.x*65280.0+c.y*255.0;if(u>=32768.0)u-=65536.0;return u/256.0;}"
             "void main(){int pid=int(gl_FragCoord.x);int per=(DIM+P-1)/P;int i0=pid*per;float s=0.0;"
             "for(int k=0;k<per;k++){int i=i0+k;if(i<DIM){"
-            "float v=dec16(texture2D(X,vec2((float(i)+0.5)/float(DIM),0.5)).rg);s+=v*v;}}"
+            + string(res_pack_
+                ? "vec4 c=texture2D(X,vec2((float(i/2)+0.5)/float((DIM+1)/2),0.5));"
+                  "float v=((i-i/2*2)==0)?dec16(c.rg):dec16(c.ba);s+=v*v;}}"
+                : "float v=dec16(texture2D(X,vec2((float(i)+0.5)/float(DIM),0.5)).rg);s+=v*v;}}") +
             "float q=floor(s*4096.0+0.5)+8388608.0;"
             "float r0=floor(q/16777216.0),g=floor(q/65536.0)-r0*256.0,b=floor(q/256.0)-r0*65536.0-g*256.0,a=q-r0*16777216.0-g*65536.0-b*256.0;"
             "gl_FragColor=vec4(r0/255.0,g/255.0,b/255.0,a/255.0);}";
@@ -1715,11 +1893,13 @@ private:
             "float s=dec24raw(texture2D(S,vec2(0.5,0.5)))/4096.0;"
             "float inv=1.0/sqrt(s/float(DIM)+1e-5);"
             "int i0=2*t;int i1=i0+1;"
-            "float v0=dec16(texture2D(X,vec2((float(i0)+0.5)/float(DIM),0.5)).rg);"
+            + string(res_pack_
+                ? "vec4 xc=texture2D(X,vec2((float(t)+0.5)/float((DIM+1)/2),0.5));float v0=dec16(xc.rg);"
+                : "float v0=dec16(texture2D(X,vec2((float(i0)+0.5)/float(DIM),0.5)).rg);") +
             "float w0=dec16(texture2D(W,vec2((float(i0)+0.5)/float(DIM),0.5)).rg);"
             "vec4 a=q16(v0*inv*w0);"
             "float v1=0.0;float w1=0.0;"
-            "if(i1<DIM){v1=dec16(texture2D(X,vec2((float(i1)+0.5)/float(DIM),0.5)).rg);"
+            "if(i1<DIM){v1=" + string(res_pack_ ? "dec16(xc.ba)" : "dec16(texture2D(X,vec2((float(i1)+0.5)/float(DIM),0.5)).rg)") + ";"
             "w1=dec16(texture2D(W,vec2((float(i1)+0.5)/float(DIM),0.5)).rg);}"
             "vec4 b=q16(v1*inv*w1);"
             "gl_FragColor=vec4(a.r,a.g,b.r,b.g);}";
@@ -2401,6 +2581,13 @@ public:
             gpu_.init_attention(m_.dim, m_.kv_dim, m_.heads, m_.kv_heads, m_.head_dim,
                                 m_.seq, m_.rope_half, m_.qk_norm, m_.layers,
                                 m_.q_norm, m_.k_norm, rope_cos_, rope_sin_);
+        if (gpu_layer_)
+            // Packed residual stream: implemented and measured neutral; it stays
+            // opt-in because the extra accumulators do not pay for the smaller
+            // number of w2 output rows.  RES_PACK=1 enables it for A/B tests.
+            gpu_.res_pack_ = getenv("RES_PACK") && strcmp(getenv("RES_PACK"), "1") == 0 &&
+                             !m_.w2.empty() && m_.w2[0].type == WeightType::INT8 &&
+                             !m_.wo.empty() && m_.wo[0].type == WeightType::INT8;
         if (gpu_layer_)
             gpu_.init_persistent(m_.dim, m_.layers, m_.rms_att, m_.rms_ffn, m_.rms_final);
     }

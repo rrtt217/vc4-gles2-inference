@@ -275,8 +275,11 @@ the hoist (pos ~73, profiled so the numbers include the sync):
 | probabilities | ~1.7 | one exp per (head, t): the draw, not the math |
 | normalise / stats | ~1.8 | 8 serial fragments, one draw |
 
-Roughly 1.3 ms per draw+finish * eight passes means about half the block is
-overhead, which is why the remaining ideas are all worth under 1%:
+**Correction (measured later): draws are pipelined**, so the per-pass 1.3 ms in
+that table came from `LAYER_PROFILE`'s `glFinish()`, not from the draws.  With
+`GPU_LAYER=1` the real `att_finish()` is a no-op and only total GPU work matters —
+merging the probs pass into `att_v` turned out to be exactly neutral.  The items
+below are therefore not worth doing:
 
 - probabilities as q16 instead of 24-bit: saves ~0.3 ms/layer in att_v (~1%).
 - parallelising the softmax stats: the draw it adds costs what the shorter
@@ -287,3 +290,33 @@ overhead, which is why the remaining ideas are all worth under 1%:
 To move the needle further you have to remove passes or change the KV layout so
 scores and p·V run as ordinary matvecs (K contiguous per head, V^T contiguous
 per head).  That is a redesign of the KV cache, not a tuning change.
+
+
+### What is left, with estimates (measured model: only GPU ALU work counts)
+
+**1. Pair the logits rows (~2%).** The vocabulary pass runs as 5 tiles of
+1536x768, one row per fragment, ~20 ms/token.  Pairing rows halves the activation
+decode exactly like the FFN gate.  It is self-contained on the write side but not
+on the read side: `read_i32` and the Top-K candidate shader both sample the logits
+texture one value per texel, so both need a packed reader.  Do it when there is
+time to re-run the full eval, not in a hurry.
+
+**2. Prefill batching (the big one, ~2-3x on prefill only).** Prefill currently
+costs the same per token as decode (22.5 s for 73 tokens ~ 308 ms each) because
+every token walks the whole layer stack on its own.  Running 4 tokens through one
+weight fetch would amortise the weight decode (2 of the ~8 ops per weight) across
+4 rows of activations, and the gate pairing already shows that sharing the decode
+works.  The blocker is attention: 4 queries need 4 score rows, 4 softmax
+normalisations and a KV write of 4 positions — a real redesign of
+`attention_block`, not a tweak.
+
+**3. KV layout for a matvec-shaped attention.** Storing K contiguous per head and
+V transposed per head would let `scores` and `p*V` reuse the existing matvec
+kernel, but the fetch and decode counts per element are already at 2 and 2 after
+the hoist, so the win is in code reuse, not in throughput.
+
+**4. int8 activations (quality risk, ~1.6x on every matvec).** Storing activations
+one byte per value would cut the dominant decode from 5 ops to 2.  The current
+scheme is 1/256 fixed point; 1/8 or 1/16 would be visible in the output.  Only
+worth it with a real perplexity harness to prove it, which this repo does not
+have — the golden-string test cannot tell a small degradation from none.

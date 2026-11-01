@@ -206,6 +206,32 @@ static GLuint prog_fast(int rows, int cols) {
     return program(buf);
 }
 
+
+// Two output rows per fragment, sharing one activation decode.  This is the
+// FFN-gate shape: w1 row r and w3 row r in the same fragment, each output
+// written as its own int16 so swiglu can read both from one texel.
+static GLuint prog_pair(int rows, int cols) {
+    static char buf[4096];
+    const int axw = (cols + 1) / 2;
+    snprintf(buf, sizeof buf,
+        "precision highp float;uniform sampler2D W1,W2,X;"
+        "float dA(vec4 c){float u=c.r*65280.0+c.g*255.0;return u>=32768.0?u-65536.0:u;}"
+        "float dB(vec4 c){float u=c.b*65280.0+c.a*255.0;return u>=32768.0?u-65536.0:u;}"
+        "void main(){int r=int(gl_FragCoord.x);float s1=0.0,s2=0.0;"
+        "for(int q=0;q<%d;q++){"
+        "vec4 c1=texture2D(W1,vec2((float(q)+0.5)/float(%d),(float(r)+0.5)/float(%d)));"
+        "vec4 c2=texture2D(W2,vec2((float(q)+0.5)/float(%d),(float(r)+0.5)/float(%d)));"
+        "vec4 w1=c1*255.0-128.0;vec4 w2=c2*255.0-128.0;"
+        "vec4 xa=texture2D(X,vec2((float(2*q)+0.5)/float(%d),0.5));"
+        "vec4 xb=texture2D(X,vec2((float(2*q+1)+0.5)/float(%d),0.5));"
+        "float a0=dA(xa),a1=dB(xa),a2=dA(xb),a3=dB(xb);"
+        "s1+=w1.x*a0+w1.y*a1+w1.z*a2+w1.w*a3;"
+        "s2+=w2.x*a0+w2.y*a1+w2.z*a2+w2.w*a3;}"
+        "gl_FragColor=vec4(clamp(s1/2048.0,-1.0,1.0)*0.5+0.5,clamp(s2/2048.0,-1.0,1.0)*0.5+0.5,0.0,1.0);}",
+        cols / 4, cols / 4, rows, cols / 4, rows, axw, axw);
+    return program(buf);
+}
+
 static void draw(GLuint prog, GLuint wt, GLuint xt, Target& out, int rows) {
     // GLES2 forbids client-side vertex arrays: the full-screen triangle must
     // come from a bound VBO or the driver faults.
@@ -313,9 +339,10 @@ int main(int argc, char** argv) {
         {"q8  act1/texel", prog_q8(rows, cols),   wq8,  x1},
         {"q8  act2/texel", prog_q8x2(rows, cols), wq8,  x2},
         {"q8  fast decode", prog_fast(rows, cols), wq8, x2},
+        {"q8  paired rows", prog_pair(rows, cols), wq8, x2},
         {"f16 f16/texel",  prog_f16(rows, cols),  wf16, xf},
     };
-    const int nc = have_half ? 4 : 3;
+    const int nc = have_half ? 5 : 4;
 
     printf("shape %dx%d, %d iterations, %d rows per draw\n", rows, cols, iters, tile);
     for (int ci = 0; ci < nc; ++ci) {
