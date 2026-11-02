@@ -140,27 +140,23 @@ GLuint GPU::ffn_fused(const Mat& w13, GLuint x, int hidden){
             if (ffn_pair_a_.tex == 0 || ffn_pair_a_.w != hidden) ffn_pair_a_ = make_target(hidden, 1);
             if (ffn_h_a_.tex == 0 || ffn_h_a_.w != aw) ffn_h_a_ = make_target(aw, 1);
             GLuint p = x_q8_pair_fused(hidden, w13.cols);
-            glBindFramebuffer(GL_FRAMEBUFFER, ffn_pair_a_.fbo);
+            bind_fbo(ffn_pair_a_.fbo);
             glViewport(0, 0, hidden, 1);
-            glUseProgram(p);
-            glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, w13.tex);
-            glUniform1i(glGetUniformLocation(p, "W"), 0);
-            glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, x);
-            glUniform1i(glGetUniformLocation(p, "X"), 1);
-            glUniform1f(glGetUniformLocation(p, "ws"), w13.scale);
-            GLuint loc = glGetAttribLocation(p, "p");
-            glEnableVertexAttribArray(loc);
-            glVertexAttribPointer(loc, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+            use_program(p);
+            bind_tex(0, w13.tex);
+            set_sampler(p, "W", 0);
+            bind_tex(1, x);
+            set_sampler(p, "X", 1);
+            glUniform1f(uloc(p, "ws"), w13.scale);
+            setup_attrib(p);
             glDrawArrays(GL_TRIANGLES, 0, 3);
             GLuint ps = x_swiglu_pair(hidden);
-            glBindFramebuffer(GL_FRAMEBUFFER, ffn_h_a_.fbo);
+            bind_fbo(ffn_h_a_.fbo);
             glViewport(0, 0, aw, 1);
-            glUseProgram(ps);
-            glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, ffn_pair_a_.tex);
-            glUniform1i(glGetUniformLocation(ps, "A"), 0);
-            loc = glGetAttribLocation(ps, "p");
-            glEnableVertexAttribArray(loc);
-            glVertexAttribPointer(loc, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+            use_program(ps);
+            bind_tex(0, ffn_pair_a_.tex);
+            set_sampler(ps, "A", 0);
+            setup_attrib(ps);
             glDrawArrays(GL_TRIANGLES, 0, 3);
             if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
             else layer_finish("NF_FFN");
@@ -178,41 +174,37 @@ GLuint GPU::ffn_fused(const Mat& w13, GLuint x, int hidden){
         if (out.tex == 0 || out.w != aw) out = make_target(aw, 1);
         const bool i4 = (w1.type == WeightType::INT4);
         GLuint pp = i4 ? x_i4_pair(hidden, w1.cols) : x_q8_pair(hidden, w1.cols);
-        glBindFramebuffer(GL_FRAMEBUFFER, pair_buf.fbo);
+        bind_fbo(pair_buf.fbo);
         glViewport(0, 0, hidden, 1);
-        glUseProgram(pp);
-        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, w1.tex);
-        glUniform1i(glGetUniformLocation(pp, "W1"), 0);
-        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, w3.tex);
-        glUniform1i(glGetUniformLocation(pp, "W2"), 1);
-        glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, x);
-        glUniform1i(glGetUniformLocation(pp, "X"), 2);
+        use_program(pp);
+        bind_tex(0, w1.tex);
+        set_sampler(pp, "W1", 0);
+        bind_tex(1, w3.tex);
+        set_sampler(pp, "W2", 1);
+        bind_tex(2, x);
+        set_sampler(pp, "X", 2);
         if (i4) {
-            glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, w1.q4_param_tex);
-            glUniform1i(glGetUniformLocation(pp, "P1"), 3);
-            glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, w3.q4_param_tex);
-            glUniform1i(glGetUniformLocation(pp, "P2"), 4);
-            glUniform1f(glGetUniformLocation(pp, "ps1"), w1.q4_param_scale);
-            glUniform1f(glGetUniformLocation(pp, "ps2"), w3.q4_param_scale);
+            bind_tex(3, w1.q4_param_tex);
+            set_sampler(pp, "P1", 3);
+            bind_tex(4, w3.q4_param_tex);
+            set_sampler(pp, "P2", 4);
+            glUniform1f(uloc(pp, "ps1"), w1.q4_param_scale);
+            glUniform1f(uloc(pp, "ps2"), w3.q4_param_scale);
         } else {
-            glUniform1f(glGetUniformLocation(pp, "ws1"), w1.scale);
-            glUniform1f(glGetUniformLocation(pp, "ws2"), w3.scale);
+            glUniform1f(uloc(pp, "ws1"), w1.scale);
+            glUniform1f(uloc(pp, "ws2"), w3.scale);
         }
-        GLuint loc = glGetAttribLocation(pp, "p");
-        glEnableVertexAttribArray(loc);
-        glVertexAttribPointer(loc, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+        setup_attrib(pp);
         glDrawArrays(GL_TRIANGLES, 0, 3);
         if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
 
         GLuint ps = x_swiglu_pair(hidden);
-        glBindFramebuffer(GL_FRAMEBUFFER, out.fbo);
+        bind_fbo(out.fbo);
         glViewport(0, 0, aw, 1);
-        glUseProgram(ps);
-        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, pair_buf.tex);
-        glUniform1i(glGetUniformLocation(ps, "A"), 0);
-        loc = glGetAttribLocation(ps, "p");
-        glEnableVertexAttribArray(loc);
-        glVertexAttribPointer(loc, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+        use_program(ps);
+        bind_tex(0, pair_buf.tex);
+        set_sampler(ps, "A", 0);
+        setup_attrib(ps);
         glDrawArrays(GL_TRIANGLES, 0, 3);
         if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
         else layer_finish("NF_FFN");
@@ -250,12 +242,11 @@ GLuint GPU::swiglu_2row(Target& src, int hidden, Target& out){
         const int aw = x_texels(hidden, ffn_fmt_);
         if (out.tex == 0 || out.w != aw) out = make_target(aw, 1);
         GLuint p = x_swiglu_2row(hidden);
-        glBindFramebuffer(GL_FRAMEBUFFER, out.fbo);
+        bind_fbo(out.fbo);
         glViewport(0, 0, aw, 1);
-        glUseProgram(p);
-        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, src.tex); glUniform1i(glGetUniformLocation(p, "A"), 0);
-        GLuint loc = glGetAttribLocation(p, "p");
-        glEnableVertexAttribArray(loc); glVertexAttribPointer(loc, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+        use_program(p);
+        bind_tex(0, src.tex); set_sampler(p, "A", 0);
+        setup_attrib(p);
         glDrawArrays(GL_TRIANGLES, 0, 3);
         if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
         else layer_finish("NF_FFN");
@@ -267,13 +258,12 @@ GLuint GPU::swiglu_split(Target& a, Target& b){
         const int aw = x_texels(a.w, ffn_fmt_);
         if (ffn_h_.tex == 0 || ffn_h_.w != aw) ffn_h_ = make_target(aw, 1);
         GLuint p = x_swiglu(a.w, false);
-        glBindFramebuffer(GL_FRAMEBUFFER, ffn_h_.fbo);
+        bind_fbo(ffn_h_.fbo);
         glViewport(0, 0, ffn_h_.w, 1);
-        glUseProgram(p);
-        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, a.tex); glUniform1i(glGetUniformLocation(p, "A"), 0);
-        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, b.tex); glUniform1i(glGetUniformLocation(p, "B"), 1);
-        GLuint loc = glGetAttribLocation(p, "p");
-        glEnableVertexAttribArray(loc); glVertexAttribPointer(loc, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+        use_program(p);
+        bind_tex(0, a.tex); set_sampler(p, "A", 0);
+        bind_tex(1, b.tex); set_sampler(p, "B", 1);
+        setup_attrib(p);
         glDrawArrays(GL_TRIANGLES, 0, 3);
         if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
         else layer_finish("NF_FFN");
@@ -285,12 +275,11 @@ GLuint GPU::swiglu_fused(Target& src, int hidden){
         const int aw = (hidden + 1) / 2;
         if (ffn_h_.tex == 0 || ffn_h_.w != aw) ffn_h_ = make_target(aw, 1);
         GLuint p = x_swiglu(hidden, true);
-        glBindFramebuffer(GL_FRAMEBUFFER, ffn_h_.fbo);
+        bind_fbo(ffn_h_.fbo);
         glViewport(0, 0, aw, 1);
-        glUseProgram(p);
-        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, src.tex); glUniform1i(glGetUniformLocation(p, "A"), 0);
-        GLuint loc = glGetAttribLocation(p, "p");
-        glEnableVertexAttribArray(loc); glVertexAttribPointer(loc, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+        use_program(p);
+        bind_tex(0, src.tex); set_sampler(p, "A", 0);
+        setup_attrib(p);
         glDrawArrays(GL_TRIANGLES, 0, 3);
         if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
         else layer_finish("NF_FFN");
@@ -343,15 +332,14 @@ CandidateResult GPU::logits_candidates_from(const vector<Mat>& tiles, GLuint xt,
             for (int i = 0; i < rows; ++i) {
                 int chunks = (tiles[i].rows + chunk - 1) / chunk;
                 GLuint p = x_top2_fast(tiles[i].rows, chunk);
-                glBindFramebuffer(GL_FRAMEBUFFER, candidate_target_.fbo);
+                bind_fbo(candidate_target_.fbo);
                 glViewport(0, i, chunks * 2, 1);
-                glUseProgram(p);
-                glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, logits_target_.tex);
-                glUniform1i(glGetUniformLocation(p, "L"), 0);
-                glUniform1f(glGetUniformLocation(p, "tr"), (float)i);
-                glUniform1f(glGetUniformLocation(p, "nr"), (float)rows);
-                GLuint loc = glGetAttribLocation(p, "p");
-                glEnableVertexAttribArray(loc); glVertexAttribPointer(loc, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+                use_program(p);
+                bind_tex(0, logits_target_.tex);
+                set_sampler(p, "L", 0);
+                glUniform1f(uloc(p, "tr"), (float)i);
+                glUniform1f(uloc(p, "nr"), (float)rows);
+                setup_attrib(p);
                 glDrawArrays(GL_TRIANGLES, 0, 3);
             }
             if (needs_finish()) { glFlush(); glFinish(); }
@@ -383,16 +371,15 @@ CandidateResult GPU::logits_candidates_from(const vector<Mat>& tiles, GLuint xt,
         for (int i = 0; i < rows; ++i) {
             int chunks = (tiles[i].rows + chunk - 1) / chunk;
             GLuint p = x_top2(tiles[i].rows, chunk);
-            glBindFramebuffer(GL_FRAMEBUFFER, candidate_target_.fbo);
+            bind_fbo(candidate_target_.fbo);
             glViewport(0, i, chunks * 3, 1);
-            glUseProgram(p);
-            glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, logits_target_.tex);
-            glUniform1i(glGetUniformLocation(p, "L"), 0);
-            glUniform1f(glGetUniformLocation(p, "tr"), (float)i);
-            glUniform1f(glGetUniformLocation(p, "nr"), (float)rows);
-            glUniform1f(glGetUniformLocation(p, "invt"), 1.0f / max(0.0001f, temp));
-            GLuint loc = glGetAttribLocation(p, "p");
-            glEnableVertexAttribArray(loc); glVertexAttribPointer(loc, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+            use_program(p);
+            bind_tex(0, logits_target_.tex);
+            set_sampler(p, "L", 0);
+            glUniform1f(uloc(p, "tr"), (float)i);
+            glUniform1f(uloc(p, "nr"), (float)rows);
+            glUniform1f(uloc(p, "invt"), 1.0f / max(0.0001f, temp));
+            setup_attrib(p);
             glDrawArrays(GL_TRIANGLES, 0, 3);
         }
         if (needs_finish()) { glFlush(); glFinish(); }
@@ -580,7 +567,7 @@ void GPU::init_persistent(int dim, int layers, const vector<float>& rms_att,
 GLuint GPU::upload_hidden(const vector<float>& x){
         const int tw = x_texels((int)x.size(), res_fmt_);
         vector<uint8_t> data = x_pack(x, res_fmt_);
-        glBindTexture(GL_TEXTURE_2D, hidden_in_);
+        bind_tex(0, hidden_in_);
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, tw, 1, GL_RGBA, GL_UNSIGNED_BYTE, data.data());
         layer_finish("NF_UPLOAD");
         return hidden_in_;
@@ -594,40 +581,34 @@ GLuint GPU::rmsnorm(GLuint x, GLuint w, Target& out){
             rms_partial_ = make_target(RMS_PARTIALS, 1);
         GLuint loc = 0;
         GLuint ps = x_rms_split();
-        glBindFramebuffer(GL_FRAMEBUFFER, rms_partial_.fbo);
+        bind_fbo(rms_partial_.fbo);
         glViewport(0, 0, RMS_PARTIALS, 1);
-        glUseProgram(ps);
-        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, x);
-        glUniform1i(glGetUniformLocation(ps, "X"), 0);
-        loc = glGetAttribLocation(ps, "p");
-        glEnableVertexAttribArray(loc);
-        glVertexAttribPointer(loc, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+        use_program(ps);
+        bind_tex(0, x);
+        set_sampler(ps, "X", 0);
+        setup_attrib(ps);
         glDrawArrays(GL_TRIANGLES, 0, 3);
         GLuint pr = x_rms_reduce();
-        glBindFramebuffer(GL_FRAMEBUFFER, rms_stats_.fbo);
+        bind_fbo(rms_stats_.fbo);
         glViewport(0, 0, 1, 1);
-        glUseProgram(pr);
-        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, rms_partial_.tex);
-        glUniform1i(glGetUniformLocation(pr, "S"), 0);
-        loc = glGetAttribLocation(pr, "p");
-        glEnableVertexAttribArray(loc);
-        glVertexAttribPointer(loc, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+        use_program(pr);
+        bind_tex(0, rms_partial_.tex);
+        set_sampler(pr, "S", 0);
+        setup_attrib(pr);
         glDrawArrays(GL_TRIANGLES, 0, 3);
         layer_finish("NF_RMS");
 
         GLuint pn = x_rms_norm();
-        glBindFramebuffer(GL_FRAMEBUFFER, out.fbo);
+        bind_fbo(out.fbo);
         glViewport(0, 0, aw, 1);
-        glUseProgram(pn);
-        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, x);
-        glUniform1i(glGetUniformLocation(pn, "X"), 0);
-        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, w);
-        glUniform1i(glGetUniformLocation(pn, "W"), 1);
-        glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, rms_stats_.tex);
-        glUniform1i(glGetUniformLocation(pn, "S"), 2);
-        loc = glGetAttribLocation(pn, "p");
-        glEnableVertexAttribArray(loc);
-        glVertexAttribPointer(loc, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+        use_program(pn);
+        bind_tex(0, x);
+        set_sampler(pn, "X", 0);
+        bind_tex(1, w);
+        set_sampler(pn, "W", 1);
+        bind_tex(2, rms_stats_.tex);
+        set_sampler(pn, "S", 2);
+        setup_attrib(pn);
         glDrawArrays(GL_TRIANGLES, 0, 3);
         layer_finish("NF_RMS");
         return out.tex;
@@ -643,25 +624,25 @@ void GPU::matvec_add(const Mat& m, GLuint x, GLuint residual, Target& out, XForm
                   : (m.type == WeightType::INT8) ? x_q8_add(m.rows, m.cols, xf)
                   : (m.type == WeightType::INT4) ? x_i4_add(m.rows, m.cols, xf)
                                                  : x_i16_add(m.rows, m.cols, xf);
-        glBindFramebuffer(GL_FRAMEBUFFER, out.fbo);
-        glUseProgram(p);
-        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, m.tex);
-        glUniform1i(glGetUniformLocation(p, "W"), 0);
-        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, x);
-        glUniform1i(glGetUniformLocation(p, "X"), 1);
-        glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, residual);
-        glUniform1i(glGetUniformLocation(p, "R"), 2);
+        bind_fbo(out.fbo);
+        use_program(p);
+        bind_tex(0, m.tex);
+        set_sampler(p, "W", 0);
+        bind_tex(1, x);
+        set_sampler(p, "X", 1);
         if (m.type == WeightType::INT4) {
-            glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, residual);
-            glUniform1i(glGetUniformLocation(p, "R"), 3);
-            glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, m.q4_param_tex);
-            glUniform1i(glGetUniformLocation(p, "P"), 2);
-            glUniform1f(glGetUniformLocation(p, "ps"), m.q4_param_scale);
+            // P takes unit 2 on the q4 kernels, so R moves to 3.
+            bind_tex(2, m.q4_param_tex);
+            set_sampler(p, "P", 2);
+            bind_tex(3, residual);
+            set_sampler(p, "R", 3);
+            glUniform1f(uloc(p, "ps"), m.q4_param_scale);
+        } else {
+            bind_tex(2, residual);
+            set_sampler(p, "R", 2);
         }
-        glUniform1f(glGetUniformLocation(p, "ws"), m.scale);
-        GLuint loc = glGetAttribLocation(p, "p");
-        glEnableVertexAttribArray(loc);
-        glVertexAttribPointer(loc, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+        glUniform1f(uloc(p, "ws"), m.scale);
+        setup_attrib(p);
         const int strip = pair ? ((m.rows == 1536) ? 384 : (m.rows + 1) / 2)
                                : ((m.rows == 1536) ? 768 : m.rows);
         for (int x0 = 0; x0 < m.rows; x0 += strip) {
@@ -692,7 +673,7 @@ vector<float> GPU::logits_from(const vector<Mat>& tiles, GLuint x){
     }
 
 vector<uint8_t> GPU::read_bytes(Target& t, int w, int h){
-        glBindFramebuffer(GL_FRAMEBUFFER, t.fbo);
+        bind_fbo(t.fbo);
         glViewport(0, 0, t.w, t.h);
         vector<uint8_t> b((size_t)w * h * 4);
         glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, b.data());
@@ -745,6 +726,89 @@ GLuint GPU::x_i4_pair(int rows, int cols){
         GLuint p = link_program(matvec_i4_pair(rows, cols, act_fmt_));
         programs_[key] = p;
         return p;
+    }
+
+// GL binding state is context-wide (GLES2 has no VAOs and the engine owns the
+// context), so these live at file scope: the static texture helpers below bind
+// on their own and can forget the cache without an instance.
+static GLuint g_bound_tex[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+static GLuint g_cur_fbo = 0xFFFFFFFFu;
+static GLuint g_cur_prog = 0xFFFFFFFFu;
+
+static void gl_state_forget_bindings() {
+    for (int i = 0; i < 8; i++) g_bound_tex[i] = 0xFFFFFFFFu;
+    g_cur_fbo = 0xFFFFFFFFu;
+}
+
+GLint GPU::aloc(GLuint prog, const char* name) {
+        if (prog != aloc_prog_ || !aloc_tab_) {
+            aloc_tab_ = &aloc_cache_[prog];
+            aloc_prog_ = prog;
+        }
+        for (const auto& e : *aloc_tab_) if (e.name == name) return e.loc;
+        GLint loc = glGetAttribLocation(prog, name);
+        aloc_tab_->push_back({name, loc});
+        return loc;
+    }
+
+void GPU::bind_tex(int unit, GLuint tex) {
+        if (unit < 0 || unit > 7 || g_bound_tex[unit] == tex) return;
+        glActiveTexture(GL_TEXTURE0 + unit);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        g_bound_tex[unit] = tex;
+    }
+
+void GPU::bind_fbo(GLuint fbo) {
+        if (g_cur_fbo == fbo) return;
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        g_cur_fbo = fbo;
+    }
+
+void GPU::use_program(GLuint prog) {
+        if (g_cur_prog == prog) return;
+        glUseProgram(prog);
+        g_cur_prog = prog;
+    }
+
+void GPU::set_sampler(GLuint prog, const char* name, int unit) {
+        // Usually a sampler keeps one unit for the life of its program, so the
+        // uniform is written once; the q4 kernels re-point R from unit 2 to 3, so
+        // the cached unit is verified rather than assumed.
+        auto& v = sampler_set_[prog];
+        for (auto& e : v) {
+            if (e.name != name) continue;
+            if (e.unit == unit) return;
+            e.unit = unit;
+            glUniform1i(uloc(prog, name), unit);
+            return;
+        }
+        glUniform1i(uloc(prog, name), unit);
+        v.push_back({name, unit});
+    }
+
+void GPU::setup_attrib(GLuint prog) {
+        // GLES2 has no VAOs, so the single "p" attribute is context state: set it
+        // once per (distinct) location instead of three calls per draw.
+        GLint loc = aloc(prog, "p");
+        if (loc < 0) return;
+        if (attrib_ready_ && loc == attrib_p_) return;
+        glEnableVertexAttribArray((GLuint)loc);
+        glVertexAttribPointer((GLuint)loc, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+        attrib_p_ = loc;
+        attrib_ready_ = true;
+    }
+
+GLint GPU::uloc(GLuint prog, const char* name) {
+        // Uniform names are string literals, so the pointer is a stable identity:
+        // a per-program linear scan over a handful of entries beats hashing.
+        if (prog != uloc_prog_ || !uloc_tab_) {
+            uloc_tab_ = &uloc_cache_[prog];
+            uloc_prog_ = prog;
+        }
+        for (const auto& e : *uloc_tab_) if (e.name == name) return e.loc;
+        GLint loc = glGetUniformLocation(prog, name);
+        uloc_tab_->push_back({name, loc});
+        return loc;
     }
 
 GLuint GPU::x_q8_add(int rows, int cols, XFormat xf){
@@ -900,7 +964,7 @@ GLuint GPU::link_program(const string& fs){
     }
 
 GLuint GPU::make_texture(int w, int h, const void* data){
-        GLuint t = 0; glGenTextures(1, &t); glBindTexture(GL_TEXTURE_2D, t);
+        GLuint t = 0; glGenTextures(1, &t); glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, t); gl_state_forget_bindings();
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
@@ -951,7 +1015,7 @@ Target GPU::make_target(int w, int h){
         Target t; t.w = w; t.h = h;
         t.tex = make_texture(w, h, nullptr);
         glGenFramebuffers(1, &t.fbo);
-        glBindFramebuffer(GL_FRAMEBUFFER, t.fbo);
+        bind_fbo(t.fbo);
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t.tex, 0);
         if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
             cerr << "FBO incomplete\n"; exit(1);
@@ -977,7 +1041,7 @@ GLuint GPU::upload_activations(const vector<float>& x){
             input_textures_[n] = t;
             return t;
         }
-        glBindTexture(GL_TEXTURE_2D, it->second);
+        bind_tex(0, it->second);
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, texels, 1, GL_RGBA, GL_UNSIGNED_BYTE, data.data());
         if (needs_finish()) { glFlush(); glFinish(); }
         return it->second;
@@ -1002,21 +1066,19 @@ void GPU::att_finish() {
 
     void GPU::kv_rope_write(int layer, int pos){
         GLuint p = x_kv_rope();
-        glBindFramebuffer(GL_FRAMEBUFFER, kv_cache_[layer].fbo);
+        bind_fbo(kv_cache_[layer].fbo);
         glViewport(0, pos, att_kv_width_, 1);
-        glUseProgram(p);
-        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, qkv_target_.tex);
-        glUniform1i(glGetUniformLocation(p, "QKV"), 0);
-        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, rope_tex_);
-        glUniform1i(glGetUniformLocation(p, "RT"), 1);
+        use_program(p);
+        bind_tex(0, qkv_target_.tex);
+        set_sampler(p, "QKV", 0);
+        bind_tex(1, rope_tex_);
+        set_sampler(p, "RT", 1);
         if (att_qk_norm_) {
-            glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, k_norm_tex_[layer]);
-            glUniform1i(glGetUniformLocation(p, "KN"), 2);
+            bind_tex(2, k_norm_tex_[layer]);
+            set_sampler(p, "KN", 2);
         }
-        glUniform1f(glGetUniformLocation(p, "pos"), (float)pos);
-        GLuint loc = glGetAttribLocation(p, "p");
-        glEnableVertexAttribArray(loc);
-        glVertexAttribPointer(loc, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+        glUniform1f(uloc(p, "pos"), (float)pos);
+        setup_attrib(p);
         glDrawArrays(GL_TRIANGLES, 0, 3);
         att_finish();
     }
@@ -1027,24 +1089,22 @@ void GPU::att_scores(int layer, int pos){
         static const bool hoist = true;
         if (!hoist) {
             GLuint pi = x_score(false);
-            glBindFramebuffer(GL_FRAMEBUFFER, att_scores_.fbo);
+            bind_fbo(att_scores_.fbo);
             glViewport(0, 0, att_seq_ / 2, att_heads_);
-            glUseProgram(pi);
-            glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, qkv_target_.tex);
-            glUniform1i(glGetUniformLocation(pi, "R"), 0);
-            glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, kv_cache_[layer].tex);
-            glUniform1i(glGetUniformLocation(pi, "KV"), 1);
-            glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, rope_tex_);
-            glUniform1i(glGetUniformLocation(pi, "RT"), 2);
+            use_program(pi);
+            bind_tex(0, qkv_target_.tex);
+            set_sampler(pi, "R", 0);
+            bind_tex(1, kv_cache_[layer].tex);
+            set_sampler(pi, "KV", 1);
+            bind_tex(2, rope_tex_);
+            set_sampler(pi, "RT", 2);
             if (att_qk_norm_) {
-                glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, q_norm_tex_[layer]);
-                glUniform1i(glGetUniformLocation(pi, "QN"), 3);
+                bind_tex(3, q_norm_tex_[layer]);
+                set_sampler(pi, "QN", 3);
             }
-            glUniform1f(glGetUniformLocation(pi, "pos"), (float)pos);
-            glUniform1f(glGetUniformLocation(pi, "invsqrt"), 1.0f / sqrtf((float)att_head_dim_));
-            GLuint li = glGetAttribLocation(pi, "p");
-            glEnableVertexAttribArray(li);
-            glVertexAttribPointer(li, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+            glUniform1f(uloc(pi, "pos"), (float)pos);
+            glUniform1f(uloc(pi, "invsqrt"), 1.0f / sqrtf((float)att_head_dim_));
+            setup_attrib(pi);
             glDrawArrays(GL_TRIANGLES, 0, 3);
             att_finish();
             return;
@@ -1054,85 +1114,75 @@ void GPU::att_scores(int layer, int pos){
             if (qscale_target_.tex == 0 || qscale_target_.w != att_heads_)
                 qscale_target_ = make_target(att_heads_, 1);
             GLuint pq = x_qnorm();
-            glBindFramebuffer(GL_FRAMEBUFFER, qscale_target_.fbo);
+            bind_fbo(qscale_target_.fbo);
             glViewport(0, 0, att_heads_, 1);
-            glUseProgram(pq);
-            glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, qkv_target_.tex);
-            glUniform1i(glGetUniformLocation(pq, "R"), 0);
-            GLuint lq = glGetAttribLocation(pq, "p");
-            glEnableVertexAttribArray(lq);
-            glVertexAttribPointer(lq, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+            use_program(pq);
+            bind_tex(0, qkv_target_.tex);
+            set_sampler(pq, "R", 0);
+            setup_attrib(pq);
             glDrawArrays(GL_TRIANGLES, 0, 3);
             att_finish();
         }
         if (qrot_target_.tex == 0 || qrot_target_.w != att_dim_ / 2)
             qrot_target_ = make_target(att_dim_ / 2, 1);
         GLuint pr = x_qrot();
-        glBindFramebuffer(GL_FRAMEBUFFER, qrot_target_.fbo);
+        bind_fbo(qrot_target_.fbo);
         glViewport(0, 0, att_dim_ / 2, 1);
-        glUseProgram(pr);
-        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, qkv_target_.tex);
-        glUniform1i(glGetUniformLocation(pr, "R"), 0);
-        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, rope_tex_);
-        glUniform1i(glGetUniformLocation(pr, "RT"), 1);
+        use_program(pr);
+        bind_tex(0, qkv_target_.tex);
+        set_sampler(pr, "R", 0);
+        bind_tex(1, rope_tex_);
+        set_sampler(pr, "RT", 1);
         if (att_qk_norm_) {
-            glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, q_norm_tex_[layer]);
-            glUniform1i(glGetUniformLocation(pr, "QN"), 2);
-            glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, qscale_target_.tex);
-            glUniform1i(glGetUniformLocation(pr, "QS"), 3);
+            bind_tex(2, q_norm_tex_[layer]);
+            set_sampler(pr, "QN", 2);
+            bind_tex(3, qscale_target_.tex);
+            set_sampler(pr, "QS", 3);
         }
-        glUniform1f(glGetUniformLocation(pr, "pos"), (float)pos);
-        GLuint lr = glGetAttribLocation(pr, "p");
-        glEnableVertexAttribArray(lr);
-        glVertexAttribPointer(lr, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+        glUniform1f(uloc(pr, "pos"), (float)pos);
+        setup_attrib(pr);
         glDrawArrays(GL_TRIANGLES, 0, 3);
         att_finish();
 
         GLuint p = x_score(true);
-        glBindFramebuffer(GL_FRAMEBUFFER, att_scores_.fbo);
+        bind_fbo(att_scores_.fbo);
         glViewport(0, 0, att_seq_ / 2, att_heads_);
-        glUseProgram(p);
-        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, qrot_target_.tex);
-        glUniform1i(glGetUniformLocation(p, "Q"), 0);
-        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, kv_cache_[layer].tex);
-        glUniform1i(glGetUniformLocation(p, "KV"), 1);
-        glUniform1f(glGetUniformLocation(p, "pos"), (float)pos);
-        glUniform1f(glGetUniformLocation(p, "invsqrt"), 1.0f / sqrtf((float)att_head_dim_));
-        GLuint loc = glGetAttribLocation(p, "p");
-        glEnableVertexAttribArray(loc);
-        glVertexAttribPointer(loc, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+        use_program(p);
+        bind_tex(0, qrot_target_.tex);
+        set_sampler(p, "Q", 0);
+        bind_tex(1, kv_cache_[layer].tex);
+        set_sampler(p, "KV", 1);
+        glUniform1f(uloc(p, "pos"), (float)pos);
+        glUniform1f(uloc(p, "invsqrt"), 1.0f / sqrtf((float)att_head_dim_));
+        setup_attrib(p);
         glDrawArrays(GL_TRIANGLES, 0, 3);
         att_finish();
     }
 
 void GPU::att_stats(int pos){
         GLuint p = x_stats();
-        glBindFramebuffer(GL_FRAMEBUFFER, att_stats_.fbo);
+        bind_fbo(att_stats_.fbo);
         glViewport(0, 0, att_heads_, 1);
-        glUseProgram(p);
-        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, att_scores_.tex);
-        glUniform1i(glGetUniformLocation(p, "S"), 0);
-        glUniform1f(glGetUniformLocation(p, "pos"), (float)pos);
-        GLuint loc = glGetAttribLocation(p, "p");
-        glEnableVertexAttribArray(loc);
-        glVertexAttribPointer(loc, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+        use_program(p);
+        bind_tex(0, att_scores_.tex);
+        set_sampler(p, "S", 0);
+        glUniform1f(uloc(p, "pos"), (float)pos);
+        setup_attrib(p);
         glDrawArrays(GL_TRIANGLES, 0, 3);
         att_finish();
     }
 
 void GPU::att_probs(int pos){
         GLuint p = x_prob();
-        glBindFramebuffer(GL_FRAMEBUFFER, att_probs_.fbo);
+        bind_fbo(att_probs_.fbo);
         glViewport(0, 0, att_seq_ / 2, att_heads_);
-        glUseProgram(p);
-        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, att_scores_.tex);
-        glUniform1i(glGetUniformLocation(p, "S"), 0);
-        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, att_stats_.tex);
-        glUniform1i(glGetUniformLocation(p, "ST"), 1);
-        glUniform1f(glGetUniformLocation(p, "pos"), (float)pos);
-        GLuint loc = glGetAttribLocation(p, "p");
-        glEnableVertexAttribArray(loc);
-        glVertexAttribPointer(loc, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+        use_program(p);
+        bind_tex(0, att_scores_.tex);
+        set_sampler(p, "S", 0);
+        bind_tex(1, att_stats_.tex);
+        set_sampler(p, "ST", 1);
+        glUniform1f(uloc(p, "pos"), (float)pos);
+        setup_attrib(p);
         glDrawArrays(GL_TRIANGLES, 0, 3);
         att_finish();
     }
@@ -1141,24 +1191,22 @@ void GPU::att_v(int layer, int pos){
         // q16 score/stats layout has one packed texel per head; fused decode is mandatory.
         static const bool fuse_prob = true;
         GLuint p = x_v();
-        glBindFramebuffer(GL_FRAMEBUFFER, att_out_.fbo);
+        bind_fbo(att_out_.fbo);
         glViewport(0, 0, att_out_.w, 1);
-        glUseProgram(p);
+        use_program(p);
         if (fuse_prob) {
-            glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, att_scores_.tex);
-            glUniform1i(glGetUniformLocation(p, "S"), 0);
-            glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, att_stats_.tex);
-            glUniform1i(glGetUniformLocation(p, "ST"), 2);
+            bind_tex(0, att_scores_.tex);
+            set_sampler(p, "S", 0);
+            bind_tex(2, att_stats_.tex);
+            set_sampler(p, "ST", 2);
         } else {
-            glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, att_probs_.tex);
-            glUniform1i(glGetUniformLocation(p, "P"), 0);
+            bind_tex(0, att_probs_.tex);
+            set_sampler(p, "P", 0);
         }
-        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, kv_cache_[layer].tex);
-        glUniform1i(glGetUniformLocation(p, "KV"), 1);
-        glUniform1f(glGetUniformLocation(p, "pos"), (float)pos);
-        GLuint loc = glGetAttribLocation(p, "p");
-        glEnableVertexAttribArray(loc);
-        glVertexAttribPointer(loc, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+        bind_tex(1, kv_cache_[layer].tex);
+        set_sampler(p, "KV", 1);
+        glUniform1f(uloc(p, "pos"), (float)pos);
+        setup_attrib(p);
         glDrawArrays(GL_TRIANGLES, 0, 3);
         att_finish();
     }
@@ -1167,23 +1215,19 @@ void GPU::draw(const Mat& m, GLuint x, Target& t, int row ){
         GLuint p = (m.type == WeightType::INT8) ? x_q8(m.rows, m.cols)
                   : (m.type == WeightType::INT4) ? x_i4(m.rows, m.cols)
                                                  : x_i16(m.rows, m.cols);
-        glBindFramebuffer(GL_FRAMEBUFFER, t.fbo);
-        glUseProgram(p);
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, m.tex);
-        glUniform1i(glGetUniformLocation(p, "W"), 0);
-        glActiveTexture(GL_TEXTURE1);
-        glBindTexture(GL_TEXTURE_2D, x);
-        glUniform1i(glGetUniformLocation(p, "X"), 1);
+        bind_fbo(t.fbo);
+        use_program(p);
+        bind_tex(0, m.tex);
+        set_sampler(p, "W", 0);
+        bind_tex(1, x);
+        set_sampler(p, "X", 1);
         if (m.type == WeightType::INT4) {
-            glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, m.q4_param_tex);
-            glUniform1i(glGetUniformLocation(p, "P"), 2);
-            glUniform1f(glGetUniformLocation(p, "ps"), m.q4_param_scale);
+            bind_tex(2, m.q4_param_tex);
+            set_sampler(p, "P", 2);
+            glUniform1f(uloc(p, "ps"), m.q4_param_scale);
         }
-        glUniform1f(glGetUniformLocation(p, "ws"), m.scale);
-        GLuint loc = glGetAttribLocation(p, "p");
-        glEnableVertexAttribArray(loc);
-        glVertexAttribPointer(loc, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+        glUniform1f(uloc(p, "ws"), m.scale);
+        setup_attrib(p);
         // VC4 is unreliable for a single 1536-column pass (the logits tile
         // and fused-W13 width).  Split only that width; other widths are fine
         // and keeping them in one draw avoids per-draw overhead.
@@ -1196,7 +1240,7 @@ void GPU::draw(const Mat& m, GLuint x, Target& t, int row ){
     }
 
 vector<int32_t> GPU::read_i32(Target& t, int w, int h){
-        glBindFramebuffer(GL_FRAMEBUFFER, t.fbo);
+        bind_fbo(t.fbo);
         glViewport(0, 0, t.w, t.h);
         vector<uint8_t> b((size_t)w * h * 4);
         glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, b.data());
