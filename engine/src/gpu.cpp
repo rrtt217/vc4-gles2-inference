@@ -1258,6 +1258,7 @@ void GPU::att_scores(int layer, int pos){
             setup_attrib(pq);
             glDrawArrays(GL_TRIANGLES, 0, 3);
             att_finish();
+            slap("qknorm");
         }
         if (qrot_target_.tex == 0 || qrot_target_.w != att_dim_ / 2)
             qrot_target_ = make_target(att_dim_ / 2, 1);

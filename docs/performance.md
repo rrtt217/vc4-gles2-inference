@@ -1494,3 +1494,47 @@ the qkv matvec output (same FBO, same pass), then fold the `stats` reduction int
 `att_v` so the chain loses a link.  Pairing rows (which worked for logits) helps
 only the passes that are genuinely fragment-bound, and after this profile that is
 `qkv` alone.
+
+## 2026-11-03: the q chain is four dependent passes - and qk-norm is ON
+
+**Correction to the profile above: MiniMind3 is not `qk_norm=0`.**  The debug dump
+(`ATTN_QFUSE_DEBUG=1`) reads `type=INT8 act=I16_2 dim=768 kvdim=384 rows=1536
+cols=768 hd=96 qkn=1 kvb=16`, i.e. **8 heads, head_dim 96, kv_heads 4**, and the
+qk-norm scale draw runs on every layer.  It was invisible because that draw sits
+between the start of the `PROFATT2` "qrot" lap and the `slap("qrot")`: the lap was
+billing scale+qrot together.  A `qknorm` lap now separates them.
+
+Decode split per layer (`LAYER_PROFILE=1`, `--gen 4`, sync-inflated):
+
+| pass | ms/layer |
+|---|---:|
+| qk-norm scale (8 fragments, 96-serial scan each) | 0.99 |
+| qrot (384 x 1) | 1.56 |
+| score grid (seq/2 x heads) | 2.20 |
+
+So the q chain is **four** passes per layer - qkv matvec, qk-norm, qrot, score -
+three drains after the matvec where the previous entry counted two, and ~8 ms/token
+is spent on a pass whose entire output is 8 scalar values.
+
+**Attempted and reverted: fold qrot into the qkv matvec (`ATTN_QFUSE=1`).**  The q
+fragments were remapped to rope pairs `(first, partner)` instead of `(2i, 2i+1)`,
+each computing both dots (same 768 dot products, half the activation decodes) and
+emitting the rotated pair as q16 in one texel; rows `[DIM/2, DIM)` go unused and
+`[DIM, QKVDIM)` keeps the K/V rows byte-identical; the score pass decodes the pair
+layout and drops its rotation-free q read.  It built (v6/VFPv2, 446 KB) and every
+gate stayed green (q8/q4 byte-identical, PPL 311.1636 exactly) - because the path is
+**inert on this checkpoint**: with qk-norm on, the scale pass has to read the *raw*
+q rows, and a fragment writes exactly one texel, so the matvec can emit either the
+raw q (for the scale) or the rotated q (for the score), never both.  Measured stop
+condition was met the honest way: A/B `engine_base` vs candidate over 3x32 tokens
+gave 228.7 -> 226.4 ms/token median, **-1.7% with load 1.71**, i.e. noise, exactly
+as predicted for an inert path.  Reverted; only the `qknorm` lap landed.
+
+**Consequence for the goal.**  For this checkpoint the removable pass is the scale,
+not qrot: `rq` is one scalar per head computed from 96 values, and it is needed
+*before* the rotation, so it cannot move into the matvec or into the score pass.
+The candidate is to merge scale+rotate into one draw: every qrot fragment recomputes
+its head norm from raw q stored as q16 pairs (48 fetches instead of a 96-fetch
+serial scan in 8 fragments), which deletes the 0.99 ms draw and its drain at the cost
+of a redundant scan per fragment.  Do not retry "fold qrot into the matvec" on a
+qk-norm checkpoint; it is structurally blocked, not slow.

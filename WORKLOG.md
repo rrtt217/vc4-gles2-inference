@@ -3,12 +3,10 @@
 Goal: Pi Zero MiniMind3 q8 decode **<=150 ms/token**, byte-identical output.
 
 | | value |
-|---|---:|
-| decode (default path) | 227.1 ms/token median (225.0 min) after paired logits |
+| decode (default path) | 226.4 ms/token median (224.8 min), A/B vs engine_base 228.7 |
 | decode with FFN_FUSE=1 | 208.9 ms/token mean (206.3 / 213.1 / 207.3) |
 | CPU | 114.2 ms/token (user 90.1 / sys 24.1) |
-| draws | 183/token default, 159 with FFN_FUSE=1 (~0.18 ms/draw, measured) |
-| gate | q8/q4 byte-identical, PPL 311.1636 (re-verified after the profiling marks) |
+| gate | q8/q4 byte-identical, PPL 311.1636 (re-verified after the qknorm lap) |
 
 Landed commits: a053d35 (G1 GL state caching), e7cc839 (rms reduce fused),
 faa833a (results doc), 318ac15 (draw-bound finding), 84b9a88 (FFN merge plan),
@@ -20,30 +18,33 @@ gained nothing and was reverted).
 
 ## Next step (do this first)
 
-**The attention chain is bound by the number of dependent passes, not by
-fragments.**  Profiled this run (`docs/performance.md`), decode only, per layer:
-qkv 5.22 ms, score grid 3.22, qrot 2.87, stats 2.76, v 2.57, rope 0.88.  The
-12-fragment `stats` draw costs as much as the 4608-fragment score grid, and
-shrinking the score viewport to `(pos+2)/2` (bit-exact, gates green) changed
-nothing - the grid is not where the time is.  Count the passes: ~11 per layer x
-8 layers = ~88 dependent drains per token; at the ~1.5-2 ms these laps show that
-is most of the 227 ms.
+**MiniMind3 has qk-norm ON** (dim 768, 8 heads, head_dim 96, kv_dim 384,
+`QKNORM=1`; verified with `ATTN_QFUSE_DEBUG=1`).  The previous entry said qk_norm
+was off - it is not, and the scale draw runs on every layer.  `LAYER_PROFILE=1`
+now prints `PROFATT2 qknorm` too: decode split per layer is scale 0.99 ms, qrot
+1.56, score 2.20.  The q chain is qkv matvec -> qk-norm -> qrot -> score, i.e.
+**four dependent passes, three drains**, and 8 ms/token goes to a pass whose whole
+output is 8 scalars.
 
-So the next kernel is a **pass merge, not a pair kernel**: fold `qrot` into the
-qkv matvec so the chain loses a link - both consumers (`kv_rope_write` and the
-score grid) already read `qkv_target_`, so produce the rotated q in the pass that
-writes q.  Keep the q16 encode and exactly the rounding `x_i24encq` applies; if
-the merged value differs by 1 LSB, stop and put the change behind a default-off
-switch instead of shipping it.  Second candidate after that: fold the `stats`
-max+sumexp reduction into `att_v` - same shape that drifted under `FFN_FUSE`, so
-only with the identical accumulation order.
+**Fold the qk-norm scale into `qrot`** (one draw instead of two draws + a drain).
+`rq = 1/sqrt(sum q^2/HEADDIM + eps)` is per head and needed *before* the rotation,
+so it cannot move into the matvec or the score pass - but every qrot fragment can
+recompute it: store the raw q rows as q16 pairs (two rows per matvec fragment, the
+same integers the 24-bit encoding holds, so bit-exact) and let each fragment read
+its head 48 texels instead of doing a 96-serial-fetch scan in 8 fragments.
+Expected ~8 ms/token if the redundant scan is cheaper than the drain it removes;
+keep the summation order of `att_qnorm_scale` exactly (`for z in 0..HEADDIM`,
+`dec24q` -> q16 decode of the same integer) and stop if any value moves 1 LSB.
+
+**Do not retry "fold qrot into the qkv matvec"** - implemented this run and
+reverted (`docs/performance.md`): with qk-norm on the scale pass needs the raw q
+rows, and a fragment writes one texel, so the matvec cannot emit raw q and rotated
+q at once.  It was inert by construction: gates green, A/B -1.7% at load 1.71 =
+noise.  The kernel is not in the tree.
 
 Do **not** shrink viewports for attention passes (measured, no gain), and do not
-open with a fused prob+v.  `LAYER_PROFILE=1` now prints `PROFATT`
-(qkv/rope/scores/stats/v) and `PROFATT2` (qrot/score); isolate decode by
-differencing a `--gen 12` run against `--gen 4` so prefill cancels, and normalise
-by `qkv`, which is position-independent.
-
+open with a fused prob+v.  Isolate decode by differencing a `--gen 12` run against
+`--gen 4` so prefill cancels, and normalise by `qkv`, which is position-independent.
 ## Where the time goes
 
 `LAYER_PROFILE=1` (sync-inflated, use the ratios): attn 36%, ffn 27%, w2 17%,
