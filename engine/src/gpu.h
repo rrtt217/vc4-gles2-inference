@@ -23,6 +23,7 @@ struct CandidateResult {
 class GPU {
     friend class Session;
 public:
+    long draws() const { return draws_; }
     GPU();
     ~GPU();
 
@@ -89,6 +90,7 @@ public:
 
     void sync();
     bool needs_finish() const;
+    bool rms_fused() const;
     int max_target_dim() const { return max_target_dim_; }
 
 private:
@@ -130,6 +132,8 @@ private:
     GLuint uloc_prog_ = 0;
     vector<ULocRec>* uloc_tab_ = nullptr;
     GLint uloc(GLuint prog, const char* name);
+    void draw_tri();
+    long draws_ = 0;
     GLint aloc(GLuint prog, const char* name);
     void bind_tex(int unit, GLuint tex);
     void bind_fbo(GLuint fbo);

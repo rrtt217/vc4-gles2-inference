@@ -41,7 +41,7 @@ std::string swiglu(int hidden, bool fused, XFormat out);
 
 std::string rms_stats_split(int dim, XFormat residual);
 std::string rms_stats_reduce();
-std::string rms_norm(int dim, XFormat residual, XFormat out);
+std::string rms_norm(int dim, XFormat residual, XFormat out, bool fused_reduce);
 
 std::string att_kv_rope(const AttnConfig& c);
 std::string att_qnorm_scale(const AttnConfig& c);

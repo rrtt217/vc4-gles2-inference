@@ -466,7 +466,14 @@ string rms_stats_reduce() {
         "gl_FragColor=encs(s);}";
 }
 
-string rms_norm(int dim, XFormat residual, XFormat out) {
+string rms_norm(int dim, XFormat residual, XFormat out, bool fused_reduce) {
+    // Fusing the 32-way reduce into every normalising fragment keeps the exact
+    // summation order, so the result is bit-identical to the separate pass; it
+    // trades one draw for 32 texture reads per output fragment.
+    const string ss_read = fused_reduce
+        ? "float ss=0.0;for(int p=0;p<32;p++){"
+          "ss+=x_i24raw(texture2D(S,vec2((float(p)+0.5)/32.0,0.5)))/4096.0;}"
+        : "float ss=x_i24raw(texture2D(S,vec2(0.5,0.5)))/4096.0;";
     const string D = to_string(dim);
     const string RW = to_string(x_texels(dim, residual));
     const string DW = to_string(x_texels(dim, XFormat::I16_2));
@@ -478,7 +485,7 @@ string rms_norm(int dim, XFormat residual, XFormat out) {
     if (out == XFormat::I8_4) {
         body =
             "void main(){int t=int(gl_FragCoord.x);int i0=4*t;"
-            "float ss=x_i24raw(texture2D(S,vec2(0.5,0.5)))/4096.0;"
+            + ss_read +
             "float inv=1.0/sqrt(ss/float(" + D + ")+1e-5);"
             "vec4 wa=texture2D(W,vec2((float(2*t)+0.5)/float(" + DW + "),0.5));"
             "vec4 wb=texture2D(W,vec2((float(2*t+1)+0.5)/float(" + DW + "),0.5));"
@@ -490,7 +497,7 @@ string rms_norm(int dim, XFormat residual, XFormat out) {
     } else {
         body =
             "void main(){int t=int(gl_FragCoord.x);int i0=2*t;int i1=i0+1;"
-            "float ss=x_i24raw(texture2D(S,vec2(0.5,0.5)))/4096.0;"
+            + ss_read +
             "float inv=1.0/sqrt(ss/float(" + D + ")+1e-5);" + wsplit +
             "float v0=R1(X,i0," + RW + ".0)*inv*w0;"
             "float v1=0.0;if(i1<" + D + ")v1=R1(X,i1," + RW + ".0)*inv*w1;"

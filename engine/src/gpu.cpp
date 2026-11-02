@@ -588,14 +588,23 @@ GLuint GPU::rmsnorm(GLuint x, GLuint w, Target& out){
         set_sampler(ps, "X", 0);
         setup_attrib(ps);
         glDrawArrays(GL_TRIANGLES, 0, 3);
-        GLuint pr = x_rms_reduce();
-        bind_fbo(rms_stats_.fbo);
-        glViewport(0, 0, 1, 1);
-        use_program(pr);
-        bind_tex(0, rms_partial_.tex);
-        set_sampler(pr, "S", 0);
-        setup_attrib(pr);
-        glDrawArrays(GL_TRIANGLES, 0, 3);
+        // RMS_FUSED folds the 32-way reduce into every normalising fragment:
+        // same summation order, so bit-identical, one draw less per rmsnorm.
+        // VC4 defaults to the fused reduce (one draw less per rmsnorm, same
+        // summation order so bit-identical); other backends keep the split pass,
+        // where a 32-fetch fragment per output texel may cost more than a draw.
+        // ACT8=1 (int8 activations) does not accept the fused form.
+        const bool fused_reduce = rms_fused() && act_fmt_ != XFormat::I8_4;
+        if (!fused_reduce) {
+            GLuint pr = x_rms_reduce();
+            bind_fbo(rms_stats_.fbo);
+            glViewport(0, 0, 1, 1);
+            use_program(pr);
+            bind_tex(0, rms_partial_.tex);
+            set_sampler(pr, "S", 0);
+            setup_attrib(pr);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+        }
         layer_finish("NF_RMS");
 
         GLuint pn = x_rms_norm();
@@ -606,7 +615,7 @@ GLuint GPU::rmsnorm(GLuint x, GLuint w, Target& out){
         set_sampler(pn, "X", 0);
         bind_tex(1, w);
         set_sampler(pn, "W", 1);
-        bind_tex(2, rms_stats_.tex);
+        bind_tex(2, fused_reduce ? rms_partial_.tex : rms_stats_.tex);
         set_sampler(pn, "S", 2);
         setup_attrib(pn);
         glDrawArrays(GL_TRIANGLES, 0, 3);
@@ -681,6 +690,13 @@ vector<uint8_t> GPU::read_bytes(Target& t, int w, int h){
     }
 
 void GPU::sync(){ glFinish(); }
+
+bool GPU::rms_fused() const{
+        // RMS_FUSED forces it on, RMS_SPLIT forces the old two-pass form.
+        if (getenv("RMS_FUSED")) return true;
+        if (getenv("RMS_SPLIT")) return false;
+        return needs_finish();   // VC4 / VideoCore
+    }
 
 bool GPU::needs_finish() const{
         if (getenv("FORCE_GLFINISH")) return true;
@@ -874,8 +890,10 @@ GLuint GPU::x_rms_split(){
 GLuint GPU::x_rms_reduce(){ return x_prog("xrmsr", rms_stats_reduce()); }
 
 GLuint GPU::x_rms_norm(){
-        return x_prog("xrmsn_" + to_string(att_dim_) + "_" + x_format_name(res_fmt_) + "_" + x_format_name(act_fmt_),
-                      rms_norm(att_dim_, res_fmt_, act_fmt_));
+        const bool fused = rms_fused() && act_fmt_ != XFormat::I8_4;
+        return x_prog("xrmsn_" + to_string(att_dim_) + "_" + x_format_name(res_fmt_) + "_" +
+                          x_format_name(act_fmt_) + (fused ? "_f" : ""),
+                      rms_norm(att_dim_, res_fmt_, act_fmt_, fused));
     }
 
 GLuint GPU::x_v(){

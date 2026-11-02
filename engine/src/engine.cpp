@@ -579,5 +579,8 @@ int main(int argc, char** argv) {
     }
     if (g_stop) { gpu.sync(); cout << "[interrupted]\n"; return 0; }
     if (generated) cout << "decode avg " << decode_ms / generated << " ms/token\n";
+    if (getenv("DRAWCOUNT") && generated)
+        cout << "draws " << gpu.draws() << " total, "
+             << (double)gpu.draws() / generated << " per token\n";
     return 0;
 }
