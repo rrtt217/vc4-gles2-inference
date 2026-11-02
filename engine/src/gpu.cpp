@@ -10,6 +10,7 @@
 #include <unordered_map>
 #include <vector>
 
+
 GPU::GPU(){ init_egl(); init_gl(); }
 
 GPU::~GPU(){
@@ -436,8 +437,8 @@ void GPU::init_attention(int dim, int kv_dim, int heads, int kv_heads, int head_
         const int half = head_dim / 2;
         const int qkv_rows = dim + 2 * kv_dim;
         qkv_target_ = make_target(qkv_rows, 1);
-        att_scores_ = make_target(seq, heads);
-        att_stats_ = make_target(2 * heads, 1);
+        att_scores_ = make_target(seq / 2, heads);
+        att_stats_ = make_target(heads, 1);
         att_probs_ = make_target(seq, heads);
         att_out_ = make_target(x_texels(dim, act_fmt_), 1);
         kv_cache_.clear();
@@ -482,11 +483,8 @@ GLuint GPU::attention_block(const Mat& qkv, GLuint x, int layer, int pos){
         lap("scores");
         att_stats(pos);
         lap("stats");
-        if (getenv("ATTN_FUSE_PROB") == nullptr || strcmp(getenv("ATTN_FUSE_PROB"), "0") != 0) {
-            // fused into att_v; the pass is skipped
-        } else {
-            att_probs(pos);
-        }
+        // q16-packed scores/stats are decoded directly in att_v; the old
+        // standalone probability pass is no longer compatible and is retired.
         lap("probs");
         att_v(layer, pos);
         lap("v");
@@ -509,10 +507,10 @@ void GPU::init_persistent(int dim, int layers, const vector<float>& rms_att,
         for (int l = 0; l < layers; ++l) {
             vector<float> a(rms_att.begin() + (size_t)l * dim, rms_att.begin() + (size_t)(l + 1) * dim);
             vector<float> f(rms_ffn.begin() + (size_t)l * dim, rms_ffn.begin() + (size_t)(l + 1) * dim);
-            rms_att_tex_.push_back(make_q16_texture(a));
-            rms_ffn_tex_.push_back(make_q16_texture(f));
+            rms_att_tex_.push_back(make_q16_pair_texture(a));
+            rms_ffn_tex_.push_back(make_q16_pair_texture(f));
         }
-        rms_final_tex_ = make_q16_texture(rms_final);
+        rms_final_tex_ = make_q16_pair_texture(rms_final);
     }
 
 GLuint GPU::upload_hidden(const vector<float>& x){
@@ -837,6 +835,13 @@ GLuint GPU::make_q24_texture(const vector<float>& x, float scale){
         return make_texture((int)x.size(), 1, data.data());
     }
 
+// RMS weight vectors packed two q16 per texel: the norm pass writes two (or
+// four) outputs per fragment, so a pair read halves its W fetches.
+GLuint GPU::make_q16_pair_texture(const vector<float>& x){
+        vector<uint8_t> data = x_pack(x, XFormat::I16_2);
+        return make_texture(x_texels((int)x.size(), XFormat::I16_2), 1, data.data());
+    }
+
 GLuint GPU::make_q16_texture(const vector<float>& x){
         vector<uint8_t> data((size_t)x.size() * 4);
         for (size_t i = 0; i < x.size(); ++i) {
@@ -922,11 +927,13 @@ void GPU::att_finish() {
     }
 
 void GPU::att_scores(int layer, int pos){
-        static const bool hoist = !(getenv("ATTN_HOIST") && strcmp(getenv("ATTN_HOIST"), "0") == 0);
+        // The q16 score-pair layout requires the hoisted q path; ATTN_HOIST=0
+        // is intentionally ignored after the q16 attention change.
+        static const bool hoist = true;
         if (!hoist) {
             GLuint pi = x_score(false);
             glBindFramebuffer(GL_FRAMEBUFFER, att_scores_.fbo);
-            glViewport(0, 0, att_seq_, att_heads_);
+            glViewport(0, 0, att_seq_ / 2, att_heads_);
             glUseProgram(pi);
             glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, qkv_target_.tex);
             glUniform1i(glGetUniformLocation(pi, "R"), 0);
@@ -963,11 +970,11 @@ void GPU::att_scores(int layer, int pos){
             glDrawArrays(GL_TRIANGLES, 0, 3);
             att_finish();
         }
-        if (qrot_target_.tex == 0 || qrot_target_.w != att_dim_)
-            qrot_target_ = make_target(att_dim_, 1);
+        if (qrot_target_.tex == 0 || qrot_target_.w != att_dim_ / 2)
+            qrot_target_ = make_target(att_dim_ / 2, 1);
         GLuint pr = x_qrot();
         glBindFramebuffer(GL_FRAMEBUFFER, qrot_target_.fbo);
-        glViewport(0, 0, att_dim_, 1);
+        glViewport(0, 0, att_dim_ / 2, 1);
         glUseProgram(pr);
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, qkv_target_.tex);
         glUniform1i(glGetUniformLocation(pr, "R"), 0);
@@ -988,7 +995,7 @@ void GPU::att_scores(int layer, int pos){
 
         GLuint p = x_score(true);
         glBindFramebuffer(GL_FRAMEBUFFER, att_scores_.fbo);
-        glViewport(0, 0, att_seq_, att_heads_);
+        glViewport(0, 0, att_seq_ / 2, att_heads_);
         glUseProgram(p);
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, qrot_target_.tex);
         glUniform1i(glGetUniformLocation(p, "Q"), 0);
@@ -1006,7 +1013,7 @@ void GPU::att_scores(int layer, int pos){
 void GPU::att_stats(int pos){
         GLuint p = x_stats();
         glBindFramebuffer(GL_FRAMEBUFFER, att_stats_.fbo);
-        glViewport(0, 0, 2 * att_heads_, 1);
+        glViewport(0, 0, att_heads_, 1);
         glUseProgram(p);
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, att_scores_.tex);
         glUniform1i(glGetUniformLocation(p, "S"), 0);
@@ -1021,7 +1028,7 @@ void GPU::att_stats(int pos){
 void GPU::att_probs(int pos){
         GLuint p = x_prob();
         glBindFramebuffer(GL_FRAMEBUFFER, att_probs_.fbo);
-        glViewport(0, 0, att_seq_, att_heads_);
+        glViewport(0, 0, att_seq_ / 2, att_heads_);
         glUseProgram(p);
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, att_scores_.tex);
         glUniform1i(glGetUniformLocation(p, "S"), 0);
@@ -1036,7 +1043,8 @@ void GPU::att_probs(int pos){
     }
 
 void GPU::att_v(int layer, int pos){
-        static const bool fuse_prob = !(getenv("ATTN_FUSE_PROB") && strcmp(getenv("ATTN_FUSE_PROB"), "0") == 0);
+        // q16 score/stats layout has one packed texel per head; fused decode is mandatory.
+        static const bool fuse_prob = true;
         GLuint p = x_v();
         glBindFramebuffer(GL_FRAMEBUFFER, att_out_.fbo);
         glViewport(0, 0, att_out_.w, 1);

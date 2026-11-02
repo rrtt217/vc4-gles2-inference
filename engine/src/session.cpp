@@ -40,7 +40,12 @@ Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
                 if (act8_mode == 1) gpu_.act_fmt_ = XFormat::I8_4;
                 gpu_.ffn_fmt_ = XFormat::I8_4;
             }
-            gpu_.res_pack_ = getenv("RES_PACK") && strcmp(getenv("RES_PACK"), "1") == 0 &&
+            // Residual stream packed two int16 per texel: halves the fetch count in
+            // every rmsnorm pass (stats and norm both read the residual) and lets
+            // matvec_add produce two rows per fragment.  Measured -11% decode on
+            // the q8 model, perplexity unchanged.  RES_PACK=0 opts out.
+            const char* rp = getenv("RES_PACK");
+            gpu_.res_pack_ = !(rp && strcmp(rp, "0") == 0) &&
                              q8_model && !m_.wo.empty() && m_.wo[0].type == WeightType::INT8;
             gpu_.res_fmt_ = gpu_.res_pack_ ? XFormat::I16_2 : XFormat::I16_1;
         }

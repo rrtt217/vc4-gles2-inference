@@ -33,30 +33,81 @@ string q24_helpers() {
 
 string matvec_q8(int rows, int cols, XFormat xf) {
     const int axw = x_texels(cols, xf);
+    const string ROWS = to_string(rows), COLS4 = to_string(cols / 4), AXW = to_string(axw);
+    // VC4's shader compiler generates a slower loop when the activation decode
+    // goes through a helper that takes two texel fetches as arguments.  Emitting
+    // the fetches and the two scalar decoders inline is measurably faster, so
+    // the I16_2 fast path keeps the inline form.
+    if (xf == XFormat::I16_2) {
+        return "precision highp float;uniform sampler2D W,X;uniform float ws;"
+               "float dA(vec4 c){float u=c.r*65280.0+c.g*255.0;"
+               "return u>=32768.0?u-65536.0:u;}"
+               "float dB(vec4 c){float u=c.b*65280.0+c.a*255.0;"
+               "return u>=32768.0?u-65536.0:u;}"
+               "void main(){int r=int(gl_FragCoord.x);float s=0.0;"
+               "for(int q=0;q<" + COLS4 + ";q++){"
+               "vec4 c=texture2D(W,vec2((float(q)+0.5)/float(" + COLS4 + "),"
+               "(float(r)+0.5)/float(" + ROWS + ")));"
+               "vec4 w=c*255.0-128.0;"
+               "vec4 xa=texture2D(X,vec2((float(2*q)+0.5)/float(" + AXW + "),0.5));"
+               "vec4 xb=texture2D(X,vec2((float(2*q+1)+0.5)/float(" + AXW + "),0.5));"
+               "s+=w.x*dA(xa)+w.y*dB(xa)+w.z*dA(xb)+w.w*dB(xb);}"
+               "float v=clamp(floor(s*ws+0.5),-32768.0,32767.0);if(v<0.0)v+=65536.0;"
+               "v+=8388608.0;"
+               "float r0=floor(v/16777216.0);float g=floor(v/65536.0)-r0*256.0;"
+               "float b=floor(v/256.0)-r0*65536.0-g*256.0;"
+               "float a=v-r0*16777216.0-g*65536.0-b*256.0;"
+               "gl_FragColor=vec4(r0/255.0,g/255.0,b/255.0,a/255.0);}";
+    }
     return head(xf) + q24_helpers() +
         "uniform sampler2D W,X;uniform float ws;"
         "void main(){int r=int(gl_FragCoord.x);float s=0.0;"
-        "for(int q=0;q<" + to_string(cols / 4) + ";q++){"
-        "vec4 c=texture2D(W,vec2((float(q)+0.5)/float(" + to_string(cols / 4) + "),"
-        "(float(r)+0.5)/float(" + to_string(rows) + ")));"
+        "for(int q=0;q<" + COLS4 + ";q++){"
+        "vec4 c=texture2D(W,vec2((float(q)+0.5)/float(" + COLS4 + "),"
+        "(float(r)+0.5)/float(" + ROWS + ")));"
         "vec4 w=c*255.0-128.0;"
-        "vec4 x=X4Q(X,q*4," + to_string(axw) + ".0);"
+        "vec4 x=X4Q(X,q*4," + AXW + ".0);"
         "s+=w.x*x.x+w.y*x.y+w.z*x.z+w.w*x.w;}"
         "gl_FragColor=x_i24encq(s*ws);}";
 }
 
 string matvec_q8_pair(int rows, int cols, XFormat xf) {
     const int axw = x_texels(cols, xf);
+    const string ROWS = to_string(rows), COLS4 = to_string(cols / 4), AXW = to_string(axw);
+    if (xf == XFormat::I16_2) {
+        return "precision highp float;uniform sampler2D W1,W2,X;uniform float ws1,ws2;"
+               "float dA(vec4 c){float u=c.r*65280.0+c.g*255.0;"
+               "return u>=32768.0?u-65536.0:u;}"
+               "float dB(vec4 c){float u=c.b*65280.0+c.a*255.0;"
+               "return u>=32768.0?u-65536.0:u;}"
+               "vec2 enc16(float s,float w){float v=clamp(floor(s*w+0.5),-32768.0,32767.0);"
+               "if(v<0.0)v+=65536.0;float hi=floor(v/256.0);"
+               "return vec2(hi/255.0,(v-hi*256.0)/255.0);}"
+               "void main(){int r=int(gl_FragCoord.x);float s1=0.0,s2=0.0;"
+               "for(int q=0;q<" + COLS4 + ";q++){"
+               "vec4 c1=texture2D(W1,vec2((float(q)+0.5)/float(" + COLS4 + "),"
+               "(float(r)+0.5)/float(" + ROWS + ")));"
+               "vec4 c2=texture2D(W2,vec2((float(q)+0.5)/float(" + COLS4 + "),"
+               "(float(r)+0.5)/float(" + ROWS + ")));"
+               "vec4 w1=c1*255.0-128.0;vec4 w2=c2*255.0-128.0;"
+               "vec4 xa=texture2D(X,vec2((float(2*q)+0.5)/float(" + AXW + "),0.5));"
+               "vec4 xb=texture2D(X,vec2((float(2*q+1)+0.5)/float(" + AXW + "),0.5));"
+               "float a0=dA(xa),a1=dB(xa),a2=dA(xb),a3=dB(xb);"
+               "s1+=w1.x*a0+w1.y*a1+w1.z*a2+w1.w*a3;"
+               "s2+=w2.x*a0+w2.y*a1+w2.z*a2+w2.w*a3;}"
+               "vec2 p1=enc16(s1,ws1),p2=enc16(s2,ws2);"
+               "gl_FragColor=vec4(p1.x,p1.y,p2.x,p2.y);}";
+    }
     return head(xf) +
         "uniform sampler2D W1,W2,X;uniform float ws1,ws2;"
         "void main(){int r=int(gl_FragCoord.x);float s1=0.0,s2=0.0;"
-        "for(int q=0;q<" + to_string(cols / 4) + ";q++){"
-        "vec4 c1=texture2D(W1,vec2((float(q)+0.5)/float(" + to_string(cols / 4) + "),"
-        "(float(r)+0.5)/float(" + to_string(rows) + ")));"
-        "vec4 c2=texture2D(W2,vec2((float(q)+0.5)/float(" + to_string(cols / 4) + "),"
-        "(float(r)+0.5)/float(" + to_string(rows) + ")));"
+        "for(int q=0;q<" + COLS4 + ";q++){"
+        "vec4 c1=texture2D(W1,vec2((float(q)+0.5)/float(" + COLS4 + "),"
+        "(float(r)+0.5)/float(" + ROWS + ")));"
+        "vec4 c2=texture2D(W2,vec2((float(q)+0.5)/float(" + COLS4 + "),"
+        "(float(r)+0.5)/float(" + ROWS + ")));"
         "vec4 w1=c1*255.0-128.0;vec4 w2=c2*255.0-128.0;"
-        "vec4 x=X4Q(X,q*4," + to_string(axw) + ".0);"
+        "vec4 x=X4Q(X,q*4," + AXW + ".0);"
         "s1+=w1.x*x.x+w1.y*x.y+w1.z*x.z+w1.w*x.w;"
         "s2+=w2.x*x.x+w2.y*x.y+w2.z*x.z+w2.w*x.w;}"
         "gl_FragColor=x_st2q(s1*ws1,s2*ws2);}";
@@ -64,14 +115,40 @@ string matvec_q8_pair(int rows, int cols, XFormat xf) {
 
 string matvec_q8_add(int rows, int cols, XFormat xf, XFormat rf) {
     const int axw = x_texels(cols, xf);
+    const string ROWS = to_string(rows), COLS4 = to_string(cols / 4), AXW = to_string(axw);
+    if (xf == XFormat::I16_2 && rf == XFormat::I16_1) {
+        // Inline form: VC4 compiles this noticeably faster than the generic
+        // helper-based version (the helper takes two texel fetches as arguments).
+        return "precision highp float;uniform sampler2D W,X,R;uniform float ws;"
+               "float dA(vec4 c){float u=c.r*65280.0+c.g*255.0;"
+               "return u>=32768.0?u-65536.0:u;}"
+               "float dB(vec4 c){float u=c.b*65280.0+c.a*255.0;"
+               "return u>=32768.0?u-65536.0:u;}"
+               "float dr(vec4 c){float u=c.r*65280.0+c.g*255.0;"
+               "if(u>=32768.0)u-=65536.0;return u/256.0;}"
+               "void main(){int r=int(gl_FragCoord.x);float s=0.0;"
+               "for(int q=0;q<" + COLS4 + ";q++){"
+               "vec4 c=texture2D(W,vec2((float(q)+0.5)/float(" + COLS4 + "),"
+               "(float(r)+0.5)/float(" + ROWS + ")));"
+               "vec4 w=c*255.0-128.0;"
+               "vec4 xa=texture2D(X,vec2((float(2*q)+0.5)/float(" + AXW + "),0.5));"
+               "vec4 xb=texture2D(X,vec2((float(2*q+1)+0.5)/float(" + AXW + "),0.5));"
+               "s+=w.x*dA(xa)+w.y*dB(xa)+w.z*dA(xb)+w.w*dB(xb);}"
+               "float v=clamp(floor(s*ws+0.5),-32768.0,32767.0);"
+               "vec4 rc=texture2D(R,vec2((float(r)+0.5)/float(" + ROWS + "),0.5));"
+               "float oq=v+dr(rc)*256.0;"
+               "float q=clamp(floor(oq+0.5),-32768.0,32767.0);if(q<0.0)q+=65536.0;"
+               "float hi=floor(q/256.0),lo=q-hi*256.0;"
+               "gl_FragColor=vec4(hi/255.0,lo/255.0,0.0,1.0);}";
+    }
     return head(xf) + x_residual_glsl(rf) +
         "uniform sampler2D W,X,R;uniform float ws;"
         "void main(){int r=int(gl_FragCoord.x);float s=0.0;"
-        "for(int q=0;q<" + to_string(cols / 4) + ";q++){"
-        "vec4 c=texture2D(W,vec2((float(q)+0.5)/float(" + to_string(cols / 4) + "),"
-        "(float(r)+0.5)/float(" + to_string(rows) + ")));"
+        "for(int q=0;q<" + COLS4 + ";q++){"
+        "vec4 c=texture2D(W,vec2((float(q)+0.5)/float(" + COLS4 + "),"
+        "(float(r)+0.5)/float(" + ROWS + ")));"
         "vec4 w=c*255.0-128.0;"
-        "vec4 x=X4Q(X,q*4," + to_string(axw) + ".0);"
+        "vec4 x=X4Q(X,q*4," + AXW + ".0);"
         "s+=w.x*x.x+w.y*x.y+w.z*x.z+w.w*x.w;}"
         "float res=R1Q(R,r," + to_string(x_texels(rows, rf)) + ".0);"
         "gl_FragColor=x_st1q(s*ws+res);}";
@@ -280,27 +357,33 @@ string rms_stats_reduce() {
 string rms_norm(int dim, XFormat residual, XFormat out) {
     const string D = to_string(dim);
     const string RW = to_string(x_texels(dim, residual));
+    const string DW = to_string(x_texels(dim, XFormat::I16_2));
+    // W is packed two q16 per texel, matching the output granularity.
+    const string wsplit =
+        "vec4 wc=texture2D(W,vec2((float(t)+0.5)/float(" + DW + "),0.5));"
+        "float w0=x_i16(wc.rg);float w1=x_i16(wc.ba);";
     string body;
     if (out == XFormat::I8_4) {
         body =
             "void main(){int t=int(gl_FragCoord.x);int i0=4*t;"
             "float ss=x_i24raw(texture2D(S,vec2(0.5,0.5)))/4096.0;"
             "float inv=1.0/sqrt(ss/float(" + D + ")+1e-5);"
-            "float v0=R1(X,i0," + RW + ".0)*inv*x_i16(texture2D(W,vec2((float(i0)+0.5)/float(" + D + "),0.5)).rg);"
-            "float v1=R1(X,i0+1," + RW + ".0)*inv*x_i16(texture2D(W,vec2((float(i0+1)+0.5)/float(" + D + "),0.5)).rg);"
-            "float v2=R1(X,i0+2," + RW + ".0)*inv*x_i16(texture2D(W,vec2((float(i0+2)+0.5)/float(" + D + "),0.5)).rg);"
-            "float v3=R1(X,i0+3," + RW + ".0)*inv*x_i16(texture2D(W,vec2((float(i0+3)+0.5)/float(" + D + "),0.5)).rg);"
+            "vec4 wa=texture2D(W,vec2((float(2*t)+0.5)/float(" + DW + "),0.5));"
+            "vec4 wb=texture2D(W,vec2((float(2*t+1)+0.5)/float(" + DW + "),0.5));"
+            "float v0=R1(X,i0," + RW + ".0)*inv*x_i16(wa.rg);"
+            "float v1=R1(X,i0+1," + RW + ".0)*inv*x_i16(wa.ba);"
+            "float v2=R1(X,i0+2," + RW + ".0)*inv*x_i16(wb.rg);"
+            "float v3=R1(X,i0+3," + RW + ".0)*inv*x_i16(wb.ba);"
             "gl_FragColor=x_i8enc4(v0,v1,v2,v3);}";
     } else {
         body =
             "void main(){int t=int(gl_FragCoord.x);int i0=2*t;int i1=i0+1;"
             "float ss=x_i24raw(texture2D(S,vec2(0.5,0.5)))/4096.0;"
-            "float inv=1.0/sqrt(ss/float(" + D + ")+1e-5);"
-            "float v0=R1(X,i0," + RW + ".0)*inv*x_i16(texture2D(W,vec2((float(i0)+0.5)/float(" + D + "),0.5)).rg);"
-            "float v1=0.0;if(i1<" + D + ")"
-            "v1=R1(X,i1," + RW + ".0)*inv*x_i16(texture2D(W,vec2((float(i1)+0.5)/float(" + D + "),0.5)).rg);"
+            "float inv=1.0/sqrt(ss/float(" + D + ")+1e-5);" + wsplit +
+            "float v0=R1(X,i0," + RW + ".0)*inv*w0;"
+            "float v1=0.0;if(i1<" + D + ")v1=R1(X,i1," + RW + ".0)*inv*w1;"
             "gl_FragColor=x_st2(v0,v1);}";
     }
     return head(residual) + x_residual_glsl(residual) + q24_helpers() +
-        "uniform sampler2D X,W,S;" + body;
+        "uniform sampler2D X,W,S;uniform float dummy;" + body;
 }

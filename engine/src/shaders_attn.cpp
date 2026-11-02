@@ -130,9 +130,13 @@ string att_qnorm_scale(const AttnConfig& c) {
 }
 
 string att_qrot(const AttnConfig& c) {
+    // Two head dims per fragment, written as a q16 pair.  The scores pass then
+    // decodes two q values per fetch instead of one 24-bit texel each, which is
+    // the dominant cost of that loop.  The value grid is unchanged: enc24s(q,256)
+    // stored the same integer that x_st2/q16 stores.
     return "precision highp float;\n" + att_defs(c) + att_helpers() +
         "uniform sampler2D R,RT,QN,QS;uniform float pos;"
-        "void main(){int x=int(gl_FragCoord.x);int h=x/HEADDIM;int i=x-h*HEADDIM;"
+        "float qval(int h,int i){"
         "float rq=1.0;"
         "if(QKNORM==1){rq=dec24s(texture2D(QS,vec2((float(h)+0.5)/float(HEADS),0.5)),65536.0);}"
         "float qv=dec24q(texture2D(R,vec2((float(h*HEADDIM+i)+0.5)/float(QKVDIM),0.5)));"
@@ -147,9 +151,12 @@ string att_qrot(const AttnConfig& c) {
         "vec4 rs=texture2D(RT,vec2((float(2*ti+1)+0.5)/float(2*HALF),(pos+0.5)/float(SEQ)));"
         "float co=dec24s(rc,4096.0),sn=dec24s(rs,4096.0);"
         "bool first=(ROPEHALF==1)?(i<HALF):(even==0);"
-        "float q=first?qv*co-b*sn:b*sn+qv*co;"
-        "gl_FragColor=enc24s(q,256.0);}";
+        "return first?qv*co-b*sn:b*sn+qv*co;}"
+        "void main(){int x=int(gl_FragCoord.x);int h=x/(HEADDIM/2);int i0=(x-h*(HEADDIM/2))*2;"
+        "vec4 p0=q16(qval(h,i0)),p1=q16(qval(h,i0+1));"
+        "gl_FragColor=vec4(p0.r,p0.g,p1.r,p1.g);}";
 }
+
 
 string att_score(const AttnConfig& c, bool hoist) {
     if (!hoist) {
@@ -182,27 +189,43 @@ string att_score(const AttnConfig& c, bool hoist) {
     }
     return "precision highp float;\n" + att_defs(c) + att_helpers() +
         "uniform sampler2D Q,KV;uniform float pos,invsqrt;"
-        "void main(){int t=int(gl_FragCoord.x);int h=int(gl_FragCoord.y);"
-        "if(float(t)>pos){gl_FragColor=enc24s(0.0,1024.0);return;}int kvh=h/GROUP;float s=0.0;"
+        "vec4 qe(float v){float q=clamp(floor(v*1024.0+0.5),-32768.0,32767.0);"
+        "if(q<0.0)q+=65536.0;float hi=floor(q/256.0);"
+        "return vec4(hi/255.0,(q-hi*256.0)/255.0,0.0,1.0);}"
+        "void main(){int T=int(gl_FragCoord.x);int h=int(gl_FragCoord.y);"
+        "int t0=T*2;int t1=t0+1;int kvh=h/GROUP;float s0=0.0,s1=0.0;"
+        "bool e0=(float(t0)<=pos);bool e1=(float(t1)<=pos);"
+        "if(!e0&&!e1){gl_FragColor=vec4(0.0,0.0,0.0,0.0);return;}"
         "for(int i=0;i<HEADDIM;i++){"
-        "float q=dec24raw(texture2D(Q,vec2((float(h*HEADDIM+i)+0.5)/float(DIM),0.5)))/256.0;"
+        "vec4 qp=texture2D(Q,vec2((float((h*HEADDIM+i)/2)+0.5)/float(DIM/2),0.5));"
+        "float q=(((h*HEADDIM+i)-(h*HEADDIM+i)/2*2)==0)?dec16(qp.rg):dec16(qp.ba);"
         "int ki=kvh*HEADDIM+i;int tx=ki;int odd=0;"
         "if(KVPACK==16){tx=ki/2;odd=ki-tx*2;}else if(KVPACK==8){tx=ki/4;odd=ki-tx*4;}"
-        "float k=decKV(texture2D(KV,vec2((float(tx)+0.5)/float(KVWIDTH),(float(t)+0.5)/float(SEQ))),odd);"
-        "s+=q*k;}"
-        "gl_FragColor=enc24s(s*invsqrt,1024.0);}";
+        "if(e0)s0+=q*decKV(texture2D(KV,vec2((float(tx)+0.5)/float(KVWIDTH),(float(t0)+0.5)/float(SEQ))),odd);"
+        "if(e1)s1+=q*decKV(texture2D(KV,vec2((float(tx)+0.5)/float(KVWIDTH),(float(t1)+0.5)/float(SEQ))),odd);}"
+        "vec4 p0=qe(e0?s0*invsqrt:0.0),p1=qe(e1?s1*invsqrt:0.0);"
+        "gl_FragColor=vec4(p0.r,p0.g,p1.r,p1.g);}";
 }
 
 string att_stats(const AttnConfig& c) {
     return "precision highp float;\n" + att_defs(c) + att_helpers() +
         "uniform sampler2D S;uniform float pos;"
-        "void main(){int x=int(gl_FragCoord.x);int h=x/2;int kind=x-h*2;float mx=-1e30;"
-        "for(int t=0;t<SEQ;t++){if(float(t)>pos)break;"
-        "mx=max(mx,dec24s(texture2D(S,vec2((float(t)+0.5)/float(SEQ),(float(h)+0.5)/float(HEADS))),1024.0));}"
+        // One fragment per head: (max, sum) packed into a single texel as two q16
+        // values.  Previously two fragments per head did the identical scan and
+        // only differed in which of the two statistics they wrote.
+        "vec2 qs(float v,float s){float q=clamp(floor(v*s+0.5),-32768.0,32767.0);"
+        "if(q<0.0)q+=65536.0;float hi=floor(q/256.0);"
+        "return vec2(hi/255.0,(q-hi*256.0)/255.0);}"
+        "void main(){int h=int(gl_FragCoord.x);float mx=-1e30;"
+        "for(int T=0;T<SEQ/2;T++){int t0=T*2;if(float(t0)>pos)break;"
+        "vec4 c=texture2D(S,vec2((float(T)+0.5)/float(SEQ/2),(float(h)+0.5)/float(HEADS)));"
+        "mx=max(mx,dec16(c.rg)/4.0);if(float(t0+1)<=pos)mx=max(mx,dec16(c.ba)/4.0);}"
         "float sum=0.0;"
-        "for(int t=0;t<SEQ;t++){if(float(t)>pos)break;"
-        "sum+=exp(dec24s(texture2D(S,vec2((float(t)+0.5)/float(SEQ),(float(h)+0.5)/float(HEADS))),1024.0)-mx);}"
-        "gl_FragColor=enc24s(kind==0?mx:sum,1024.0);}";
+        "for(int T=0;T<SEQ/2;T++){int t0=T*2;if(float(t0)>pos)break;"
+        "vec4 c=texture2D(S,vec2((float(T)+0.5)/float(SEQ/2),(float(h)+0.5)/float(HEADS)));"
+        "sum+=exp(dec16(c.rg)/4.0-mx);if(float(t0+1)<=pos)sum+=exp(dec16(c.ba)/4.0-mx);}"
+        "vec2 pm=qs(mx,1024.0),ps=qs(sum,32.0);"
+        "gl_FragColor=vec4(pm.x,pm.y,ps.x,ps.y);}";
 }
 
 string att_prob(const AttnConfig& c) {
@@ -217,37 +240,71 @@ string att_prob(const AttnConfig& c) {
 }
 
 string att_v(const AttnConfig& c, XFormat out) {
-    static const bool fuse_prob = !(getenv("ATTN_FUSE_PROB") && strcmp(getenv("ATTN_FUSE_PROB"), "0") == 0);
+    // q16 score/stats layout has one packed texel per head; fused decode is mandatory.
+    static const bool fuse_prob = true;
     const string prob_bind = fuse_prob ? "S,ST,KV" : "P,KV";
     const string prob_body = fuse_prob
-        ? string("vec4 sm=texture2D(ST,vec2((float(2*h)+0.5)/float(2*HEADS),0.5));"
-                 "vec4 su=texture2D(ST,vec2((float(2*h+1)+0.5)/float(2*HEADS),0.5));"
-                 "float mx=dec24s(sm,1024.0);float sum=dec24s(su,1024.0);"
+        ? string("vec4 st=texture2D(ST,vec2((float(h)+0.5)/float(HEADS),0.5));"
+                 "float mx=dec16(st.rg)/4.0;float sum=dec16(st.ba)*8.0;"
                  "float invs=(sum>0.0)?(1.0/sum):0.0;")
         : string("");
     const string prob_read = fuse_prob
-        ? string("float sc=dec24s(texture2D(S,vec2((float(t)+0.5)/float(SEQ),(float(h)+0.5)/float(HEADS))),1024.0);"
+        ? string("vec4 sp=texture2D(S,vec2((float(t/2)+0.5)/float(SEQ/2),(float(h)+0.5)/float(HEADS)));"
+                 "float sc=((t-(t/2)*2)==0)?dec16(sp.rg)/4.0:dec16(sp.ba)/4.0;"
                  "float p=exp(sc-mx)*invs;")
         : string("float p=dec24s(texture2D(P,vec2((float(t)+0.5)/float(SEQ),(float(h)+0.5)/float(HEADS))),65536.0);");
-    string main;
-    if (out == XFormat::I8_4) {
-        main = "void main(){int t=int(gl_FragCoord.x);int x0=4*t;"
-               "gl_FragColor=x_i8enc4(att(x0),att(x0+1),att(x0+2),att(x0+3));}";
-    } else {
-        main = "void main(){int t=int(gl_FragCoord.x);int x0=2*t;"
-               "gl_FragColor=x_st2(att(x0),att(x0+1));}";
+
+    // Two (or four) output channels per fragment share one probability decode and
+    // one pass over the KV rows.  HEADDIM is even, so a fragment never straddles a
+    // head boundary and a single head index is enough.
+    const int N = (out == XFormat::I8_4) ? 4 : 2;
+    // The V index depends only on the head/dim, not on t, so it is computed once
+    // outside the loop.  The loop is unrolled by two: one score texel already
+    // holds the pair (t, t+1), so two positions cost one score fetch.
+    string heads_idx;
+    for (int k = 0; k < N; ++k) {
+        string K = to_string(k);
+        heads_idx += "int ci" + K + "=i0+" + K + ";int vi" + K + "=kvh*HEADDIM+ci" + K + ";"
+                     "int tx" + K + "=KVDIM+vi" + K + ";int od" + K + "=0;"
+                     "if(KVPACK==16){tx" + K + "=KVDIM/2+vi" + K + "/2;od" + K + "=vi" + K + "-(vi" + K + "/2)*2;}"
+                     "else if(KVPACK==8){tx" + K + "=KVDIM/4+vi" + K + "/4;od" + K + "=vi" + K + "-(vi" + K + "/4)*4;}";
     }
-    return "precision highp float;\n" + x_glsl(out) + att_defs(c) + att_helpers() +
+    string bodies, accs;
+    for (int k = 0; k < N; ++k) {
+        string K = to_string(k);
+        bodies += "a" + K + "+=p0*v0_" + K + ";";
+        accs += "a" + K + (k + 1 < N ? "," : "");
+    }
+    string loads0, loads1;
+    for (int k = 0; k < N; ++k) {
+        string K = to_string(k);
+        loads0 += "float v0_" + K + "=decKV(texture2D(KV,vec2((float(tx" + K + ")+0.5)/float(KVWIDTH),"
+                  "(float(t0)+0.5)/float(SEQ))),od" + K + ");";
+        loads1 += "float v1_" + K + "=decKV(texture2D(KV,vec2((float(tx" + K + ")+0.5)/float(KVWIDTH),"
+                  "(float(t1)+0.5)/float(SEQ))),od" + K + ");";
+    }
+    string init;
+    for (int k = 0; k < N; ++k) init += "float a" + to_string(k) + "=0.0;";
+    string enc = (N == 4) ? "gl_FragColor=x_i8enc4(" + accs + ");}"
+                          : "gl_FragColor=x_st2(" + accs + ");}";
+
+    string fs = "precision highp float;\n" + x_glsl(out) + att_defs(c) + att_helpers() +
         "uniform sampler2D " + prob_bind + ";uniform float pos;"
-        "float att(int x){int h=x/HEADDIM;int i=x-h*HEADDIM;int kvh=h/GROUP;float acc=0.0;" +
+        "void main(){int t=int(gl_FragCoord.x);int x0=" + to_string(N) + "*t;"
+        "int h=x0/HEADDIM;int i0=x0-h*HEADDIM;int kvh=h/GROUP;" + init + heads_idx +
         prob_body +
-        "for(int t=0;t<SEQ;t++){if(float(t)>pos)break;" +
-        prob_read +
-        "int vi=kvh*HEADDIM+i;int tx=KVDIM+vi;int odd=0;"
-        "if(KVPACK==16){tx=KVDIM/2+vi/2;odd=vi-(vi/2)*2;}else if(KVPACK==8){tx=KVDIM/4+vi/4;odd=vi-(vi/4)*4;}"
-        "float v=decKV(texture2D(KV,vec2((float(tx)+0.5)/float(KVWIDTH),(float(t)+0.5)/float(SEQ))),odd);"
-        "acc+=p*v;}return acc;}" + main;
+        "int mxT=int(pos+0.5)/2+1;"
+        "for(int T=0;T<SEQ/2;T++){if(T>=mxT)break;"
+        "int t0=T*2;int t1=t0+1;"
+        "vec4 sp=texture2D(S,vec2((float(T)+0.5)/float(SEQ/2),(float(h)+0.5)/float(HEADS)));"
+        "float p0=exp(dec16(sp.rg)/4.0-mx)*invs;" +
+        loads0 + bodies +
+        "if(float(t1)<=pos){float p1=exp(dec16(sp.ba)/4.0-mx)*invs;" + loads1 +
+        "a0+=p1*v1_0;" + (N > 1 ? "a1+=p1*v1_1;" : "") + (N > 2 ? "a2+=p1*v1_2;a3+=p1*v1_3;" : "") + "}}"
+        + enc;
+    return fs;
 }
+
 
 string sum_logits() {
     return "precision highp float;"

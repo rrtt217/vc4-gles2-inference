@@ -684,3 +684,215 @@ strings remain byte-identical with `ACT8` unset.
 This is the same lesson as q4: a small fixed corpus can rank a lossy format
 wrongly.  Keep the harness and compare at least two corpora before changing a
 default.
+
+
+## The refactor's 12% regression: helper indirection in the hot matvec loops
+
+Moving the engine into `src/` with the X-format abstraction made decode ~12%
+slower (313 vs 279 ms/token) with **identical** GL work — same draws (14004),
+same fragments (10,713,749), same uploads (83), same CPU time (11.2+4.2 s), and
+*more* free CMA.  So the cost was in the code the driver generated, not in the
+amount of work submitted.
+
+Diffing the emitted GLSL of every shader (dump is one env var away) showed the
+hot loops had been rewritten from
+
+```glsl
+vec4 xa = texture2D(X, vec2((float(2*q)+0.5)/float(384), 0.5));
+vec4 xb = texture2D(X, vec2((float(2*q+1)+0.5)/float(384), 0.5));
+s += w.x*dA(xa) + w.y*dB(xa) + w.z*dA(xb) + w.w*dB(xb);
+```
+
+to
+
+```glsl
+vec4 x = X4Q(X, q*4, 384.0);          // macro -> x_i16quadq(fetch, fetch)
+s += w.x*x.x + w.y*x.y + w.z*x.z + w.w*x.w;
+```
+
+Semantically identical, but on VC4 the helper that receives two texture fetches
+as arguments compiles to a slower loop.  Emitting the inline form again in the
+three hot builders (`matvec_q8`, `matvec_q8_pair`, `matvec_q8_add`) restores
+both the speed and — notably — the exact numeric output:
+
+| build | decode (interleaved A/B) | PPL | greedy text |
+|---|---:|---:|---|
+| pre-refactor | 280.6 / 299.2 | 273.05 | `…提供准确、` |
+| refactor (helpers) | 313.4 | 274.43 | `…提供精准` |
+| refactor + inline hot loops | 282.8 / 296.5 | 273.29 | `…提供准确、` |
+
+The 0.4% perplexity drift disappeared with the inline form, which is a good
+reminder that "semantically identical" GLSL is not bit-identical arithmetic on
+this GPU.
+
+Rule for `shaders.cpp`: the generic `X4Q` macro form is fine for cold paths, but
+the three widest matvec loops keep the explicit two-fetch/decode form.
+
+
+## Attention: q stored as q16 pairs (-2.6%)
+
+`att_qrot` used to write one 24-bit texel per head dimension and `att_scores`
+decoded one q value per fetch.  The stored grid was `enc24s(q, 256)`, i.e. an
+integer in +-32767 — exactly what a q16 slot holds — so the format can be
+halved with no loss: `att_qrot` now emits two head dims per fragment as a q16
+pair and the scores loop decodes two q values from one fetch.
+
+| build | decode (4 interleaved rounds) | PPL |
+|---|---|---:|
+| pre-refactor | 280.9 / 279.0 / 279.6 / 281.4 | 273.05 |
+| + inline matvecs + att_v fusion | 272.8 (min) | 273.29 |
+| **+ q16 q-vector** | **273.6 / 271.9 / 272.9 / 273.0** | 273.40 |
+
+Cumulative against the pre-refactor engine: **-2.6% decode**, golden greedy text
+byte-identical, q4 unchanged (PPL 328.53 vs 329.16 before, text identical).
+
+The same trick applies to the score texture itself (it is also a 24-bit encoding
+of a 1/1024 grid), which would let two positions share one fetch in the scores
+pass; that is the next step if more is needed.
+
+
+## Score texture as q16 pairs (-1 to -3%)
+
+The score matrix was the same story as the q vector: `enc24s(s, 1024)` stores an
+integer in +-32767, i.e. exactly a q16 slot.  Packing two positions per texel
+(`SEQ/2` wide) lets one fragment compute **two** attention rows, sharing the q
+decode, and halves the fetch count in `att_stats` (which scans the scores twice:
+once for the max, once for the sum) and in `att_v`.
+
+| build | decode (min of 4 interleaved rounds) | PPL |
+|---|---:|---:|
+| pre-refactor | 278.2 | 273.05 |
+| + inline matvecs, att_v fusion, q16 q vector | 271.9 | 273.40 |
+| **+ q16 score pairs** | **270.1** | **272.53** |
+
+Golden greedy text is byte-identical throughout.  q8 PPL ends up slightly *below*
+the pre-refactor number (272.53 vs 273.05) because the intermediate values now go
+through the same q16 grid the reference quantization used.
+
+Cumulative against the pre-refactor engine: **-2.9% decode** (280 -> 270 ms).
+
+
+### Tried: online softmax statistics (not landed)
+
+`att_stats` scans the score row twice — once for the max, once for the
+exponential sum.  Folding both into one online pass (`sum = sum*exp(mx-a)` when a
+new max appears) looked like a clean 2x on that pass, but the shader produced
+garbage output (PPL 33619 instead of 272) in both the plain and the
+guarded-first-element forms, and the second attempt did not even rebuild.  Left
+for a session that can iterate on the GLSL in isolation; the two-pass version is
+what ships.
+
+
+## Attention statistics: one fragment per head (-0 to -1%)
+
+`att_stats` used to run two fragments per head (`kind` 0 and 1) that performed
+the *identical* two-pass scan and differed only in which statistic they wrote.
+Now one fragment per head writes `(max, sum)` packed into a single texel, with
+the max on the 1/1024 grid and the sum on a 1/16 grid (they need different
+ranges: the sum reaches `pos+1`, which does not fit a q16 slot at 1/1024).
+
+| build | decode (min of 3) | PPL |
+|---|---:|---:|
+| pre-refactor | 277.2 | 273.05 |
+| + inline matvecs, att_v fusion, q16 q + scores | 270.1 | 272.53 |
+| **+ packed stats** | **270.0** | **272.27** |
+
+The pass is now half the fragments and one texel per head, but it was small
+enough that the wall-clock difference sits inside the noise; the perplexity is
+unchanged and the work is strictly less, so it stays.
+
+
+## att_v: hoisted V index + unrolled by two (-1%)
+
+The `p*V` loop recomputed the V texel index every iteration even though it only
+depends on the head and the output dimension, and it fetched one score texel per
+position even though the score texture now holds the pair (t, t+1).  Hoisting the
+index out of the loop and unrolling by two halves both counts:
+
+| build | decode (3 rounds) |
+|---|---|
+| pre-refactor | 278.4 / 287.6 / 280.0 |
+| + all previous work | 270.0 (min) |
+| **+ hoisted/unrolled att_v** | **269.0 / 271.1 / 273.2** |
+
+Cumulative against the pre-refactor engine: **280 -> 269 ms (-3.9%)**, greedy text
+byte-identical, PPL 272.27 (pre-refactor 273.05).
+
+The run-to-run variance also dropped sharply (269-273 vs 278-288 before), which
+suggests the loop was bound by the integer index arithmetic rather than memory.
+
+
+## Packed residual stream, now default (-11%)
+
+`RES_PACK` (two int16 residual values per texel) was implemented early in the
+refactor work and measured **neutral**, so it stayed opt-in.  That measurement is
+stale: back then the matvec loops were the bottleneck and the residual packing
+only helped `matvec_add`.  With the matvec decoders inline and the attention
+passes tightened, the rmsnorm passes became a large share of the layer — and both
+of them read the residual stream (`stats` and `norm` each fetch all 768 values).
+Packing halves those fetches.
+
+| build | decode (3 rounds) | q8 PPL |
+|---|---|---:|
+| pre-refactor | 277.4 / 276.9 / 278.0 | 273.05 |
+| + everything up to att_v unroll | 269.0 | 272.27 |
+| **+ packed residual (default)** | **235.4 / 242.3 / 235.4** | **269.61** |
+
+**-15% against the pre-refactor engine**, and perplexity is *better* (269.61 vs
+273.05) because the residual now shares the q16 grid the reference uses.
+
+A precision detail found while validating: the softmax denominator was packed on a
+1/16 grid, which cost q4 2% perplexity (334.9 vs 329.2).  At 1/32 both models are
+back: q8 269.61, q4 329.22 (pre-refactor q4: 329.16).
+
+`RES_PACK=0` restores the unpacked stream.
+
+
+## Switch sweep on the new baseline (all toggles)
+
+With the default path at ~240 ms the opt-in switches were re-measured; the
+relative value of every one of them moved because the baseline they were tuned
+against is gone:
+
+| switch | decode | verdict |
+|---|---:|---|
+| default | 240.0 | — |
+| `ACT8=2` | 272.3 | now **13% worse** |
+| `ACT8=1` | 282.7 | now **18% worse** |
+| `KV_PACK=8` | 238.7 | neutral |
+| `FFN_PAIR=0` | 341.3 | paired gate is essential |
+| `ATTN_HOIST=0` | 259.1 | hoisting is essential |
+
+The int8 activation modes now lose because the inline fast paths cover `I16_2`
+only; `I8_4` falls back to the generic helper shaders.  Worth revisiting only if
+the I8_4 path gets the same inline treatment.
+
+An inline `matvec_add` for the packed residual (`I16_2` in and out) was also
+tried: 243.4 / 237.3 / 240.1 against 235.4 / 242.3 / 235.4 — inside the noise, so
+it was reverted rather than kept for the sake of looking busy.
+
+### Remaining, with estimates
+
+1. `scores` shares one K fetch between two queries during prefill (needs a KV
+   write layout change) - the largest structural item left, ~3-5%.
+2. `kv_rope_write` folded into the qkv matvec output (one fewer draw per layer).
+3. rms weights packed as q16 pairs so the norm pass does one fetch per two
+   outputs, ~0.5-1%.
+4. Inline `I8_4` variants, which would bring the int8 activation modes back.
+
+
+## RMS weight vectors packed as q16 pairs
+
+`rms_norm` writes two outputs per fragment but fetched the two weight values from
+two separate texels.  Packing the (static) rms vectors two-per-texel makes it one
+fetch.  Output text and perplexity are unchanged (269.6078, identical to four
+decimals); the win is small and sits under the noise this machine now has.
+
+## Benchmarking caveat: the Pi also runs a Minecraft server
+
+`./pumpkin` has been resident since Nov 1 (~72 CPU-hours).  With it running, the
+same binary swings between 236 and 560 ms/token and the load average sits at
+2-2.6, which is why several A/B rounds in this log disagree.  Comparisons taken
+back-to-back in one session are still valid (both sides see the same
+interference), but absolute numbers should be taken with the server idle, and the
+best-of-N is the only stable statistic.

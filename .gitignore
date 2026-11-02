@@ -31,6 +31,7 @@ __pycache__/
 # Engine/build outputs
 engine/engine
 engine/engine_mm3
+engine/engine_mm3_pi
 engine/engine_attn
 engine/engine_layer
 engine/engine_profile

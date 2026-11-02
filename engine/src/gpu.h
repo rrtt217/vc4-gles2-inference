@@ -165,6 +165,7 @@ private:
     static GLuint make_q24_texture(const vector<float>& x, float scale);
 
     static GLuint make_q16_texture(const vector<float>& x);
+    static GLuint make_q16_pair_texture(const vector<float>& x);
 
     static Target make_target(int w, int h);
 
