@@ -113,6 +113,24 @@ string matvec_q8_pair(int rows, int cols, XFormat xf) {
         "gl_FragColor=x_st2q(s1*ws1,s2*ws2);}";
 }
 
+string matvec_q8_pair_fused(int rows, int cols, XFormat xf) {
+    const int axw = x_texels(cols, xf);
+    const int rows2 = 2 * rows;
+    return head(xf) +
+        "uniform sampler2D W,X;uniform float ws;"
+        "void main(){int r=int(gl_FragCoord.x);float s1=0.0,s2=0.0;"
+        "for(int q=0;q<" + to_string(cols / 4) + ";q++){"
+        "vec4 c1=texture2D(W,vec2((float(q)+0.5)/float(" + to_string(cols / 4) + "),"
+        "(float(r)+0.5)/float(" + to_string(rows2) + ")));"
+        "vec4 c2=texture2D(W,vec2((float(q)+0.5)/float(" + to_string(cols / 4) + "),"
+        "(float(r+" + to_string(rows) + ")+0.5)/float(" + to_string(rows2) + ")));"
+        "vec4 w1=c1*255.0-128.0;vec4 w2=c2*255.0-128.0;"
+        "vec4 x=X4Q(X,q*4," + to_string(axw) + ".0);"
+        "s1+=w1.x*x.x+w1.y*x.y+w1.z*x.z+w1.w*x.w;"
+        "s2+=w2.x*x.x+w2.y*x.y+w2.z*x.z+w2.w*x.w;}"
+        "gl_FragColor=x_st2q(s1*ws,s2*ws);}";
+}
+
 string matvec_q8_add(int rows, int cols, XFormat xf, XFormat rf) {
     const int axw = x_texels(cols, xf);
     const string ROWS = to_string(rows), COLS4 = to_string(cols / 4), AXW = to_string(axw);

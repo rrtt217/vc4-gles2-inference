@@ -25,6 +25,7 @@ std::string att_helpers();
 
 std::string matvec_q8(int rows, int cols, XFormat xf);
 std::string matvec_q8_pair(int rows, int cols, XFormat xf);
+std::string matvec_q8_pair_fused(int rows, int cols, XFormat xf);
 std::string matvec_q8_add(int rows, int cols, XFormat xf, XFormat rf);
 std::string matvec_q8_add_pair(int rows, int cols, XFormat xf);
 std::string matvec_i16(int rows, int cols, XFormat xf);

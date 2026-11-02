@@ -1089,8 +1089,10 @@ family, so compare decode more than prefill.
 
 The q8 15M files initially produced gibberish on the GPU FFN path while their
 fp32 and i16 checkpoints were coherent.  The cause is the fused-W13 q8 path,
-the same q8 q24-FFN family as the earlier MiniMind2 failure.  `make_q8_from_i16.py`
-now splits W13 into W1/W3 (`split=1`), which selects the paired q16 FFN path;
-the regenerated `stories15M.q8` and `TinyChat15M.q8` are the coherent files in
-the table.  `stories42M` already used split W1/W3.  Q4 is unaffected (fused q4
+the same q8 q24-FFN family as the earlier MiniMind2 failure.  The runtime now
+has `matvec_q8_pair_fused`, a paired q16 W13 shader; old fused q8 files work
+again (stories15M fused: ~5-8 ms/token, coherent).  `make_q8_from_i16.py` still
+writes split W1/W3 by default because separate scales and the existing paired
+path are faster (stories15M split: ~3.8-4.2 ms/token); the table uses the split
+files.  `stories42M` already used split W1/W3.  Q4 is unaffected (fused q4
 still uses its own path).

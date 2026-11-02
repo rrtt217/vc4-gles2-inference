@@ -44,9 +44,10 @@ mat:
 Q8M1 uses the same layout with int8 data and no rope metadata.  MiniMind q8
 needs `ROPE_THETA=1000000 ROPE_HALF=1`; I16M1 stores these fields.
 
-`make_q8_from_i16.py` always writes `split=1` and splits a fused W13 into
-W1/W3.  The fused q8 W13 GPU FFN path is broken; the split layout takes the
-paired q16 W1/W3 path.  Reconvert old fused q8 files.
+`make_q8_from_i16.py` writes `split=1` by default and splits a fused W13
+into W1/W3.  The split layout keeps separate q8 scales and takes the paired
+q16 W1/W3 path.  The runtime also supports fused q8 W13 through
+`matvec_q8_pair_fused`, so old fused files remain loadable.
 
 ### I16M2 / Q8M2
 

@@ -121,6 +121,40 @@ GLuint GPU::ffn_split(const Mat& w1, const Mat& w3, GLuint x, int hidden){
     }
 
 GLuint GPU::ffn_fused(const Mat& w13, GLuint x, int hidden){
+        // q8 W13 uses the paired q16 path: the old q24 path miscomputes
+        // fused-W13 FFN.  q4/i16 keep the q24 path.
+        if (w13.type == WeightType::INT8) {
+            const int aw = x_texels(hidden, ffn_fmt_);
+            if (ffn_pair_a_.tex == 0 || ffn_pair_a_.w != hidden) ffn_pair_a_ = make_target(hidden, 1);
+            if (ffn_h_a_.tex == 0 || ffn_h_a_.w != aw) ffn_h_a_ = make_target(aw, 1);
+            GLuint p = x_q8_pair_fused(hidden, w13.cols);
+            glBindFramebuffer(GL_FRAMEBUFFER, ffn_pair_a_.fbo);
+            glViewport(0, 0, hidden, 1);
+            glUseProgram(p);
+            glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, w13.tex);
+            glUniform1i(glGetUniformLocation(p, "W"), 0);
+            glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, x);
+            glUniform1i(glGetUniformLocation(p, "X"), 1);
+            glUniform1f(glGetUniformLocation(p, "ws"), w13.scale);
+            GLuint loc = glGetAttribLocation(p, "p");
+            glEnableVertexAttribArray(loc);
+            glVertexAttribPointer(loc, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+            GLuint ps = x_swiglu_pair(hidden);
+            glBindFramebuffer(GL_FRAMEBUFFER, ffn_h_a_.fbo);
+            glViewport(0, 0, aw, 1);
+            glUseProgram(ps);
+            glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, ffn_pair_a_.tex);
+            glUniform1i(glGetUniformLocation(ps, "A"), 0);
+            loc = glGetAttribLocation(ps, "p");
+            glEnableVertexAttribArray(loc);
+            glVertexAttribPointer(loc, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+            if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
+            else layer_finish("NF_FFN");
+            if (getenv("FFN_SYNC")) { glFlush(); glFinish(); }
+            return ffn_h_a_.tex;
+        }
         matvec_to(w13, x, ffn_a_);
         return swiglu_fused(ffn_a_, hidden);
     }
@@ -685,6 +719,11 @@ GLuint GPU::x_q8(int rows, int cols){
 GLuint GPU::x_q8_pair(int rows, int cols){
         return x_prog("xq8p_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(act_fmt_),
                       matvec_q8_pair(rows, cols, act_fmt_));
+    }
+
+GLuint GPU::x_q8_pair_fused(int rows, int cols){
+        return x_prog("xq8pf_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(act_fmt_),
+                      matvec_q8_pair_fused(rows, cols, act_fmt_));
     }
 
 GLuint GPU::x_i4_pair(int rows, int cols){

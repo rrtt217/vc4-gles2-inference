@@ -7,9 +7,10 @@ KV packed variants. The model format itself is in
 ## Q8 conversion
 
 Convert an I16 checkpoint with `make_q8_from_i16.py`; q8 is a terminal format,
-not a source for q4.  The converter always writes `split=1` (separate W1/W3),
-even when the I16 source has a fused W13: the fused q8 GPU FFN path is wrong,
-while split W1/W3 uses the paired q16 path.  Reconvert old fused q8 files.
+not a source for q4.  The converter writes `split=1` (separate W1/W3) by
+default, even when the I16 source has a fused W13, so each half keeps its own
+q8 scale and uses the paired q16 FFN path.  The runtime also handles fused q8
+W13 with `matvec_q8_pair_fused`, so existing fused files still load.
 
 ## Weight quantization experiments
 
