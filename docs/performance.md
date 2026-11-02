@@ -1141,3 +1141,80 @@ scales, so they remain the preferred conversion for quality.
 MiniMind3 q8 and q4 both stay coherent, but the q8 self-introduction differs
 (``我是一个AI助手...`` vs q4 ``我是MiniMind...``); this is present with both the
 old and new Pi binaries and is not caused by the fused-W13 change.
+
+## Draw-path work: G1 (GL state caching) and G2 (rmsnorm reduce fusion)
+
+Measured on the Pi Zero with `scripts/bench_plain_ab.sh`, plain mode, greedy,
+`--prompt "Once upon a time, there was a little" --gen 32`, min of three
+alternating runs.  CPU/token is the rusage difference between the gen-32 and
+gen-128 runs, so it excludes prefill and model load.
+
+| build | draws/token | decode (min) | CPU/token | user | sys |
+|---|---:|---:|---:|---:|---:|
+| deef607 baseline | 204 | 237.3 | 136.4 | 108.5 | 27.9 |
+| + G1 state caching | 204 | 234.6 | 123.0 | 96.7 | 26.3 |
+| + G2 rms reduce fused | 188 | 229.2 | 114.5 | 89.5 | 25.0 |
+
+Target is 150 ms/token, so this is roughly a fifth of the way there: the draw
+count has to come down by another ~90 before the fixed per-draw cost stops
+dominating.
+
+### G1: cache the GL state the draws never change
+
+Each draw used to do 3-4 `glGetUniformLocation` calls by name, an
+`glGetAttribLocation`, two `glUniform1i` for sampler units that never move, and
+`glEnableVertexAttribArray`/`glVertexAttribPointer` for an attribute whose state
+is context-global in GLES2.  All of it is now cached: `uloc()`/`aloc()` key the
+cache on the string literal's address (names are literals, so the pointer is a
+stable identity and beats hashing), `setup_attrib()` sets the attribute once,
+`set_sampler()` writes a unit once, and `bind_tex()`/`bind_fbo()`/`use_program()`
+skip redundant rebinds.
+
+Two traps found while landing it:
+
+* **A sampler is not fixed per program.** The q4 kernels first point `R` at unit
+  2 and then re-point it at unit 3 (because `P` takes unit 2).  Caching the unit
+  without verifying it made q4 emit `排排排排...`, while q8 stayed correct —
+  a gate that only covered q8 would have shipped it.
+* **Static texture helpers bypass the cache.** `make_texture()` binds on its own,
+  so the bind cache is file-scope and the helpers call
+  `gl_state_forget_bindings()`; a per-instance cache would go stale the first
+  time a new input texture is allocated mid-run.
+
+G1 is worth 11.6% of CPU but only 1.1% of decode: the CPU is already hidden
+behind the GPU, so submission savings alone cannot move the wall clock.
+
+### G2: fold the rmsnorm reduce into the normalise
+
+`rmsnorm` was three draws (32 partials, 1x1 reduce, normalise).  The reduce
+produces one scalar that every normalising fragment reads, so the normalise can
+sum the same 32 partials itself with the identical expression and order:
+
+    float ss=0.0;
+    for(int p=0;p<32;p++) ss += x_i24raw(texture2D(S,vec2((p+0.5)/32,0.5)))/4096.0;
+
+`regression.sh` reports PPL 311.1636 with and without it and both gates keep
+their byte-identical text, so the fusion is numerically free.  It is the default
+on VC4/VideoCore and off elsewhere (`RMS_FUSED` / `RMS_SPLIT` override), because
+32 fetches per output fragment may cost more than a draw on other GPUs.
+`ACT8=1` does not accept the fused form and stays on the split path.
+
+### Two negative results worth keeping
+
+* **Batching the command stream is slower.** The FFN draws each call `glFlush()`.
+  Suppressing that flush (`FFN_NOFLUSH=1`) made decode *worse*, 253-266 vs
+  234-239 ms/token across three alternating pairs: the flush is what lets the
+  GPU start while the CPU builds the next command list, so a bigger batch just
+  delays the first tile.
+* **The 1536-column strip is required, not conservative.** Drawing the 1536-wide
+  qkv matvec in one pass instead of two 768 strips returns garbage tokens
+  (`编写一个编写一个...` on q8, `我我我我...` on q4).  The strip stays.
+
+### Where the remaining draw budget goes
+
+Per layer (q8 chunked path): rms_att 2, qkv 2 (strip), rope 1, qnorm 1, qrot 1,
+scores 1, stats 1, v 1, wo 1, rms_ffn 2, gate pair 2, swiglu 2, w2 2 = 19 draws,
+plus about 15 per token outside the layer loop (embedding, final rmsnorm,
+logits tiles, sampling).  The next candidates, in order: fold `att_stats` into
+`att_v` (the same trick as the rms reduce), merge the two swiglu draws by
+writing both FFN chunks into one texture, and cut the logits tile count.
