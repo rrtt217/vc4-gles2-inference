@@ -356,3 +356,46 @@ string top2(int rows, int chunk) {
         "float sv=floor(sum*2048.0+0.5);float sh=floor(sv/256.0),sl=sv-sh*256.0;"
         "gl_FragColor=vec4(mh/255.0,ml/255.0,sh/255.0,sl/255.0);}";
 }
+
+// Packed-logits Top-K: the logits target is half width, two q16 logits per texel
+// (.rg = even vocabulary index, .ba = odd).  Same chunking and same output
+// encoding as the unpacked versions, only the sample changes.
+string top2_fast_packed(int rows, int chunk) {
+    return "precision highp float;"
+        "uniform sampler2D L;uniform float tr,nr;"
+        "float dv(float v){if(v>=32768.0)v-=65536.0;return v/256.0;}"
+        "float dl(vec4 c){return dv(floor(c.r*255.0+0.5)*256.0+floor(c.g*255.0+0.5));}"
+        "float dh(vec4 c){return dv(floor(c.b*255.0+0.5)*256.0+floor(c.a*255.0+0.5));}"
+        "void main(){int x=int(gl_FragCoord.x);int ch=x/2;int rank=x-ch*2;int start=ch*" + to_string(chunk) + ";"
+        "float best1=-1e30,best2=-1e30;int i1=0,i2=0;"
+        "for(int k=0;k<" + to_string(chunk) + ";k++){int idx=start+k;if(idx>=" + to_string(rows) + ")break;"
+        "int h=idx/2;vec4 c=texture2D(L,vec2((float(h)+0.5)/768.0,(tr+0.5)/nr));"
+        "float v=((h*2)==idx)?dl(c):dh(c);"
+        "if(v>best1){best2=best1;i2=i1;best1=v;i1=idx;}else if(v>best2){best2=v;i2=idx;}}"
+        "float bv=(rank==0?best1:best2)*256.0;int bi=rank==0?i1:i2;"
+        "if(bv<0.0)bv+=65536.0;float vh=floor(bv/256.0),vl=bv-vh*256.0;"
+        "float ih=floor(float(bi)/256.0),il=float(bi)-ih*256.0;"
+        "gl_FragColor=vec4(vh/255.0,vl/255.0,ih/255.0,il/255.0);}";
+}
+
+string top2_packed(int rows, int chunk) {
+    return "precision highp float;"
+        "uniform sampler2D L;uniform float tr,nr,invt;"
+        "float dv(float v){if(v>=32768.0)v-=65536.0;return v/256.0;}"
+        "float dl(vec4 c){return dv(floor(c.r*255.0+0.5)*256.0+floor(c.g*255.0+0.5));}"
+        "float dh(vec4 c){return dv(floor(c.b*255.0+0.5)*256.0+floor(c.a*255.0+0.5));}"
+        "void main(){int x=int(gl_FragCoord.x);int ch=x/3;int rank=x-ch*3;int start=ch*" + to_string(chunk) + ";"
+        "float best1=-1e30,best2=-1e30,lm=-1e30,ls=0.0;int i1=0,i2=0;"
+        "for(int k=0;k<" + to_string(chunk) + ";k++){int idx=start+k;if(idx>=" + to_string(rows) + ")break;"
+        "int h=idx/2;vec4 c=texture2D(L,vec2((float(h)+0.5)/768.0,(tr+0.5)/nr));"
+        "float v=((h*2)==idx)?dl(c):dh(c);"
+        "if(v>best1){best2=best1;i2=i1;best1=v;i1=idx;}else if(v>best2){best2=v;i2=idx;}"
+        "if(v>lm){ls=ls*exp((lm-v)*invt)+1.0;lm=v;}else{ls+=exp((v-lm)*invt);}}"
+        "if(rank<2){float bv=(rank==0?best1:best2)*256.0;int bi=rank==0?i1:i2;"
+        "if(bv<0.0)bv+=65536.0;float vh=floor(bv/256.0),vl=bv-vh*256.0;"
+        "float ih=floor(float(bi)/256.0),il=float(bi)-ih*256.0;"
+        "gl_FragColor=vec4(vh/255.0,vl/255.0,ih/255.0,il/255.0);return;}"
+        "float sum=ls;float mv=lm*256.0;if(mv<0.0)mv+=65536.0;float mh=floor(mv/256.0),ml=mv-mh*256.0;"
+        "float sv=floor(sum*2048.0+0.5);float sh=floor(sv/256.0),sl=sv-sh*256.0;"
+        "gl_FragColor=vec4(mh/255.0,ml/255.0,sh/255.0,sl/255.0);}";
+}

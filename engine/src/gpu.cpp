@@ -299,18 +299,74 @@ GLuint GPU::swiglu_fused(Target& src, int hidden){
         return ffn_h_.tex;
     }
 
-vector<float> GPU::logits(const vector<Mat>& tiles, const vector<float>& x){
+bool GPU::logits_pair() const{
+        if (getenv("LOGITS_SPLIT")) return false;
+        return act_fmt_ != XFormat::I8_4;
+    }
+
+// The paired kernel is q8-only; a q4 checkpoint keeps q4 vocabulary tiles and
+// therefore the unpacked path (byte-identical to before this change).
+bool GPU::logits_pair_ok(const vector<Mat>& tiles) const{
+        if (!logits_pair()) return false;
+        for (size_t i = 0; i < tiles.size(); ++i)
+            if (tiles[i].type != WeightType::INT8) return false;
+        return true;
+    }
+
+// Logits pass.  The paired path renders two vocabulary rows per fragment and
+// packs both q16 logits into one texel, so the target is half as wide (768).
+void GPU::logits_pass(const vector<Mat>& tiles, GLuint x){
         const int rows = (int)tiles.size();
-        if (logits_target_.tex == 0 || logits_target_.h != rows) logits_target_ = make_target(1536, rows);
-        GLuint xt = upload_activations(x);
-        for (int i = 0; i < rows; ++i) draw(tiles[i], xt, logits_target_, i);
-        if (needs_finish()) { glFlush(); glFinish(); }
-        vector<int32_t> raw = read_i32(logits_target_, 1536, rows);
+        if (logits_pair_ok(tiles)) {
+            if (logits_target_.tex == 0 || logits_target_.h != rows || logits_target_.w != 768)
+                logits_target_ = make_target(768, rows);
+            logits_packed_ = true;
+            for (int i = 0; i < rows; ++i) {
+                const Mat& m = tiles[i];
+                GLuint p = x_q8_pair_logits(m.rows, m.cols);
+                bind_fbo(logits_target_.fbo);
+                use_program(p);
+                bind_tex(0, m.tex); set_sampler(p, "W", 0);
+                bind_tex(1, x); set_sampler(p, "X", 1);
+                glUniform1f(uloc(p, "ws"), m.scale);
+                setup_attrib(p);
+                glViewport(0, i, (m.rows + 1) / 2, 1);
+                glDrawArrays(GL_TRIANGLES, 0, 3);
+            }
+            return;
+        }
+        if (logits_target_.tex == 0 || logits_target_.h != rows || logits_target_.w != 1536)
+            logits_target_ = make_target(1536, rows);
+        logits_packed_ = false;
+        for (int i = 0; i < rows; ++i) draw(tiles[i], x, logits_target_, i);
+    }
+
+// Read the logits target back as floats, unpacking the texel pairs when the
+// paired pass ran.
+vector<float> GPU::read_logits_full(const vector<Mat>& tiles){
+        const int rows = (int)tiles.size();
         vector<float> out;
         out.reserve((size_t)rows * 1536);
+        if (logits_packed_) {
+            const int w = logits_target_.w;
+            bind_fbo(logits_target_.fbo);
+            vector<uint8_t> b((size_t)w * rows * 4);
+            glReadPixels(0, 0, w, rows, GL_RGBA, GL_UNSIGNED_BYTE, b.data());
+            for (int i = 0; i < rows; ++i) {
+                const int n = tiles[i].rows;
+                for (int j = 0; j < n; ++j) {
+                    const int t = j / 2, half = j - t * 2;
+                    const size_t o = ((size_t)i * w + t) * 4 + (half ? 2 : 0);
+                    int v = (int)b[o] * 256 + b[o + 1];
+                    if (v >= 32768) v -= 65536;
+                    out.push_back((float)v / ACT_SCALE);
+                }
+            }
+            return out;
+        }
+        vector<int32_t> raw = read_i32(logits_target_, 1536, rows);
         for (int i = 0; i < rows; ++i) {
-            const Mat& m = tiles[i];
-            for (int j = 0; j < m.rows; ++j) {
+            for (int j = 0; j < tiles[i].rows; ++j) {
                 int v = raw[(size_t)i * 1536 + j];
                 if (v >= 32768) v -= 65536;
                 out.push_back((float)v / ACT_SCALE);
@@ -319,6 +375,13 @@ vector<float> GPU::logits(const vector<Mat>& tiles, const vector<float>& x){
         return out;
     }
 
+vector<float> GPU::logits(const vector<Mat>& tiles, const vector<float>& x){
+        GLuint xt = upload_activations(x);
+        logits_pass(tiles, xt);
+        if (needs_finish()) { glFlush(); glFinish(); }
+        return read_logits_full(tiles);
+
+    }
 CandidateResult GPU::logits_candidates(const vector<Mat>& tiles, const vector<float>& x,
                                       int topk, float temp, float top_p){
         return logits_candidates_from(tiles, upload_activations(x), topk, temp, top_p);
@@ -327,8 +390,7 @@ CandidateResult GPU::logits_candidates(const vector<Mat>& tiles, const vector<fl
 CandidateResult GPU::logits_candidates_from(const vector<Mat>& tiles, GLuint xt,
                                            int topk, float temp, float top_p){
         const int rows = (int)tiles.size();
-        if (logits_target_.tex == 0 || logits_target_.h != rows) logits_target_ = make_target(1536, rows);
-        for (int i = 0; i < rows; ++i) draw(tiles[i], xt, logits_target_, i);
+        logits_pass(tiles, xt);
         // The candidate pass samples logits_target_ as a texture.  On VC4 the
         // tile pipeline does not order that sample after the FBO renders, so
         // finish the logits pass before starting Top-K.
@@ -343,7 +405,8 @@ CandidateResult GPU::logits_candidates_from(const vector<Mat>& tiles, GLuint xt,
                 candidate_target_ = make_target(out_w, rows);
             for (int i = 0; i < rows; ++i) {
                 int chunks = (tiles[i].rows + chunk - 1) / chunk;
-                GLuint p = x_top2_fast(tiles[i].rows, chunk);
+                GLuint p = logits_packed_ ? x_top2_fast_packed(tiles[i].rows, chunk)
+                          : x_top2_fast(tiles[i].rows, chunk);
                 bind_fbo(candidate_target_.fbo);
                 glViewport(0, i, chunks * 2, 1);
                 use_program(p);
@@ -382,7 +445,8 @@ CandidateResult GPU::logits_candidates_from(const vector<Mat>& tiles, GLuint xt,
             candidate_target_ = make_target(out_w, rows);
         for (int i = 0; i < rows; ++i) {
             int chunks = (tiles[i].rows + chunk - 1) / chunk;
-            GLuint p = x_top2(tiles[i].rows, chunk);
+            GLuint p = logits_packed_ ? x_top2_packed(tiles[i].rows, chunk)
+                          : x_top2(tiles[i].rows, chunk);
             bind_fbo(candidate_target_.fbo);
             glViewport(0, i, chunks * 3, 1);
             use_program(p);
@@ -447,15 +511,7 @@ CandidateResult GPU::logits_candidates_from(const vector<Mat>& tiles, GLuint xt,
             return res;
         }
         res.cand.clear();
-        vector<int32_t> full_raw = read_i32(logits_target_, 1536, rows);
-        res.full.reserve((size_t)rows * 1536);
-        for (int i = 0; i < rows; ++i) {
-            for (int j = 0; j < tiles[i].rows; ++j) {
-                int v = full_raw[(size_t)i * 1536 + j];
-                if (v >= 32768) v -= 65536;
-                res.full.push_back((float)v / ACT_SCALE);
-            }
-        }
+        res.full = read_logits_full(tiles);
         return res;
     }
 
@@ -675,22 +731,9 @@ void GPU::matvec_add(const Mat& m, GLuint x, GLuint residual, Target& out, XForm
     }
 
 vector<float> GPU::logits_from(const vector<Mat>& tiles, GLuint x){
-        const int rows = (int)tiles.size();
-        if (logits_target_.tex == 0 || logits_target_.h != rows) logits_target_ = make_target(1536, rows);
-        for (int i = 0; i < rows; ++i) draw(tiles[i], x, logits_target_, i);
+        logits_pass(tiles, x);
         if (needs_finish()) { glFlush(); glFinish(); }
-        vector<int32_t> raw = read_i32(logits_target_, 1536, rows);
-        vector<float> out;
-        out.reserve((size_t)rows * 1536);
-        for (int i = 0; i < rows; ++i) {
-            const Mat& m = tiles[i];
-            for (int j = 0; j < m.rows; ++j) {
-                int v = raw[(size_t)i * 1536 + j];
-                if (v >= 32768) v -= 65536;
-                out.push_back((float)v / ACT_SCALE);
-            }
-        }
-        return out;
+        return read_logits_full(tiles);
     }
 
 vector<uint8_t> GPU::read_bytes(Target& t, int w, int h){
@@ -973,6 +1016,19 @@ GLuint GPU::x_top2_fast(int rows, int chunk){
 
 GLuint GPU::x_top2(int rows, int chunk){
         return x_prog("xt2_" + to_string(rows) + "_" + to_string(chunk), top2(rows, chunk));
+    }
+
+GLuint GPU::x_q8_pair_logits(int rows, int cols){
+        return x_prog("xq8pl_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(act_fmt_),
+                      matvec_q8_pair_logits(rows, cols, act_fmt_));
+    }
+
+GLuint GPU::x_top2_fast_packed(int rows, int chunk){
+        return x_prog("xt2fp_" + to_string(rows) + "_" + to_string(chunk), top2_fast_packed(rows, chunk));
+    }
+
+GLuint GPU::x_top2_packed(int rows, int chunk){
+        return x_prog("xt2p_" + to_string(rows) + "_" + to_string(chunk), top2_packed(rows, chunk));
     }
 
 void GPU::init_egl(){

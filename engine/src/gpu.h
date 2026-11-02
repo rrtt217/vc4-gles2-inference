@@ -126,6 +126,13 @@ private:
     GLuint x_sum();
     GLuint x_top2_fast(int rows, int chunk);
     GLuint x_top2(int rows, int chunk);
+    GLuint x_q8_pair_logits(int rows, int cols);
+    GLuint x_top2_fast_packed(int rows, int chunk);
+    GLuint x_top2_packed(int rows, int chunk);
+    bool logits_pair() const;
+    bool logits_pair_ok(const vector<Mat>& tiles) const;
+    void logits_pass(const vector<Mat>& tiles, GLuint x);
+    vector<float> read_logits_full(const vector<Mat>& tiles);
 
     EGLDisplay dpy_ = EGL_NO_DISPLAY;
     EGLContext ctx_ = EGL_NO_CONTEXT;
@@ -146,6 +153,7 @@ private:
     bool attrib_ready_ = false;
     GLint attrib_p_ = -1;
     unordered_map<GLuint, vector<ULocRec>> aloc_cache_;
+    bool logits_packed_ = false;
     GLuint aloc_prog_ = 0;
     vector<ULocRec>* aloc_tab_ = nullptr;
     struct SampRec { const char* name; int unit; };

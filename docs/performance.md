@@ -1401,3 +1401,45 @@ the same shape as the existing (and bit-exact) FFN gate pair, not the
 four-accumulator shape that drifted 1 LSB under `FFN_FUSE`.  The write side is
 self-contained; the read side needs a packed reader in `read_i32` and in the
 Top-K candidate shader, which currently sample one logit per texel.
+
+### Landed: paired logits rows (-6.8 ms, bit-exact)
+
+`logits_from` / `logits` / `logits_candidates_from` used to run one fragment per
+vocabulary entry: 5 tiles x 1536 fragments, each decoding all 768 activations.
+`matvec_q8_pair_logits` now evaluates two consecutive vocabulary rows per
+fragment with **two accumulators** and writes the pair with `x_st2q`, the same
+q16 rounding and clamp `x_i24encq` applies, so every logit is the same integer
+as before.  The logits target is 768 wide (two logits per texel, `.rg` = even
+index, `.ba` = odd), `read_logits_full` unpacks on read, and a new
+`top2_packed` / `top2_fast_packed` pair decodes the pairs for Top-K.
+`LOGITS_SPLIT=1` restores the old single-row path.  q4 checkpoints keep their
+q4 vocabulary tiles and therefore take the unpacked path unchanged.
+
+Same binary, `LOGITS_SPLIT=1` (old) vs paired, interleaved, plain mode, 32
+tokens, SEQ 768:
+
+| run | split (10 draws) | paired (5 draws) |
+|---|---:|---:|
+| 1 | 233.2 | 226.2 |
+| 2 | 239.6 | 225.6 |
+| 3 | 231.0 | 231.7 |
+mean | 234.6 | 227.8 |
+
+**-6.8 ms mean (-2.9%)**, and 5 draws fewer per token (~0.9 ms of it).  The
+cross-binary `bench_plain_ab.sh bin/engine_base bin/engine_mm3_pi 32 3` agrees
+in sign but is noisier: median 228.9 -> 227.1, min 228.6 -> 225.0
+("B vs A: -1.6% decode"), CPU 117.4 -> 114.2 ms/token.
+
+What this fixes in the cost model: the logits pass is **~14 ms/token, not
+~20**, and essentially all of it was the activation decode - halving the
+fragment count recovers half of 14.  (Total weight-fetch volume is unchanged:
+each fragment now issues two `W` fetches per iteration.)  Same conclusion as
+`FFN_FUSE`: shared activation decode per fragment is the lever, draw count is
+not.
+
+Gates: q8 and q4 greedy text byte-identical, default system prompt OK, PPL
+**311.1636** exactly (ACT8=2 314.8067, ACT8=1 309.7812 unchanged).  The packed
+Top-K was verified end to end, not just compiled: `TOPK=1` with `--temp 0.0001`
+(non-greedy, candidate path) reproduces the greedy text character for
+character, and both `TOPK_FAST=1` and the strict running-logsumexp path sample
+coherent text on the new shaders.

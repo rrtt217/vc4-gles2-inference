@@ -113,6 +113,29 @@ string matvec_q8_pair(int rows, int cols, XFormat xf) {
         "gl_FragColor=x_st2q(s1*ws1,s2*ws2);}";
 }
 
+// q8 vocabulary projection, two output rows per fragment.  One activation decode
+// feeds two dot products, so both the fragment count and the activation decode
+// halve: 1536 vocabulary rows become 768 fragments.  Each accumulator sums in
+// exactly the order matvec_q8 uses, and x_st2q applies the same q16 rounding and
+// clamp as x_i24encq, so the packed pair holds the same two integers that the
+// unpacked pass writes.
+string matvec_q8_pair_logits(int rows, int cols, XFormat xf) {
+    const int axw = x_texels(cols, xf);
+    const string ROWS = to_string(rows), COLS4 = to_string(cols / 4), AXW = to_string(axw);
+    const string WR0 = "vec2((float(q)+0.5)/float(" + COLS4 + "),(float(r0)+0.5)/float(" + ROWS + "))";
+    const string WR1 = "vec2((float(q)+0.5)/float(" + COLS4 + "),(float(r1)+0.5)/float(" + ROWS + "))";
+    return head(xf) +
+        "uniform sampler2D W,X;uniform float ws;"
+        "void main(){int t=int(gl_FragCoord.x);int r0=2*t;int r1=r0+1;float s0=0.0,s1=0.0;"
+        "for(int q=0;q<" + COLS4 + ";q++){"
+        "vec4 x=X4Q(X,q*4," + AXW + ".0);"
+        "vec4 c=texture2D(W," + WR0 + ");vec4 w=c*255.0-128.0;"
+        "s0+=w.x*x.x+w.y*x.y+w.z*x.z+w.w*x.w;"
+        "c=texture2D(W," + WR1 + ");w=c*255.0-128.0;"
+        "s1+=w.x*x.x+w.y*x.y+w.z*x.z+w.w*x.w;}"
+        "gl_FragColor=x_st2q(s0*ws,s1*ws);}";
+}
+
 // q8 FFN gate + swiglu fused: one fragment evaluates two consecutive gate rows
 // for both w1 and w3 (four dots sharing one activation decode) and writes the two
 // swiglu results as one q16 pair.  This collapses the two-draw sequence
