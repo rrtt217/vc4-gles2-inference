@@ -19,13 +19,21 @@ runs a Minecraft server, so use the ranges rather than individual decimals:
 | stories15M i16 | `stories15M.i16` | 49 MB | 3.1 s | 167 ms/token | TinyStories completion; coherent |
 | stories42M q8 | `stories42M.q8` | 58 MB | 3.8 s | 190 ms/token | TinyStories completion; coherent |
 | stories15M q8 | `stories15M.q8` | 24 MB | 3.1 s | 148 ms/token | **gibberish** in current conversion; use i16 |
+| stories260K legacy | `stories260K.bin` | 1 MB | 4.3 s | 83 ms/token | fastest decode, but output is gibberish; not usable |
 
-The Pi store now has TinyStories 15M/42M checkpoints.  They are base
+The Pi store now has TinyStories 15M/42M/260K checkpoints.  They are base
 completion models, not chat models, so test them with a plain prompt such as
 `Once upon a time` and no `--chat`.  `stories42M.i16` is too large for the
 current CMA budget; q8 is the practical 42M path.  TinyChat15M should be
 treated as a format/probe model, not as a usable chat model until its
 tokenizer/prompt pairing is fixed.
+
+The 260K legacy checkpoint is a useful **floor probe**, not a product model:
+its 5-layer/64-dim body reaches 83 ms/token, but prefill is still 4.3 s because
+the attention passes walk the full 512-position grid and the shader setup is
+fixed.  The legacy loader's int8-on-load path also produces gibberish with the
+current tokenizer, so it does not invalidate the ~100 ms floor for coherent
+TinyStories models.
 
 ### Default system prompt
 

@@ -101,6 +101,8 @@ GPU_LAYER=1 KV_PACK=16 ./engine_mm3 \
 
 Pi 上 stories15M i16 约 167 ms/token，stories42M q8 约 190 ms/token，均连贯。
 `stories15M.q8` 当前转换输出乱码，改用 i16；stories42M i16 超出当前 CMA 预算。
+260K legacy（`stories260K.bin` + `tok512.bin`）decode 约 83 ms/token，但 prefill
+仍要 4.3 s 且输出乱码，只能当 floor 探针。
 
 ## MiniMind3 64M
 

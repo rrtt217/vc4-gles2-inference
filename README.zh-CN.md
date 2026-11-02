@@ -104,6 +104,7 @@ python3 server.py --seq 768 --kv-pack 16 \
 | stories15M i16 | 49 MB | ~167 ms/token | TinyStories 补全，连贯 |
 | stories42M q8 | 58 MB | ~190 ms/token | TinyStories 补全，连贯 |
 | stories15M q8 | 24 MB | ~148 ms/token | 当前 q8 转换输出乱码，改用 i16 |
+| stories260K legacy | 1 MB | ~83 ms/token | 只作 floor 探针；输出乱码，prefill 4.3 s |
 
 Pi 数字是单次运行，受后台负载影响；详见 [performance.md](docs/performance.md)。
 TinyChat15M 目前还不能算可用的对话模型，需要先修 tokenizer/prompt 配对。

@@ -107,6 +107,7 @@ details.
 | stories15M i16 | 49 MB | ~167 ms/token | TinyStories completion; coherent |
 | stories42M q8 | 58 MB | ~190 ms/token | TinyStories completion; coherent |
 | stories15M q8 | 24 MB | ~148 ms/token | q8 conversion currently produces gibberish; use i16 |
+| stories260K legacy | 1 MB | ~83 ms/token | floor probe only; output gibberish, prefill 4.3 s |
 
 Pi numbers are single-run and noisy; see [performance.md](docs/performance.md).
 The current supported matrix is checked on 2026-11-02; TinyChat15M needs a

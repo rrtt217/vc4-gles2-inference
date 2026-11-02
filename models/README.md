@@ -23,6 +23,7 @@ models/
     minimind2-small.q8/.i16/.q4
     stories15M-llama2-enzh.bin
     tokenizer.bin
+    tok512.bin                  # stories260K only (512-token tokenizer)
     tokenizer-llama2enzh.bin
     stories260K.bin
 ```
@@ -49,6 +50,8 @@ Notes:
 - `stories15M.q8` currently produces gibberish; `stories15M.i16` is the
   coherent TinyStories 15M artifact.  stories42M q8 is coherent; its i16
   exceeds the current Pi CMA budget.
+- `stories260K.bin` needs `tok512.bin` (not the 32k `tokenizer.bin`).  It is a
+  floor probe: fast decode, but current legacy int8-on-load output is gibberish.
 
 Model files, tokenizers, KV caches and logs are ignored by `.gitignore`.
 The HuggingFace `tokenizer.json` source is also not tracked; place it in

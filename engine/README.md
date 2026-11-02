@@ -131,7 +131,9 @@ GPU_LAYER=1 KV_PACK=16 ./engine_mm3 \
 On the Pi, stories15M i16 is coherent at ~167 ms/token and stories42M q8 at
 ~190 ms/token.  `stories15M.q8` currently produces gibberish in the repo's
 conversion; use the i16 file.  stories42M i16 is too large for the current
-CMA budget.
+CMA budget.  The 260K legacy file (`stories260K.bin` + `tok512.bin`) reaches
+~83 ms/token decode but still has 4.3 s prefill and gibberish output; treat it
+as a floor probe only.
 
 ## MiniMind3 64M
 
