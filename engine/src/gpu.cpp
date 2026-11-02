@@ -703,6 +703,19 @@ vector<uint8_t> GPU::read_bytes(Target& t, int w, int h){
 
 void GPU::sync(){ glFinish(); }
 
+void GPU::dump_target(const Target& t, const char* name, int n){
+        if (t.tex == 0) return;
+        if (n > t.w) n = t.w;
+        vector<uint8_t> b((size_t)t.w * 4);
+        glFinish();
+        glBindFramebuffer(GL_FRAMEBUFFER, t.fbo);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(0, 0, t.w, 1, GL_RGBA, GL_UNSIGNED_BYTE, &b[0]);
+        fprintf(stderr, "DUMP %s w=%d", name, t.w);
+        for (int i = 0; i < n; i++) fprintf(stderr, " %02x%02x%02x%02x", b[i*4], b[i*4+1], b[i*4+2], b[i*4+3]);
+        fprintf(stderr, "\n");
+}
+
 bool GPU::rms_fused() const{
         // RMS_FUSED forces it on, RMS_SPLIT forces the old two-pass form.
         if (getenv("RMS_FUSED")) return true;

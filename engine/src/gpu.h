@@ -90,6 +90,7 @@ public:
     vector<uint8_t> read_bytes(Target& t, int w, int h);
 
     void sync();
+    void dump_target(const Target& t, const char* name, int n);
     bool needs_finish() const;
     bool rms_fused() const;
     int max_target_dim() const { return max_target_dim_; }

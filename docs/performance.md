@@ -1293,3 +1293,44 @@ is what the fused kernel above achieves without any repack.  w2 (`768 x 2432`, i
 608 wide by 768 tall as a texture) is not affected by that limit; it is a column
 split, so a one-draw version would change the summation order and needs its own
 bit-exactness check.
+
+### Bisecting the fused FFN drift: it is 1 LSB of codegen noise, not a bug
+
+The fused gate+swiglu kernel above is the fastest change on the board (-20 ms)
+but it moved PPL from 311.1636 to 312.1366, so the bisect planned in the
+WORKLOG was run.  A new `FFN_DUMP=1` debug hook prints the first 8 texels of
+`ha`/`hb` (raw RGBA8 bytes) right after the FFN gate stage, for every layer-0
+forward.
+
+**The dumps are byte-identical except for two texels.**  Across ~28 layer-0
+forwards (608 texels x 2 chunks each, so ~28k q16 values) exactly two values
+differ, and each differs by **1 LSB of q16** (`...ffe4` vs `...ffe5`, `...ff97`
+vs `...ff98`).  Gate decode, int16 quantisation, silu input and the q16 store
+therefore all match; there is no encoding or logic error in the fused kernel.
+
+Two candidate causes were then eliminated on the board, each with a PPL run
+(`--ppl`, 254 tokens):
+
+* **Silu expression form** (`FFN_SILU`): the current one-liner, a split-statement
+  version, an explicit-reciprocal version and split+mul all give **312.1366**.
+  The silu arithmetic is not the source of the drift.
+* **Accumulation association** (`FFN_ACC`): this *is* the lever, but no variant
+  reaches the reference.  Serial statements give **309.2918**, explicit
+  left-associative gives **312.1366** (identical to the unmodified kernel, i.e.
+  the VC4 compiler already picks left-association for `a+b+c+d`), pairwise gives
+  **313.5574**.
+
+The spread of those three numbers is the real result: PPL is chaotic with
+respect to harmless float reassociation.  The unchanged default path already
+shows it - `regression.sh` reports PPL 309.7812 for `ACT8=1` and 314.8067 for
+`ACT8=2`, both shipped options with no gate failure.  A 1-ULP difference in a
+handful of activations is enough to move PPL by +-2, so the fused kernel cannot
+be steered back onto exactly 311.1636 by editing the expression: bit-exactness
+here needs the *reference shader text* to survive, and sharing one column loop
+between four accumulators changes how the VC4 compiler schedules and contracts
+the multiply-adds.
+
+Conclusion: `FFN_FUSE` stays default-off and both debug variants were reverted.
+The lesson for the next candidate is to remove draws **without touching a
+shader that contains an accumulation chain**; the `FFN_DUMP=1` hook is kept
+because any future draw merge has to be checked the same way.

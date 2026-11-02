@@ -257,6 +257,11 @@ GLuint Session::forward_gpu_hidden(int token, int pos, bool want_logits){
                 GLuint ha, hb;
                 gpu_.ffn_split_chunked(m_.w1a[l], m_.w3a[l], m_.w1b[l], m_.w3b[l], xbf,
                                        m_.ffn_chunk, m_.hidden - m_.ffn_chunk, ha, hb);
+                if (getenv("FFN_DUMP") && l == 0) {
+                    gpu_.sync();
+                    gpu_.dump_target(gpu_.ffn_h_a_, "ha", 8);
+                    gpu_.dump_target(gpu_.ffn_h_b_, "hb", 8);
+                }
                 mark("ffn", l);
                 gpu_.matvec_add(m_.w2a[l], ha, x1, gpu_.hidden_a_, gpu_.ffn_fmt_);
                 gpu_.matvec_add(m_.w2b[l], hb, gpu_.hidden_a_.tex, gpu_.hidden_b_, gpu_.ffn_fmt_);
