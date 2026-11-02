@@ -1218,3 +1218,38 @@ plus about 15 per token outside the layer loop (embedding, final rmsnorm,
 logits tiles, sampling).  The next candidates, in order: fold `att_stats` into
 `att_v` (the same trick as the rms reduce), merge the two swiglu draws by
 writing both FFN chunks into one texture, and cut the logits tile count.
+
+### Decode is draw-bound, not sequence-bound
+
+Same prompt, same generation length, different `SEQ` (which only changes how far
+the attention loops run):
+
+| SEQ | decode |
+|---:|---:|
+| 192 | 236.9 ms/token |
+| 384 | 230.1 ms/token |
+| 768 | 228.1 ms/token |
+
+Decode is flat, so the KV scans and score loops are not where the time goes;
+each token costs about the same regardless of how much attention work it does.
+At 188 draws that is ~1.2 ms per draw, which is why the working order is
+"fewer draws" and why shaving arithmetic inside a shader has produced almost
+nothing.
+
+### What blocks the remaining 35%
+
+Decode is 229 ms against a 150 ms target, i.e. roughly 70 draws too many at the
+current per-draw cost.  The merges that would remove them are blocked by three
+concrete things, not by a lack of ideas:
+
+* **The 1536-column strip.**  qkv needs two draws because a single 1536-wide
+  pass returns garbage (`编写一个编写一个...`); that is 8 draws per token that
+  only the driver can give back.
+* **One weight texture per matrix.**  The two FFN chunks are separate Mats, so
+  the gate stays two draws and w2 stays two draws (2432 rows also exceeds the
+  2048 viewport limit).  Merging them means changing the quantised weight layout,
+  which is out of scope for this pass.
+* **`att_stats` is quantised, not just computed.**  It stores `(max, sum)` as
+  packed q16 and `att_v` reads the *quantised* values, so folding the stats scan
+  into `att_v` (the same trick as the rms reduce) is not bit-exact unless the
+  fused version reproduces the packing exactly.  Left alone deliberately.
