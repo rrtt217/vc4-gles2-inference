@@ -1063,3 +1063,34 @@ q4 remains slower than q8 (380 vs 240 ms) because a nibble split costs several
 ALU ops per weight against int8's single `c*255-128`, and VC4 is ALU-bound; the
 halved fetch count does not pay for it.  Closing that gap would need pre-split
 int8 weights, which doubles the weight footprint past what CMA can hold.
+
+## Iris Xe model matrix (2026-11-02, no elevation)
+
+The workspace sandbox now exposes `/dev/dri`; `eglinfo -B` reports
+`Mesa Intel(R) Iris(R) Xe Graphics (ADL GT2)` and `Accelerated: yes`.  These
+runs use the in-tree `engine_mm3` with no elevated permissions, `GPU_LAYER=1`,
+`KV_PACK=16`, greedy, 32 generated tokens, best of two warm runs.  Prefill is
+the whole prompt/chat template, not a per-token number; prompts differ by
+family, so compare decode more than prefill.
+
+| model | file | size | prefill | decode | output |
+|---|---|---:|---:|---:|---|
+| MiniMind3 q8 | minimind3.q8 | 66 MB | 0.66 s | 14.1 ms/token | coherent |
+| MiniMind3 q4 | minimind3.q4 | 45 MB | 0.88 s | 14.6 ms/token | coherent |
+| MiniMind2 q8 | minimind2-small.q8 | 28 MB | 0.39 s | 6.8 ms/token | coherent |
+| MiniMind2 q4 | minimind2-small.q4 | 20.7 MB | 0.57 s | 6.4 ms/token | coherent |
+| stories15M q8 | stories15M.q8 | 24.5 MB | 0.25 s | 3.8 ms/token | coherent |
+| stories42M q8 | stories42M.q8 | 58 MB | 0.25 s | 7.1 ms/token | coherent |
+| TinyChat15M q8 | TinyChat15M.q8 | 24.5 MB | 0.23 s | 3.6 ms/token | coherent |
+| stories15M fp32 | stories15M.bin | 60 MB | 0.29 s | 9.8 ms/token | coherent |
+| TinyChat15M fp32 | TinyChat15M.bin | 60 MB | 0.23 s | 9.2 ms/token | coherent |
+| stories15M-enzh fp32 | stories15M-llama2-enzh.bin | 87 MB | 0.19 s | 6.2 ms/token | coherent English |
+| stories260K fp32 | stories260K.bin | 1 MB | 0.38 s | 1.5 ms/token | gibberish (expected) |
+
+The q8 15M files initially produced gibberish on the GPU FFN path while their
+fp32 and i16 checkpoints were coherent.  The cause is the fused-W13 q8 path,
+the same q8 q24-FFN family as the earlier MiniMind2 failure.  `make_q8_from_i16.py`
+now splits W13 into W1/W3 (`split=1`), which selects the paired q16 FFN path;
+the regenerated `stories15M.q8` and `TinyChat15M.q8` are the coherent files in
+the table.  `stories42M` already used split W1/W3.  Q4 is unaffected (fused q4
+still uses its own path).

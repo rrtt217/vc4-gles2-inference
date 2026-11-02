@@ -4,6 +4,13 @@ This document covers the q4/q6 experiments, the offline Q4M1 path, and the
 KV packed variants. The model format itself is in
 [model-formats.md](model-formats.md).
 
+## Q8 conversion
+
+Convert an I16 checkpoint with `make_q8_from_i16.py`; q8 is a terminal format,
+not a source for q4.  The converter always writes `split=1` (separate W1/W3),
+even when the I16 source has a fused W13: the fused q8 GPU FFN path is wrong,
+while split W1/W3 uses the paired q16 path.  Reconvert old fused q8 files.
+
 ## Weight quantization experiments
 
 The NumPy reference (`minimind3/ref_numpy.py`) supports symmetric and
