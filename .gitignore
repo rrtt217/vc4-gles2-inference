@@ -52,3 +52,7 @@ engine/probes/texsize_probe
 # Local upstream references / model assets
 /refs/
 /minimind3/tokenizer.json
+
+# Local agent overrides (machine-specific, not portable)
+/AGENTS.local.md
+/AGENTS.override.md

@@ -1,6 +1,13 @@
 # AGENTS.md
 
-Instructions for coding agents working in this repository.
+Instructions for coding agents working in this repository.  Machine-specific
+details live in local override files, not here:
+
+- `AGENTS.local.md` — DSH local override (this laptop).
+- `AGENTS.override.md` — Hermes/VLAB full override; it replaces this file.
+
+Those files are local/personal and are gitignored.  Do not copy host names,
+sysroots, deploy paths, or benchmark numbers from them into this file.
 
 ## Mission
 
@@ -15,8 +22,9 @@ replace working paths with demos or cosmetic rewrites.
 | `engine/src/` | EGL/GLES2 engine: X-format layouts, shader builders, GPU, model, session, tokenizer, CLI |
 | `engine/probes/` | standalone VC4 feature/throughput probes (not linked into the engine) |
 | `engine/quantize/make_i16.py` | F16/llama2.c -> I16M1/M2 |
-| `engine/quantize/make_q8_from_i16.py` | I16 -> Q8M1/M2 |
+| `engine/quantize/make_q8_from_i16.py` | I16 -> Q8M1/M2 (splits fused W13) |
 | `engine/quantize/make_q4.py` | F16 safetensors -> Q4M1 |
+| `engine/quantize/make_q4_from_i16.py` | I16 -> Q4M1 |
 | `engine/scripts/` | benchmark and regression helpers |
 | `server/server.py` | OpenAI-compatible HTTP server and worker protocol |
 | `models/` | central model store (gitignored) |
@@ -25,26 +33,42 @@ replace working paths with demos or cosmetic rewrites.
 
 ## Build
 
-Local:
+Build for the target and do not reuse a stale binary:
 
-```bash
-make -C engine -B engine_mm3 CXXFLAGS='-O2 -std=c++17 -Wall -Wextra'
-```
+- Native GLES2: `make -C engine -B engine_mm3`
+- Pi: cross-build with `make -C engine -B pi CROSS_SYSROOT=<sysroot>` on the
+  cross host, or build on the Pi with the ARMv6 flags in the Makefile.
 
-Pi (build separately from the run; 8–10 minutes on a Zero; never run two builds):
+Do not use a short build timeout.  Machine-specific host/sysroot/deploy paths
+belong in `AGENTS.local.md` (DSH) or `AGENTS.override.md` (Hermes/VLAB).
 
-```bash
-make -B engine_mm3 CXXFLAGS='-O2 -march=armv6 -mfpu=vfp -mfloat-abi=hard -ffast-math -std=c++17'
-```
+### Pi Zero reference (measured, not a target)
 
-Do not use a short build timeout; a stale binary produces misleading results.
+Measured on a Pi Zero, `GPU_LAYER=1 KV_PACK=16`, greedy, 32 generated tokens,
+best of two runs; MiniMind3 uses `SEQ=768`.  Prefill is prompt-specific; the
+full matrix and prefills are in [`docs/performance.md`](docs/performance.md).
+
+| model | decode |
+|---|---:|
+| MiniMind3 q8 | 252 ms/token |
+| MiniMind3 q4 | 388 ms/token |
+| MiniMind2 q8 | 144 ms/token |
+| MiniMind2 q4 | 187 ms/token |
+| MiniMind2 i16 | 232 ms/token |
+| stories15M q8 | 138 ms/token |
+| stories42M q8 | 188 ms/token |
+| TinyChat15M q8 | 137 ms/token |
+
+A native ARMv6 build on a Pi Zero takes about 8–10 minutes; never run two
+builds concurrently.  Prefer the VLAB cross-build (see the VLAB override).
 
 ## Canonical smoke tests
+
+Run from `engine/` with the model store paths used by the local checkout.
 
 q8:
 
 ```bash
-cd engine
 MODEL=../models/minimind3/minimind3.q8 \
 TOKENIZER=../models/minimind3/minimind3.tok \
 GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat --template minimind3 \
@@ -54,15 +78,16 @@ GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat --template minimind3 \
 Offline q4 (do not set `Q4_WEIGHTS`):
 
 ```bash
-cd engine
 MODEL=../models/minimind3/minimind3.q4 \
 TOKENIZER=../models/minimind3/minimind3.tok \
 GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat --template minimind3 \
   --prompt "用一句话介绍你自己。" --gen 16 --greedy
 ```
 
-Expected q4 starts with `我是MiniMind，一个由jingyaogong...`.
-Expected q8 starts with `MiniMind是一个高效的小...`.
+Expected q4 starts with `我是MiniMind，一个由jingyaogong...`.  The q8 string is
+for the reference checkpoint (`MiniMind是一个高效的小...`); if a local q8
+checkpoint is known to differ, record the observed string and checksum in the
+local override instead of weakening this gate.
 
 ## Invariants
 
@@ -99,3 +124,10 @@ Shader text belongs in `shaders.cpp` / `shaders_attn.cpp`, and activation
 layout knowledge belongs in `xformat.h/.cpp`. Do not reintroduce per-shader
 activation-layout strings. Run q8, q4 and `--ppl` comparisons after any GPU or
 format change; a byte-identical greedy string is the minimum gate.
+
+## Local overrides
+
+- DSH reads `AGENTS.local.md` in addition to this file.
+- Hermes/VLAB reads `AGENTS.override.md`, which **fully replaces** this file;
+  keep that copy self-contained.
+- Both files are gitignored and must not be treated as portable project rules.
