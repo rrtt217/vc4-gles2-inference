@@ -1253,3 +1253,43 @@ concrete things, not by a lack of ideas:
   packed q16 and `att_v` reads the *quantised* values, so folding the stats scan
   into `att_v` (the same trick as the rms reduce) is not bit-exact unless the
   fused version reproduces the packing exactly.  Left alone deliberately.
+
+### FFN gate+swiglu fusion: 4 draws -> 2, -20 ms, but not bit-exact (FFN_FUSE, default off)
+
+The two FFN chunks each spend one draw on the paired gate matvec and one on
+swiglu.  A single kernel can do both: one fragment evaluates two consecutive gate
+rows for w1 and w3 (four dots sharing one activation decode) and writes the two
+swiglu results as one q16 pair.  Halving the fragment count keeps the viewport at
+rows/2 and the whole chunk becomes one draw, so the FFN gate+swiglu cost drops
+from 4 draws to 2 per layer (188 -> 164 draws/token).
+
+Interleaved A/B on the Pi, plain mode, 32 tokens, three alternating pairs:
+
+| run | two-pass | fused |
+|---|---:|---:|
+| 1 | 229.8 | 206.3 |
+| 2 | 229.4 | 213.1 |
+| 3 | 229.0 | 207.3 |
+
+Mean -20.4 ms/token (~9%), the largest single win since the GL state caching.
+
+It is not bit-exact yet, so it is behind `FFN_FUSE=1` (default off).  The gate
+int16 quantisation and the final q16 rounding are reproduced inline, but PPL moves
+from 311.1636 (nll 5.7403) to 312.1366 (nll 5.7434) on the same corpus, while both
+greedy gates still print their byte-identical text.  The difference must come from
+arithmetic that no longer passes through the RGBA8 intermediate, or from VC4
+compiling the four-accumulator loop differently from the two-accumulator one;
+the accumulation loop is the first suspect.  With `FFN_FUSE` unset the default
+path is unchanged: `regression.sh` gives `q8 OK`, `q4 OK`, PPL 311.1636.
+
+### Note on merging the FFN weight chunks
+
+The plan to merge w1a/w1b, w3a/w3b and w2a/w2b at load time cannot be taken as
+written for w1/w3: those Mats are uploaded as `rows`-tall weight textures, so a
+merged 2432-row w1 needs `GL_MAX_TEXTURE_SIZE >= 2432` (the board reports 2048 for
+targets, and `make_target` refuses anything larger).  Merging the gate therefore
+has to keep two weight textures per matrix and do the two chunks in one draw, which
+is what the fused kernel above achieves without any repack.  w2 (`768 x 2432`, i.e.
+608 wide by 768 tall as a texture) is not affected by that limit; it is a column
+split, so a one-draw version would change the summation order and needs its own
+bit-exactness check.

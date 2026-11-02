@@ -220,6 +220,18 @@ void GPU::ffn_split_chunked(const Mat& w1a, const Mat& w3a, const Mat& w1b, cons
                           ((w1a.type == WeightType::INT8 && w3a.type == WeightType::INT8) ||
                            (w1a.type == WeightType::INT4 && w3a.type == WeightType::INT4));
         if (pair) {
+            // Fused gate+swiglu: one draw per chunk instead of two.  Only the
+            // q8 path has the fused kernel, and only I16_2 output is wired to w2.
+            // Default OFF: the fused kernel is 20 ms/token faster but moves PPL
+            // (312.1366 vs 311.1636), so the numerics still differ from the two
+            // pass sequence.  Opt in with FFN_FUSE=1 while that is being chased.
+            static const bool fuse_env = getenv("FFN_FUSE") && strcmp(getenv("FFN_FUSE"), "0") != 0;
+            if (fuse_env && w1a.type == WeightType::INT8 && ffn_fmt_ == XFormat::I16_2 &&
+                (n1 & 1) == 0 && (n2 & 1) == 0) {
+                ha = ffn_pair_swiglu_chunk(w1a, w3a, x, n1, ffn_h_a_);
+                hb = ffn_pair_swiglu_chunk(w1b, w3b, x, n2, ffn_h_b_);
+                return;
+            }
             ha = ffn_pair_chunk(w1a, w3a, x, n1, ffn_pair_a_, ffn_h_a_);
             hb = ffn_pair_chunk(w1b, w3b, x, n2, ffn_pair_b_, ffn_h_b_);
             return;
@@ -728,6 +740,33 @@ GLuint GPU::x_q8(int rows, int cols){
 GLuint GPU::x_q8_pair(int rows, int cols){
         return x_prog("xq8p_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(act_fmt_),
                       matvec_q8_pair(rows, cols, act_fmt_));
+    }
+
+GLuint GPU::x_q8_pair_swiglu(int rows, int cols){
+        return x_prog("xq8ps_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(act_fmt_),
+                      matvec_q8_pair_swiglu(rows, cols, act_fmt_));
+    }
+
+// Gate pair matvec for two rows per fragment plus swiglu, straight into a q16
+// pair texture that the w2 matvec can read: one draw instead of two.
+GLuint GPU::ffn_pair_swiglu_chunk(const Mat& w1, const Mat& w3, GLuint x, int rows, Target& out){
+        const int aw = x_texels(rows, ffn_fmt_);
+        if (out.tex == 0 || out.w != aw) out = make_target(aw, 1);
+        GLuint p = x_q8_pair_swiglu(rows, w1.cols);
+        bind_fbo(out.fbo);
+        glViewport(0, 0, aw, 1);
+        use_program(p);
+        bind_tex(0, w1.tex); set_sampler(p, "W1", 0);
+        bind_tex(1, w3.tex); set_sampler(p, "W2", 1);
+        bind_tex(2, x); set_sampler(p, "X", 2);
+        glUniform1f(uloc(p, "ws1"), w1.scale);
+        glUniform1f(uloc(p, "ws2"), w3.scale);
+        setup_attrib(p);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
+        else layer_finish("NF_FFN");
+        if (getenv("FFN_SYNC")) { glFlush(); glFinish(); }
+        return out.tex;
     }
 
 GLuint GPU::x_q8_pair_fused(int rows, int cols){

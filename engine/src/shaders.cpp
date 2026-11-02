@@ -113,6 +113,38 @@ string matvec_q8_pair(int rows, int cols, XFormat xf) {
         "gl_FragColor=x_st2q(s1*ws1,s2*ws2);}";
 }
 
+// q8 FFN gate + swiglu fused: one fragment evaluates two consecutive gate rows
+// for both w1 and w3 (four dots sharing one activation decode) and writes the two
+// swiglu results as one q16 pair.  This collapses the two-draw sequence
+// (pair matvec -> swiglu) into a single draw, and halving the fragment count keeps
+// the viewport at rows/2.  The gate quantisation (int16 of s*ws) and the final q16
+// rounding are the same operations the separate passes perform, so the output is
+// bit-identical.
+string matvec_q8_pair_swiglu(int rows, int cols, XFormat xf) {
+    const int axw = x_texels(cols, xf);
+    const string ROWS = to_string(rows), COLS4 = to_string(cols / 4), AXW = to_string(axw);
+    const string WR0 = "vec2((float(q)+0.5)/float(" + COLS4 + "),(float(r0)+0.5)/float(" + ROWS + "))";
+    const string WR1 = "vec2((float(q)+0.5)/float(" + COLS4 + "),(float(r1)+0.5)/float(" + ROWS + "))";
+    return head(xf) +
+        "uniform sampler2D W1,W2,X;uniform float ws1,ws2;"
+        "float qz(float v){return clamp(floor(v+0.5),-32768.0,32767.0);}"
+        "float sl(float q,float g){float a=q/256.0;return (a/(1.0+exp(-a)))*(g/256.0);}"
+        "void main(){int t=int(gl_FragCoord.x);int r0=2*t;"
+        "int r1=min(r0+1," + to_string(rows - 1) + ");float s10=0.0,s20=0.0,s11=0.0,s21=0.0;"
+        "for(int q=0;q<" + COLS4 + ";q++){"
+        "vec4 x=X4Q(X,q*4," + AXW + ".0);"
+        "vec4 c=texture2D(W1," + WR0 + ");vec4 w=c*255.0-128.0;"
+        "s10+=w.x*x.x+w.y*x.y+w.z*x.z+w.w*x.w;"
+        "c=texture2D(W2," + WR0 + ");w=c*255.0-128.0;"
+        "s20+=w.x*x.x+w.y*x.y+w.z*x.z+w.w*x.w;"
+        "c=texture2D(W1," + WR1 + ");w=c*255.0-128.0;"
+        "s11+=w.x*x.x+w.y*x.y+w.z*x.z+w.w*x.w;"
+        "c=texture2D(W2," + WR1 + ");w=c*255.0-128.0;"
+        "s21+=w.x*x.x+w.y*x.y+w.z*x.z+w.w*x.w;}"
+        "float v1=(r0+1<" + to_string(rows) + ")?sl(qz(s11*ws1),qz(s21*ws2)):0.0;"
+        "gl_FragColor=x_st2(sl(qz(s10*ws1),qz(s20*ws2)),v1);}";
+}
+
 string matvec_q8_pair_fused(int rows, int cols, XFormat xf) {
     const int axw = x_texels(cols, xf);
     const int rows2 = 2 * rows;

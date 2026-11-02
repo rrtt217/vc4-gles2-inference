@@ -329,6 +329,12 @@ otherwise.
 
 ## Plan: merge the chunked FFN weight textures (scope expanded)
 
+> **Superseded for w1/w3 (2026-11-03).** These Mats are uploaded as `rows`-tall
+> weight textures, so a merged 2432-row matrix needs `GL_MAX_TEXTURE_SIZE >= 2432`,
+> over the board limit.  The same draw reduction is reached without any repack by
+> the fused gate+swiglu kernel (`FFN_FUSE`, still -20 ms but not yet bit-exact — see
+> `docs/performance.md`).
+
 Decode is 229 ms with 188 draws at ~0.5 ms per draw, so ~94 ms is draw overhead
 and ~135 ms is texture-fetch plus MAC work (decode is flat across SEQ, so none
 of that is sequence-dependent).  Reaching 150 ms needs both terms down.
