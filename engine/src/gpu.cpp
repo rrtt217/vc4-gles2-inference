@@ -1213,6 +1213,15 @@ void GPU::att_scores(int layer, int pos){
         // The q16 score-pair layout requires the hoisted q path; ATTN_HOIST=0
         // is intentionally ignored after the q16 attention change.
         static const bool hoist = true;
+        const bool sprof = getenv("LAYER_PROFILE") != nullptr;
+        auto stp = Clock::now();
+        auto slap = [&](const char* n) {
+            if (!sprof) return;
+            glFinish();
+            auto nw = Clock::now();
+            cerr << "PROFATT2 " << n << " " << elapsed_ms(stp, nw) << "\n";
+            stp = nw;
+        };
         if (!hoist) {
             GLuint pi = x_score(false);
             bind_fbo(att_scores_.fbo);
@@ -1233,6 +1242,7 @@ void GPU::att_scores(int layer, int pos){
             setup_attrib(pi);
             glDrawArrays(GL_TRIANGLES, 0, 3);
             att_finish();
+            slap("qknorm");
             return;
         }
         // Position-only work first: qk-norm factor per head, then the rotated q.
@@ -1269,6 +1279,7 @@ void GPU::att_scores(int layer, int pos){
         setup_attrib(pr);
         glDrawArrays(GL_TRIANGLES, 0, 3);
         att_finish();
+        slap("qrot");
 
         GLuint p = x_score(true);
         bind_fbo(att_scores_.fbo);
@@ -1283,6 +1294,7 @@ void GPU::att_scores(int layer, int pos){
         setup_attrib(p);
         glDrawArrays(GL_TRIANGLES, 0, 3);
         att_finish();
+        slap("score");
     }
 
 void GPU::att_stats(int pos){

@@ -1443,3 +1443,54 @@ Top-K was verified end to end, not just compiled: `TOPK=1` with `--temp 0.0001`
 (non-greedy, candidate path) reproduces the greedy text character for
 character, and both `TOPK_FAST=1` and the strict running-logsumexp path sample
 coherent text on the new shaders.
+
+### Profiled: the attention chain, and why shrinking it did not help
+
+`attention_block` already carried `PROFATT` laps (qkv, rope, scores, probs, v) from
+the module refactor; this run used them on the paired-logits build (`LAYER_PROFILE=1`,
+SEQ 768, decode isolated by differencing a `--gen 12` run against `--gen 4` so the
+prefill cancels: 8 tokens x 8 layers = 64 blocks).
+
+**First finding: the `scores` lap is three draws, not one** (qknorm, qrot, score
+grid). MiniMind3 has `qk_norm` off, so the qknorm draw does not run, but qrot and the
+score grid are two separate dependent passes inside one number. Adding `PROFATT2`
+marks inside `att_scores` splits them:
+
+| pass | ms/block (decode) | share |
+|---|---:|---:|
+| qkv matvec | 5.22 | 29% |
+| score grid (seq/2 x heads) | 3.22 | 18% |
+| stats (heads x 1) | 2.76 | 15% |
+| qrot (att_dim/2 x 1) | 2.87 | 16% |
+| v (att_out_.w x 1) | 2.57 | 14% |
+| kv rope write | 0.88 | 5% |
+
+(This run was ~4% slower globally than the previous one, normalised by the
+position-independent `qkv` control; the shares are what matter.)
+
+**Second finding: the tiny passes cost as much as the big ones.** `stats` is a
+12-fragment draw and costs 2.76 ms; `qrot` is a 384-fragment single row and costs
+2.87 ms; the score grid is 4608 fragments at 3.22 ms.  So attention is not
+fill-rate bound, it is **bound by the number of dependent FBO passes** - each one
+pays the finish/drain before the next can sample.  That also explains why the
+measured 0.18 ms/draw from the `RMS_SPLIT` experiment does not apply here: those
+were trivial draws off the critical path, whereas these are serialised on the
+attention chain.
+
+**Attempted and reverted: shrink the score viewport to the current position.**
+All readers (`att_stats`, `att_v`, `att_probs`) `break` at `t0 > pos`, so
+`att_scores` only needs `(pos+2)/2` pairs of the `seq/2` grid; computing the rest
+is dead work.  Changed the score `glViewport` to `(pos + 2) / 2` - numerically
+identical by construction, and the gates confirmed it (q8/q4 byte-identical, PPL
+311.1636).  Measured: **no gain, slightly negative** - scores lap 1274.44 -> 1379.55
+raw on a run whose `qkv` control was 4% slower, i.e. ~1328 normalised vs 1274, 
+about +4%.  Consistent with the finding above: the score grid is not where the
+time is, so removing 90%+ of its fragments at pos 20 changes nothing.  Reverted.
+
+**Consequence for the goal.** Per token there are 8 layers x ~11 dependent passes
+= ~88 drains; at the ~1.5-2 ms each these laps show, that is the bulk of the 227 ms,
+not the arithmetic.  The lever is **merging passes**, in the order: fold qrot into
+the qkv matvec output (same FBO, same pass), then fold the `stats` reduction into
+`att_v` so the chain loses a link.  Pairing rows (which worked for logits) helps
+only the passes that are genuinely fragment-bound, and after this profile that is
+`qkv` alone.

@@ -8,29 +8,41 @@ Goal: Pi Zero MiniMind3 q8 decode **<=150 ms/token**, byte-identical output.
 | decode with FFN_FUSE=1 | 208.9 ms/token mean (206.3 / 213.1 / 207.3) |
 | CPU | 114.2 ms/token (user 90.1 / sys 24.1) |
 | draws | 183/token default, 159 with FFN_FUSE=1 (~0.18 ms/draw, measured) |
-| gate | q8/q4 byte-identical, PPL 311.1636 (re-verified after the logits pairing) |
+| gate | q8/q4 byte-identical, PPL 311.1636 (re-verified after the profiling marks) |
 
 Landed commits: a053d35 (G1 GL state caching), e7cc839 (rms reduce fused),
 faa833a (results doc), 318ac15 (draw-bound finding), 84b9a88 (FFN merge plan),
 70bb245 (fused FFN kernel), 1a7da7c (per-draw cost: 0.18 ms, draw merging is
 not the lever), a40593a (paired logits rows: -6.8 ms, bit-exact,
-`LOGITS_SPLIT=1` restores the old path).
+`LOGITS_SPLIT=1` restores the old path), then 2cc1f7a (attention profile:
+`PROFATT2` marks inside `att_scores`; the score-viewport shrink was bit-exact but
+gained nothing and was reverted).
 
 ## Next step (do this first)
 
-**Profile the attention chain, then attack its dominant kernel.**  attn is 36%
-of the shader work and is a chain of five dependent draws (score, stats, prob,
-v, and kv/rope) with a finish between each.  At 0.18 ms/draw the 40 attention
-draws are only ~7 ms, so the other ~9 ms per layer is dependency stall plus
-shader work, and it has never been split.  Start the run by adding
-`LAYER_PROFILE=1` marks inside the attention sequence so score / stats / prob / v
-are timed separately, and record the split before writing any kernel.
+**The attention chain is bound by the number of dependent passes, not by
+fragments.**  Profiled this run (`docs/performance.md`), decode only, per layer:
+qkv 5.22 ms, score grid 3.22, qrot 2.87, stats 2.76, v 2.57, rope 0.88.  The
+12-fragment `stats` draw costs as much as the 4608-fragment score grid, and
+shrinking the score viewport to `(pos+2)/2` (bit-exact, gates green) changed
+nothing - the grid is not where the time is.  Count the passes: ~11 per layer x
+8 layers = ~88 dependent drains per token; at the ~1.5-2 ms these laps show that
+is most of the 227 ms.
 
-Do **not** open with a fused prob+v.  `att_v` consumes `att_probs`, and fusing
-them moves the normalisation, which is exactly the shape that drifted 1 LSB in
-`FFN_FUSE`.  If the profile says `score` dominates, the safe form is the q8
-**pair** kernel that has now worked twice (two rows, two accumulators, packed
-q16 out): two heads per fragment, `x_st2q` output.
+So the next kernel is a **pass merge, not a pair kernel**: fold `qrot` into the
+qkv matvec so the chain loses a link - both consumers (`kv_rope_write` and the
+score grid) already read `qkv_target_`, so produce the rotated q in the pass that
+writes q.  Keep the q16 encode and exactly the rounding `x_i24encq` applies; if
+the merged value differs by 1 LSB, stop and put the change behind a default-off
+switch instead of shipping it.  Second candidate after that: fold the `stats`
+max+sumexp reduction into `att_v` - same shape that drifted under `FFN_FUSE`, so
+only with the identical accumulation order.
+
+Do **not** shrink viewports for attention passes (measured, no gain), and do not
+open with a fused prob+v.  `LAYER_PROFILE=1` now prints `PROFATT`
+(qkv/rope/scores/stats/v) and `PROFATT2` (qrot/score); isolate decode by
+differencing a `--gen 12` run against `--gen 4` so prefill cancels, and normalise
+by `qkv`, which is position-independent.
 
 ## Where the time goes
 
