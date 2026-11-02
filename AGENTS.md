@@ -7,7 +7,9 @@ details live in local override files, not here:
 - `AGENTS.override.md` — Hermes/VLAB full override; it replaces this file.
 
 Those files are local/personal and are gitignored.  Do not copy host names,
-sysroots, deploy paths, or benchmark numbers from them into this file.
+sysroots, deploy paths, or local-only benchmark numbers from them into this
+file.  Target reference timings are allowed when explicitly labeled with the
+target (for example Pi Zero).
 
 ## Mission
 
