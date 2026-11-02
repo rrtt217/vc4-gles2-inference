@@ -1334,3 +1334,70 @@ Conclusion: `FFN_FUSE` stays default-off and both debug variants were reverted.
 The lesson for the next candidate is to remove draws **without touching a
 shader that contains an accumulation chain**; the `FFN_DUMP=1` hook is kept
 because any future draw merge has to be checked the same way.
+
+### Measured per-draw cost: ~0.18 ms, so draw merging is not the lever (2026-11-03)
+
+The working assumption since the draw-count analysis has been "188 draws at
+0.5-1.2 ms each, so ~94 ms is per-draw overhead, merge draws".  That number was
+never measured directly.  It can be, without touching any arithmetic:
+`RMS_SPLIT=1` turns off the fused rmsnorm reduce, which re-inserts the 1x1
+reduce draw after each partial pass.  Same expressions, same summation order, so
+the gates stay byte-identical (that is why the fusion was landed in the first
+place) - the only difference is `2 * layers + 1 = 17` extra trivial draws per
+token.
+
+Same binary, alternate A/B, plain mode, 32 tokens, SEQ 768:
+
+| run | default (188) | RMS_SPLIT (205) | delta |
+|---|---:|---:|---:|
+| 1 | 232.7 | 236.4 | +3.8 |
+| 2 | 236.4 | 236.4 | +0.0 |
+| 3 | 227.9 | 233.3 | +5.4 |
+
+Mean +3.0 ms for 17 draws, i.e. **~0.18 ms per draw** (upper bound ~0.35 ms,
+given the board's +-4 ms run-to-run noise).  Even a 1x1 draw costs that, so this
+is submission/dependency latency, not rasterisation.
+
+Consequences, which change the plan:
+
+* 188 draws are worth ~34 ms of the 229, not ~94.  The other ~195 ms is shader
+  work inside the passes.
+* The planned "merge the two swiglu passes" step (8 draws, the next step in
+  WORKLOG) was worth ~1.5 ms and is **cancelled** before it was written.  It
+  also needed the swiglu output to be read at an offset by `w2`, i.e. shader
+  text churn for no measurable gain.
+* Re-reading the `FFN_FUSE` A/B (-20.4 ms for 24 draws): only ~4.3 ms of that is
+  draws.  The other **~16 ms is real work** - the fused kernel halves the gate
+  fragment count, so each activation texel is decoded once for two rows instead
+  of twice.  Shared-activation-decode per fragment is the lever that matters.
+
+### Where the ~195 ms of shader work goes (`LAYER_PROFILE=1`)
+
+Steady-state per layer (`l>=1`; `l=0` and the first token include prefill, and
+`mark()` syncs at every stage so absolute values are inflated ~1.5x - use the
+ratios):
+
+| stage | ms/layer (sync-inflated) | share |
+|---|---:|---:|
+| attn | 16.1 | 36% |
+| ffn (gate pair + swiglu) | 12.0 | 27% |
+| w2 (2 chunks x 2 strips) | 7.8 | 17% |
+| wo | 3.4 | 8% |
+| rms_att / rms_ffn | 2.7 / 2.7 | 6% each |
+| logits (outside the loop) | ~20 ms/token | 9% of the token |
+
+Attention is the single largest stage and it is a chain of five *dependent*
+draws, each needing its own finish before the next FBO can be sampled.  With
+draw cost at 0.18 ms the 40 attention draws are only ~7 ms, so the remaining
+~9 ms/layer is dependency stall plus shader work - that needs its own probe
+before it can be attacked.
+
+### Next candidate: pair the logits rows
+
+`logits_from` runs 5 tiles of 1536x768 one row (one vocabulary entry) per
+fragment, ~20 ms/token for 7680 fragments that each decode all 768 activations.
+Two rows per fragment halves the activation decode with **two accumulators** -
+the same shape as the existing (and bit-exact) FFN gate pair, not the
+four-accumulator shape that drifted 1 LSB under `FFN_FUSE`.  The write side is
+self-contained; the read side needs a packed reader in `read_i32` and in the
+Top-K candidate shader, which currently sample one logit per texel.
