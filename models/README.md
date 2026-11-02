@@ -20,7 +20,7 @@ models/
     stories15M.bin/.q8/.i16
     stories42M.bin/.q8/.i16
     TinyChat15M.bin/.q8/.i16
-    minimind2-small.q8/.i16
+    minimind2-small.q8/.i16/.q4
     stories15M-llama2-enzh.bin
     tokenizer.bin
     tokenizer-llama2enzh.bin

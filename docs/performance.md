@@ -896,3 +896,102 @@ same binary swings between 236 and 560 ms/token and the load average sits at
 back-to-back in one session are still valid (both sides see the same
 interference), but absolute numbers should be taken with the server idle, and the
 best-of-N is the only stable statistic.
+
+## MiniMind2-small Q8 on the laptop (2026-11-02)
+
+Machine: Iris Xe (ADL GT2), Mesa 26.2.5. Model:
+`minimind2-small.q8` (28 MB), tokenizer `minimind2-tokenizer.bin`,
+`ROPE_THETA=1000000 ROPE_HALF=1`. Prompt `用一句话介绍你自己。` through
+`--chat --template qwen`, greedy, 64 generated tokens; prefill is the whole
+chat prompt, not a per-token number.
+
+| path | prefill | decode | output |
+|---|---:|---:|---|
+| q8, GPU layers (fixed, paired FFN) | 0.20 s | 7.7 ms/token | coherent |
+| q4, GPU layers (Q4M1 from I16) | 0.20 s | 6.7 ms/token | coherent |
+| q8, CPU FFN (`CPU_FFN=1`) | 0.31 s | 11.8 ms/token | coherent |
+| i16, GPU layers (`GPU_LAYER=1`) | 0.28 s | 11.1 ms/token | coherent |
+| q8, GPU layers, `FFN_PAIR=0` | 0.17 s | 6.2 ms/token* | **garbled** |
+| i16, CPU FFN (`CPU_FFN=1`) | 0.73 s | 19.4 ms/token | coherent |
+
+\* the broken path was timed on a 6-token run; it is not a usable baseline.
+
+The q8 failure was not "q8 in general": `Q8_PARTS=ffn` reproduced it while
+`w2`, `qkv` and `wo` stayed coherent; `GPU_FFN=1` and `GPU_LAYER=1` both failed
+while `CPU_FFN=1` worked; i16 used the same non-paired path and worked;
+MiniMind3 (hidden 2432, chunked, paired path) worked.
+
+The fault is the non-paired q8 FFN path (`matvec_to_row` q24 +
+`swiglu_2row`) for `hidden=1408`. `GPU::ffn_split` now routes INT8 w1/w3
+through `ffn_pair_chunk`, the same q16 paired path already used by chunked
+models; `FFN_PAIR=0` keeps the old path for A/B. MiniMind3 q8/q4 canonical
+greedy outputs are unchanged after the change.
+
+The Q4M1 file is generated directly from the I16 checkpoint with
+`make_q4_from_i16.py` (20.7 MB). It takes the old non-paired path and is
+coherent; the failure is q8-specific, not a generic non-paired-path bug. Q4 is
+faster than q8 here (6.7 vs 7.7 ms/token) but noticeably lower quality: it
+answers `1+1=2` and `中国的首都是北京`, while the self-introduction drifts to
+"我是一台电脑".
+
+
+## Q4 path: nibble decode without mod (-13%)
+
+The q4 matvec decodes two nibbles per weight byte with `mod(b,16)` and
+`floor(b/16)`.  GLSL's `mod` is `x - y*floor(x/y)`, i.e. a divide plus a floor,
+and it was being paid twice per byte, 768/8 times per output row.
+
+Replacing it with an explicit split — `h = floor(b*0.0625)`, `l = b - h*16` —
+keeps the exact same integers (the byte itself is still `floor(w*255+0.5)`) and
+cuts the stage from ~8 ops per byte to ~5:
+
+| q4 build | decode | PPL | greedy text |
+|---|---:|---:|---|
+| before | 463.6 / 463.6 ms | 329.22 | `我是MiniMind，一个由jingyaogong…` |
+| **+ split nibble decode** | **403.3 / 407.4 ms** | **329.15** | identical |
+
+Also tried and kept: moving the per-weight `mn` term out into
+`sc*sum(n*x) + mn*sum(x)` so the min is paid once per group (neutral on its own,
+but it is what makes the nibble split cheap to express).
+
+Also tried and reverted: a q4 `matvec_add` pair kernel (two rows per fragment,
+packed residual).  It was 20 ms faster but the output was garbage
+(PPL 4e14), so the q4 residual stream stays unpacked until that kernel is
+debugged.
+
+### Why q4 stays slower than q8
+
+Per weight, q4 needs a nibble split (~5 ops for two weights) plus a scale/min
+FMA, while int8 needs `c*255-128` (2 ops).  The halved *fetch* count does not pay
+for that on VC4, which is ALU-bound: q4 lands at 403 ms against q8's 240 ms.
+Closing the rest of the gap needs either the pair kernel above or storing q4
+weights pre-split (which doubles the weight footprint and does not fit CMA).
+
+
+### Q4: paired gate and packed residual (463 -> 380 ms, -18%)
+
+Two more changes landed on the q4 path after the nibble split:
+
+1. **Paired FFN gate** (`matvec_i4_pair`): one fragment computes `w1[r]` and
+   `w3[r]`, sharing the activation decode, and writes a raw q16 pair for swiglu.
+   The first attempt produced garbage because the q4 accumulator works in *raw*
+   q16 units while `x_st2` expects activation units (it multiplies by 256); the
+   fix is `x_st2q`.  The same unit trap applies to the q4 `matvec_add` pair
+   kernel (`matvec_i4_add_pair`).
+2. **Packed residual for q4** (`res_pack_` no longer requires int8 weights): both
+   the q4 add pair kernel and the rmsnorm passes now read the stream two values
+   per texel.
+
+| q4 build | decode | PPL |
+|---|---:|---:|
+| baseline | 463.6 | 329.22 |
+| + nibble split | 403.3 | 329.15 |
+| **+ paired gate + packed residual** | **380.7 / 382.9** | **327.85** |
+
+Phase profile (ms/layer, profiled): FFN 28.5 -> 23.8, w2 16.9 -> 12.7,
+wo 6.5 -> 5.4, attention unchanged at ~22.
+
+q4 remains slower than q8 (380 vs 240 ms) because a nibble split costs several
+ALU ops per weight against int8's single `c*255-128`, and VC4 is ALU-bound; the
+halved fetch count does not pay for it.  Closing that gap would need pre-split
+int8 weights, which doubles the weight footprint past what CMA can hold.

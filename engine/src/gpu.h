@@ -95,8 +95,10 @@ private:
     GLuint x_prog(const string& key, const string& src);
     GLuint x_q8(int rows, int cols);
     GLuint x_q8_pair(int rows, int cols);
+    GLuint x_i4_pair(int rows, int cols);
     GLuint x_q8_add(int rows, int cols, XFormat xf);
     GLuint x_q8_add_pair(int rows, int cols, XFormat xf);
+    GLuint x_i4_add_pair(int rows, int cols, XFormat xf);
     GLuint x_i16(int rows, int cols);
     GLuint x_i16_add(int rows, int cols, XFormat xf);
     GLuint x_i4(int rows, int cols);

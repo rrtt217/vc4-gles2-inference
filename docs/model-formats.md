@@ -62,7 +62,8 @@ needed for MiniMind3.
 
 ## Q4M1 (offline q4)
 
-Q4M1 is generated directly from F16 safetensors by `make_q4.py`:
+Q4M1 is generated from F16 safetensors by `make_q4.py`, or from an I16
+checkpoint by `make_q4_from_i16.py` (I16 is an allowed source; q8 is not):
 
 ```text
 u32 magic = 0x51344D31 ("Q4M1")

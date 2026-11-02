@@ -42,6 +42,13 @@ drops from ~119 MB to ~56 MB.  This is system RAM, not CMA.
 python3 engine/quantize/make_q4.py --input models/minimind3 --output models/minimind3/minimind3.q4 --seq 512
 ```
 
+For an I16 checkpoint, convert directly without going through q8:
+
+```bash
+python3 engine/quantize/make_q4_from_i16.py \
+  models/llama2c/minimind2-small.i16 models/llama2c/minimind2-small.q4
+```
+
 The Q4M1 file stores q4 block32 asymmetric linear weights (qkv/wo/W1/W3/W2),
 q8 embeddings and q8 logits tiles.  Load it directly; do **not** set
 `Q4_WEIGHTS`:

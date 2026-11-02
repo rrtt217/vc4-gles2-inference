@@ -108,6 +108,12 @@ vector<float> GPU::matvec_from(const Mat& m, GLuint x){
     }
 
 GLuint GPU::ffn_split(const Mat& w1, const Mat& w3, GLuint x, int hidden){
+        // The old non-paired q8 path (q24 matvec_to_row + swiglu_2row) has been
+        // observed to miscompute w1/w3 for hidden=1408; the paired q16 path is
+        // correct and also faster.  FFN_PAIR=0 keeps the old path for A/B.
+        static const bool pair_env = !(getenv("FFN_PAIR") && strcmp(getenv("FFN_PAIR"), "0") == 0);
+        if (pair_env && w1.type == WeightType::INT8 && w3.type == WeightType::INT8)
+            return ffn_pair_chunk(w1, w3, x, hidden, ffn_pair_a_, ffn_h_a_);
         if (ffn_ab_.tex == 0 || ffn_ab_.w != hidden || ffn_ab_.h != 2) ffn_ab_ = make_target(hidden, 2);
         matvec_to_row(w1, x, ffn_ab_, 0);
         matvec_to_row(w3, x, ffn_ab_, 1);
@@ -124,7 +130,8 @@ GLuint GPU::ffn_fused(const Mat& w13, GLuint x, int hidden){
         if (pair_buf.tex == 0 || pair_buf.w != hidden) pair_buf = make_target(hidden, 1);
         const int aw = x_texels(hidden, ffn_fmt_);
         if (out.tex == 0 || out.w != aw) out = make_target(aw, 1);
-        GLuint pp = x_q8_pair(hidden, w1.cols);
+        const bool i4 = (w1.type == WeightType::INT4);
+        GLuint pp = i4 ? x_i4_pair(hidden, w1.cols) : x_q8_pair(hidden, w1.cols);
         glBindFramebuffer(GL_FRAMEBUFFER, pair_buf.fbo);
         glViewport(0, 0, hidden, 1);
         glUseProgram(pp);
@@ -134,8 +141,17 @@ GLuint GPU::ffn_fused(const Mat& w13, GLuint x, int hidden){
         glUniform1i(glGetUniformLocation(pp, "W2"), 1);
         glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, x);
         glUniform1i(glGetUniformLocation(pp, "X"), 2);
-        glUniform1f(glGetUniformLocation(pp, "ws1"), w1.scale);
-        glUniform1f(glGetUniformLocation(pp, "ws2"), w3.scale);
+        if (i4) {
+            glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, w1.q4_param_tex);
+            glUniform1i(glGetUniformLocation(pp, "P1"), 3);
+            glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, w3.q4_param_tex);
+            glUniform1i(glGetUniformLocation(pp, "P2"), 4);
+            glUniform1f(glGetUniformLocation(pp, "ps1"), w1.q4_param_scale);
+            glUniform1f(glGetUniformLocation(pp, "ps2"), w3.q4_param_scale);
+        } else {
+            glUniform1f(glGetUniformLocation(pp, "ws1"), w1.scale);
+            glUniform1f(glGetUniformLocation(pp, "ws2"), w3.scale);
+        }
         GLuint loc = glGetAttribLocation(pp, "p");
         glEnableVertexAttribArray(loc);
         glVertexAttribPointer(loc, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
@@ -162,7 +178,9 @@ void GPU::ffn_split_chunked(const Mat& w1a, const Mat& w3a, const Mat& w1b, cons
                            GLuint x, int n1, int n2, GLuint& ha, GLuint& hb){
         static const bool pair_env = !(getenv("FFN_PAIR") && strcmp(getenv("FFN_PAIR"), "0") == 0);
         // The paired shader assumes int8 weights; q4/i16 keep the old path.
-        const bool pair = pair_env && w1a.type == WeightType::INT8 && w3a.type == WeightType::INT8;
+        const bool pair = pair_env &&
+                          ((w1a.type == WeightType::INT8 && w3a.type == WeightType::INT8) ||
+                           (w1a.type == WeightType::INT4 && w3a.type == WeightType::INT4));
         if (pair) {
             ha = ffn_pair_chunk(w1a, w3a, x, n1, ffn_pair_a_, ffn_h_a_);
             hb = ffn_pair_chunk(w1b, w3b, x, n2, ffn_pair_b_, ffn_h_b_);
@@ -571,9 +589,11 @@ GLuint GPU::rmsnorm(GLuint x, GLuint w, Target& out){
 
 void GPU::matvec_add(const Mat& m, GLuint x, GLuint residual, Target& out, XFormat xf){
         const bool pair = res_pack_ && m.type == WeightType::INT8;
-        const int ow = pair ? (m.rows + 1) / 2 : m.rows;
+        const bool pair4 = res_pack_ && m.type == WeightType::INT4;
+        const int ow = (pair || pair4) ? (m.rows + 1) / 2 : m.rows;
         if (out.tex == 0 || out.w != ow) out = make_target(ow, 1);
-        GLuint p = pair ? x_q8_add_pair(m.rows, m.cols, xf)
+        GLuint p = pair4 ? x_i4_add_pair(m.rows, m.cols, xf)
+                  : pair ? x_q8_add_pair(m.rows, m.cols, xf)
                   : (m.type == WeightType::INT8) ? x_q8_add(m.rows, m.cols, xf)
                   : (m.type == WeightType::INT4) ? x_i4_add(m.rows, m.cols, xf)
                                                  : x_i16_add(m.rows, m.cols, xf);
@@ -667,6 +687,15 @@ GLuint GPU::x_q8_pair(int rows, int cols){
                       matvec_q8_pair(rows, cols, act_fmt_));
     }
 
+GLuint GPU::x_i4_pair(int rows, int cols){
+        const string key = "xi4p_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(act_fmt_);
+        auto it = programs_.find(key);
+        if (it != programs_.end()) return it->second;
+        GLuint p = link_program(matvec_i4_pair(rows, cols, act_fmt_));
+        programs_[key] = p;
+        return p;
+    }
+
 GLuint GPU::x_q8_add(int rows, int cols, XFormat xf){
         return x_prog("xq8a_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(xf) + "_" + x_format_name(res_fmt_),
                       matvec_q8_add(rows, cols, xf, res_fmt_));
@@ -676,6 +705,16 @@ GLuint GPU::x_q8_add_pair(int rows, int cols, XFormat xf){
         return x_prog("xq8ap_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(xf),
                       matvec_q8_add_pair(rows, cols, xf));
     }
+
+GLuint GPU::x_i4_add_pair(int rows, int cols, XFormat xf){
+        const string key = "xi4ap_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(xf);
+        auto it = programs_.find(key);
+        if (it != programs_.end()) return it->second;
+        GLuint p = link_program(matvec_i4_add_pair(rows, cols, xf));
+        programs_[key] = p;
+        return p;
+    }
+
 
 GLuint GPU::x_i16(int rows, int cols){
         return x_prog("xi16_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(act_fmt_),

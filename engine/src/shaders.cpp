@@ -220,15 +220,102 @@ string matvec_i4(int rows, int cols, XFormat xf) {
         "for(int t=0;t<4;t++){int c=g*32+t*8;"
         "vec4 w=texture2D(W,vec2((float(g*4+t)+0.5)/float(" + to_string(texw) + "),"
         "(float(r)+0.5)/float(" + to_string(rows) + ")));"
-        "float b0=floor(w.r*255.0+0.5),b1=floor(w.g*255.0+0.5);"
-        "float b2=floor(w.b*255.0+0.5),b3=floor(w.a*255.0+0.5);"
+        "float b0=floor(w.r*255.0+0.5),b1=floor(w.g*255.0+0.5),"
+        "b2=floor(w.b*255.0+0.5),b3=floor(w.a*255.0+0.5);"
+        "float h0=floor(b0*0.0625),h1=floor(b1*0.0625),"
+        "h2=floor(b2*0.0625),h3=floor(b3*0.0625);"
+        "float l0=b0-h0*16.0,l1=b1-h1*16.0,l2=b2-h2*16.0,l3=b3-h3*16.0;"
         "vec4 xa=X4Q(X,c," + to_string(axw) + ".0);"
         "vec4 xb=X4Q(X,c+4," + to_string(axw) + ".0);"
-        "s+=(mod(b0,16.0)*sc+mn)*xa.x+(floor(b0/16.0)*sc+mn)*xa.y;"
-        "s+=(mod(b1,16.0)*sc+mn)*xa.z+(floor(b1/16.0)*sc+mn)*xa.w;"
-        "s+=(mod(b2,16.0)*sc+mn)*xb.x+(floor(b2/16.0)*sc+mn)*xb.y;"
-        "s+=(mod(b3,16.0)*sc+mn)*xb.z+(floor(b3/16.0)*sc+mn)*xb.w;}}"
+        // (n*sc + mn)*x sums to sc*sum(n*x) + mn*sum(x): the min term is paid
+        // once per group instead of once per weight, and the activation sum
+        // reuses the fetches already made.
+        "float d0=l0*xa.x+h0*xa.y;"
+        "float d1=l1*xa.z+h1*xa.w;"
+        "float d2=l2*xb.x+h2*xb.y;"
+        "float d3=l3*xb.z+h3*xb.w;"
+        "s+=sc*(d0+d1+d2+d3)+mn*(xa.x+xa.y+xa.z+xa.w+xb.x+xb.y+xb.z+xb.w);}}"
         "gl_FragColor=x_i24encq(s);}";
+}
+
+// q4 residual-add, two rows per fragment: rows 2t and 2t+1 share one activation
+// decode and one residual fetch, and are written as a raw q16 pair (x_st2q, since
+// the q4 accumulator works in raw q16 units, not activation units).
+string matvec_i4_add_pair(int rows, int cols, XFormat xf) {
+    const int texw = cols / 8;
+    const int groups = (cols + 31) / 32;
+    const int axw = x_texels(cols, xf);
+    const int rw = (rows + 1) / 2;
+    return head(xf) + x_residual_glsl(XFormat::I16_2) +
+        "uniform sampler2D W,P,X,R;uniform float ps;"
+        "float dot4(vec4 w0,vec4 xa,vec4 xb){"
+        "float b0=floor(w0.r*255.0+0.5),b1=floor(w0.g*255.0+0.5),"
+        "b2=floor(w0.b*255.0+0.5),b3=floor(w0.a*255.0+0.5);"
+        "float h0=floor(b0*0.0625),h1=floor(b1*0.0625),"
+        "h2=floor(b2*0.0625),h3=floor(b3*0.0625);"
+        "float l0=b0-h0*16.0,l1=b1-h1*16.0,l2=b2-h2*16.0,l3=b3-h3*16.0;"
+        "return l0*xa.x+h0*xa.y+l1*xa.z+h1*xa.w+l2*xb.x+h2*xb.y+l3*xb.z+h3*xb.w;}"
+        "void main(){int t=int(gl_FragCoord.x);int r0=2*t;int r1=r0+1;"
+        "float s0=0.0,s1=0.0;"
+        "for(int g=0;g<" + to_string(groups) + ";g++){"
+        "vec4 pa=texture2D(P,vec2((float(g)+0.5)/float(" + to_string(groups) + "),"
+        "(float(r0)+0.5)/float(" + to_string(rows) + ")));"
+        "vec4 pb=texture2D(P,vec2((float(g)+0.5)/float(" + to_string(groups) + "),"
+        "(float(r1)+0.5)/float(" + to_string(rows) + ")));"
+        "float sa=x_i16raw(pa.rg)*ps,ma=x_i16raw(pa.ba)*ps;"
+        "float sb=x_i16raw(pb.rg)*ps,mb=x_i16raw(pb.ba)*ps;"
+        "float xsum=0.0,dota=0.0,dotb=0.0;"
+        "for(int q=0;q<4;q++){int c=g*32+q*8;"
+        "vec4 xa=X4Q(X,c," + to_string(axw) + ".0);"
+        "vec4 xb=X4Q(X,c+4," + to_string(axw) + ".0);"
+        "xsum+=xa.x+xa.y+xa.z+xa.w+xb.x+xb.y+xb.z+xb.w;"
+        "vec4 w0=texture2D(W,vec2((float(g*4+q)+0.5)/float(" + to_string(texw) + "),"
+        "(float(r0)+0.5)/float(" + to_string(rows) + ")));"
+        "dota+=dot4(w0,xa,xb);"
+        "w0=texture2D(W,vec2((float(g*4+q)+0.5)/float(" + to_string(texw) + "),"
+        "(float(r1)+0.5)/float(" + to_string(rows) + ")));"
+        "dotb+=dot4(w0,xa,xb);}"
+        "s0+=sa*dota+ma*xsum;s1+=sb*dotb+mb*xsum;}"
+        "float res0=R1Q(R,r0," + to_string(rw) + ".0),res1=R1Q(R,r1," + to_string(rw) + ".0);"
+        "gl_FragColor=x_st2q(s0+res0,s1+res1);}";
+}
+
+// q4 FFN gate, paired: one fragment computes w1[r] and w3[r], sharing the
+// activation decode, and writes both as a raw q16 pair for swiglu.
+string matvec_i4_pair(int rows, int cols, XFormat xf) {
+    const int texw = cols / 8;
+    const int groups = (cols + 31) / 32;
+    const int axw = x_texels(cols, xf);
+    return head(xf) +
+        "uniform sampler2D W1,W2,P1,P2,X;uniform float ps1,ps2;"
+        "float dot4(vec4 w0,vec4 xa,vec4 xb){"
+        "float b0=floor(w0.r*255.0+0.5),b1=floor(w0.g*255.0+0.5),"
+        "b2=floor(w0.b*255.0+0.5),b3=floor(w0.a*255.0+0.5);"
+        "float h0=floor(b0*0.0625),h1=floor(b1*0.0625),"
+        "h2=floor(b2*0.0625),h3=floor(b3*0.0625);"
+        "float l0=b0-h0*16.0,l1=b1-h1*16.0,l2=b2-h2*16.0,l3=b3-h3*16.0;"
+        "return l0*xa.x+h0*xa.y+l1*xa.z+h1*xa.w+l2*xb.x+h2*xb.y+l3*xb.z+h3*xb.w;}"
+        "void main(){int r=int(gl_FragCoord.x);float s1=0.0,s2=0.0;"
+        "for(int g=0;g<" + to_string(groups) + ";g++){"
+        "vec4 q1=texture2D(P1,vec2((float(g)+0.5)/float(" + to_string(groups) + "),"
+        "(float(r)+0.5)/float(" + to_string(rows) + ")));"
+        "vec4 q2=texture2D(P2,vec2((float(g)+0.5)/float(" + to_string(groups) + "),"
+        "(float(r)+0.5)/float(" + to_string(rows) + ")));"
+        "float sa1=x_i16raw(q1.rg)*ps1,ma1=x_i16raw(q1.ba)*ps1;"
+        "float sa2=x_i16raw(q2.rg)*ps2,ma2=x_i16raw(q2.ba)*ps2;"
+        "float xsum=0.0,d1=0.0,d2=0.0;"
+        "for(int q=0;q<4;q++){int c=g*32+q*8;"
+        "vec4 xa=X4Q(X,c," + to_string(axw) + ".0);"
+        "vec4 xb=X4Q(X,c+4," + to_string(axw) + ".0);"
+        "xsum+=xa.x+xa.y+xa.z+xa.w+xb.x+xb.y+xb.z+xb.w;"
+        "vec4 w0=texture2D(W1,vec2((float(g*4+q)+0.5)/float(" + to_string(texw) + "),"
+        "(float(r)+0.5)/float(" + to_string(rows) + ")));"
+        "d1+=dot4(w0,xa,xb);"
+        "w0=texture2D(W2,vec2((float(g*4+q)+0.5)/float(" + to_string(texw) + "),"
+        "(float(r)+0.5)/float(" + to_string(rows) + ")));"
+        "d2+=dot4(w0,xa,xb);}"
+        "s1+=sa1*d1+ma1*xsum;s2+=sa2*d2+ma2*xsum;}"
+        "gl_FragColor=x_st2q(s1,s2);}";
 }
 
 string matvec_i4_add(int rows, int cols, XFormat xf, XFormat rf) {
@@ -245,14 +332,21 @@ string matvec_i4_add(int rows, int cols, XFormat xf, XFormat rf) {
         "for(int t=0;t<4;t++){int c=g*32+t*8;"
         "vec4 w=texture2D(W,vec2((float(g*4+t)+0.5)/float(" + to_string(texw) + "),"
         "(float(r)+0.5)/float(" + to_string(rows) + ")));"
-        "float b0=floor(w.r*255.0+0.5),b1=floor(w.g*255.0+0.5);"
-        "float b2=floor(w.b*255.0+0.5),b3=floor(w.a*255.0+0.5);"
+        "float b0=floor(w.r*255.0+0.5),b1=floor(w.g*255.0+0.5),"
+        "b2=floor(w.b*255.0+0.5),b3=floor(w.a*255.0+0.5);"
+        "float h0=floor(b0*0.0625),h1=floor(b1*0.0625),"
+        "h2=floor(b2*0.0625),h3=floor(b3*0.0625);"
+        "float l0=b0-h0*16.0,l1=b1-h1*16.0,l2=b2-h2*16.0,l3=b3-h3*16.0;"
         "vec4 xa=X4Q(X,c," + to_string(axw) + ".0);"
         "vec4 xb=X4Q(X,c+4," + to_string(axw) + ".0);"
-        "s+=(mod(b0,16.0)*sc+mn)*xa.x+(floor(b0/16.0)*sc+mn)*xa.y;"
-        "s+=(mod(b1,16.0)*sc+mn)*xa.z+(floor(b1/16.0)*sc+mn)*xa.w;"
-        "s+=(mod(b2,16.0)*sc+mn)*xb.x+(floor(b2/16.0)*sc+mn)*xb.y;"
-        "s+=(mod(b3,16.0)*sc+mn)*xb.z+(floor(b3/16.0)*sc+mn)*xb.w;}}"
+        // (n*sc + mn)*x sums to sc*sum(n*x) + mn*sum(x): the min term is paid
+        // once per group instead of once per weight, and the activation sum
+        // reuses the fetches already made.
+        "float d0=l0*xa.x+h0*xa.y;"
+        "float d1=l1*xa.z+h1*xa.w;"
+        "float d2=l2*xb.x+h2*xb.y;"
+        "float d3=l3*xb.z+h3*xb.w;"
+        "s+=sc*(d0+d1+d2+d3)+mn*(xa.x+xa.y+xa.z+xa.w+xb.x+xb.y+xb.z+xb.w);}}"
         "float res=R1Q(R,r," + to_string(x_texels(rows, rf)) + ".0);"
         "gl_FragColor=x_st1q(s+res);}";
 }

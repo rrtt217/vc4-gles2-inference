@@ -46,7 +46,8 @@ Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
             // the q8 model, perplexity unchanged.  RES_PACK=0 opts out.
             const char* rp = getenv("RES_PACK");
             gpu_.res_pack_ = !(rp && strcmp(rp, "0") == 0) &&
-                             q8_model && !m_.wo.empty() && m_.wo[0].type == WeightType::INT8;
+                             !m_.wo.empty() &&
+                             (m_.wo[0].type == WeightType::INT8 || m_.wo[0].type == WeightType::INT4);
             gpu_.res_fmt_ = gpu_.res_pack_ ? XFormat::I16_2 : XFormat::I16_1;
         }
         if (gpu_attn_)

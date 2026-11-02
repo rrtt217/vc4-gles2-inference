@@ -31,6 +31,8 @@ std::string matvec_i16(int rows, int cols, XFormat xf);
 std::string matvec_i16_add(int rows, int cols, XFormat xf, XFormat rf);
 std::string matvec_i4(int rows, int cols, XFormat xf);
 std::string matvec_i4_add(int rows, int cols, XFormat xf, XFormat rf);
+std::string matvec_i4_pair(int rows, int cols, XFormat xf);
+std::string matvec_i4_add_pair(int rows, int cols, XFormat xf);
 
 std::string swiglu_pair(int hidden, XFormat out);
 std::string swiglu_2row(int hidden, XFormat out);
