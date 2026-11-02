@@ -17,9 +17,10 @@ runs a Minecraft server, so use the ranges rather than individual decimals:
 | MiniMind2 q4 | `minimind2-small.q4` | 21 MB | 9.7 s | 193–212 ms/token | memory mode; identity answers unreliable |
 | TinyChat15M q8 | `TinyChat15M.q8` | 24 MB | 4.8 s | 139–171 ms/token | loads and runs, but output is not coherent with the repo tokenizer |
 | stories15M i16 | `stories15M.i16` | 49 MB | 3.1 s | 167 ms/token | TinyStories completion; coherent |
+| stories15M legacy | `stories15M.bin` | 60 MB | 3.3 s | 161 ms/token | coherent after legacy-I16 default |
 | stories42M q8 | `stories42M.q8` | 58 MB | 3.8 s | 190 ms/token | TinyStories completion; coherent |
-| stories15M q8 | `stories15M.q8` | 24 MB | 3.1 s | 148 ms/token | **gibberish** in current conversion; use i16 |
-| stories260K legacy | `stories260K.bin` | 1 MB | 4.3 s | 83 ms/token | fastest decode, but output is gibberish; not usable |
+| stories15M q8 | `stories15M.q8` | 24 MB | 3.1 s | 148 ms/token | **gibberish**; use the `.bin`/i16 path instead |
+| stories260K legacy | `stories260K.bin` + `tok512.bin` | 1 MB | 5.4 s | 85 ms/token | coherent after legacy-I16 default; 5-layer floor probe |
 
 The Pi store now has TinyStories 15M/42M/260K checkpoints.  They are base
 completion models, not chat models, so test them with a plain prompt such as
@@ -29,11 +30,12 @@ treated as a format/probe model, not as a usable chat model until its
 tokenizer/prompt pairing is fixed.
 
 The 260K legacy checkpoint is a useful **floor probe**, not a product model:
-its 5-layer/64-dim body reaches 83 ms/token, but prefill is still 4.3 s because
-the attention passes walk the full 512-position grid and the shader setup is
-fixed.  The legacy loader's int8-on-load path also produces gibberish with the
-current tokenizer, so it does not invalidate the ~100 ms floor for coherent
-TinyStories models.
+its 5-layer/64-dim body reaches 85 ms/token after the legacy-I16 fix, but
+prefill is still 5.4 s because the attention passes walk the full 512-position
+grid and the shader setup is fixed.  This is below the ~150 ms floor of the
+coherent 15M/42M models, but it is not a quality replacement for them.
+Legacy fp32 files now default to I16; `LEGACY_Q8=1` keeps the old low-memory
+q8 path for large checkpoints, at a quality cost on small TinyStories models.
 
 ### Default system prompt
 

@@ -17,6 +17,9 @@ production settings.
   q8 and q4 use packed residual by default.
 - `ROPE_THETA=1000000 ROPE_HALF=1` — required for legacy Q8M1
   MiniMind2-small.q8; those fields are not in the old Q8 header.
+- `LEGACY_Q8=1` — quantize a legacy fp32 `.bin` checkpoint to q8 instead of
+  the default I16.  Use only when I16 does not fit; small TinyStories models
+  (15M/260K) lose coherence in q8.
 - `ACT8=2` — FFN hidden state in I8_4 (q8 weights only, opt-in).
 - `ACT8=1` — all matvec inputs in I8_4 (q8 weights only, opt-in).
 - `FORCE_GLFINISH=1` — force the VC4 finish path on other drivers.

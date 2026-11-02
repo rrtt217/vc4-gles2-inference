@@ -99,10 +99,14 @@ GPU_LAYER=1 KV_PACK=16 ./engine_mm3 \
   --prompt "Once upon a time" --gen 64 --greedy
 ```
 
-Pi 上 stories15M i16 约 167 ms/token，stories42M q8 约 190 ms/token，均连贯。
-`stories15M.q8` 当前转换输出乱码，改用 i16；stories42M i16 超出当前 CMA 预算。
-260K legacy（`stories260K.bin` + `tok512.bin`）decode 约 83 ms/token，但 prefill
-仍要 4.3 s 且输出乱码，只能当 floor 探针。
+Pi 上 stories15M i16 约 167 ms/token，legacy `stories15M.bin` 约 161 ms/token，
+stories42M q8 约 190 ms/token，均连贯。`stories15M.q8` 当前转换输出乱码，
+改用 `.bin` 或 i16；stories42M i16 超出当前 CMA 预算。260K legacy
+（`stories260K.bin` + `tok512.bin`）在 legacy-I16 修复后约 85 ms/token，
+但仍要 5.4 s prefill，只能当 floor 探针。
+
+legacy fp32 默认按 I16 加载；只有内存不够时才用 `LEGACY_Q8=1`（例如 42M `.bin`）。
+小 TinyStories 模型在 q8 模式下会失去连贯性。
 
 ## MiniMind3 64M
 

@@ -105,9 +105,10 @@ details.
 | MiniMind2 q4 | 21 MB | ~193–212 ms/token | memory mode; identity answers unreliable |
 | TinyChat15M q8 | 24 MB | ~139–171 ms/token | runs, but output is not coherent; format probe only |
 | stories15M i16 | 49 MB | ~167 ms/token | TinyStories completion; coherent |
+| stories15M `.bin` | 60 MB | ~161 ms/token | coherent after legacy-I16 default |
 | stories42M q8 | 58 MB | ~190 ms/token | TinyStories completion; coherent |
-| stories15M q8 | 24 MB | ~148 ms/token | q8 conversion currently produces gibberish; use i16 |
-| stories260K legacy | 1 MB | ~83 ms/token | floor probe only; output gibberish, prefill 4.3 s |
+| stories15M q8 | 24 MB | ~148 ms/token | q8 conversion currently produces gibberish; use `.bin`/i16 |
+| stories260K `.bin` | 1 MB | ~85 ms/token | coherent after legacy-I16 default; prefill 5.4 s |
 
 Pi numbers are single-run and noisy; see [performance.md](docs/performance.md).
 The current supported matrix is checked on 2026-11-02; TinyChat15M needs a

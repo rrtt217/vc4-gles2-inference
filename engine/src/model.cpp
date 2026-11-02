@@ -227,27 +227,33 @@ bool Model::load_legacy(const string& path){
         const float* rfin = take(dim); rms_final.assign(rfin, rfin + dim);
         p += (size_t)seq * head_dim;
         const float* wcls = shared_embeddings ? ep : p;
+        // Legacy fp32 files have no precision field.  Quantizing them to int8
+        // destroys the tiny 260K/15M TinyStories models (empirically: coherent
+        // from I16, gibberish from Q8).  Default to I16; LEGACY_Q8=1 keeps the
+        // old low-memory path for large checkpoints.
+        const bool legacy_q8 = getenv("LEGACY_Q8") && strcmp(getenv("LEGACY_Q8"), "0") != 0;
+        const WeightType qt = legacy_q8 ? WeightType::INT8 : WeightType::INT16;
 
         for (int l = 0; l < layers; ++l) {
             vector<float> fused((size_t)(dim + 2 * kv_dim) * dim);
             memcpy(fused.data(), wq + (size_t)l * dim * dim, (size_t)dim * dim * 4);
             memcpy(fused.data() + (size_t)dim * dim, wk + (size_t)l * kv_dim * dim, (size_t)kv_dim * dim * 4);
             memcpy(fused.data() + (size_t)(dim + kv_dim) * dim, wv + (size_t)l * kv_dim * dim, (size_t)kv_dim * dim * 4);
-            qkv.push_back(quantize(fused.data(), dim + 2 * kv_dim, dim, WeightType::INT8));
-            wo.push_back(quantize(wo_p + (size_t)l * dim * dim, dim, dim, WeightType::INT8));
+            qkv.push_back(quantize(fused.data(), dim + 2 * kv_dim, dim, qt));
+            wo.push_back(quantize(wo_p + (size_t)l * dim * dim, dim, dim, qt));
             if (2 * hidden <= 2048) {
                 vector<float> fused13((size_t)2 * hidden * dim);
                 memcpy(fused13.data(), w1_p + (size_t)l * hidden * dim, (size_t)hidden * dim * 4);
                 memcpy(fused13.data() + (size_t)hidden * dim, w3_p + (size_t)l * hidden * dim, (size_t)hidden * dim * 4);
-                w13.push_back(quantize(fused13.data(), 2 * hidden, dim, WeightType::INT8));
+                w13.push_back(quantize(fused13.data(), 2 * hidden, dim, qt));
             } else {
-                w1.push_back(quantize(w1_p + (size_t)l * hidden * dim, hidden, dim, WeightType::INT8));
-                w3.push_back(quantize(w3_p + (size_t)l * hidden * dim, hidden, dim, WeightType::INT8));
+                w1.push_back(quantize(w1_p + (size_t)l * hidden * dim, hidden, dim, qt));
+                w3.push_back(quantize(w3_p + (size_t)l * hidden * dim, hidden, dim, qt));
             }
-            w2.push_back(quantize(w2_p + (size_t)l * dim * hidden, dim, hidden, WeightType::INT8));
+            w2.push_back(quantize(w2_p + (size_t)l * dim * hidden, dim, hidden, qt));
         }
         for (int st = 0; st < vocab; st += 1536)
-            logits_tiles.push_back(quantize(wcls + (size_t)st * dim, min(1536, vocab - st), dim, WeightType::INT8));
+            logits_tiles.push_back(quantize(wcls + (size_t)st * dim, min(1536, vocab - st), dim, qt));
         munmap(base, st.st_size);
         return true;
     }

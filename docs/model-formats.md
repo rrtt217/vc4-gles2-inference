@@ -5,7 +5,9 @@ the same tensor order; only the header and weight encoding differ.
 
 ## Supported checkpoints
 
-1. **legacy llama2.c fp32** — 28-byte header + fp32 tensors
+1. **legacy llama2.c fp32** — 28-byte header + fp32 tensors.  The loader
+   quantizes it to I16 by default; `LEGACY_Q8=1` selects the old q8 path for
+   memory-constrained use.
 2. **Q8M1** — int8 weights, int8 embedding
 3. **I16M1** — int16 weights, int16 embedding, rope metadata
 4. **Q8M2 / I16M2** — same as Q8M1/I16M1, plus stored theta/half and

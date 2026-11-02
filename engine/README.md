@@ -128,12 +128,17 @@ GPU_LAYER=1 KV_PACK=16 ./engine_mm3 \
   --prompt "Once upon a time" --gen 64 --greedy
 ```
 
-On the Pi, stories15M i16 is coherent at ~167 ms/token and stories42M q8 at
-~190 ms/token.  `stories15M.q8` currently produces gibberish in the repo's
-conversion; use the i16 file.  stories42M i16 is too large for the current
-CMA budget.  The 260K legacy file (`stories260K.bin` + `tok512.bin`) reaches
-~83 ms/token decode but still has 4.3 s prefill and gibberish output; treat it
-as a floor probe only.
+On the Pi, stories15M i16 is coherent at ~167 ms/token, the legacy
+`stories15M.bin` at ~161 ms/token, and stories42M q8 at ~190 ms/token.
+`stories15M.q8` currently produces gibberish in the repo's conversion; use the
+`.bin` or i16 file.  stories42M i16 is too large for the current CMA budget.  The
+260K legacy file (`stories260K.bin` + `tok512.bin`) is coherent after the
+legacy-I16 fix at ~85 ms/token, but still has 5.4 s prefill; treat it as a floor
+probe.
+
+Legacy fp32 checkpoints now load as I16 by default.  Set `LEGACY_Q8=1` only when
+the extra memory of I16 does not fit (for example a 42M `.bin`); small
+TinyStories models lose coherence in that mode.
 
 ## MiniMind3 64M
 

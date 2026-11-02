@@ -47,11 +47,15 @@ Notes:
   `engine/quantize/make_q4_from_i16.py`;
 - `TinyChat15M.q8` loads, but the repository tokenizer/prompt pairing currently
   produces incoherent text; treat it as a format probe;
-- `stories15M.q8` currently produces gibberish; `stories15M.i16` is the
-  coherent TinyStories 15M artifact.  stories42M q8 is coherent; its i16
+- `stories15M.q8` currently produces gibberish; use `stories15M.bin` (legacy
+  I16 default) or `stories15M.i16`.  stories42M q8 is coherent; its i16
   exceeds the current Pi CMA budget.
-- `stories260K.bin` needs `tok512.bin` (not the 32k `tokenizer.bin`).  It is a
-  floor probe: fast decode, but current legacy int8-on-load output is gibberish.
+- `stories260K.bin` needs `tok512.bin` (not the 32k `tokenizer.bin`).  With the
+  legacy-I16 default it is coherent at ~85 ms/token on the Pi, but prefill is
+  still ~5.4 s; it is a floor probe.
+- Legacy fp32 files default to I16.  `LEGACY_Q8=1` restores the old q8 path
+  for memory-constrained 42M `.bin` use, but small TinyStories models become
+  incoherent in q8.
 
 Model files, tokenizers, KV caches and logs are ignored by `.gitignore`.
 The HuggingFace `tokenizer.json` source is also not tracked; place it in
