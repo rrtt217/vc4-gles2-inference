@@ -48,7 +48,7 @@ make -B engine_mm3 CXXFLAGS='-O2 -march=armv6 -mfpu=vfp -mfloat-abi=hard -ffast-
 ```bash
 MODEL=$PWD/../models/llama2c/stories15M.i16 \
 TOKENIZER=../models/llama2c/tokenizer.bin \
-./engine --prompt "One day, Lily" --gen 8
+./engine_mm3 --prompt "One day, Lily" --gen 8
 ```
 
 MiniMind3 q8，GPU 层 + packed KV：
@@ -71,6 +71,23 @@ GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat --template minimind3 \
 
 模型文件本身是 Q4M1 时，不要设置 `Q4_WEIGHTS`。
 
+### MiniMind2 Small
+
+MiniMind2 使用 Qwen ChatML 模板。旧 Q8M1 文件头没有 RoPE 元数据，q8 必须显式补：
+
+```bash
+ROPE_THETA=1000000 ROPE_HALF=1 \
+MODEL=../models/llama2c/minimind2-small.q8 \
+TOKENIZER=../models/llama2c/minimind2-tokenizer.bin \
+GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat --template qwen \
+  --prompt "用一句话介绍你自己。" --gen 24 --greedy
+```
+
+I16/Q4M1 文件头自带 theta/half。q4 是内存模式，身份类回答明显更弱。
+
+TinyChat15M.q8 能加载运行，但当前 tokenizer/prompt 配对下输出不连贯，
+只能当格式探针，不要当对话模型使用。
+
 ## MiniMind3 64M
 
 64M Qwen3 风格 dense 模型：8 层、768 hidden、2432 FFN、8 Q / 4 KV heads、
@@ -79,14 +96,18 @@ head_dim 96、vocab 6400、RoPE theta 1e6、tied embedding、per-head Q/K RMSNor
 `--template minimind3` 使用 ChatML、空 `<think>` 块和 MiniMind 系统提示。
 加 `TIMING=1` 打印 prefill/decode 时间。
 
-Pi Zero q8，82-token prefill + 64 token 生成：
+Pi Zero，16 token 生成（2026-11-02，Pi 上还有 Minecraft server，数字有噪声）：
 
-| 项目 | 数值 |
-|---|---:|
-| prefill | 42.7 s |
-| decode | **520.9 ms/token** |
-| CPU-attention 路径 | 559.5 ms/token |
-| q8 权重 | 66 MB |
+| 模型 | prefill | decode |
+|---|---:|---:|
+| MiniMind3 q8 | 20.5 s | **238 ms/token** |
+| MiniMind3 q4 | 33.0 s | **381 ms/token** |
+| MiniMind2 i16 | 9.2 s | 226 ms/token |
+| MiniMind2 q8 | 8.4 s | 140–190 ms/token |
+| MiniMind2 q4 | 9.7 s | 193–212 ms/token |
+| TinyChat15M q8 | 4.8 s | 139–171 ms/token（不连贯） |
+
+旧的 520.9 ms/token、42.7 s prefill 是 q16 attention 和 q4 paired residual 之前的数字。
 
 FFN hidden 2432 超过 VC4 2048 像素 FBO 限制。
 `Model::split_ffn()` 把 W1/W3 按行、W2 按列切成 1216 宽两块；
@@ -132,6 +153,8 @@ FFN hidden 2432 超过 VC4 2048 像素 FBO 限制。
 | `TIMING=1` | 打印 prefill/decode 时间 |
 | `LAYER_PROFILE=1` | 逐层时间 |
 | `TOPK`, `TOPK_FAST` | candidate Top-K 路径 |
+| `RES_PACK=0` | 关闭默认的 packed residual（q8/q4） |
+| `ACT8=1/2` | int8 activation 实验，需 q8 权重，默认关闭 |
 
 完整列表见 [测试开关](../docs/test-hooks.md)。
 
@@ -144,7 +167,7 @@ FFN hidden 2432 超过 VC4 2048 像素 FBO 限制。
 | [engine-internals.md](../docs/engine-internals.md) | VC4 shader/FBO 细节 |
 | [performance.md](../docs/performance.md) | Pi/笔记本数据 |
 | [prefix-cache.md](../docs/prefix-cache.md) | worker 和磁盘 KV cache |
-| [engine-layout.md](../docs/engine-layout.md) | 源码是否该拆 |
+| [engine-layout.md](../docs/engine-layout.md) | 源码模块、X 格式和回归规则 |
 
 ## 服务器
 

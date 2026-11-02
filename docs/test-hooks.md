@@ -13,7 +13,10 @@ production settings.
 - `LAYER_SAFE_FINISH=1` — disable the GPU_LAYER selective-finish shortcut.
 - `FFN_SYNC=1` — finish after FFN passes.
 - `FFN_PAIR=0` — disable the paired gate matvec.
-- `RES_PACK=1` — store two q16 residual values per texel (neutral, opt-in).
+- `RES_PACK=0` — disable the default two-q16-per-texel residual stream;
+  q8 and q4 use packed residual by default.
+- `ROPE_THETA=1000000 ROPE_HALF=1` — required for legacy Q8M1
+  MiniMind2-small.q8; those fields are not in the old Q8 header.
 - `ACT8=2` — FFN hidden state in I8_4 (q8 weights only, opt-in).
 - `ACT8=1` — all matvec inputs in I8_4 (q8 weights only, opt-in).
 - `FORCE_GLFINISH=1` — force the VC4 finish path on other drivers.
@@ -26,6 +29,9 @@ production settings.
 - `--greedy` — deterministic argmax sampling.
 - `--seed N` — RNG seed for non-greedy sampling (default 1234).
 - `--template minimind3` — MiniMind3 ChatML/thinking prompt.
+- `--template qwen` — Qwen-style ChatML for MiniMind2/TinyChat-style files.
+- `ATTN_HOIST=0`, `ATTN_FUSE_PROB=0` — retired after the q16 attention
+  layout; the hoisted/fused path is mandatory.  The variables are ignored.
 - `--thinking`, `--open-thinking` — prefill `<think>` instead of the empty
   think block.
 - `--tools JSON`, `--tools-file PATH` — inject MiniMind3 tool definitions.

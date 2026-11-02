@@ -3,6 +3,36 @@
 Measurements are from the Pi Zero and the local Xe/GLES2 machine. Treat them
 as regression baselines, not portable benchmarks.
 
+## Current model matrix (2026-11-02)
+
+Pi Zero, `GPU_LAYER=1 KV_PACK=16`, greedy, 16 generated tokens.  The Pi also
+runs a Minecraft server, so use the ranges rather than individual decimals:
+
+| model | file | size | prefill | decode | status |
+|---|---|---:|---:|---:|---|
+| MiniMind3 q8 | `minimind3.q8` | 66 MB | 20.5 s | **238 ms/token** | default Chinese chat |
+| MiniMind3 q4 | `minimind3.q4` | 45 MB | 33.0 s | **381 ms/token** | memory mode; slightly lower quality |
+| MiniMind2 i16 | `minimind2-small.i16` | 58 MB | 9.2 s | 226 ms/token | reference; weak instruction following |
+| MiniMind2 q8 | `minimind2-small.q8` | 29 MB | 8.4 s | 140–190 ms/token | fastest MiniMind2; needs `ROPE_THETA=1000000 ROPE_HALF=1` |
+| MiniMind2 q4 | `minimind2-small.q4` | 21 MB | 9.7 s | 193–212 ms/token | memory mode; identity answers unreliable |
+| TinyChat15M q8 | `TinyChat15M.q8` | 24 MB | 4.8 s | 139–171 ms/token | loads and runs, but output is not coherent with the repo tokenizer |
+
+The Pi store has no stories15M/42M checkpoint, so they are not part of the
+current matrix.  TinyChat15M should be treated as a format/probe model, not as
+a usable chat model until its tokenizer/prompt pairing is fixed.
+
+## How to read this document
+
+This file is a chronological lab notebook, not a single clean benchmark.  The
+sections above the first historical marker are the current summary; the rest
+records how the numbers were obtained, including failed experiments.
+
+- [Available-model baseline (2026-11-01)](#available-model-baseline-pi-zero-2026-11-01)
+- [2026-11-01 optimization pass](#summary-of-the-2026-11-01-optimization-pass)
+- [Attention and refactor work (2026-11-02)](#the-refactors-12-regression-helper-indirection-in-the-hot-matvec-loops)
+- [q4 path (2026-11-02)](#q4-path-nibble-decode-without-mod-13)
+- [Benchmarking caveat](#benchmarking-caveat-the-pi-also-runs-a-minecraft-server)
+
 ## Summary of the 2026-11-01 optimization pass
 
 MiniMind3-64M, q8, Pi Zero, same 73-token prompt, greedy:
@@ -43,6 +73,9 @@ FFN). See "Long prompts did not get faster" at the end.
 
 ## Available-model baseline (Pi Zero, 2026-11-01)
 
+> Historical snapshot at engine commit 0d06392.  Use the current matrix above
+> for the 2026-11-02 binaries.
+
 Engine commit: 0d06392 (attention hoist enabled by default).
 All runs use KV_PACK=16, GPU_LAYER=1, greedy sampling, one warm process.
 
@@ -58,8 +91,10 @@ not a speed mode: it uses 21 MB less weight storage but is about 1.42x slower
 per decoded token in this run.
 
 MiniMind2 Small answers simple arithmetic but has weak identity/instruction
-following. TinyChat15M is much faster and is suitable for simple English chat
-only. The Pi model store currently has no stories15M/42M or MiniMind3 i16.
+following.  TinyChat15M was historically treated as a fast English model, but
+the current Pi tests produce incoherent text (see the current matrix above);
+do not use it as a chat model without fixing its tokenizer/prompt pairing.
+The Pi model store has no stories15M/42M or MiniMind3 i16.
 
 These are single-run baselines, not statistical measurements. Pi timing varies
 with thermal state, SD-card activity, and shader compilation; expect several

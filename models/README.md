@@ -38,6 +38,15 @@ python3 engine/quantize/make_q4.py --input models/minimind3 \
   --output models/minimind3/minimind3.q4 --seq 512
 ```
 
+Notes:
+
+- `minimind2-small.q8` is a legacy Q8M1 header and needs
+  `ROPE_THETA=1000000 ROPE_HALF=1` when loaded;
+- `minimind2-small.q4` is generated directly from I16 with
+  `engine/quantize/make_q4_from_i16.py`;
+- `TinyChat15M.q8` loads, but the repository tokenizer/prompt pairing currently
+  produces incoherent text; treat it as a format probe.
+
 Model files, tokenizers, KV caches and logs are ignored by `.gitignore`.
 The HuggingFace `tokenizer.json` source is also not tracked; place it in
 `minimind3/tokenizer.json` if you need to rebuild `minimind3.tok`.

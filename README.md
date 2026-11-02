@@ -13,6 +13,8 @@ and a disk KV prefix cache.
 
 - **MiniMind3 64M** — 8 layers, 768 hidden, 2432 FFN, 8 Q / 4 KV heads,
   head_dim 96, vocab 6400, RoPE theta 1e6, per-head Q/K RMSNorm.
+- **MiniMind2 Small** — i16/q8/q4; Qwen-style chat, weaker instruction
+  following than MiniMind3.
 - **Formats** — legacy llama2.c, Q8M1, I16M1, Q8M2/I16M2, and offline **Q4M1**.
 - **KV cache** — 24-bit baseline, packed q16 (default recommendation), and
   packed q8 (quality caveat).
@@ -94,14 +96,18 @@ details.
 
 ## Model sizes and speed
 
-| Path | Size | Local decode |
-|---|---:|---:|
-| MiniMind3 q8 | 66 MB | ~17 ms/token |
-| MiniMind3 offline q4 | 45 MB | ~16–23 ms/token |
-| MiniMind3 i16 | 132 MB | reference/source |
+| Model | Size | Pi decode | Notes |
+|---|---:|---:|---|
+| MiniMind3 q8 | 66 MB | ~238 ms/token | default Chinese chat |
+| MiniMind3 q4 | 45 MB | ~381 ms/token | memory mode; lower quality |
+| MiniMind2 i16 | 58 MB | ~226 ms/token | reference; weak instruction following |
+| MiniMind2 q8 | 29 MB | ~140–190 ms/token | needs `ROPE_THETA=1000000 ROPE_HALF=1` |
+| MiniMind2 q4 | 21 MB | ~193–212 ms/token | memory mode; identity answers unreliable |
+| TinyChat15M q8 | 24 MB | ~139–171 ms/token | runs, but output is not coherent; format probe only |
 
-On Pi Zero q8: ~520 ms/token decode, ~42.7 s for an 82-token prefill.
-Numbers are machine-specific; see [performance.md](docs/performance.md).
+Pi numbers are single-run and noisy; see [performance.md](docs/performance.md).
+The current supported matrix is checked on 2026-11-02; TinyChat15M needs a
+working tokenizer/prompt pairing before it can be called a chat model.
 
 ## Documentation
 
@@ -136,6 +142,7 @@ not covered by this repository license; see the credits above.
   test the exact model/cache combination.
 - q8 KV is fluent but not quality-safe; q16 packed is the safe KV default.
 - q4 is not bit-exact, and its arithmetic quality is prompt-dependent.
-- The engine is a single translation unit today; see
-  [engine-layout.md](docs/engine-layout.md) for the staged split plan.
+- The engine is split into `engine/src/` modules; see
+  [engine-layout.md](docs/engine-layout.md) for the X-format and regression
+  rules.
 

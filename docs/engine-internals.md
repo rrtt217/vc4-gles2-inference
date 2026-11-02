@@ -9,7 +9,7 @@ The earlier failures were not one bug.  Three separate things mattered.
 
 ### 1. `gl_FragCoord` is integer on VC4
 
-`probes/vc4_probe.cpp` shows:
+`engine/probes/vc4_probe.cpp` shows:
 
 | renderer | first pixel |
 |---|---|
@@ -129,17 +129,25 @@ by default.  `GPU_FFN=1` still forces it for experiments.
 
 ## GPU attention / KV cache (experimental)
 
+> `GPU_LAYER=0` is **not** CPU-only: attention/FFN move to the CPU, but the
+> matvecs and logits still run on the GPU.  The engine has no CPU matvec path,
+> so the CPU-attention numbers below are mixed CPU/GPU measurements.
+
+
 `GPU_ATTN=1` keeps RoPE, the KV cache, attention scores/softmax and the
 weighted V sum on the GPU.  Only the attention output is fed to the existing
 GPU `wo` matvec; the CPU still handles the residual and FFN.
 
 Layout:
 
-- `qkv_rope`: 24-bit fixed point, scale 4096 (RoPE constants);
-- `kv_cache`: per layer, `2*kv_dim x seq`, 24-bit fixed point, scale 16384;
-- scores and stats: 24-bit, scale 1024;
-- probabilities: 24-bit, scale 65536;
-- attention output: q16, ready for `wo`.
+- `qkv_rope` / `kv_cache`: 24-bit (or packed q16/q8) KV, scale 16384;
+- rotated q and scores: q16 pairs, scale 1024; scores pack two positions per
+  texel;
+- stats: one texel per head, `(max, sum)` packed as q16 with scales 1024 and
+  32;
+- probabilities: decoded inside `att_v`; the separate probability texture is
+  retired after the q16 score layout;
+- attention output: the active X format (q16 pair or `I8_4`), ready for `wo`.
 
 The CPU KV cache is not allocated when `GPU_ATTN=1`, so for 42M the 33 MB CPU
 cache is replaced by a 33 MB GPU cache instead of adding both.

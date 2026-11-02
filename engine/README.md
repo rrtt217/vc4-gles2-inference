@@ -64,7 +64,7 @@ Smallest example:
 ```bash
 MODEL=$PWD/../models/llama2c/stories15M.i16 \
 TOKENIZER=../models/llama2c/tokenizer.bin \
-./engine --prompt "One day, Lily" --gen 8
+./engine_mm3 --prompt "One day, Lily" --gen 8
 ```
 
 MiniMind3 q8, GPU layers and packed KV:
@@ -87,6 +87,35 @@ GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat --template minimind3 \
 
 Do not set `Q4_WEIGHTS` when the model file is already Q4M1.
 
+### MiniMind2 Small
+
+MiniMind2 uses the Qwen chat template.  The legacy Q8M1 file does **not** carry
+RoPE metadata, so q8 needs the environment override:
+
+```bash
+ROPE_THETA=1000000 ROPE_HALF=1 \
+MODEL=../models/llama2c/minimind2-small.q8 \
+TOKENIZER=../models/llama2c/minimind2-tokenizer.bin \
+GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat --template qwen \
+  --prompt "用一句话介绍你自己。" --gen 24 --greedy
+```
+
+The I16 and Q4M1 files carry theta/half in their headers.  Q4 is a memory
+mode and is noticeably weaker on identity questions:
+
+```bash
+MODEL=../models/llama2c/minimind2-small.q4 \
+TOKENIZER=../models/llama2c/minimind2-tokenizer.bin \
+GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat --template qwen \
+  --prompt "用一句话介绍你自己。" --gen 24 --greedy
+```
+
+### TinyChat15M
+
+TinyChat15M.q8 loads and runs, but the repository tokenizer/prompt pairing
+currently produces incoherent text.  Treat it as a format/probe model, not as
+a chat model.
+
 ## MiniMind3 64M
 
 64M Qwen3-style dense model: 8 layers, 768 hidden, 2432 FFN, 8 Q / 4 KV
@@ -96,14 +125,20 @@ Q/K RMSNorm.
 `--template minimind3` uses ChatML, an empty `<think>` block, and the
 MiniMind system prompt. Add `TIMING=1` for prefill/decode timing.
 
-Pi Zero q8, 82-token prefill + 64 generated tokens:
+Pi Zero, 16 generated tokens (2026-11-02 run; Pi also runs a Minecraft
+server, so expect noise):
 
-| item | value |
-|---|---:|
-| prefill | 42.7 s |
-| decode | **520.9 ms/token** |
-| CPU-attention path | 559.5 ms/token |
-| q8 weights | 66 MB |
+| model | prefill | decode |
+|---|---:|---:|
+| MiniMind3 q8 | 20.5 s | **238 ms/token** |
+| MiniMind3 q4 | 33.0 s | **381 ms/token** |
+| MiniMind2 i16 | 9.2 s | 226 ms/token |
+| MiniMind2 q8 | 8.4 s | 140–190 ms/token |
+| MiniMind2 q4 | 9.7 s | 193–212 ms/token |
+| TinyChat15M q8 | 4.8 s | 139–171 ms/token (not coherent) |
+
+The historical 520.9 ms/token and 42.7 s prefill figures were measured before
+the q16 attention and q4 paired-residual work; use the table above.
 
 The FFN hidden width 2432 exceeds the VC4 2048-pixel FBO limit.
 `Model::split_ffn()` splits W1/W3 rows and W2 columns into 1216-wide chunks;
@@ -152,7 +187,7 @@ model; tool calls are much more reliable.
 | `TIMING=1` | print prefill/decode timing |
 | `LAYER_PROFILE=1` | per-layer timing |
 | `TOPK`, `TOPK_FAST` | candidate Top-K paths |
-| `RES_PACK=1` | two q16 residual values/texel; neutral, opt-in |
+| `RES_PACK=0` | disable the default packed residual stream (q8/q4) |
 | `ACT8=2` | FFN hidden state in I8_4, q8 weights only; opt-in |
 | `ACT8=1` | all matvec inputs in I8_4, q8 weights only; opt-in |
 
@@ -179,7 +214,7 @@ default-safe on every corpus.
 | [engine-internals.md](../docs/engine-internals.md) | VC4 shader/FBO quirks |
 | [performance.md](../docs/performance.md) | Pi/laptop numbers |
 | [prefix-cache.md](../docs/prefix-cache.md) | worker and disk KV cache |
-| [engine-layout.md](../docs/engine-layout.md) | whether to split the source |
+| [engine-layout.md](../docs/engine-layout.md) | source modules, X formats, regression rule |
 
 ## Server
 

@@ -22,11 +22,14 @@ Deep dives:
 | [engine-layout.md](engine-layout.md) | source layout, X formats, regression rule |
 | [future-optimization.md](future-optimization.md) | prioritized future work and explicit non-goals |
 | [deterministic-tools.md](deterministic-tools.md) | model-free tool routing, argument validation, cache interaction |
+| [translation-decision-model-fit.zh-CN.md](translation-decision-model-fit.zh-CN.md) | 20–150M translation/decision model fit, Jev-like decisions, adaptation plan (中文) |
 
 Conventions:
 
 - Numbers are measured on the machine named in the section; they are not
   promises for every Pi or driver.
+- `performance.md` is chronological.  Its top matrix is current; later
+  sections retain historical numbers so the cost model stays auditable.
 - The Pi and laptop do **not** produce byte-identical KV caches. Build a disk
   cache on the machine that will load it.
 - `CmaFree` is actual CMA occupancy; reducing `gpu_mem` or `cma` does not

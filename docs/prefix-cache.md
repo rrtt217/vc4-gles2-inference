@@ -109,6 +109,11 @@ acceptable as a default**:
 q16 first-step logits: cosine ~0.9998, MAE ~0.05, max ~0.30.  Use q16 if
 reducing KV memory; q8 needs per-head/block scales or better calibration.
 
+The `MMKV1` header binds the model metadata, `KV_PACK` mode, `qk_norm`,
+`rope_half`, and the activation format (`ACT8`).  A cache built with
+`ACT8=1` is rejected by a non-ACT8 process and vice versa; rebuild on the
+target machine after changing any of those flags.
+
 Build a packed disk cache with the same packing mode:
 
 ```bash

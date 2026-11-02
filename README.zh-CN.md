@@ -12,6 +12,7 @@ OpenAI 兼容 HTTP 服务器和磁盘 KV prefix cache。
 
 - **MiniMind3 64M** — 8 层、768 hidden、2432 FFN、8 Q / 4 KV heads、
   head_dim 96、vocab 6400、RoPE theta 1e6、per-head Q/K RMSNorm。
+- **MiniMind2 Small** — i16/q8/q4；Qwen 风格 chat，指令跟随弱于 MiniMind3。
 - **格式** — legacy llama2.c、Q8M1、I16M1、Q8M2/I16M2、离线 **Q4M1**。
 - **KV cache** — 24-bit 基线、packed q16（推荐默认）、packed q8
   （质量有风险）。
@@ -92,14 +93,17 @@ python3 server.py --seq 768 --kv-pack 16 \
 
 ## 模型大小和速度
 
-| 路径 | 大小 | 本地 decode |
-|---|---:|---:|
-| MiniMind3 q8 | 66 MB | ~17 ms/token |
-| MiniMind3 离线 q4 | 45 MB | ~16–23 ms/token |
-| MiniMind3 i16 | 132 MB | 参考/量化源 |
+| 模型 | 大小 | Pi decode | 说明 |
+|---|---:|---:|---|
+| MiniMind3 q8 | 66 MB | ~238 ms/token | 默认中文对话 |
+| MiniMind3 q4 | 45 MB | ~381 ms/token | 内存模式，质量略低 |
+| MiniMind2 i16 | 58 MB | ~226 ms/token | 参考模型，指令跟随较弱 |
+| MiniMind2 q8 | 29 MB | ~140–190 ms/token | 需 `ROPE_THETA=1000000 ROPE_HALF=1` |
+| MiniMind2 q4 | 21 MB | ~193–212 ms/token | 内存模式，身份类回答不可靠 |
+| TinyChat15M q8 | 24 MB | ~139–171 ms/token | 能运行但输出不连贯，只作格式探针 |
 
-Pi Zero q8：decode 约 520 ms/token，82-token prefill 约 42.7 s。
-具体数字与机器有关，见 [performance.md](docs/performance.md)。
+Pi 数字是单次运行，受后台负载影响；详见 [performance.md](docs/performance.md)。
+TinyChat15M 目前还不能算可用的对话模型，需要先修 tokenizer/prompt 配对。
 
 ## 文档
 
@@ -135,6 +139,6 @@ MIT，见 [LICENSE](LICENSE)。模型权重和第三方模型资源不包含在�
   要用实际模型/缓存组合验证。
 - q8 KV 流畅但质量不安全；packed q16 是安全的 KV 默认。
 - q4 不是 bit-exact，算术质量依赖 prompt。
-- 引擎目前是单个 translation unit；分阶段拆分见
+- 引擎已拆成 `engine/src/` 多个模块；X 格式和回归规则见
   [engine-layout.md](docs/engine-layout.md)。
 

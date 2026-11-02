@@ -4,15 +4,17 @@ This is a working backlog, not a promise list. It records what is already
 implemented, what is worth doing next, and what should not be attempted on the
 current Pi Zero / VC4 target.
 
-Last updated: 2026-11-01.
+Last updated: 2026-11-02.
 
 ## Current baseline
 
 | Area | Current state |
 |---|---|
-| Chat model | MiniMind3 64M q4/q8, ChatML template |
+| Chat models | MiniMind3 64M q8/q4; MiniMind2 Small i16/q8/q4; TinyChat15M is a format probe only |
 | Default Pi context | q4: 1024; q8: 768 |
 | KV cache | packed q16 (KV_PACK=16) |
+| q8 decode (Pi) | ~238 ms/token, prefill ~20.5 s for a 16-token chat run |
+| q4 decode (Pi) | ~381 ms/token; paired gate + packed residual enabled by default |
 | Tools | get_current_time, calculate_math, system_status |
 | Tool cache | single-tool q8 cache, 252 tokens, built on the Pi |
 | Direct chat cache | --chat --prefix-cache skips the cached prefix |
@@ -22,17 +24,18 @@ Last updated: 2026-11-01.
 | Prefix cache automation | `server/build_prefix_cache.py build|verify`, sidecar metadata, refuses stale caches |
 | Eval harness | `server/eval_suite.py` (fixed cases, JSON output) + `server/selftest.py` (54 assertions, no GPU) |
 | Thinking | format works, but MiniMind3 q4/q8 does not reliably close think tags |
-| Effective throughput | q8 on Pi: 37.5 s prefill / 517 ms per decode token (79-token prompt), i.e. ~1.9 tok/s |
+| Effective throughput | q8 on Pi: ~238 ms per decode token (2026-11-02), i.e. ~4.2 tok/s; older 517 ms figure is historical |
 
 ## P0: highest-value work
 
 ### 1. Batch prompt prefill
 
 The engine currently advances one token at a time even for prompt prefill.
-That is the largest avoidable cost: a 31-token MiniMind2 prompt took 12.6 s,
-while decode was about 0.44 s/token.
+That remains the largest structural item; no batching implementation has
+landed.  The numbers below are the original 2026-11-01 baseline and are kept
+for the cost model.
 
-**Measured on MiniMind3 q8 (2026-11-01), before writing any batching code:**
+**Measured on MiniMind3 q8 (2026-11-01):**
 
 - prefill 37.5 s for 79 prompt tokens = **474 ms/token**
 - decode **517 ms/token**
@@ -215,11 +218,14 @@ llama2.c engine handles every Llama variant without conversion tests.
 
 ### MiniMind2-Small
 
-Keep as an experiment only:
+Keep as an secondary experiment, not the primary chat model:
 
-- i16 math is reasonable;
-- identity and instruction following are weak;
-- q8 says it is Alibaba Cloud;
+- i16 math is reasonable; Pi decode is ~226 ms/token;
+- q8 is faster (~140–190 ms/token) but requires
+  `ROPE_THETA=1000000 ROPE_HALF=1` because Q8M1 lacks RoPE metadata;
+- q4 saves memory but identity answers are unreliable (“一台电脑”);
+- identity and instruction following are weak; multi-question prompts often
+  answer only the last question;
 - thinking is not reliable;
 - 1024 context is the practical limit in current tests.
 
