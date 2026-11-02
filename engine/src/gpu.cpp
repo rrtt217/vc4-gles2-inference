@@ -11,7 +11,19 @@
 #include <vector>
 
 
-GPU::GPU(){ init_egl(); init_gl(); }
+GPU::GPU(){
+        init_egl();
+        init_gl();
+        GLint max_tex = 0, max_rb = 0, max_vp[2] = {0, 0};
+        glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_tex);
+        glGetIntegerv(GL_MAX_RENDERBUFFER_SIZE, &max_rb);
+        glGetIntegerv(GL_MAX_VIEWPORT_DIMS, max_vp);
+        max_target_dim_ = max_tex;
+        if (max_rb > 0 && max_rb < max_target_dim_) max_target_dim_ = max_rb;
+        if (max_vp[0] > 0 && max_vp[0] < max_target_dim_) max_target_dim_ = max_vp[0];
+        if (max_vp[1] > 0 && max_vp[1] < max_target_dim_) max_target_dim_ = max_vp[1];
+        if (max_target_dim_ <= 0) max_target_dim_ = 2048;
+    }
 
 GPU::~GPU(){
         if (dpy_ == EGL_NO_DISPLAY) return;
@@ -931,6 +943,11 @@ GLuint GPU::make_q16_texture(const vector<float>& x){
     }
 
 Target GPU::make_target(int w, int h){
+        if (w <= 0 || h <= 0 || w > max_target_dim_ || h > max_target_dim_) {
+            cerr << "target " << w << "x" << h
+                 << " exceeds GL target limit " << max_target_dim_ << "\n";
+            exit(1);
+        }
         Target t; t.w = w; t.h = h;
         t.tex = make_texture(w, h, nullptr);
         glGenFramebuffers(1, &t.fbo);

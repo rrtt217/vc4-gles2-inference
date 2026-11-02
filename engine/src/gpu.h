@@ -89,6 +89,7 @@ public:
 
     void sync();
     bool needs_finish() const;
+    int max_target_dim() const { return max_target_dim_; }
 
 private:
     AttnConfig att_cfg() const;
@@ -151,6 +152,7 @@ private:
     int att_kv_bits_ = 0;
     float att_kv_scale_ = 16384.0f;
     int att_kv_width_ = 0;
+    int max_target_dim_ = 0;
     vector<GLuint> q_norm_tex_, k_norm_tex_;
     GLuint vbo_ = 0;
     string renderer_;
@@ -170,7 +172,7 @@ private:
     static GLuint make_q16_texture(const vector<float>& x);
     static GLuint make_q16_pair_texture(const vector<float>& x);
 
-    static Target make_target(int w, int h);
+    Target make_target(int w, int h);
 
     Target& target_for(int rows);
 

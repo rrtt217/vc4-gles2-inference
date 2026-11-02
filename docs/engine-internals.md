@@ -113,6 +113,13 @@ Two consequences:
   int8). Any further speedup has to come from doing less ALU per weight, not
   from a wider texture format.
 
+A third consequence: `SEQ` is clamped to
+`min(GL_MAX_TEXTURE_SIZE, GL_MAX_RENDERBUFFER_SIZE, GL_MAX_VIEWPORT_DIMS)`
+before the KV cache and attention targets are allocated.  On VC4 that limit is
+2048; on the Iris Xe laptop it is 16384.  The engine prints a warning when it
+clamps, instead of dying later with `FBO incomplete`.  A context longer than
+the limit would need a tiled KV cache, which is not implemented.
+
 ## FFN policy
 
 - VC4, split W1/W3 models: **GPU FFN** (W1/W3 -> SwiGLU -> W2, only W2 read back).

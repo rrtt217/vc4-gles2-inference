@@ -114,6 +114,13 @@ int main(int argc, char** argv) {
     if (getenv("Q4_WEIGHTS")) model.quantize_q4_weights(getenv("Q4_SCOPE") ? getenv("Q4_SCOPE") : "all");
     if (!tools_json.empty() && model.seq < 768) model.seq = 768;
     if ((worker || !build_cache_prompt.empty()) && model.seq < 1024 && !getenv("SEQ")) model.seq = 1024;
+    const int target_limit = gpu.max_target_dim();
+    if (model.seq > target_limit) {
+        cerr << "SEQ " << model.seq << " exceeds GL target limit " << target_limit
+             << "; clamping to " << target_limit << "\n";
+        model.seq = target_limit;
+    }
+    if (model.seq < 16) model.seq = 16;
     Tokenizer tokenizer;
     if (!tokenizer.load(tokenizer_path, model.vocab)) return 1;
     tokenizer.set_qwen(qwen_template || minimind3_template);
