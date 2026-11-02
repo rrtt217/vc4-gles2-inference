@@ -54,6 +54,15 @@ The spring-writing prompt is unchanged across the old and new prompts.  The
 shorter header also removes model-specific identity wording from the default;
 use `--system` when a deployment needs a specific persona.
 
+The gates pin this prompt on the command line
+(`--system "You are a helpful assistant."`): see the canonical smoke tests in
+`AGENTS.md` and `engine/scripts/regression.sh`, which also assert that the
+same command without `--system` prints identical text.  Pinning matters
+because the strings moved when `c1bb4f6` replaced the old Chinese persona
+prompt; the pre-`c1bb4f6` strings (`MiniMind是一个高效的小...` for q8,
+`我是MiniMind，一个由jingyaogong...` for q4) still reproduce with that old text
+passed to `--system`, but they are not the gate.
+
 ## How to read this document
 
 This file is a chronological lab notebook, not a single clean benchmark.  The

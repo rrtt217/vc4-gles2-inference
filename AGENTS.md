@@ -66,7 +66,10 @@ builds concurrently.  Prefer the VLAB cross-build (see the VLAB override).
 
 ## Canonical smoke tests
 
-Run from `engine/` with the model store paths used by the local checkout.
+Run from `engine/` with the model store paths used by the local checkout.  The
+system prompt is pinned on the command line: the compiled default changed in
+`c1bb4f6` (Chinese persona -> neutral English), so a gate that omits `--system`
+silently changes meaning and stops reproducing.
 
 q8:
 
@@ -74,6 +77,7 @@ q8:
 MODEL=../models/minimind3/minimind3.q8 \
 TOKENIZER=../models/minimind3/minimind3.tok \
 GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat --template minimind3 \
+  --system "You are a helpful assistant." \
   --prompt "用一句话介绍你自己。" --gen 16 --greedy
 ```
 
@@ -83,13 +87,25 @@ Offline q4 (do not set `Q4_WEIGHTS`):
 MODEL=../models/minimind3/minimind3.q4 \
 TOKENIZER=../models/minimind3/minimind3.tok \
 GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat --template minimind3 \
+  --system "You are a helpful assistant." \
   --prompt "用一句话介绍你自己。" --gen 16 --greedy
 ```
 
-Expected q4 starts with `我是MiniMind，一个由jingyaogong...`.  The q8 string is
-for the reference checkpoint (`MiniMind是一个高效的小...`); if a local q8
-checkpoint is known to differ, record the observed string and checksum in the
-local override instead of weakening this gate.
+Expected, byte for byte (Pi Zero and Xe agree):
+
+- q8: `Assistant: 我是一个AI助手，我的存在是为了提供帮助和信息。`
+- q4: `Assistant: 我是MiniMind，一个高效的小参数AI模型，专注于`
+
+The same command **without** `--system` must print the same text; that is the
+check that the compiled default has not moved.  If it differs, change
+`kDefaultSystem`, this gate, `engine/scripts/regression.sh` and
+`docs/performance.md` together, never one of them alone.
+
+The older strings (`MiniMind是一个高效的小...` for q8,
+`我是MiniMind，一个由jingyaogong...` for q4) were measured with the pre-`c1bb4f6`
+Chinese default prompt.  They are still reproducible by passing that text to
+`--system`; do not use them as the gate.  If a local q8 checkpoint is known to
+differ, set `Q8_EXPECT` in the local override instead of weakening this gate.
 
 ## Invariants
 
