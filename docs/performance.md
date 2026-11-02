@@ -1096,3 +1096,39 @@ writes split W1/W3 by default because separate scales and the existing paired
 path are faster (stories15M split: ~3.8-4.2 ms/token); the table uses the split
 files.  `stories42M` already used split W1/W3.  Q4 is unaffected (fused q4
 still uses its own path).
+
+## Pi Zero model matrix (2026-11-02, VLAB cross-build)
+
+The current tree (commit `252c9c4`) was cross-built on VLAB with
+`make -C engine -B pi CROSS_SYSROOT=$HOME/raspi-root4` (GCC 12, ARMv6/VFPv2)
+and the resulting `engine_mm3_pi_new` was copied to the Pi.  All runs use
+`GPU_LAYER=1 KV_PACK=16`, greedy, 32 generated tokens, best of two runs;
+`SEQ=768` for MiniMind3.  Prefill is the whole prompt/chat template, not a
+per-token number.  The Pi was otherwise idle apart from the resident
+`pumpkin` server; `CmaFree` was 117.6 MB before and 93.0 MB after the matrix.
+
+| model | file | prefill | decode | output |
+|---|---|---:|---:|---|
+| MiniMind3 q8 | minimind3.q8 (66 MB) | 10.95 s | 251.8 ms/token | coherent |
+| MiniMind3 q4 | minimind3.q4 (45 MB) | 17.71 s | 387.6 ms/token | coherent |
+| MiniMind2 q8 | minimind2-small.q8 (28 MB) | 6.85 s | 143.5 ms/token | coherent |
+| MiniMind2 q4 | minimind2-small.q4 (20.7 MB) | 10.01 s | 186.7 ms/token | coherent |
+| MiniMind2 i16 | minimind2-small.i16 (58 MB) | 8.89 s | 232.2 ms/token | coherent |
+| stories15M q8 split | stories15M-split.q8 (24.5 MB) | 3.26 s | 138.4 ms/token | coherent |
+| stories15M q8 fused | stories15M-fused.q8 (24.5 MB) | 3.32 s | 137.2 ms/token | coherent |
+| stories42M q8 | stories42M.q8 (58 MB) | 3.57 s | 188.1 ms/token | coherent |
+| TinyChat15M q8 split | TinyChat15M-split.q8 (24.5 MB) | 3.35 s | 137.6 ms/token | coherent |
+| TinyChat15M q8 fused | TinyChat15M-fused.q8 (24.5 MB) | 3.41 s | 136.4 ms/token | coherent |
+| stories15M fp32 | stories15M.bin (60 MB) | 3.04 s | 168.3 ms/token | coherent |
+| TinyChat15M fp32 | TinyChat15M.bin (60 MB) | 3.67 s | 161.8 ms/token | coherent |
+| stories15M-enzh fp32 | stories15M-llama2-enzh.bin (87 MB) | 4.58 s | 242.4 ms/token | coherent English (toy MT) |
+| stories260K fp32 | stories260K.bin (1 MB) | 5.93 s | 81.9 ms/token | gibberish (expected) |
+
+The fused-W13 q8 path is correct and **not slower** on the Pi than the split
+path: identical text, 137.2 vs 138.4 ms/token for stories15M, and 136.4 vs
+137.6 ms/token for TinyChat15M.  The split files still have separate W1/W3
+scales, so they remain the preferred conversion for quality.
+
+MiniMind3 q8 and q4 both stay coherent, but the q8 self-introduction differs
+(``我是一个AI助手...`` vs q4 ``我是MiniMind...``); this is present with both the
+old and new Pi binaries and is not caused by the fused-W13 change.
