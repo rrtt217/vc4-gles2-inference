@@ -14,7 +14,7 @@ Landed commits: a053d35 (G1 GL state caching), e7cc839 (rms reduce fused),
 faa833a (results doc), 318ac15 (draw-bound finding), 84b9a88 (FFN merge plan),
 70bb245 (fused FFN kernel), 1a7da7c (per-draw cost: 0.18 ms, draw merging is
 not the lever), a40593a (paired logits rows: -6.8 ms, bit-exact,
-`LOGITS_SPLIT=1` restores the old path), then 2cc1f7a (attention profile:
+`LOGITS_SPLIT=1` restores the old path), then 66e5f00 (attention profile:
 `PROFATT2` marks inside `att_scores`; the score-viewport shrink was bit-exact but
 gained nothing and was reverted).
 
