@@ -27,10 +27,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import localtools as local_tools  # noqa: E402  (deterministic tools, same directory)
 
-DEFAULT_SYSTEM = (
-    "你的名字叫MiniMind，你是一个乐于助人、知识渊博的AI助手。"
-    "请用完整且友好的方式回答用户问题，当被问到名字时请回答MiniMind。"
-)
+DEFAULT_SYSTEM = "You are a helpful assistant."
 
 
 class WorkerError(RuntimeError):

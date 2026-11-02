@@ -101,6 +101,9 @@ python3 server.py --seq 768 --kv-pack 16 \
 | MiniMind2 q8 | 29 MB | ~140–190 ms/token | 需 `ROPE_THETA=1000000 ROPE_HALF=1` |
 | MiniMind2 q4 | 21 MB | ~193–212 ms/token | 内存模式，身份类回答不可靠 |
 | TinyChat15M q8 | 24 MB | ~139–171 ms/token | 能运行但输出不连贯，只作格式探针 |
+| stories15M i16 | 49 MB | ~167 ms/token | TinyStories 补全，连贯 |
+| stories42M q8 | 58 MB | ~190 ms/token | TinyStories 补全，连贯 |
+| stories15M q8 | 24 MB | ~148 ms/token | 当前 q8 转换输出乱码，改用 i16 |
 
 Pi 数字是单次运行，受后台负载影响；详见 [performance.md](docs/performance.md)。
 TinyChat15M 目前还不能算可用的对话模型，需要先修 tokenizer/prompt 配对。

@@ -116,14 +116,33 @@ TinyChat15M.q8 loads and runs, but the repository tokenizer/prompt pairing
 currently produces incoherent text.  Treat it as a format/probe model, not as
 a chat model.
 
+### TinyStories 15M/42M
+
+These are base completion models, not chat models.  Use a plain prompt and
+no `--chat`:
+
+```bash
+MODEL=../models/llama2c/stories42M.q8 \
+TOKENIZER=../models/llama2c/tokenizer.bin \
+GPU_LAYER=1 KV_PACK=16 ./engine_mm3 \
+  --prompt "Once upon a time" --gen 64 --greedy
+```
+
+On the Pi, stories15M i16 is coherent at ~167 ms/token and stories42M q8 at
+~190 ms/token.  `stories15M.q8` currently produces gibberish in the repo's
+conversion; use the i16 file.  stories42M i16 is too large for the current
+CMA budget.
+
 ## MiniMind3 64M
 
 64M Qwen3-style dense model: 8 layers, 768 hidden, 2432 FFN, 8 Q / 4 KV
 heads, head_dim 96, vocab 6400, RoPE theta 1e6, tied embedding, per-head
 Q/K RMSNorm.
 
-`--template minimind3` uses ChatML, an empty `<think>` block, and the
-MiniMind system prompt. Add `TIMING=1` for prefill/decode timing.
+`--template minimind3` uses ChatML, an empty `<think>` block, and the same
+short English default system prompt as the other chat templates
+(`You are a helpful assistant.`). Override it with `--system`. Add `TIMING=1`
+for prefill/decode timing.
 
 Pi Zero, 16 generated tokens (2026-11-02 run; Pi also runs a Minecraft
 server, so expect noise):

@@ -30,6 +30,8 @@ production settings.
 - `--seed N` — RNG seed for non-greedy sampling (default 1234).
 - `--template minimind3` — MiniMind3 ChatML/thinking prompt.
 - `--template qwen` — Qwen-style ChatML for MiniMind2/TinyChat-style files.
+- `--system TEXT` — override the default neutral system prompt
+  (`You are a helpful assistant.`); the same prompt is used by the server.
 - `ATTN_HOIST=0`, `ATTN_FUSE_PROB=0` — retired after the q16 attention
   layout; the hoisted/fused path is mandatory.  The variables are ignored.
 - `--thinking`, `--open-thinking` — prefill `<think>` instead of the empty

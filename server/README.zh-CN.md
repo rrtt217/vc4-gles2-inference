@@ -176,7 +176,7 @@ Thinking：
 `thinking: false`、`{"type": "disabled"}`、`reasoning_effort: "none"`
 以及不传参数都表示**关闭**；没有基于文本内容猜测的规则。
 
-Chatbox 会在 system prompt 后追加 `Additional info` / `## Runtime` 元数据。服务端会剥离这段元数据，并把泛化的 `You are a helpful assistant.` 替换为 MiniMind 提示词；包含 `MiniMind` 的自定义提示词会保留。
+Chatbox 会在 system prompt 后追加 `Additional info` / `## Runtime` 元数据。服务端会剥离这段元数据，并使用短默认提示 `You are a helpful assistant.`；包含 `MiniMind` 的自定义提示词会保留。
 
 ## 工具调用
 

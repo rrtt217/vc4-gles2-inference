@@ -16,10 +16,33 @@ runs a Minecraft server, so use the ranges rather than individual decimals:
 | MiniMind2 q8 | `minimind2-small.q8` | 29 MB | 8.4 s | 140–190 ms/token | fastest MiniMind2; needs `ROPE_THETA=1000000 ROPE_HALF=1` |
 | MiniMind2 q4 | `minimind2-small.q4` | 21 MB | 9.7 s | 193–212 ms/token | memory mode; identity answers unreliable |
 | TinyChat15M q8 | `TinyChat15M.q8` | 24 MB | 4.8 s | 139–171 ms/token | loads and runs, but output is not coherent with the repo tokenizer |
+| stories15M i16 | `stories15M.i16` | 49 MB | 3.1 s | 167 ms/token | TinyStories completion; coherent |
+| stories42M q8 | `stories42M.q8` | 58 MB | 3.8 s | 190 ms/token | TinyStories completion; coherent |
+| stories15M q8 | `stories15M.q8` | 24 MB | 3.1 s | 148 ms/token | **gibberish** in current conversion; use i16 |
 
-The Pi store has no stories15M/42M checkpoint, so they are not part of the
-current matrix.  TinyChat15M should be treated as a format/probe model, not as
-a usable chat model until its tokenizer/prompt pairing is fixed.
+The Pi store now has TinyStories 15M/42M checkpoints.  They are base
+completion models, not chat models, so test them with a plain prompt such as
+`Once upon a time` and no `--chat`.  `stories42M.i16` is too large for the
+current CMA budget; q8 is the practical 42M path.  TinyChat15M should be
+treated as a format/probe model, not as a usable chat model until its
+tokenizer/prompt pairing is fixed.
+
+### Default system prompt
+
+The CLI and server use one neutral English prompt for every chat template:
+`You are a helpful assistant.`  It replaces the old model-specific Chinese
+MiniMind3 prompt and the server's Chinese default.  Tested behavior:
+
+| model | identity response | note |
+|---|---|---|
+| MiniMind3 q8 | “我是一个AI助手……” | coherent; does not claim a name |
+| MiniMind3 q4 | “我是MiniMind……” | retains the model identity |
+| MiniMind2 i16/q8 | “我是一款智能语音助手……” | coherent |
+| MiniMind2 q4 | “我是一台电脑/大型语言模型……” | still unreliable |
+
+The spring-writing prompt is unchanged across the old and new prompts.  The
+shorter header also removes model-specific identity wording from the default;
+use `--system` when a deployment needs a specific persona.
 
 ## How to read this document
 

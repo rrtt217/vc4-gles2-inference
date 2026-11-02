@@ -88,12 +88,27 @@ I16/Q4M1 文件头自带 theta/half。q4 是内存模式，身份类回答明显
 TinyChat15M.q8 能加载运行，但当前 tokenizer/prompt 配对下输出不连贯，
 只能当格式探针，不要当对话模型使用。
 
+### TinyStories 15M/42M
+
+它们是 base completion 模型，不是 chat 模型；用普通 prompt，不要加 `--chat`：
+
+```bash
+MODEL=../models/llama2c/stories42M.q8 \
+TOKENIZER=../models/llama2c/tokenizer.bin \
+GPU_LAYER=1 KV_PACK=16 ./engine_mm3 \
+  --prompt "Once upon a time" --gen 64 --greedy
+```
+
+Pi 上 stories15M i16 约 167 ms/token，stories42M q8 约 190 ms/token，均连贯。
+`stories15M.q8` 当前转换输出乱码，改用 i16；stories42M i16 超出当前 CMA 预算。
+
 ## MiniMind3 64M
 
 64M Qwen3 风格 dense 模型：8 层、768 hidden、2432 FFN、8 Q / 4 KV heads、
 head_dim 96、vocab 6400、RoPE theta 1e6、tied embedding、per-head Q/K RMSNorm。
 
-`--template minimind3` 使用 ChatML、空 `<think>` 块和 MiniMind 系统提示。
+`--template minimind3` 使用 ChatML、空 `<think>` 块，并和其他 chat 模板共用
+短英文默认系统提示（`You are a helpful assistant.`）。需要时用 `--system` 覆盖。
 加 `TIMING=1` 打印 prefill/decode 时间。
 
 Pi Zero，16 token 生成（2026-11-02，Pi 上还有 Minecraft server，数字有噪声）：

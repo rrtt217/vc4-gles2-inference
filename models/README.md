@@ -45,7 +45,10 @@ Notes:
 - `minimind2-small.q4` is generated directly from I16 with
   `engine/quantize/make_q4_from_i16.py`;
 - `TinyChat15M.q8` loads, but the repository tokenizer/prompt pairing currently
-  produces incoherent text; treat it as a format probe.
+  produces incoherent text; treat it as a format probe;
+- `stories15M.q8` currently produces gibberish; `stories15M.i16` is the
+  coherent TinyStories 15M artifact.  stories42M q8 is coherent; its i16
+  exceeds the current Pi CMA budget.
 
 Model files, tokenizers, KV caches and logs are ignored by `.gitignore`.
 The HuggingFace `tokenizer.json` source is also not tracked; place it in

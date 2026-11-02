@@ -112,7 +112,9 @@ reducing KV memory; q8 needs per-head/block scales or better calibration.
 The `MMKV1` header binds the model metadata, `KV_PACK` mode, `qk_norm`,
 `rope_half`, and the activation format (`ACT8`).  A cache built with
 `ACT8=1` is rejected by a non-ACT8 process and vice versa; rebuild on the
-target machine after changing any of those flags.
+target machine after changing any of those flags.  The 2026-11-02 switch to
+the neutral English system prompt also invalidates old tool/chat caches;
+`build_prefix_cache.py verify` and the sidecar `system_sha` catch that.
 
 Build a packed disk cache with the same packing mode:
 

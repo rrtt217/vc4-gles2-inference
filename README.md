@@ -104,6 +104,9 @@ details.
 | MiniMind2 q8 | 29 MB | ~140–190 ms/token | needs `ROPE_THETA=1000000 ROPE_HALF=1` |
 | MiniMind2 q4 | 21 MB | ~193–212 ms/token | memory mode; identity answers unreliable |
 | TinyChat15M q8 | 24 MB | ~139–171 ms/token | runs, but output is not coherent; format probe only |
+| stories15M i16 | 49 MB | ~167 ms/token | TinyStories completion; coherent |
+| stories42M q8 | 58 MB | ~190 ms/token | TinyStories completion; coherent |
+| stories15M q8 | 24 MB | ~148 ms/token | q8 conversion currently produces gibberish; use i16 |
 
 Pi numbers are single-run and noisy; see [performance.md](docs/performance.md).
 The current supported matrix is checked on 2026-11-02; TinyChat15M needs a

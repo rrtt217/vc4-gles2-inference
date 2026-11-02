@@ -43,6 +43,12 @@
 #include "sampling.h"
 #include "tools.h"
 
+// One short English prompt for every chat model.  MiniMind3's old Chinese
+// prompt was longer and made the default behave differently from the Qwen
+// template; a single ASCII prompt keeps prefill small and is easy to override
+// with --system.
+static const char* kDefaultSystem = "You are a helpful assistant.";
+
 int main(int argc, char** argv) {
     install_stop_handlers();
     string model_path = getenv("MODEL") ? getenv("MODEL") : "../models/llama2c/stories15M.bin";
@@ -316,9 +322,7 @@ int main(int argc, char** argv) {
         auto turn_start = Clock::now();
         string text;
         if (minimind3_template) {
-            string sys = system_prompt.empty()
-                ? string("你的名字叫MiniMind，你是一个乐于助人、知识渊博的AI助手。请用完整且友好的方式回答用户问题，当被问到名字时请回答MiniMind。")
-                : system_prompt;
+            string sys = system_prompt.empty() ? string(kDefaultSystem) : system_prompt;
             if (!tools_json.empty()) {
                 sys += "\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\n"
                        "You are provided with function signatures within <tools></tools> XML tags:\n<tools>\n" +
@@ -333,7 +337,7 @@ int main(int argc, char** argv) {
             text += open_thinking ? "<think>\n" : "<think>\n\n</think>\n\n";
         } else if (qwen_template) {
             if (first)
-                text = "<|im_start|>system\n" + (system_prompt.empty() ? string("You are a helpful assistant") : system_prompt) +
+                text = "<|im_start|>system\n" + (system_prompt.empty() ? string(kDefaultSystem) : system_prompt) +
                        "<|im_end|>\n<|im_start|>user\n" + user + "<|im_end|>\n<|im_start|>assistant\n";
             else
                 text = "<|im_start|>user\n" + user + "<|im_end|>\n<|im_start|>assistant\n";
