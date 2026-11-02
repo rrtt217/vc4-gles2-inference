@@ -326,3 +326,31 @@ the hoist, so the win is in code reuse, not in throughput.
 The `--ppl` harness exists; greedy text can stay identical while PPL moves, so
 both must be checked.  Keep it opt-in unless a corpus-wide quality run says
 otherwise.
+
+## Plan: merge the chunked FFN weight textures (scope expanded)
+
+Decode is 229 ms with 188 draws at ~0.5 ms per draw, so ~94 ms is draw overhead
+and ~135 ms is texture-fetch plus MAC work (decode is flat across SEQ, so none
+of that is sequence-dependent).  Reaching 150 ms needs both terms down.
+
+The FFN chunks are the cheapest draw reduction left.  `w1a/w1b`, `w3a/w3b` and
+`w2a/w2b` are separate Mats purely because the converter wrote them in two
+pieces; the weights themselves are one matrix.  Merging them at load time (in
+the model loader, from the same float data, before the CPU copy is freed) is a
+repack, not a format change, so every value stays identical:
+
+| pass | now | merged |
+|---|---:|---:|
+| FFN gate pair | 2 | **1** (pair kernel emits 2 rows/fragment, so 2432 rows = 1216 fragments, under the 2048 viewport) |
+| swiglu | 2 | **1** (2432 values = 1216 texels) |
+| w2 + residual | 2 | **1** (rows 768, cols 2432) |
+
+That is 6 draws per layer down to 3: 188 -> 164 draws/token, about -12 ms.  It
+does not reach 150 on its own; the remaining draw budget after it is rmsnorm 4,
+qkv 2 (driver strip), rope/scores/stats/v/wo/qrot 6, plus 15 outside the layer
+loop.
+
+The compute term is dominated by reading the whole 66 MB q8 weight set once per
+token, so the other lever is activation precision: ACT8=2 (-6%) and the paired
+row kernels stay available behind their env switches and are worth re-measuring
+once the draw count is lower.
