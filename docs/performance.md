@@ -954,10 +954,10 @@ Also tried and kept: moving the per-weight `mn` term out into
 `sc*sum(n*x) + mn*sum(x)` so the min is paid once per group (neutral on its own,
 but it is what makes the nibble split cheap to express).
 
-Also tried and reverted: a q4 `matvec_add` pair kernel (two rows per fragment,
-packed residual).  It was 20 ms faster but the output was garbage
-(PPL 4e14), so the q4 residual stream stays unpacked until that kernel is
-debugged.
+An early q4 `matvec_add` pair kernel (two rows per fragment, packed residual)
+was 20 ms faster but produced garbage (PPL 4e14) because the q4 accumulator is
+in raw q16 units while `x_st2` expects activation units.  The fixed kernel uses
+`x_st2q`; it is the packed-residual result described below, not a reverted path.
 
 ### Why q4 stays slower than q8
 
