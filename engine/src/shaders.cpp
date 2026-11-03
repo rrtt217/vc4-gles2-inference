@@ -29,6 +29,33 @@ string q24_helpers() {
         "return vec4(r0/255.0,g/255.0,b/255.0,a/255.0);}\n";
 }
 
+static string q4_head(XFormat xf, bool inl) {
+    if (!inl || xf != XFormat::I16_2) return head(xf);
+    return head(xf) +
+        "float dA(vec4 c){float u=c.r*65280.0+c.g*255.0;"
+        "return u>=32768.0?u-65536.0:u;}\n"
+        "float dB(vec4 c){float u=c.b*65280.0+c.a*255.0;"
+        "return u>=32768.0?u-65536.0:u;}\n";
+}
+
+// INT4 kernels all decode eight I16_2 activations per 32-weight group.  The
+// generic X4Q macro hands two texel fetches to a helper and VC4 compiles that
+// loop much slower (q8 matvec_probe: 177 vs 283 MMAC/s at 1536x768).  Emitting
+// the four fetches and the dA/dB decoders in the loop body is the q4 analogue
+// of the q8 inline decode; the arithmetic and the order are unchanged.
+static string q4_act(XFormat xf, int cols, bool inl) {
+    const string AXW = to_string(x_texels(cols, xf));
+    if (!inl || xf != XFormat::I16_2)
+        return "vec4 xa=X4Q(X,c," + AXW + ".0);vec4 xb=X4Q(X,c+4," + AXW + ".0);";
+    return
+        "vec4 t0=texture2D(X,vec2((float(c/2)+0.5)/" + AXW + ".0,0.5));"
+        "vec4 t1=texture2D(X,vec2((float(c/2+1)+0.5)/" + AXW + ".0,0.5));"
+        "vec4 t2=texture2D(X,vec2((float(c/2+2)+0.5)/" + AXW + ".0,0.5));"
+        "vec4 t3=texture2D(X,vec2((float(c/2+3)+0.5)/" + AXW + ".0,0.5));"
+        "float a0=dA(t0),a1=dB(t0),a2=dA(t1),a3=dB(t1)," 
+        "a4=dA(t2),a5=dB(t2),a6=dA(t3),a7=dB(t3);"
+        "vec4 xa=vec4(a0,a1,a2,a3);vec4 xb=vec4(a4,a5,a6,a7);";
+}
 }  // namespace
 
 string matvec_q8(int rows, int cols, XFormat xf) {
@@ -396,11 +423,11 @@ string matvec_i16_add(int rows, int cols, XFormat xf, XFormat rf) {
         "gl_FragColor=x_st1q(s*ws+res);}";
 }
 
-string matvec_i4(int rows, int cols, XFormat xf) {
+string matvec_i4(int rows, int cols, XFormat xf, bool inl) {
     const int texw = cols / 8;
     const int groups = (cols + 31) / 32;
     const int axw = x_texels(cols, xf);
-    return head(xf) + q24_helpers() +
+    return q4_head(xf, inl) + q24_helpers() +
         "uniform sampler2D W,P,X;uniform float ps;"
         "void main(){int r=int(gl_FragCoord.x);float s=0.0;"
         "for(int g=0;g<" + to_string(groups) + ";g++){"
@@ -415,8 +442,7 @@ string matvec_i4(int rows, int cols, XFormat xf) {
         "float h0=floor(b0*0.0625),h1=floor(b1*0.0625),"
         "h2=floor(b2*0.0625),h3=floor(b3*0.0625);"
         "float l0=b0-h0*16.0,l1=b1-h1*16.0,l2=b2-h2*16.0,l3=b3-h3*16.0;"
-        "vec4 xa=X4Q(X,c," + to_string(axw) + ".0);"
-        "vec4 xb=X4Q(X,c+4," + to_string(axw) + ".0);"
+        + q4_act(xf, cols, inl) +
         // (n*sc + mn)*x sums to sc*sum(n*x) + mn*sum(x): the min term is paid
         // once per group instead of once per weight, and the activation sum
         // reuses the fetches already made.
@@ -431,12 +457,12 @@ string matvec_i4(int rows, int cols, XFormat xf) {
 // q4 residual-add, two rows per fragment: rows 2t and 2t+1 share one activation
 // decode and one residual fetch, and are written as a raw q16 pair (x_st2q, since
 // the q4 accumulator works in raw q16 units, not activation units).
-string matvec_i4_add_pair(int rows, int cols, XFormat xf) {
+string matvec_i4_add_pair(int rows, int cols, XFormat xf, bool inl) {
     const int texw = cols / 8;
     const int groups = (cols + 31) / 32;
     const int axw = x_texels(cols, xf);
     const int rw = (rows + 1) / 2;
-    return head(xf) + x_residual_glsl(XFormat::I16_2) +
+    return q4_head(xf, inl) + x_residual_glsl(XFormat::I16_2) +
         "uniform sampler2D W,P,X,R;uniform float ps;"
         "float dot4(vec4 w0,vec4 xa,vec4 xb){"
         "float b0=floor(w0.r*255.0+0.5),b1=floor(w0.g*255.0+0.5),"
@@ -456,8 +482,7 @@ string matvec_i4_add_pair(int rows, int cols, XFormat xf) {
         "float sb=x_i16raw(pb.rg)*ps,mb=x_i16raw(pb.ba)*ps;"
         "float xsum=0.0,dota=0.0,dotb=0.0;"
         "for(int q=0;q<4;q++){int c=g*32+q*8;"
-        "vec4 xa=X4Q(X,c," + to_string(axw) + ".0);"
-        "vec4 xb=X4Q(X,c+4," + to_string(axw) + ".0);"
+        + q4_act(xf, cols, inl) +
         "xsum+=xa.x+xa.y+xa.z+xa.w+xb.x+xb.y+xb.z+xb.w;"
         "vec4 w0=texture2D(W,vec2((float(g*4+q)+0.5)/float(" + to_string(texw) + "),"
         "(float(r0)+0.5)/float(" + to_string(rows) + ")));"
@@ -516,13 +541,13 @@ string matvec_i4_pair(int rows, int cols, XFormat xf) {
 // and the per-group order (scale*dot + min*xsum) of matvec_i4_pair; qz/sl
 // reproduce x_st2q -> x_i16pair -> x_st2 exactly, so the packed output is
 // bit-identical to the two-pass path.
-string matvec_i4_pair_swiglu(int rows, int cols, XFormat xf) {
+string matvec_i4_pair_swiglu(int rows, int cols, XFormat xf, bool inl) {
     const int texw = cols / 8;
     const int groups = (cols + 31) / 32;
     const int axw = x_texels(cols, xf);
     const string ROWS = to_string(rows), GROUPS = to_string(groups),
                  TEXW = to_string(texw), AXW = to_string(axw);
-    return head(xf) +
+    return q4_head(xf, inl) +
         "uniform sampler2D W1,W2,P1,P2,X;uniform float ps1,ps2;"
         "float dot4(vec4 w0,vec4 xa,vec4 xb){"
         "float b0=floor(w0.r*255.0+0.5),b1=floor(w0.g*255.0+0.5)," 
@@ -548,8 +573,7 @@ string matvec_i4_pair_swiglu(int rows, int cols, XFormat xf) {
         "float sb2=x_i16raw(p2.rg)*ps2,mb2=x_i16raw(p2.ba)*ps2;"
         "float xsum=0.0,d1=0.0,d2=0.0,e1=0.0,e2=0.0;"
         "for(int q=0;q<4;q++){int c=g*32+q*8;"
-        "vec4 xa=X4Q(X,c," + AXW + ".0);"
-        "vec4 xb=X4Q(X,c+4," + AXW + ".0);"
+        + q4_act(xf, cols, inl) +
         "xsum+=xa.x+xa.y+xa.z+xa.w+xb.x+xb.y+xb.z+xb.w;"
         "vec4 w0=texture2D(W1,vec2((float(g*4+q)+0.5)/float(" + TEXW + "),(u0+0.5)/float(" + ROWS + ")));"
         "d1+=dot4(w0,xa,xb);"

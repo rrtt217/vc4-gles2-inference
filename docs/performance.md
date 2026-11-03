@@ -2054,3 +2054,45 @@ rather than guessing; (b) precompute the per-group activation sum in one extra t
 pass so the matvec replaces 7 adds per texel with one fetch per fragment per group
 (~20% of the kernel's ALU on paper); (c) a symmetric q4 format without the min term
 (format change: `make_q4` plus a re-quantised model).
+
+## q4 INT4 inline activation decode (2026-11-04)
+
+The five INT4 kernels decoded the eight activations of every 32-weight group through
+`X4Q`, which expands to `x_i16quadq(texture2D(X,...), texture2D(X,...))` - the same
+"helper that takes its two fetches as arguments" that cost the q8 matvec 177 vs 283
+MMAC/s before it was inlined.  The three hot q4 kernels now emit the four texel
+fetches and the dA/dB decoders in the loop body: `matvec_i4` (qkv and q4 logits),
+`matvec_i4_add_pair` (w2/wo) and `matvec_i4_pair_swiglu` (FFN gate).  `xa`/`xb` are
+rebuilt from a0..a7, so the decode arithmetic, the per-group order
+(`sc*(d0+d1+d2+d3)+mn*xsum`) and every consumer expression are unchanged.
+`Q4_INLINE=0` restores the generic form in the same binary (the program cache key
+carries the choice); `Q4_INLINE=gate,w2,qkv` enables a subset.
+
+Pricing first, because q4 had no per-pass table.  Interleaved on the Pi
+(`minimind3.q4`, `GPU_LAYER=1 KV_PACK=16 SEQ=768`, 32 tokens, plain mode):
+
+| probe | off | on | marginal |
+|---|---:|---:|---:|
+| `ATTN_DUP=all` (whole attention block, incl. qkv) | 364.1 | 419.3 | **+55.2 ms (15%)** |
+| `PASS_DUP=logits,logits_draw` | 362.8 | 391.1 | **+28.3 ms (7.8%)** |
+| `LAYER_PROFILE=1` ratios | | | gate ~32%, attn ~30%, w2 ~17%, wo ~7%, logits ~4% |
+
+So the matvec passes are ~75% of a q4 token and the FFN is the target; the
+`glFinish` laps inflate the small passes, so only the ratios are usable there.
+
+Decode, 3 interleaved pairs of 32-token runs:
+
+| pair | generic | inline | delta |
+|---|---:|---:|---:|
+| 1 | 364.1 | 360.9 | -3.2 |
+| 2 | 362.5 | 358.8 | -3.7 |
+| 3 | 363.6 | 358.9 | -4.7 |
+| median | 363.6 | 358.9 | **-3.7 (-1.0%)** |
+
+Every inline run beat every generic run.  Bit-exact: the q4 greedy answer is
+byte-identical (`我是MiniMind，一个高效的小参数AI模型，专注于`), q8 is untouched and the
+suite is ACCEPT with PPL exactly 271.2855.  Only -1.0% against 2-4% per kernel on
+q8: the q4 loop is dominated by the nibble unpack (~112 ALU ops per 32-weight group
+against 8 mul-adds), so the helper-call overhead is a thinner slice of the token.
+The next q4 lever is that unpack and the per-group `mn*xsum`, not the loop shape.
+

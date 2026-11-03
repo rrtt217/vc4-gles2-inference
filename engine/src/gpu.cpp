@@ -36,6 +36,26 @@ static bool attn_dup(const char* name){
 }
 
 
+// Q4_INLINE selects the INT4 activation-decode form per kernel group, so the
+// generic and the inline build can be A/B-ed from one binary (the program
+// cache key carries the choice).  Unset = all inline; Q4_INLINE=0 = all
+// generic; otherwise a comma list of gate,w2,qkv enables only those.
+static bool q4_inline(const char* name){
+    static const char* env = getenv("Q4_INLINE");
+    if (!env) return true;
+    static const std::string s = env;
+    if (s.empty() || s == "0") return false;
+    size_t p = 0;
+    while (p <= s.size()) {
+        const size_t q = s.find(",", p);
+        const std::string tok = s.substr(p, q == std::string::npos ? std::string::npos : q - p);
+        if (tok == name || tok == "all") return true;
+        if (q == std::string::npos) break;
+        p = q + 1;
+    }
+    return false;
+}
+
 GPU::GPU(){
         init_egl();
         init_gl();
@@ -945,8 +965,9 @@ GLuint GPU::x_i4_pair(int rows, int cols){
     }
 
 GLuint GPU::x_i4_pair_swiglu(int rows, int cols){
-        return x_prog("xi4ps_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(act_fmt_),
-                      matvec_i4_pair_swiglu(rows, cols, act_fmt_));
+        const bool inl = q4_inline("gate");
+        return x_prog("xi4ps_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(act_fmt_) + (inl ? "" : "_gen"),
+                      matvec_i4_pair_swiglu(rows, cols, act_fmt_, inl));
     }
 
 // GL binding state is context-wide (GLES2 has no VAOs and the engine owns the
@@ -1049,10 +1070,11 @@ GLuint GPU::x_q8_add_pair(int rows, int cols, XFormat xf){
     }
 
 GLuint GPU::x_i4_add_pair(int rows, int cols, XFormat xf){
-        const string key = "xi4ap_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(xf);
+        const bool inl = q4_inline("w2");
+        const string key = "xi4ap_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(xf) + (inl ? "" : "_gen");
         auto it = programs_.find(key);
         if (it != programs_.end()) return it->second;
-        GLuint p = link_program(matvec_i4_add_pair(rows, cols, xf));
+        GLuint p = link_program(matvec_i4_add_pair(rows, cols, xf, inl));
         programs_[key] = p;
         return p;
     }
@@ -1069,8 +1091,9 @@ GLuint GPU::x_i16_add(int rows, int cols, XFormat xf){
     }
 
 GLuint GPU::x_i4(int rows, int cols){
-        return x_prog("xi4_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(act_fmt_),
-                      matvec_i4(rows, cols, act_fmt_));
+        const bool inl = q4_inline("qkv");
+        return x_prog("xi4_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(act_fmt_) + (inl ? "" : "_gen"),
+                      matvec_i4(rows, cols, act_fmt_, inl));
     }
 
 GLuint GPU::x_i4_add(int rows, int cols, XFormat xf){
