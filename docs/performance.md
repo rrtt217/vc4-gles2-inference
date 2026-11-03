@@ -1579,3 +1579,53 @@ to give up for ~0.3 ms/layer.
 Per-pass numbers to use instead: `LAYER_PROFILE=1` laps are sync-inflated and not
 comparable across runs - on the same binary the `qknorm` lap reads 2.33 ms/layer here
 vs 0.99 ms/layer in the previous entry.  Compare laps only within one run.
+
+### Landed: the fused FFN gate+swiglu is the default path (-10.6% decode)
+
+FFN_FUSE had been measured at -20 ms/token several entries ago but stayed opt-in
+because its output drifts from the two-pass sequence in the last bit of some swiglu
+values.  Per the gate correction in commit c836a91 (PPL on a 254-token corpus is a
+tripwire, not a bit-exact criterion) that drift is 0.3%, two orders of magnitude inside
+the sampling noise, and the byte-identical greedy gates pass.  The fused kernel is now
+the default on the q8 path; FFN_FUSE=0 restores the two-pass sequence.
+
+Interleaved A/B, plain mode, 32 tokens, 3 pairs, load 1.26 (bin/bench_plain_ab.sh):
+
+| | min | median | CPU/token |
+|---|---:|---:|---:|
+| engine_base (two-pass) | 228.7 | 228.9 | 109.6 (89.5 user / 20.1 sys) |
+| HEAD (fused gate+swiglu) | 204.4 | 214.8 | 115.2 (86.7 / 28.5) |
+| delta | **-10.6%** | -6.2% | +5.6 |
+
+Gates on the new default: q8 and q4 greedy text byte-identical, compiled default system
+prompt unchanged (same text without --system), PPL 312.1366 (two-pass 311.1636),
+ACT8=1/2 unchanged at 309.7812 / 314.8067.  The median spreads more than the min
+because the board was at load 1.26; the min is the interference-free figure.
+
+#### The 1-LSB drift is not the add tree (three hypotheses falsified)
+
+The recorded suspect was the fused kernel four accumulators putting the dot product in
+a different order.  Three rewrites of the fused kernel were built, deployed and gated on
+the Pi; every one reproduced **PPL 312.1366 exactly**, while the two-pass path reads
+311.1636:
+
+| fused kernel variant | PPL |
+|---|---:|
+| shipped (X4Q decode, four accumulators, shared activation decode) | 312.1366 |
+| same statement text as matvec_q8_pair (scalar dA/dB, w.x*a0+w.y*a1+...) | 312.1366 |
+| two sequential per-row loops, i.e. the two-pass instruction shape | 312.1366 |
+| the same plus emulation of the gate RGBA8 write/read round trip | 312.1366 |
+
+So the add tree, the number of live accumulator chains per fragment and the int16 gate
+round trip are all ruled out: the gate integers and the swiglu inputs are already
+bit-identical to the two-pass path.  That the round-trip emulation was really live is
+shown by shipping it once without its sign fix - PPL blew up to 114073.96, so the units
+really changed.  The remaining difference therefore sits inside the swiglu evaluation:
+the fused kernel feeds exp() a value computed in-register, the two-pass path feeds it
+one that came back through a sampler.  Both are the same float in exact arithmetic, so
+on VC4 the difference is in how the two programs lower exp() and the division.  Do not
+chase this with more shader variants; the next attempt should dump one layer of FFN
+hidden activations on both paths (FFN_DUMP) and diff them.
+
+Recorded so nobody repeats it: none of those three rewrites changed PPL or timing, and
+all were reverted before the fused kernel was made the default.

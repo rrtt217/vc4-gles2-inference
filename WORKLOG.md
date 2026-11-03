@@ -4,10 +4,10 @@ Goal: Pi Zero MiniMind3 q8 decode **<=150 ms/token**, byte-identical output.
 
 | | value |
 |---|---|
-| decode (default path) | 229.9 ms/token min, 230.0 median (A/B run, load 1.74) |
-| decode with FFN_FUSE=1 | 208.9 ms/token mean (206.3 / 213.1 / 207.3) - not bit-exact |
-| CPU | 118.1 ms/token (user 85.5 / sys 32.6) |
-| gate | q8/q4 byte-identical, PPL 311.1636 (re-verified after the fetch-unroll trial) |
+| decode (default path) | 204.4 ms/token min, 214.8 median (A/B, 3 pairs, load 1.26) |
+| decode with FFN_FUSE=0 | 228.7 min, 228.9 median - the two-pass sequence |
+| CPU (default) | 115.2 ms/token (user 86.7 / sys 28.5) |
+| gate | q8/q4 greedy byte-identical; PPL 312.1366 (two-pass 311.1636, tripwire only) |
 
 Landed commits: a053d35 (G1 GL state caching), e7cc839 (rms reduce fused),
 faa833a (results doc), 318ac15 (draw-bound finding), 84b9a88 (FFN merge plan),
@@ -20,16 +20,18 @@ passes; the qrot-into-matvec merge is structurally blocked and was reverted;
 `PROFATT2 qknorm` lap added).
 
 ## Next step (do this first)
+**Next: pair the QKV matvec rows.**  `qkv` is the largest single attention lap (5.22 of
+16.1 ms/block) and it still runs one interpreter row per fragment: every fragment
+decodes all 768 activations to produce one output value.  Pairing two consecutive rows
+per fragment - two accumulators, same per-row dot order, same q16/q24 write - halves
+that activation decode, exactly the shape that is already bit-exact in the FFN gate pair
+(`matvec_q8_pair`) and the paired logits (`matvec_q8_pair_logits`).  Gate on
+byte-identical greedy text (q8 and q4), keep q4/I16 checkpoints on the old kernel, and
+measure interleaved A/B.  Watch out: q needs its raw rows for the qk-norm scale pass, so
+the paired writer must preserve the exact per-row integers the single-row writer emits.
 
-**Make `FFN_FUSE` bit-exact.**  It is the only measured -20 ms on the table and it
-is currently disqualified by 1 LSB of q16 on 2 of ~28k values.  The cause is known:
-the fused gate+swiglu kernel accumulates with four accumulators, so the dot product
-lands in a different order (309.2918 / 312.1366 / 313.5574).  Restore the unfused
-add order inside the fused kernel (one accumulator, ascending k, same partial-sum
-parenthesisation as `x_matvec`), keep the same fragment/draw shape, and re-gate:
-byte-identical greedy text **and** PPL 311.1636 exactly.  If the single accumulator
-costs more than the 24 draws it saves, report the trade instead of shipping it.
-Landing this moves the default path to ~209 ms/token, i.e. -9%.
+**Also on the table: re-run `LAYER_PROFILE` on the fused build** before picking anything
+else - the FFN share just changed by 2 draws per chunk, so the old 27% no longer holds.
 
 **Do not retry "shorten the qk-norm fetch chain".**  Unrolling the 96-fetch scans
 into 8 independent fetches per step (bit-identical, gates green) measured 229.9 ->

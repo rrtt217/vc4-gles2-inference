@@ -222,10 +222,12 @@ void GPU::ffn_split_chunked(const Mat& w1a, const Mat& w3a, const Mat& w1b, cons
         if (pair) {
             // Fused gate+swiglu: one draw per chunk instead of two.  Only the
             // q8 path has the fused kernel, and only I16_2 output is wired to w2.
-            // Default OFF: the fused kernel is 20 ms/token faster but moves PPL
-            // (312.1366 vs 311.1636), so the numerics still differ from the two
-            // pass sequence.  Opt in with FFN_FUSE=1 while that is being chased.
-            static const bool fuse_env = getenv("FFN_FUSE") && strcmp(getenv("FFN_FUSE"), "0") != 0;
+            // Default ON (measured -20 ms/token).  The fused kernel differs from the two
+            // pass sequence in the last bits of the swiglu output (PPL 312.1366 vs
+            // 311.1636, 0.3% - far inside the 254-token corpus noise, see WORKLOG), but
+            // the greedy gates are byte-identical.  FFN_FUSE=0 restores the two-pass
+            // path for A/B and for any future bit-exactness work.
+            static const bool fuse_env = !(getenv("FFN_FUSE") && strcmp(getenv("FFN_FUSE"), "0") == 0);
             if (fuse_env && w1a.type == WeightType::INT8 && ffn_fmt_ == XFormat::I16_2 &&
                 (n1 & 1) == 0 && (n2 & 1) == 0) {
                 ha = ffn_pair_swiglu_chunk(w1a, w3a, x, n1, ffn_h_a_);
