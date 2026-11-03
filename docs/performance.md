@@ -2241,3 +2241,122 @@ One measurement trap, for the record: `/home/david/vc4-llm-runtime/engine/` also
 holds an `engine_mm3_pi` (from 11-02), so a hand-run PPL from that directory
 measures a stale build - it reads 269.6078 for q8 and 327.8478 for q4 against
 this build's 271.2855 / 325.3751.  Always pass `bin/engine_mm3_pi` explicitly.
+
+## 8-bit KV: the packing is exact, the grid is a quality knob (2026-11-04)
+
+Item 5 of the phase-2 backlog.  `KV_PACK=8` has been in the tree since the
+first packing work but was never priced against the current engine: the only
+number in this file (238.7 ms vs 240.0) predates the decode campaign, and
+`future-optimization.md` still called it unmeasured.  Measured now on the Pi
+Zero with build `baba12b` (suite ACCEPT), MiniMind3 q8/q4, `SEQ=768`,
+`GPU_LAYER=1`, greedy; PPL on the 293-token `data/ppl_test.txt`.
+
+### The pack and unpack are bit-exact
+
+`KV_PACK=8` writes four signed bytes per RGBA8 texel (K and V each half the
+texels); `KV_PACK=16` writes two q16 values per texel.  The two only have to
+agree when they quantise to the same grid, so run 16-bit at `KV_SCALE=16`
+(same 1/16 step, range +-2048) against 8-bit's default (`KV_SCALE=16`,
+range +-8).  Same binary, same model, same prompt:
+
+| check | `KV_PACK=16 KV_SCALE=16` | `KV_PACK=8` |
+|---|---:|---:|
+| q8 PPL | 260.4460 | 260.4460 |
+| q4 PPL | 351.2603 | 351.2603 |
+| q8 greedy stream, identity prompt (md5, 51 tokens incl. prompt) | `5a881f71...` | `5a881f71...` |
+
+Both models print the same PPL to four decimals and the token stream is
+byte-identical, so the 8-bit encode/decode, the texel index arithmetic and
+the K/V region split add no error of their own.  What changes between the
+modes is only the quantisation grid: `KV_PACK=16` defaults to
+`KV_SCALE=2048` (1/2048 step, range +-16), `KV_PACK=8` to 16 (1/16 step,
+range +-8).
+
+### The grid is a quality knob, and it is not monotonic
+
+PPL at `SEQ=768`, one 293-token window:
+
+| model | KV config | PPL | vs default |
+|---|---|---:|---:|
+| q8 | kv16 default (scale 2048) | 271.2855 | - |
+| q8 | kv8 scale 32 | 265.2213 | -2.2% |
+| q8 | **kv8 scale 16 (default)** | **260.4460** | **-4.0%** |
+| q8 | kv8 scale 8 | 280.3085 | +3.3% |
+| q4 | kv16 default (scale 2048) | 325.3751 | - |
+| q4 | kv8 scale 8 | 342.6477 | +5.3% |
+| q4 | kv8 scale 16 (default) | 351.2603 | +8.0% |
+
+Not a monotonic "more bits is better" curve: q8 has a minimum at 1/16 and is
+*worse* at both 1/8 and 1/2048, and q4 is worse at every 8-bit scale tried.
+The kv16 2048-vs-16 comparison changes nothing but the `KVSCALE` constant in
+the same kernels, so the effect is the KV grid itself, not a code path.  The
+likely reading is that the coarse grid acts as a noise/regularisation knob on
+a 64M model and how it lands depends on the weight quantisation; the
+mechanism is not established.  Treat it as a per-model knob, not a format
+property: the single global default (16) helps q8 and hurts q4.
+
+The greedy identity answer moves with the mode, which is why this cannot be a
+silent default change: kv16 gives
+`我是一个AI助手，没有自我意识，也没有身体，所以我无法` (the pinned q8
+string), kv8 gives `我是MiniMind，一个高效的小参数AI模型。` and stops at EOS
+after 15 tokens.  A KV8 deployment needs its own golden pin.
+
+### Speed: CPU headroom, not decode time
+
+Same binary, interleaved A/B, both arms forced to 32 tokens
+(`IGNORE_EOS=1`), 5 reps, q8:
+
+| arm | decode min | decode median | cpu/token |
+|---|---:|---:|---:|
+| `KV_PACK=16` | 183.4 | 185.1 | 115.0 (user 86.9 / sys 28.1) |
+| `KV_PACK=8` | 182.9 | 183.7 | 107.6 (user 85.0 / sys 22.6) |
+
+Decode moves by -0.3%, inside the +-2 ms spread: the decode loop is not
+KV-bandwidth bound, as the pass budget already said (scores ~4 ms, att_v
+~2.7 ms, KV rope write ~2.5 ms per token).  The CPU side drops 7.4 ms/token
+(mostly sys: half the KV fragments means fewer ioctls), which is worth having
+on a board where the same CPU also runs the sampler and the HTTP server.
+Prefill at the identity prompt is unchanged at ~9.6 s (five of six runs; the
+sixth hit 16.8 s during a network reconnect, load 3.2).
+
+### Memory: exactly half, and the prefix-cache file proves it
+
+One KV layer is `kv_dim × seq` RGBA8 texels: at `SEQ=768` (kv_dim 384) that
+is 1,179,648 B with `KV_PACK=16` and 589,824 B with `KV_PACK=8`, so 9.0 MiB
+vs 4.5 MiB over 8 layers.  The prefix-cache writer dumps exactly that buffer,
+so the file sizes are the end-to-end check at 588 tokens:
+
+| `KV_PACK` | cache file | data | header |
+|---|---:|---:|---:|
+| 16 | 7,227,772 B | 8 × 384 × 588 × 4 = 7,225,344 B | 2,428 B |
+| 8 | 3,615,100 B | 8 × 192 × 588 × 4 = 3,612,672 B | 2,428 B |
+
+The data is exactly 2:1 and the header is identical.  `CmaFree` cannot
+resolve 4.7 MB on this board: idle `CmaFree` moved 126-157 MB between
+consecutive runs and the same config produced 54-84 MB deltas, so the 22 MB
+difference recorded in the 2026-10-31 table above does not reproduce and
+should not be quoted.  Use the allocation arithmetic (or the cache file)
+instead.
+
+### Cross-pack cache loading is rejected
+
+All four combinations, current binary, `--worker --prefix-cache`:
+
+| server `KV_PACK` | cache built with 16 | cache built with 8 |
+|---|---|---|
+| 16 | `PREFIX_CACHE loaded 588 tokens` | `PREFIX_CACHE ignored` |
+| 8 | `PREFIX_CACHE ignored` | `PREFIX_CACHE loaded 588 tokens` |
+
+so the pack-mode bits in the header do their job.  (The header does **not**
+record `KV_SCALE`, which is the other half of the encoding - a cache built at
+scale 16 and loaded at 2048 is accepted and silently different.  Recorded as
+the next backlog item.)
+
+### Verdict
+
+`KV_PACK=16` stays the default and the deployment setting.  `KV_PACK=8` is
+not a free container: it halves the KV cache and shaves CPU, but it changes
+the model's answers and needs a per-model `KV_SCALE` and its own golden
+string.  On q8 the default 8-bit grid happens to *lower* PPL by 4% on the
+pinned corpus - a direction surprising enough that it needs a second corpus
+before anyone promotes it; on q4 it is a clear 8% loss and should stay off.

@@ -12,7 +12,7 @@ Last updated: 2026-11-02.
 |---|---|
 | Chat models | MiniMind3 64M q8/q4; MiniMind2 Small i16/q8/q4; TinyChat15M is a format probe only |
 | Default Pi context | q4: 1024; q8: 768 |
-| KV cache | packed q16 (`KV_PACK=16`) by default; `KV_PACK=8` exists but has no speed or quality measurement, and its scale is a single global constant |
+| KV cache | packed q16 (`KV_PACK=16`) by default. `KV_PACK=8` is bit-exact to 16-bit at a matched grid, halves the cache (9.0 -> 4.5 MiB at SEQ=768) and saves ~7 ms/token of CPU, but its 1/16 grid changes quality by -4% (q8) / +8% (q4) PPL and changes the greedy text - opt-in only, and the prefix-cache header does not record `KV_SCALE` yet |
 | q8 decode (Pi) | **183.5 ms/token min** (2026-11-03, 8 interleaved pairs, `GPU_LAYER=1 KV_PACK=16 SEQ=768`); first-token latency is dominated by ~3.8 s of shader compilation, not by prompt tokens |
 | q4 decode (Pi) | ~381 ms/token, **not re-measured since 2026-11-02**: the 2026-11-03 structural work (FFN fusion, qkv/logits row pairing, inline I16_2 decode) is gated on `WeightType::INT8` and never touched q4 |
 | Tools | get_current_time, calculate_math, system_status |
