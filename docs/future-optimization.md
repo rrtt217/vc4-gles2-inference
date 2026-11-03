@@ -302,6 +302,13 @@ Do not compare a laptop run with a Pi run as if they were the same machine.
 
 ### Attention is now pass-count bound, not ALU bound (2026-11-01, after the hoist)
 
+> **Superseded (2026-11-03).** The lap numbers below were taken with
+> `LAYER_PROFILE`, whose `glFinish` also retires the draw issued before the lap,
+> so they price the drain rather than the pass.  `ATTN_DUP` (replay one pass,
+> bit-exact) puts the whole attention block at **~39 ms/token**, qkv alone at 23,
+> and the three passes this section blames at ~9 ms together.  See
+> `docs/performance.md` ("Decode loop campaign summary").
+
 The block is eight draws per layer: qkv matvec, qk-norm factor, rotated q, KV
 rope write, scores, softmax stats, probabilities, p·V.  Per-call profile after
 the hoist (pos ~73, profiled so the numbers include the sync):
@@ -333,6 +340,13 @@ per head).  That is a redesign of the KV cache, not a tuning change.
 
 
 ### What is left, with estimates (measured model: only GPU ALU work counts)
+
+> **Superseded (2026-11-03).** These estimates were written against the 303 ms
+> baseline and the pass-count premise above.  Of the four items, row pairing
+> (logits, qkv) and the fused FFN all landed, and the four-row widening was
+> measured to be impossible on this hardware (one texel per fragment, no MRT).
+> The live list is in `docs/performance.md` and the dead ends in
+> "Do not retry" above.
 
 **1. Pair the logits rows (~2%).** The vocabulary pass runs as 5 tiles of
 1536x768, one row per fragment, ~20 ms/token.  Pairing rows halves the activation
@@ -368,6 +382,11 @@ otherwise.
 > over the board limit.  The same draw reduction is reached without any repack by
 > the fused gate+swiglu kernel (`FFN_FUSE`, still -20 ms but not yet bit-exact — see
 > `docs/performance.md`).
+
+> **Superseded measurement (2026-11-03).** The "~0.5 ms per draw" below was an
+> estimate; the direct measurement (`RMS_SPLIT=1`, which re-inserts one draw) is
+> **0.18 ms**, and the FFN fusion this plan aims at landed as `FFN_FUSE`
+> (-10.6%).  Read the numbers below as the estimate they were.
 
 Decode is 229 ms with 188 draws at ~0.5 ms per draw, so ~94 ms is draw overhead
 and ~135 ms is texture-fetch plus MAC work (decode is flat across SEQ, so none

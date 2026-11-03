@@ -3,6 +3,38 @@
 Environment switches used for A/B tests and debugging. They are not all
 production settings.
 
+## Decode-campaign switches (2026-11-03)
+
+Each of these defaults to the fast path and exists so a change can be A/B-ed
+inside one binary (two builds add enough variance to hide a 1 ms effect).  They
+are measurement hooks, not production settings.
+
+- `QKV_PAIR=0` - single-row qkv matvec; the paired rows are the default
+  (200.7 vs 183.5 ms/token).
+- `FFN_FUSE=0` - two-pass FFN gate+swiglu; the fused kernel is the default
+  (228.7 vs 183.5 ms/token).
+- `LOGITS_SPLIT=1` - unpaired logits rows (two vocabulary entries per fragment
+  otherwise).
+- `RMS_SPLIT=1`, `RMS_FUSED=1` - force the split or fused rmsnorm reduce.  VC4
+  defaults to fused (it drops one draw per norm); other drivers default to
+  split, where 32 extra fetches per fragment can cost more than the draw.
+- `Q8AP_INLINE=0`, `FFN_SW_INLINE=0` - restore the generic `X4Q` activation
+  decode in the w2/wo and FFN gate+swiglu kernels.
+
+Probes.  All default off, and all are bit-exact replays, so they can be enabled
+without moving the gate:
+
+- `ATTN_DUP=qkv,rope,qknorm,qrot,score,stats,v|all` - replay one attention pass
+  per layer; the end-to-end delta is that pass's marginal cost.
+- `PASS_DUP=embed,rms_att,rms_ffn,rms_final,logits,logits_draw|all` - the same
+  for the fixed per-token passes (`logits_draw` also skips the read-back).
+- `DRAWCOUNT=1` - print draws per generated token.
+- `FFN_DUMP=1` - dump the first 8 texels of the layer-0 gate output, for bisecting
+  a 1-LSB drift.
+- `LAYER_PROFILE=1` - per-pass marks.  The `glFinish` in the lap also retires the
+  draw issued before it, so use the replay probes above to price a pass; keep
+  `LAYER_PROFILE` for finding *which* pass moved.
+
 ## Test hooks
 
 - `TOPK=N` — exact Top-K candidate path (0/absent = full logits).

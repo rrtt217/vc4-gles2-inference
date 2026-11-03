@@ -115,6 +115,7 @@ bool Session::save_prefix_cache(const string& path, const vector<int>& toks){
             glReadPixels(0, 0, width, n, GL_RGBA, GL_UNSIGNED_BYTE, data.data());
             f.write((char*)data.data(), data.size());
         }
+        gpu_.forget_state();
         return (bool)f;
     }
 
@@ -156,6 +157,7 @@ bool Session::load_prefix_cache(const string& path, vector<int>& toks){
             glBindTexture(GL_TEXTURE_2D, gpu_.kv_cache_[l].tex);
             glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, n, GL_RGBA, GL_UNSIGNED_BYTE, data.data());
         }
+        gpu_.forget_state();
         gpu_.sync();
         toks = std::move(tmp);
         return true;

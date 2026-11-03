@@ -10,6 +10,10 @@
 #include <unordered_map>
 #include <vector>
 
+// Defined next to the bind cache helpers further down; declared here because the
+// debug dump and the prefix cache invalidate the cache from earlier in the file.
+static void gl_state_forget_bindings();
+
 // Default-off probe (ATTN_DUP=qkv,rope,qknorm,qrot,score,stats,v or all):
 // replay one attention pass per layer.  Every shader involved is deterministic
 // and writes the same FBO from unchanged inputs, so the second draw reproduces
@@ -801,6 +805,8 @@ vector<uint8_t> GPU::read_bytes(Target& t, int w, int h){
 
 void GPU::sync(){ glFinish(); }
 
+void GPU::forget_state(){ gl_state_forget_bindings(); }
+
 void GPU::dump_target(const Target& t, const char* name, int n){
         if (t.tex == 0) return;
         if (n > t.w) n = t.w;
@@ -809,6 +815,7 @@ void GPU::dump_target(const Target& t, const char* name, int n){
         glBindFramebuffer(GL_FRAMEBUFFER, t.fbo);
         glPixelStorei(GL_PACK_ALIGNMENT, 1);
         glReadPixels(0, 0, t.w, 1, GL_RGBA, GL_UNSIGNED_BYTE, &b[0]);
+        gl_state_forget_bindings();
         fprintf(stderr, "DUMP %s w=%d", name, t.w);
         for (int i = 0; i < n; i++) fprintf(stderr, " %02x%02x%02x%02x", b[i*4], b[i*4+1], b[i*4+2], b[i*4+3]);
         fprintf(stderr, "\n");

@@ -94,6 +94,10 @@ public:
     vector<uint8_t> read_bytes(Target& t, int w, int h);
 
     void sync();
+    // Drop the bind caches.  Any code that touches glBindFramebuffer /
+    // glBindTexture directly (prefix-cache save/load, debug dumps) must call
+    // this, or a later bind_tex()/bind_fbo() will skip a needed bind.
+    void forget_state();
     void dump_target(const Target& t, const char* name, int n);
     bool needs_finish() const;
     bool rms_fused() const;

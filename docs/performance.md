@@ -65,15 +65,31 @@ passed to `--system`, but they are not the gate.
 
 ## How to read this document
 
-This file is a chronological lab notebook, not a single clean benchmark.  The
-sections above the first historical marker are the current summary; the rest
-records how the numbers were obtained, including failed experiments.
+This file is a chronological lab notebook, not a single clean benchmark: the
+oldest entries are at the top, the newest at the bottom, and every section is
+measured on the machine or driver it names.  Start with the current state, then
+walk back through the entries that produced it.
+
+Current state:
+
+- [Decode loop campaign summary (2026-11-02 .. 03)](#decode-loop-campaign-summary-2026-11-02--03)
+  — 237.3 -> 183.5 ms decode, the pass budget, and the env knob behind each
+  landed change.  Dead ends live in
+  [`future-optimization.md`](future-optimization.md#do-not-retry-measured-2026-11-03).
+- [Pi Zero model matrix (2026-11-02)](#pi-zero-model-matrix-2026-11-02-vlab-cross-build)
+- [Benchmarking caveat](#benchmarking-caveat-the-pi-also-runs-a-minecraft-server)
+
+History:
 
 - [Available-model baseline (2026-11-01)](#available-model-baseline-pi-zero-2026-11-01)
 - [2026-11-01 optimization pass](#summary-of-the-2026-11-01-optimization-pass)
 - [Attention and refactor work (2026-11-02)](#the-refactors-12-regression-helper-indirection-in-the-hot-matvec-loops)
-- [q4 path (2026-11-02)](#q4-path-nibble-decode-without-mod-13)
-- [Benchmarking caveat](#benchmarking-caveat-the-pi-also-runs-a-minecraft-server)
+- [q4 path (2026-11-02)](#q4-path-nibble-decode-without-mod--13)
+- [Draw-path work: G1 and G2 (2026-11-02)](#draw-path-work-g1-gl-state-caching-and-g2-rmsnorm-reduce-fusion)
+- [The q chain is four dependent passes (2026-11-03)](#2026-11-03-the-q-chain-is-four-dependent-passes---and-qk-norm-is-on)
+- [qk-norm scans are fetch-count bound (2026-11-03)](#2026-11-03-the-qk-norm--k-norm-scan-is-fetch-count-bound-not-latency-bound)
+- [Inline I16_2 decode in FFN gate and logits (2026-11-03)](#2026-11-03-inline-i16_2-decode-in-the-ffn-gate-and-logits-kernels--24-bit-exact)
+- [Inline I16_2 decode in the FFN swiglu kernel (2026-11-03)](#2026-11-03---ffn-gate-inline-i16_2-decode-in-matvec_q8_pair_swiglu--10-ms-bit-exact)
 
 ## Summary of the 2026-11-01 optimization pass
 
