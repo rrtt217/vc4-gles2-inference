@@ -45,7 +45,8 @@ MiniMind3 prompt and the server's Chinese default.  Tested behavior:
 
 | model | identity response | note |
 |---|---|---|
-| MiniMind3 q8 | “我是一个AI助手……” | coherent; does not claim a name |
+| MiniMind3 q8 (Pi) | “我是一个AI助手，没有自我意识，也没有身体……” | re-baselined 2026-11-03; see below |
+| MiniMind3 q8 (Xe) | “我是一个AI助手，我的存在是为了提供帮助和信息。” | the two GPUs round the fused FFN differently |
 | MiniMind3 q4 | “我是MiniMind……” | retains the model identity |
 | MiniMind2 i16/q8 | “我是一款智能语音助手……” | coherent |
 | MiniMind2 q4 | “我是一台电脑/大型语言模型……” | still unreliable |
@@ -62,6 +63,22 @@ because the strings moved when `c1bb4f6` replaced the old Chinese persona
 prompt; the pre-`c1bb4f6` strings (`MiniMind是一个高效的小...` for q8,
 `我是MiniMind，一个由jingyaogong...` for q4) still reproduce with that old text
 passed to `--system`, but they are not the gate.
+
+### Why the q8 identity string changed on 2026-11-03
+
+Making the fused FFN gate+swiglu the default (`b7dce0d`) reassociates the last
+bits of the swiglu output, and on VC4 that is enough to flip the first answer:
+the pinned gate went from `我是一个AI助手，我的存在是为了提供帮助和信息。` to
+`我是一个AI助手，没有自我意识，也没有身体，所以我无法`.  The Xe build of the
+same tree still prints the old string, so the two machines no longer share a
+golden value.
+
+This is a re-baseline, not a regression: llama.cpp running the official
+`minimind-3.q8.gguf` on the same Pi, same prompt, same system message and
+`--temp 0` prints the **same** new text byte for byte, while the old engine
+build does not.  See `AGENTS.md` ("Canonical smoke tests") for the per-machine
+values and for the acceptance policy: the golden string is a tripwire, and
+`engine/scripts/regression.sh` is the gate.
 
 ## How to read this document
 

@@ -91,10 +91,27 @@ GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat --template minimind3 \
   --prompt "用一句话介绍你自己。" --gen 16 --greedy
 ```
 
-Expected, byte for byte (Pi Zero and Xe agree):
+Expected text.  The value is **machine specific** - VC4 and Xe round the fused
+FFN differently - so never compare a Pi run with an Xe run:
 
-- q8: `Assistant: 我是一个AI助手，我的存在是为了提供帮助和信息。`
-- q4: `Assistant: 我是MiniMind，一个高效的小参数AI模型，专注于`
+- Pi Zero q8: `Assistant: 我是一个AI助手，没有自我意识，也没有身体，所以我无法`
+- Pi Zero q4: `Assistant: 我是MiniMind，一个高效的小参数AI模型，专注于`
+- Xe / desktop GLES2 q8: `Assistant: 我是一个AI助手，我的存在是为了提供帮助和信息。`
+
+The Pi q8 string was re-baselined on 2026-11-03 when the fused FFN became the
+default (`b7dce0d`): the reassociation moves the last bits on VC4, and
+llama.cpp with the official `minimind-3.q8.gguf` prints the same text for the
+same prompt on the same board, so this is the VC4 reference, not a regression.
+
+**The string is a tripwire, not the acceptance criterion.**
+`engine/scripts/regression.sh` is the gate: determinism (same binary twice),
+a second prompt's behaviour (non-empty, no collapse), the pinned strings when
+the machine sets them, and perplexity.  A deliberate numeric change
+re-baselines `Q8_EXPECT` / `Q4_EXPECT` / `PPL_EXPECT` in the same commit and
+cites the evidence - PPL on a corpus large enough to matter, the behaviour
+checks, and where possible a cross-implementation check (llama.cpp on the same
+prompt).  `scripts/regression.sh --rebaseline` prints the new values; keep them
+in the machine's override, not here.
 
 The same command **without** `--system` must print the same text; that is the
 check that the compiled default has not moved.  If it differs, change
@@ -141,7 +158,10 @@ The engine is split into `engine/src/` modules; see `docs/engine-layout.md`.
 Shader text belongs in `shaders.cpp` / `shaders_attn.cpp`, and activation
 layout knowledge belongs in `xformat.h/.cpp`. Do not reintroduce per-shader
 activation-layout strings. Run q8, q4 and `--ppl` comparisons after any GPU or
-format change; a byte-identical greedy string is the minimum gate.
+format change, and run `engine/scripts/regression.sh` (determinism, behaviour,
+pinned strings, PPL).  A single golden string is a tripwire, not the gate: it is
+chaotic across GPUs and across reassociations, so pin it per machine and
+re-baseline it deliberately when the numbers move on purpose.
 
 ## Local overrides
 
