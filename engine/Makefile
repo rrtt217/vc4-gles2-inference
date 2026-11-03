@@ -51,7 +51,12 @@ probes/matvec_probe: probes/matvec_probe.cpp $(SRC)/common.cpp $(SRC)/common.h
 probes/texsize_probe: probes/texsize_probe.cpp $(SRC)/common.cpp $(SRC)/common.h
 	$(CXX) $(CXXFLAGS) -I$(SRC) -o $@ probes/texsize_probe.cpp $(SRC)/common.cpp $(LDLIBS)
 
+# Standalone VC4 format probes: no engine sources, cross-built for the Pi.
+probes/q4fmt_probe_pi: probes/q4fmt_probe.cpp
+	@test -d "$(CROSS_SYSROOT)" || { echo "missing CROSS_SYSROOT=$(CROSS_SYSROOT)" >&2; exit 2; }
+	$(CROSS_CXX) $(CROSS_CXXFLAGS) -o $@ $< $(CROSS_LDLIBS)
+
 clean:
 	rm -f engine engine_mm3 engine_mm3_pi
 	rm -f probes/vc4_probe probes/vc4_ffn_probe probes/vc4_topk_probe
-	rm -f probes/matvec_probe probes/texsize_probe
+	rm -f probes/matvec_probe probes/texsize_probe probes/q4fmt_probe_pi

@@ -2141,3 +2141,66 @@ the ceiling for that work.  `Q4_HFAST=1` stays as the record that chain
 length was tried and rejected.  All are default off, and the shared
 `q4_taps`/`q4_h` builders emit the original shader text when off: suite ACCEPT
 with PPL exactly 271.2855 and both greedy strings unchanged.
+
+## q4: the unpack cost is FLOOR, and the hi/lo split format is a dead end (2026-11-04)
+
+The previous run priced the nibble unpack with `Q4_NOUNPACK` (235.5 ms, -34.4%)
+and projected a hi/lo split weight format at -11% on the theory that the unpack
+is 12 ALU ops per 8-weight texel.  Both halves of that theory were wrong, and
+this run - meant to build the split format - spent its budget proving that and
+finding the real cost model.
+
+**The split format was built and measured.**  `Q4_SPLIT=1` uploaded every q4
+matrix as two RGBA4 nibble planes interleaved along x (texel 2u = high nibbles,
+texel 2u+1 = low ones): the same four bytes per eight weights, so the model file
+and its GPU footprint do not move, and one mul + floor per nibble instead of the
+byte/floor/subtract chain.  It was bit-exact - the 32-token greedy text was
+byte-identical to the packed path - and **12% slower**:
+
+| q4 decode arm | ALU per 8 weights | fetches per 8 weights | ms/token |
+|---|---:|---:|---:|
+| packed RGBA8 (default) | 8 floor + 12 mad | 1 | **358.1** (3 runs) |
+| `Q4_SPLIT=1` RGBA4 planes, floor | 8 floor + 8 mad | 2 | 402.7 (1 run) |
+| `Q4_SPLIT=mul` RGBA4 planes, no floor (wrong weights) | 8 mad | 2 | 283.3 (1 run) |
+| `Q4_BFAST=1` packed, byte floor dropped (wrong weights) | 4 floor + 12 mad | 1 | **292.3** (3 runs) |
+| `Q4_NOUNPACK=1` no unpack at all (wrong weights) | 8 mad | 1 | 235.5 (prev run) |
+
+All arms: `minimind3.q4`, `GPU_LAYER=1 KV_PACK=16 SEQ=768`, 32 tokens with
+`IGNORE_EOS=1` so both arms run every token; the packed control was interleaved
+with `Q4_BFAST` (358.1 / 358.1 / 356.9 vs 299.9 / 291.9 / 292.3).
+
+Three conclusions, each measured:
+
+1. **A texture fetch costs more than the ALU it saves.**  Going from one fetch
+   per 8 weights to two costs ~17 ms/token, while the four mads the split format
+   removes are worth ~4 ms.  q4 is not fetch-starved in the row-pair sense, but
+   every extra fetch is ~12-17 ms on this board.
+2. **FLOOR is the q4 cost: ~15.5 ms per floor per 8-weight texel.**  Removing the
+   four byte floors (`Q4_BFAST`) takes the token from 358.1 to 292.3 ms
+   (-18.4%); removing all eight (`Q4_NOUNPACK`) takes it to 235.5.  Eight floors
+   x ~15.5 ms accounts for the whole 124 ms gap, and the twelve mads of the
+   unpack are worth ~12 ms together.  The unpack is 91% FLOOR.
+3. **No exact decode can avoid those floors on VC4.**  Two attempts died:
+   * The byte floor is not redundant.  An 8-bit UNORM component does not come
+     back as exactly `b/255`: `engine/probes/q4fmt_probe` measures `c*255 - b`
+     over all 256 bytes as -16..0 in units of 2^-20 (up to 1.5e-5 low), so
+     `floor(c*255+0.5)` recovers every byte while `floor(c*255)` misses 254 of
+     256 - and the kernel floors `b/16` afterwards, where a 1e-5 deficit under
+     every multiple of 16 is fatal.  `Q4_BFAST` decodes every multiple of 16 one
+     low and the greedy text collapses to one repeated token.
+   * The 2^23 round trick, `((x + 8388608.0) - 8388608.0)`, does not survive
+     Mesa: with it the probe arm decoded garbage *and* ran at 195-252 ms, faster
+     than any arm that still decodes, so the expression was folded back to a
+     bare multiply.
+   * A 4-bit RGBA4 component is low too: `c*15` is `v - 9.5e-7` for v = 9..14
+     (one ULP at that scale), and `(c*255)/17` has the same one-ULP deficit, so
+     `Q4_SPLIT=mul` cannot be exact while `Q4_SPLIT=1` with floors can.
+
+q4 decode is therefore at **its own structural floor: 8 FLOOR per 8 weights,
+~358 ms/token**.  The unpack cannot be made cheaper without changing what a
+weight is (q8: 1 byte, no floor, 183 ms; f16: 2 bytes, no decode, 4x the
+memory), and the remaining q4 lever is *fewer q4 weights* - a per-layer or
+per-matrix precision mix - not a cheaper decode.  The split implementation was
+reverted after measurement: the numbers and the RGBA4/RGBA8 conversion facts
+(`engine/probes/q4fmt_probe.cpp`) are what is worth keeping.  `Q4_BFAST` stays
+in the tree default-off as the byte-floor ceiling.

@@ -87,6 +87,24 @@ static bool q4_nounpack() {
     return v;
 }
 
+// Q4_BFAST=1 drops the floor(x+0.5) on the byte decode: an 8-bit component
+// comes back as a float within 1e-5 of the byte, and the q8 kernels have
+// never needed a floor because they multiply instead of flooring.  This probe
+// floors afterwards (h = floor(b/16)), so the ~1e-5 deficit lands under every
+// multiple of 16 and the weights are wrong on purpose: it prices the four byte
+// floors, which is the ceiling any exact byte decode could reach.
+static bool q4_bfast() {
+    static const char* e = getenv("Q4_BFAST");
+    static const bool v = e && strcmp(e, "0") != 0;
+    return v;
+}
+
+static string q4_byte(const string& w, char ch) {
+    const string t = w + "." + ch;
+    if (q4_bfast()) return t + "*255.0";
+    return "floor(" + t + "*255.0+0.5)";
+}
+
 // The unpack of one 8-weight texel, shared verbatim by the INT4 kernels so the
 // probe swaps it in one place.  q4_h is defined below; W is the texel name.
 static string q4_h(const string& w);
@@ -96,8 +114,8 @@ static string q4_taps(const char* W) {
         return "float h0=" + w + ".r*15.0,l0=" + w + ".g*15.0,h1=" + w + ".b*15.0,"
                "l1=" + w + ".a*15.0,h2=" + w + ".r*7.0,l2=" + w + ".g*7.0,"
                "h3=" + w + ".b*7.0,l3=" + w + ".a*7.0;";
-    return "float b0=floor(" + w + ".r*255.0+0.5),b1=floor(" + w + ".g*255.0+0.5),"
-           "b2=floor(" + w + ".b*255.0+0.5),b3=floor(" + w + ".a*255.0+0.5);"
+    return "float b0=" + q4_byte(w, 'r') + ",b1=" + q4_byte(w, 'g') + ","
+           "b2=" + q4_byte(w, 'b') + ",b3=" + q4_byte(w, 'a') + ";"
            + q4_h(w) +
            "float l0=b0-h0*16.0,l1=b1-h1*16.0,l2=b2-h2*16.0,l3=b3-h3*16.0;";
 }
@@ -116,7 +134,7 @@ static string q4_h(const string& w) {
     if (q4_hfast())
         return "float h0=floor(" + w + ".r*15.9375+0.03125),h1=floor(" + w + ".g*15.9375+0.03125)," 
                "h2=floor(" + w + ".b*15.9375+0.03125),h3=floor(" + w + ".a*15.9375+0.03125);";
-    return "float h0=floor(b0*0.0625),h1=floor(b1*0.0625)," 
+    return "float h0=floor(b0*0.0625),h1=floor(b1*0.0625),"
            "h2=floor(b2*0.0625),h3=floor(b3*0.0625);";
 }
 }  // namespace
