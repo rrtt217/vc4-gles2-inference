@@ -528,10 +528,11 @@ bool GPU::gpu_layer_enabled() const{
 void GPU::init_attention(int dim, int kv_dim, int heads, int kv_heads, int head_dim,
                         int seq, bool rope_half, bool qk_norm, int layers,
                         const vector<float>& qn, const vector<float>& kn,
-                        const vector<float>& rcos, const vector<float>& rsin){
+                        const vector<float>& rcos, const vector<float>& rsin, bool qkv_pair){
         att_dim_ = dim; att_kv_dim_ = kv_dim; att_heads_ = heads;
         att_kv_heads_ = kv_heads; att_head_dim_ = head_dim; att_seq_ = seq;
         att_rope_half_ = rope_half; att_qk_norm_ = qk_norm;
+        att_qkv_pair_ = qkv_pair && ((dim + 2 * kv_dim) % 2 == 0);
         att_kv_bits_ = getenv("KV_PACK") ? atoi(getenv("KV_PACK")) : 0;
         if (att_kv_bits_ == 1) att_kv_bits_ = 16;
         if (att_kv_bits_ != 0 && att_kv_bits_ != 8 && att_kv_bits_ != 16) att_kv_bits_ = 0;
@@ -557,7 +558,7 @@ void GPU::init_attention(int dim, int kv_dim, int heads, int kv_heads, int head_
         }
         const int half = head_dim / 2;
         const int qkv_rows = dim + 2 * kv_dim;
-        qkv_target_ = make_target(qkv_rows, 1);
+        qkv_target_ = make_target(att_qkv_pair_ ? (qkv_rows + 1) / 2 : qkv_rows, 1);
         att_scores_ = make_target(seq / 2, heads);
         att_stats_ = make_target(heads, 1);
         att_probs_ = make_target(seq, heads);
@@ -595,7 +596,27 @@ GLuint GPU::attention_block(const Mat& qkv, GLuint x, int layer, int pos){
             cerr << "PROFATT " << name << " " << elapsed_ms(tp, now) << "\n";
             tp = now;
         };
-        matvec_to(qkv, x, qkv_target_);
+        // Two qkv rows per fragment: one activation decode feeds two dot
+        // products, exactly like the paired logits pass.  The kernel writes the
+        // same per-row q16 integers the 24-bit writer produced (x_st2q applies
+        // the identical round/clamp), so the rope/qk-norm/qrot readers see the
+        // same values.
+        if (att_qkv_pair_ && qkv.type == WeightType::INT8) {
+            const int pairs = (qkv.rows + 1) / 2;
+            GLuint p = x_prog("xqkvp_" + to_string(qkv.rows) + "_" + to_string(qkv.cols) +
+                              "_" + x_format_name(act_fmt_),
+                              matvec_q8_pair_logits(qkv.rows, qkv.cols, act_fmt_));
+            bind_fbo(qkv_target_.fbo);
+            glViewport(0, 0, pairs, 1);
+            use_program(p);
+            bind_tex(0, qkv.tex); set_sampler(p, "W", 0);
+            bind_tex(1, x); set_sampler(p, "X", 1);
+            glUniform1f(uloc(p, "ws"), qkv.scale);
+            setup_attrib(p);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+        } else {
+            matvec_to(qkv, x, qkv_target_);
+        }
         att_finish();
         lap("qkv");
         kv_rope_write(layer, pos);
@@ -779,6 +800,7 @@ AttnConfig GPU::att_cfg() const{
         c.kv_heads = att_kv_heads_; c.head_dim = att_head_dim_; c.seq = att_seq_;
         c.rope_half = att_rope_half_; c.qk_norm = att_qk_norm_;
         c.kv_bits = att_kv_bits_; c.kv_scale = att_kv_scale_; c.kv_width = att_kv_width_;
+        c.qkv_pair = att_qkv_pair_;
         return c;
     }
 

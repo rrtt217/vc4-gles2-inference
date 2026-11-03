@@ -50,10 +50,17 @@ Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
                              (m_.wo[0].type == WeightType::INT8 || m_.wo[0].type == WeightType::INT4);
             gpu_.res_fmt_ = gpu_.res_pack_ ? XFormat::I16_2 : XFormat::I16_1;
         }
+        // Paired qkv matvec: two output rows per fragment, half the activation
+        // decode.  Only the int8 checkpoint uses it; QKV_PAIR=0 restores the
+        // single-row kernel.
+        bool qkv_pair = true;
+        for (const Mat& m : m_.qkv)
+            if (m.type != WeightType::INT8 || (m.rows & 1)) qkv_pair = false;
+        if (getenv("QKV_PAIR") && strcmp(getenv("QKV_PAIR"), "0") == 0) qkv_pair = false;
         if (gpu_attn_)
             gpu_.init_attention(m_.dim, m_.kv_dim, m_.heads, m_.kv_heads, m_.head_dim,
                                 m_.seq, m_.rope_half, m_.qk_norm, m_.layers,
-                                m_.q_norm, m_.k_norm, rope_cos_, rope_sin_);
+                                m_.q_norm, m_.k_norm, rope_cos_, rope_sin_, qkv_pair);
         if (gpu_layer_)
             gpu_.init_persistent(m_.dim, m_.layers, m_.rms_att, m_.rms_ffn, m_.rms_final);
     }

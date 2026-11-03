@@ -1629,3 +1629,45 @@ hidden activations on both paths (FFN_DUMP) and diff them.
 
 Recorded so nobody repeats it: none of those three rewrites changed PPL or timing, and
 all were reverted before the fused kernel was made the default.
+
+### Landed: the qkv matvec writes row pairs (-4.5% decode, bit-exact)
+
+`qkv` was the largest single attention lap (5.22 of 16.1 ms/block) and still ran one
+interpreter row per fragment: every fragment decoded all 768 activations to produce a
+single output value.  It now uses the paired kernel shape that is already bit-exact in
+the logits pass - two consecutive weight rows per fragment, one activation decode
+feeding two dot products, two q16 values packed into one texel.  The qkv target is
+therefore half as wide (768 texels instead of 1536) and the rope / qk-norm / qrot
+readers decode a half-width fetch plus a .rg/.ba component select.
+
+The q16 pair carries exactly the integers the 24-bit writer produced: `x_st2q` applies
+the same round-half-up and clamp to [-32768, 32767] as `x_i24encq`, and the readers
+recover the integer with `floor(byte*255+0.5)` before the sign step, which reproduces
+`dec24q` arithmetic exactly.  QKV_PAIR=0 restores the single-row kernel (q4/i16
+checkpoints always use it).
+
+**The floor is not optional.**  The first version decoded `p.x*65280 + p.y*255` without
+flooring the bytes.  The qkv bytes were provably identical (dumped the target and
+hashed the decoded integers per layer: the sequences matched value for value), but
+`(128/255)*65280` lands a few ulps off 32768, so the qk-norm scans and rope multiplies
+saw values a hair off the integer grid: PPL 314.7118 instead of 312.1366, while the
+16-token greedy gate still passed.  Flooring the two bytes restored PPL 312.1366,
+ACT8=2 314.8067 and ACT8=1 309.7812 exactly.
+
+Interleaved A/B on the same binary via QKV_PAIR=0/1, plain, 32 tokens, 3 pairs:
+
+| | decode min | decode median |
+|---|---:|---:|
+| QKV_PAIR=0 (single row) | 200.7 | 201.7 |
+| QKV_PAIR=1 (paired rows) | 191.6 | 192.5 |
+| delta | **-4.5%** | -4.6% |
+
+Against `engine_base` (plain, 32 tokens, 3 pairs, same session): 228.9 -> **192.5**
+ms/token min (-15.9%), median 231.6 -> 195.5; CPU/token 124.1 -> 116.2 (user 90.0 ->
+93.8, sys 34.1 -> 22.4).
+
+Gates: q8 and q4 greedy text byte-identical, default system prompt unchanged, all
+three PPL figures exactly equal to the pre-change reference (312.1366 / 314.8067 /
+309.7812).  The same decode-before-dump order that found the floor bug is the advice
+for the next format change: hash the decoded values, not the bytes, because a packed
+layout changes both.

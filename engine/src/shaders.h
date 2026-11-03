@@ -15,6 +15,7 @@ struct AttnConfig {
     int seq = 0;
     bool rope_half = false;
     bool qk_norm = false;
+    bool qkv_pair = false;  // qkv matvec writes two q16 rows per texel
     int kv_bits = 0;
     float kv_scale = 16384.0f;
     int kv_width = 0;

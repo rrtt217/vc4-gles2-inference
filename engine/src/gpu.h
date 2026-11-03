@@ -72,7 +72,7 @@ public:
     void init_attention(int dim, int kv_dim, int heads, int kv_heads, int head_dim,
                         int seq, bool rope_half, bool qk_norm, int layers,
                         const vector<float>& qn, const vector<float>& kn,
-                        const vector<float>& rcos, const vector<float>& rsin);
+                        const vector<float>& rcos, const vector<float>& rsin, bool qkv_pair);
 
     GLuint attention_block(const Mat& qkv, GLuint x, int layer, int pos);
 
@@ -181,6 +181,7 @@ private:
     int att_head_dim_ = 0, att_seq_ = 0;
     bool att_rope_half_ = false;
     bool att_qk_norm_ = false;
+    bool att_qkv_pair_ = false;  // qkv target holds two q16 per texel
     bool att_kv_packed_ = false;
     int att_kv_bits_ = 0;
     float att_kv_scale_ = 16384.0f;

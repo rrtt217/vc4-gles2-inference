@@ -8,10 +8,32 @@
 using std::string;
 using std::to_string;
 
+namespace {
+
+// QKV holds the q/k/v matvec output.  When the qkv matvec pairs two output
+// rows into one texel the reads become a half-width fetch plus a component
+// select; otherwise the original 24-bit fetch is emitted verbatim.
+string qkv_read(const AttnConfig& c, const char* tex, const char* macro) {
+    const string t(tex), m(macro);
+    if (!c.qkv_pair)
+        return "\n#define " + m + "(I) dec24q(texture2D(" + t +
+               ",vec2((float(I)+0.5)/float(QKVDIM),0.5)))\n";
+    const string fn = string("qkvr_") + t;
+    return "\nfloat " + fn + "(int i){int t=i/2;vec4 c=texture2D(" + t +
+           ",vec2((float(t)+0.5)/float(QKVTW),0.5));"
+           "vec2 p=(((i-t*2)==0)?c.rg:c.ba);"
+           "float u=floor(p.x*255.0+0.5)*256.0+floor(p.y*255.0+0.5);"
+           "if(u>=32768.0)u-=65536.0;return u/256.0;}\n"
+           "#define " + m + "(I) " + fn + "(I)\n";
+}
+
+}  // namespace
+
 string att_defs(const AttnConfig& c) {
     return string("#define DIM ") + to_string(c.dim) + "\n" +
            "#define KVDIM " + to_string(c.kv_dim) + "\n" +
            "#define QKVDIM " + to_string(c.dim + 2 * c.kv_dim) + "\n" +
+           "#define QKVTW " + to_string((c.dim + 2 * c.kv_dim + 1) / 2) + "\n" +
            "#define HEADS " + to_string(c.heads) + "\n" +
            "#define KVHEADS " + to_string(c.kv_heads) + "\n" +
            "#define GROUP " + to_string(c.heads / c.kv_heads) + "\n" +
@@ -42,23 +64,23 @@ string att_helpers() {
 
 string att_kv_rope(const AttnConfig& c) {
     return "precision highp float;\n" + att_defs(c) + att_helpers() +
-        "uniform sampler2D QKV,RT,KN;uniform float pos;"
+        "uniform sampler2D QKV,RT,KN;uniform float pos;" + qkv_read(c, "QKV", "QKVQ") +
         "void main(){int x=int(gl_FragCoord.x);"
         "if(KVPACK==8){"
         "if(x<KVDIM/4){"
         "int base=4*x;int h=base/HEADDIM;int li0=base-h*HEADDIM;"
         "float rk=1.0;"
         "if(QKNORM==1){float ss=0.0;for(int z=0;z<HEADDIM;z++){"
-        "float zk=dec24q(texture2D(QKV,vec2((float(DIM+h*HEADDIM+z)+0.5)/float(QKVDIM),0.5)));ss+=zk*zk;}"
+        "float zk=QKVQ(DIM+h*HEADDIM+z);ss+=zk*zk;}"
         "rk=1.0/sqrt(ss/float(HEADDIM)+QKEPS);}"
         "float o0=0.0,o1=0.0,o2=0.0,o3=0.0;"
         "for(int k=0;k<4;k++){int ii=base+k;int li=li0+k;int j,ti;int even=li-(li/2)*2;"
-        "float vv=dec24q(texture2D(QKV,vec2((float(DIM+ii)+0.5)/float(QKVDIM),0.5)));"
+        "float vv=QKVQ(DIM+ii);"
         "if(QKNORM==1)vv=vv*rk*dec16(texture2D(KN,vec2((float(li)+0.5)/float(HEADDIM),0.5)).rg);"
         "if(ROPEHALF==1){if(li<HALF){j=li+HALF;ti=li;}else{j=li-HALF;ti=li-HALF;}}"
         "else{j=(even==0)?li+1:li-1;ti=li/2;}"
         "int pc=DIM+h*HEADDIM+j;"
-        "float bb=dec24q(texture2D(QKV,vec2((float(pc)+0.5)/float(QKVDIM),0.5)));"
+        "float bb=QKVQ(pc);"
         "if(QKNORM==1)bb=bb*rk*dec16(texture2D(KN,vec2((float(j)+0.5)/float(HEADDIM),0.5)).rg);"
         "vec4 rc=texture2D(RT,vec2((float(2*ti)+0.5)/float(2*HALF),(pos+0.5)/float(SEQ)));"
         "vec4 rs=texture2D(RT,vec2((float(2*ti+1)+0.5)/float(2*HALF),(pos+0.5)/float(SEQ)));"
@@ -67,26 +89,26 @@ string att_kv_rope(const AttnConfig& c) {
         "float oo=first?vv*co-bb*sn:bb*sn+vv*co;if(k==0)o0=oo;else if(k==1)o1=oo;else if(k==2)o2=oo;else o3=oo;}"
         "gl_FragColor=encKV8(o0,o1,o2,o3);return;}"
         "int vb=4*(x-KVDIM/4);"
-        "float v0=dec24q(texture2D(QKV,vec2((float(DIM+KVDIM+vb)+0.5)/float(QKVDIM),0.5)));"
-        "float v1=dec24q(texture2D(QKV,vec2((float(DIM+KVDIM+vb+1)+0.5)/float(QKVDIM),0.5)));"
-        "float v2=dec24q(texture2D(QKV,vec2((float(DIM+KVDIM+vb+2)+0.5)/float(QKVDIM),0.5)));"
-        "float v3=dec24q(texture2D(QKV,vec2((float(DIM+KVDIM+vb+3)+0.5)/float(QKVDIM),0.5)));"
+        "float v0=QKVQ(DIM+KVDIM+vb);"
+        "float v1=QKVQ(DIM+KVDIM+vb+1);"
+        "float v2=QKVQ(DIM+KVDIM+vb+2);"
+        "float v3=QKVQ(DIM+KVDIM+vb+3);"
         "gl_FragColor=encKV8(v0,v1,v2,v3);return;}"
         "if(KVPACK==16){"
         "if(x<KVDIM/2){"
         "int i0=2*x;int h=i0/HEADDIM;int li0=i0-h*HEADDIM;"
         "float rk=1.0;"
         "if(QKNORM==1){float ss=0.0;for(int z=0;z<HEADDIM;z++){"
-        "float zk=dec24q(texture2D(QKV,vec2((float(DIM+h*HEADDIM+z)+0.5)/float(QKVDIM),0.5)));ss+=zk*zk;}"
+        "float zk=QKVQ(DIM+h*HEADDIM+z);ss+=zk*zk;}"
         "rk=1.0/sqrt(ss/float(HEADDIM)+QKEPS);}"
         "float o0=0.0,o1=0.0;"
         "for(int k=0;k<2;k++){int ii=i0+k;int li=li0+k;int j,ti;int even=li-(li/2)*2;"
-        "float vv=dec24q(texture2D(QKV,vec2((float(DIM+ii)+0.5)/float(QKVDIM),0.5)));"
+        "float vv=QKVQ(DIM+ii);"
         "if(QKNORM==1)vv=vv*rk*dec16(texture2D(KN,vec2((float(li)+0.5)/float(HEADDIM),0.5)).rg);"
         "if(ROPEHALF==1){if(li<HALF){j=li+HALF;ti=li;}else{j=li-HALF;ti=li-HALF;}}"
         "else{j=(even==0)?li+1:li-1;ti=li/2;}"
         "int pc=DIM+h*HEADDIM+j;"
-        "float bb=dec24q(texture2D(QKV,vec2((float(pc)+0.5)/float(QKVDIM),0.5)));"
+        "float bb=QKVQ(pc);"
         "if(QKNORM==1)bb=bb*rk*dec16(texture2D(KN,vec2((float(j)+0.5)/float(HEADDIM),0.5)).rg);"
         "vec4 rc=texture2D(RT,vec2((float(2*ti)+0.5)/float(2*HALF),(pos+0.5)/float(SEQ)));"
         "vec4 rs=texture2D(RT,vec2((float(2*ti+1)+0.5)/float(2*HALF),(pos+0.5)/float(SEQ)));"
@@ -95,21 +117,21 @@ string att_kv_rope(const AttnConfig& c) {
         "float oo=first?vv*co-bb*sn:bb*sn+vv*co;if(k==0)o0=oo;else o1=oo;}"
         "gl_FragColor=encKV(o0,o1);return;}"
         "int vb=2*(x-KVDIM/2);"
-        "float v0=dec24q(texture2D(QKV,vec2((float(DIM+KVDIM+vb)+0.5)/float(QKVDIM),0.5)));"
-        "float v1=dec24q(texture2D(QKV,vec2((float(DIM+KVDIM+vb+1)+0.5)/float(QKVDIM),0.5)));"
+        "float v0=QKVQ(DIM+KVDIM+vb);"
+        "float v1=QKVQ(DIM+KVDIM+vb+1);"
         "gl_FragColor=encKV(v0,v1);return;}"
-        "float v=dec24q(texture2D(QKV,vec2((float(DIM+x)+0.5)/float(QKVDIM),0.5)));"
+        "float v=QKVQ(DIM+x);"
         "if(x>=KVDIM){gl_FragColor=enc24s(v,KVSCALE);return;}"
         "int h=x/HEADDIM;int i=x-h*HEADDIM;int j,ti;int even=i-(i/2)*2;"
         "float rk=1.0;"
         "if(QKNORM==1){float ss=0.0;for(int z=0;z<HEADDIM;z++){"
-        "float zk=dec24q(texture2D(QKV,vec2((float(DIM+h*HEADDIM+z)+0.5)/float(QKVDIM),0.5)));ss+=zk*zk;}"
+        "float zk=QKVQ(DIM+h*HEADDIM+z);ss+=zk*zk;}"
         "rk=1.0/sqrt(ss/float(HEADDIM)+QKEPS);}"
         "float vn=v;if(QKNORM==1)vn=v*rk*dec16(texture2D(KN,vec2((float(i)+0.5)/float(HEADDIM),0.5)).rg);"
         "if(ROPEHALF==1){if(i<HALF){j=i+HALF;ti=i;}else{j=i-HALF;ti=i-HALF;}}"
         "else{j=(even==0)?i+1:i-1;ti=i/2;}"
         "int pc=DIM+h*HEADDIM+j;"
-        "float b=dec24q(texture2D(QKV,vec2((float(pc)+0.5)/float(QKVDIM),0.5)));"
+        "float b=QKVQ(pc);"
         "float bn=b;if(QKNORM==1)bn=b*rk*dec16(texture2D(KN,vec2((float(j)+0.5)/float(HEADDIM),0.5)).rg);"
         "vec4 rc=texture2D(RT,vec2((float(2*ti)+0.5)/float(2*HALF),(pos+0.5)/float(SEQ)));"
         "vec4 rs=texture2D(RT,vec2((float(2*ti+1)+0.5)/float(2*HALF),(pos+0.5)/float(SEQ)));"
@@ -120,10 +142,10 @@ string att_kv_rope(const AttnConfig& c) {
 
 string att_qnorm_scale(const AttnConfig& c) {
     return "precision highp float;\n" + att_defs(c) + att_helpers() +
-        "uniform sampler2D R;"
+        "uniform sampler2D R;" + qkv_read(c, "R", "RQKVQ") +
         "void main(){int h=int(gl_FragCoord.x);float ss=0.0;"
         "for(int z=0;z<HEADDIM;z++){"
-        "float zq=dec24q(texture2D(R,vec2((float(h*HEADDIM+z)+0.5)/float(QKVDIM),0.5)));"
+        "float zq=RQKVQ(h*HEADDIM+z);"
         "ss+=zq*zq;}"
         "float rq=1.0/sqrt(ss/float(HEADDIM)+QKEPS);"
         "gl_FragColor=enc24s(min(rq,127.0),65536.0);}";
@@ -135,15 +157,15 @@ string att_qrot(const AttnConfig& c) {
     // the dominant cost of that loop.  The value grid is unchanged: enc24s(q,256)
     // stored the same integer that x_st2/q16 stores.
     return "precision highp float;\n" + att_defs(c) + att_helpers() +
-        "uniform sampler2D R,RT,QN,QS;uniform float pos;"
+        "uniform sampler2D R,RT,QN,QS;uniform float pos;" + qkv_read(c, "R", "RQKVQ") +
         "float qval(int h,int i){"
         "float rq=1.0;"
         "if(QKNORM==1){rq=dec24s(texture2D(QS,vec2((float(h)+0.5)/float(HEADS),0.5)),65536.0);}"
-        "float qv=dec24q(texture2D(R,vec2((float(h*HEADDIM+i)+0.5)/float(QKVDIM),0.5)));"
+        "float qv=RQKVQ(h*HEADDIM+i);"
         "int j,ti;int even=i-(i/2)*2;"
         "if(ROPEHALF==1){if(i<HALF){j=i+HALF;ti=i;}else{j=i-HALF;ti=i-HALF;}}"
         "else{j=(even==0)?i+1:i-1;ti=i/2;}"
-        "float b=dec24q(texture2D(R,vec2((float(h*HEADDIM+j)+0.5)/float(QKVDIM),0.5)));"
+        "float b=RQKVQ(h*HEADDIM+j);"
         "if(QKNORM==1){"
         "qv=qv*rq*dec16(texture2D(QN,vec2((float(i)+0.5)/float(HEADDIM),0.5)).rg);"
         "b=b*rq*dec16(texture2D(QN,vec2((float(j)+0.5)/float(HEADDIM),0.5)).rg);}"
@@ -161,19 +183,19 @@ string att_qrot(const AttnConfig& c) {
 string att_score(const AttnConfig& c, bool hoist) {
     if (!hoist) {
         return "precision highp float;\n" + att_defs(c) + att_helpers() +
-            "uniform sampler2D R,KV,RT,QN;uniform float pos,invsqrt;"
+            "uniform sampler2D R,KV,RT,QN;uniform float pos,invsqrt;" + qkv_read(c, "R", "RQKVQ") +
             "void main(){int t=int(gl_FragCoord.x);int h=int(gl_FragCoord.y);"
             "if(float(t)>pos){gl_FragColor=enc24s(0.0,1024.0);return;}int kvh=h/GROUP;float s=0.0;"
             "float rq=1.0;"
             "if(QKNORM==1){float ss=0.0;for(int z=0;z<HEADDIM;z++){"
-            "float zq=dec24q(texture2D(R,vec2((float(h*HEADDIM+z)+0.5)/float(QKVDIM),0.5)));ss+=zq*zq;}"
+            "float zq=RQKVQ(h*HEADDIM+z);ss+=zq*zq;}"
             "rq=1.0/sqrt(ss/float(HEADDIM)+QKEPS);}"
             "for(int i=0;i<HEADDIM;i++){"
-            "float qv=dec24q(texture2D(R,vec2((float(h*HEADDIM+i)+0.5)/float(QKVDIM),0.5)));"
+            "float qv=RQKVQ(h*HEADDIM+i);"
             "int j,ti;int even=i-(i/2)*2;"
             "if(ROPEHALF==1){if(i<HALF){j=i+HALF;ti=i;}else{j=i-HALF;ti=i-HALF;}}"
             "else{j=(even==0)?i+1:i-1;ti=i/2;}"
-            "float b=dec24q(texture2D(R,vec2((float(h*HEADDIM+j)+0.5)/float(QKVDIM),0.5)));"
+            "float b=RQKVQ(h*HEADDIM+j);"
             "if(QKNORM==1){qv=qv*rq*dec16(texture2D(QN,vec2((float(i)+0.5)/float(HEADDIM),0.5)).rg);"
             "b=b*rq*dec16(texture2D(QN,vec2((float(j)+0.5)/float(HEADDIM),0.5)).rg);}"
             "vec4 rc=texture2D(RT,vec2((float(2*ti)+0.5)/float(2*HALF),(pos+0.5)/float(SEQ)));"
