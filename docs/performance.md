@@ -2007,3 +2007,50 @@ was checked over 64 greedy tokens on two prompts (byte-identical to `FFN_FUSE=0`
 the suite (determinism, default system, behaviour, q4 golden) and the q8 baseline PPL,
 which stays exactly 271.2855 at SEQ=768 - the q8 path is untouched.
 
+
+## q4 qkv row pairing: measured, not landed (2026-11-03)
+
+The phase-1 row pairing that pays on q8 (qkv `-4.5%`, `QKV_PAIR`) has an obvious q4
+port: `matvec_i4_pair_rows` computes rows 2t/2t+1 in one fragment, sharing the
+activation decode and the per-group activation sum, and writes the same packed q16
+texel the paired q8 kernel writes.  It was built, checked and then dropped.
+
+**Bit-exactness fails by one unit.**  The accumulation reproduced `matvec_i4`'s
+per-texel order (`s += sc*(d0+d1+d2+d3) + mn*xsum`), and a hash of the qkv target
+(hash of the decoded per-row integers, so the two layouts compare) showed all 1536
+rows identical at layer 0, pos 0.  It is still not reproducible: at layer 3, pos 1,
+exactly one row differed by one q16 unit (-145 vs -146).  The same expression tree
+scheduled inside a two-row fragment rounds differently on the VC4 shader compiler.
+Greedy text agrees through the first sentence and then splits ("so the little
+girl lived" vs "soon she lived"), so this cannot be default-on and cannot be
+re-baselined.
+
+**Speed: inside the noise.**  4 interleaved pairs of 32-token runs (`minimind3.q4`,
+`GPU_LAYER=1 KV_PACK=16 SEQ=768`, plain mode):
+
+| q4 decode ms/token | pair off | pair on | delta |
+|---|---:|---:|---:|
+| pair 1 | 362.2 | 360.9 | -1.3 |
+| pair 2 | 363.4 | 364.1 | +0.7 |
+| pair 3 | 365.0 | 360.8 | -4.2 |
+| pair 4 | 363.5 | 362.0 | -1.5 |
+| median | 363.5 | 361.5 | **-1.4 (-0.4%)** |
+
+The single-row path has to split the 1536-wide qkv pass into two 768-fragment
+strips (VC4 is unreliable at that width), so pairing removes a draw *and* half the
+activation fetches *and* one of the two group sums - and still only bought
+-1.4 ms.  That is the strongest evidence so far that q4's cost is the nibble
+unpack, not the fetch or the draw: the same two draws are worth ~0.2-0.4 ms, and
+the fused FFN gate was worth -2.0% here against -10.6% on q8.
+
+**The row-pair family is exhausted on q4**: FFN gate+swiglu -2.0%, qkv -0.4%,
+wo/w2 already paired through `res_pack_` (`matvec_i4_add_pair`).  What is left is
+the unpack itself.  Per 8-weight texel the kernel pays ~7 instructions for
+`b=floor(w*255+0.5)`, `h=floor(b/16)`, `l=b-16h` against 8 mul + 8 add for the dot
+and 7 adds for the min term, which is why q4 decode is ALU bound at 2x the q8 time
+while streaming less data.  Options, cheapest first: (a) price the q4 passes with
+`LAYER_PROFILE` / `PASS_DUP` / `ATTN_DUP` so the next attempt targets the hot pass
+rather than guessing; (b) precompute the per-group activation sum in one extra tiny
+pass so the matvec replaces 7 adds per texel with one fetch per fragment per group
+(~20% of the kernel's ALU on paper); (c) a symmetric q4 format without the min term
+(format change: `make_q4` plus a re-quantised model).
