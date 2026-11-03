@@ -1722,3 +1722,58 @@ use this probe to size future levers; use an A/B of the real binary.
 Lesson: three of the six q8 kernels had drifted away from the inline decode form.
 When a kernel performs below the expected rate, first check whether it still uses
 the `X4Q` helper before inventing a new layout.
+
+### ATTN_DUP probe: the attention chain is qkv-bound, not pass-count bound (2026-11-03)
+
+A new default-off probe replays one attention pass per layer:
+`ATTN_DUP=qkv,rope,qknorm,qrot,score,stats,v` (or `all`).  Every shader involved
+is deterministic and writes the same FBO from unchanged inputs, so the replay
+lands the same texels: with `ATTN_DUP=all` the chat output is byte-identical to
+the default run on both checkpoints (q8 gen 24, q4 gen 16), and `regression.sh`
+stays green with the same PPL 312.1366 / 314.8067 / 309.7812.  Because no
+glFinish sits in the timing path, the end-to-end delta is the true marginal cost
+of the pass - unlike the `LAYER_PROFILE` laps, whose finish also retires the draw
+issued before the lap started.
+
+Calibration: replaying the qkv matvec costs 23 ms.  qkv is 1536x768 x 8 layers =
+9.4M MAC, so 410 MMAC/s, the same rate the matvecs show elsewhere - which is why
+the deltas below are trusted to about +-1 ms while the base row sits in the clean
+regime.
+
+| replayed pass | delta vs base |
+|---|---:|
+| qkv pair matvec | **+23 ms** |
+| rope (KV write) | +1.3 |
+| qk-norm scale | +3.9 |
+| qrot | +1.7 |
+| scores | **+0.5** |
+| stats | +2.7 |
+| att_v | +4 (warm) ... +19 (cold) |
+| attention block total | **~39 ms of 189** |
+
+Six interleaved reps, 32 tokens, SEQ 768.  The Pi also runs a Rust Minecraft
+server on its one core, so load 0.7-2.1 makes single rows swing by 15%; three of
+the six rows had base 188.8-189.1 and only those deltas are quoted
+(rope/qknorm/qrot come from one such row in the first probe pass).
+
+What this settles:
+
+* The three laps the docs called pass-count bound (`scores`, `stats`, `att_v`)
+  are worth about 9 ms together, not the ~25 ms the sync-inflated profile
+  implied.  `scores` is essentially free - 3072 fragments is not a cost.
+* 60% of the attention block is its own matvec (qkv), so attention is the same
+  throughput problem as the FFN, not a draw or pass-count problem.
+* `att_v` is the one soft number: the replay reads the KV rows the first draw
+  just fetched, so +4 ms is a warm-cache lower bound.  Any future v change must
+  be judged by an A/B of the real binary, not by this probe.
+* At 63.3M MAC in 189 ms the engine runs at 335 MMAC/s overall while the matvecs
+  alone run at ~410.  The difference is the 183 draws plus the fixed cost of the
+  attention passes; the 189 -> 150 gap is not in attention.
+
+### Last q8 kernel on the generic decode
+
+The audit the previous entry asked for is complete: `matvec_q8_add_pair` is the
+only default-path q8 kernel still decoding activations through the generic `X4Q`
+helper.  It covers w2 + residual (15M MAC/token) and wo (4.7M), i.e. 33% of the
+token MACs.  The other five already use the inline I16_2 form.  Porting the same
+mechanical change is the next step.

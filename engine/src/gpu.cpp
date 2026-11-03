@@ -10,6 +10,27 @@
 #include <unordered_map>
 #include <vector>
 
+// Default-off probe (ATTN_DUP=qkv,rope,qknorm,qrot,score,stats,v or all):
+// replay one attention pass per layer.  Every shader involved is deterministic
+// and writes the same FBO from unchanged inputs, so the second draw reproduces
+// the same texels and the output stays byte-identical.  The end-to-end delta is
+// the true marginal cost of that pass, unlike the LAYER_PROFILE laps, whose glFinish
+// also retires the draw issued before the lap started.
+static bool attn_dup(const char* name){
+    static const std::string env = getenv("ATTN_DUP") ? getenv("ATTN_DUP") : "";
+    if (env.empty()) return false;
+    const std::string want(name);
+    size_t p = 0;
+    while (p <= env.size()) {
+        const size_t q = env.find(",", p);
+        const std::string tok = env.substr(p, q == std::string::npos ? std::string::npos : q - p);
+        if (tok == want || tok == "all") return true;
+        if (q == std::string::npos) break;
+        p = q + 1;
+    }
+    return false;
+}
+
 
 GPU::GPU(){
         init_egl();
@@ -601,34 +622,41 @@ GLuint GPU::attention_block(const Mat& qkv, GLuint x, int layer, int pos){
         // same per-row q16 integers the 24-bit writer produced (x_st2q applies
         // the identical round/clamp), so the rope/qk-norm/qrot readers see the
         // same values.
-        if (att_qkv_pair_ && qkv.type == WeightType::INT8) {
-            const int pairs = (qkv.rows + 1) / 2;
-            GLuint p = x_prog("xqkvp_" + to_string(qkv.rows) + "_" + to_string(qkv.cols) +
-                              "_" + x_format_name(act_fmt_),
-                              matvec_q8_pair_logits(qkv.rows, qkv.cols, act_fmt_));
-            bind_fbo(qkv_target_.fbo);
-            glViewport(0, 0, pairs, 1);
-            use_program(p);
-            bind_tex(0, qkv.tex); set_sampler(p, "W", 0);
-            bind_tex(1, x); set_sampler(p, "X", 1);
-            glUniform1f(uloc(p, "ws"), qkv.scale);
-            setup_attrib(p);
-            glDrawArrays(GL_TRIANGLES, 0, 3);
-        } else {
-            matvec_to(qkv, x, qkv_target_);
-        }
+        auto draw_qkv = [&]{
+            if (att_qkv_pair_ && qkv.type == WeightType::INT8) {
+                const int pairs = (qkv.rows + 1) / 2;
+                GLuint p = x_prog("xqkvp_" + to_string(qkv.rows) + "_" + to_string(qkv.cols) +
+                                  "_" + x_format_name(act_fmt_),
+                                  matvec_q8_pair_logits(qkv.rows, qkv.cols, act_fmt_));
+                bind_fbo(qkv_target_.fbo);
+                glViewport(0, 0, pairs, 1);
+                use_program(p);
+                bind_tex(0, qkv.tex); set_sampler(p, "W", 0);
+                bind_tex(1, x); set_sampler(p, "X", 1);
+                glUniform1f(uloc(p, "ws"), qkv.scale);
+                setup_attrib(p);
+                glDrawArrays(GL_TRIANGLES, 0, 3);
+            } else {
+                matvec_to(qkv, x, qkv_target_);
+            }
+        };
+        draw_qkv();
+        if (attn_dup("qkv")) draw_qkv();
         att_finish();
         lap("qkv");
         kv_rope_write(layer, pos);
+        if (attn_dup("rope")) kv_rope_write(layer, pos);
         lap("rope");
         att_scores(layer, pos);
         lap("scores");
         att_stats(pos);
+        if (attn_dup("stats")) att_stats(pos);
         lap("stats");
         // q16-packed scores/stats are decoded directly in att_v; the old
         // standalone probability pass is no longer compatible and is retired.
         lap("probs");
         att_v(layer, pos);
+        if (attn_dup("v")) att_v(layer, pos);
         lap("v");
         return att_out_.tex;
     }
@@ -1274,51 +1302,63 @@ void GPU::att_scores(int layer, int pos){
             if (qscale_target_.tex == 0 || qscale_target_.w != att_heads_)
                 qscale_target_ = make_target(att_heads_, 1);
             GLuint pq = x_qnorm();
-            bind_fbo(qscale_target_.fbo);
-            glViewport(0, 0, att_heads_, 1);
-            use_program(pq);
-            bind_tex(0, qkv_target_.tex);
-            set_sampler(pq, "R", 0);
-            setup_attrib(pq);
-            glDrawArrays(GL_TRIANGLES, 0, 3);
-            att_finish();
+            auto go = [&]{
+                bind_fbo(qscale_target_.fbo);
+                glViewport(0, 0, att_heads_, 1);
+                use_program(pq);
+                bind_tex(0, qkv_target_.tex);
+                set_sampler(pq, "R", 0);
+                setup_attrib(pq);
+                glDrawArrays(GL_TRIANGLES, 0, 3);
+                att_finish();
+            };
+            go();
+            if (attn_dup("qknorm")) go();
             slap("qknorm");
         }
         if (qrot_target_.tex == 0 || qrot_target_.w != att_dim_ / 2)
             qrot_target_ = make_target(att_dim_ / 2, 1);
         GLuint pr = x_qrot();
-        bind_fbo(qrot_target_.fbo);
-        glViewport(0, 0, att_dim_ / 2, 1);
-        use_program(pr);
-        bind_tex(0, qkv_target_.tex);
-        set_sampler(pr, "R", 0);
-        bind_tex(1, rope_tex_);
-        set_sampler(pr, "RT", 1);
-        if (att_qk_norm_) {
-            bind_tex(2, q_norm_tex_[layer]);
-            set_sampler(pr, "QN", 2);
-            bind_tex(3, qscale_target_.tex);
-            set_sampler(pr, "QS", 3);
-        }
-        glUniform1f(uloc(pr, "pos"), (float)pos);
-        setup_attrib(pr);
-        glDrawArrays(GL_TRIANGLES, 0, 3);
-        att_finish();
+        auto go_qrot = [&]{
+            bind_fbo(qrot_target_.fbo);
+            glViewport(0, 0, att_dim_ / 2, 1);
+            use_program(pr);
+            bind_tex(0, qkv_target_.tex);
+            set_sampler(pr, "R", 0);
+            bind_tex(1, rope_tex_);
+            set_sampler(pr, "RT", 1);
+            if (att_qk_norm_) {
+                bind_tex(2, q_norm_tex_[layer]);
+                set_sampler(pr, "QN", 2);
+                bind_tex(3, qscale_target_.tex);
+                set_sampler(pr, "QS", 3);
+            }
+            glUniform1f(uloc(pr, "pos"), (float)pos);
+            setup_attrib(pr);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+            att_finish();
+        };
+        go_qrot();
+        if (attn_dup("qrot")) go_qrot();
         slap("qrot");
 
         GLuint p = x_score(true);
-        bind_fbo(att_scores_.fbo);
-        glViewport(0, 0, att_seq_ / 2, att_heads_);
-        use_program(p);
-        bind_tex(0, qrot_target_.tex);
-        set_sampler(p, "Q", 0);
-        bind_tex(1, kv_cache_[layer].tex);
-        set_sampler(p, "KV", 1);
-        glUniform1f(uloc(p, "pos"), (float)pos);
-        glUniform1f(uloc(p, "invsqrt"), 1.0f / sqrtf((float)att_head_dim_));
-        setup_attrib(p);
-        glDrawArrays(GL_TRIANGLES, 0, 3);
-        att_finish();
+        auto go_score = [&]{
+            bind_fbo(att_scores_.fbo);
+            glViewport(0, 0, att_seq_ / 2, att_heads_);
+            use_program(p);
+            bind_tex(0, qrot_target_.tex);
+            set_sampler(p, "Q", 0);
+            bind_tex(1, kv_cache_[layer].tex);
+            set_sampler(p, "KV", 1);
+            glUniform1f(uloc(p, "pos"), (float)pos);
+            glUniform1f(uloc(p, "invsqrt"), 1.0f / sqrtf((float)att_head_dim_));
+            setup_attrib(p);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+            att_finish();
+        };
+        go_score();
+        if (attn_dup("score")) go_score();
         slap("score");
     }
 
