@@ -22,19 +22,27 @@ passes; the qrot-into-matvec merge is structurally blocked and was reverted;
 b7dce0d (fused FFN gate+swiglu is the default: -10.6% decode, greedy gates green),
 b907b30 (paired qkv matvec rows: 200.7 -> 191.6 min / 201.7 -> 192.5 median, -4.5%,
 bit-exact - but only after the q16 readers recover the integers with floor(byte*255+0.5)).
+8529dad (ATTN_DUP probe: attention is ~39 ms and qkv-bound; no decode change).
 
 ## Next step (do this first)
-**Duplicate-pass probe on the attention chain.**  The three attention laps the docs
-call pass-count bound (`scores`, `stats`, `att_v`) have never been timed without the
-`LAYER_PROFILE` finish.  Running one pass twice per layer behind a default-off switch is
-bit-exact (the second draw recomputes the same texels) and the delta is the true cost of
-that pass; calibrate it on the qkv matvec, whose cost is known from the pair A/B.  Only
-then can we say whether the remaining ~40 ms sits in the attention passes, in the two
-rmsnorm calls, or in the 183 draws.
+**Inline the I16_2 decode in `matvec_q8_add_pair`.**  The audit the last run asked for is
+done: this is the last default-path q8 kernel still decoding activations through the
+generic `X4Q` helper, and it covers w2 + residual (15M MAC/token) and wo (4.7M) - 33% of
+the token MACs, the largest block that has not had the treatment `138136a` gave the FFN
+gate and logits.  Copy the proven form from `matvec_q8_pair` (fetch xa/xb, compute dA/dB
+once, feed both rows), leave the accumulation order and the `x_st2q` rounding untouched.
+Gate: greedy q8/q4 byte-identical plus PPL exactly 312.1366 / 314.8067 / 309.7812.
 
-Also: `matvec_q8_pair_swiglu` (chunked-FFN path only) still uses the generic `X4Q` decode;
-check it for the same drift before touching anything else.  Three of the six q8 kernels
-had drifted off the inline form, so audit for that pattern first when a kernel looks slow.
+**Do not spend more runs on attention pass count.**  `ATTN_DUP` (this run, bit-exact)
+prices the block at ~39 ms of 189: qkv 23, att_v 4-19, qknorm 3.9, stats 2.7, qrot 1.7,
+rope 1.3, scores 0.5.  The three laps the docs called pass-count bound are ~9 ms together,
+so viewport, draw-merging and pass-splitting ideas inside attention have nothing left to
+win; the token is matvec throughput (63.3M MAC at ~410 MMAC/s in the kernels, 335 overall).
+
+**Measurement rules that now matter.**  `ATTN_DUP` is bit-exact, so use it whenever a pass
+needs pricing.  The Pi runs a Minecraft server on its one core: a base row reading above
+~195 ms means the core was stolen, so discard that row instead of comparing across regimes
+(three of six rows were clean at 188.8-189.1 in this run).
 
 **Do not decode packed q16 bytes without `floor(byte*255+0.5)`.**  The qkv pairing
 looked correct on the raw bytes and still moved PPL (312.1366 -> 314.7118) because
@@ -73,6 +81,10 @@ wo 8%, rms 12%, and logits **~14 ms/token** outside the loop (measured by the
 pairing: halving its fragment count returned 6.8 ms, so nearly all of the logits
 pass was the activation decode, not weight fetch).  183 draws are ~33 ms of the
 227; the remaining ~190 ms is shader work.
+
+Correction (2026-11-03, `ATTN_DUP`): the attention block is **~39 ms of the 189**,
+not 36% - qkv alone is 23 of it and `scores`/`stats` cost 0.5/2.7.  The profile
+laps overstate attention because each lap finish retires the previous draw too.
 
 ## Ruled out — do not retry
 
