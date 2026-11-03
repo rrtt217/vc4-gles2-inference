@@ -18,6 +18,7 @@ not the lever), a40593a (paired logits rows: -6.8 ms, bit-exact,
 gained nothing and was reverted), 96edebb (qk-norm is ON: q chain is four
 passes; the qrot-into-matvec merge is structurally blocked and was reverted;
 `PROFATT2 qknorm` lap added).
+b7dce0d (fused FFN gate+swiglu is the default: -10.6% decode, greedy gates green).
 
 ## Next step (do this first)
 **Next: pair the QKV matvec rows.**  `qkv` is the largest single attention lap (5.22 of
