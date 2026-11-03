@@ -32,6 +32,8 @@
 #   PPL_EXPECT   expected baseline PPL; empty = print only
 #   PPL_TOL      relative tolerance for PPL_EXPECT (default 0.01)
 #   PPL_FILE     corpus (default data/ppl_test.txt)
+#   PPL_SEQ      SEQ used for the ppl runs (default 768; values are not
+#                comparable across SEQ)
 #   NO_PPL=1     skip the perplexity pass (it is the slow part)
 set -eu
 cd "$(dirname "$0")/.."
@@ -49,6 +51,7 @@ Q8_EXPECT="${Q8_EXPECT:-}"
 Q4_EXPECT="${Q4_EXPECT:-}"
 PPL_EXPECT="${PPL_EXPECT:-}"
 PPL_TOL="${PPL_TOL:-0.01}"
+PPL_SEQ="${PPL_SEQ:-768}"
 PROMPT="用一句话介绍你自己。"
 PROMPT2="写一首关于春天的短诗。"
 
@@ -135,8 +138,10 @@ check_prefix q4 "$Q4_EXPECT" "$q4"
 poem=$(text "$Q8" "$PROMPT2" 48 "$SYS")
 behaviour poem "$poem"
 
+# SEQ is pinned: the ppl path chunks the corpus per window, so the token count
+# and the value both move with SEQ and are not comparable across settings.
 ppl() {
-    MODEL="$Q8" TOKENIZER="$TOK" GPU_LAYER=1 KV_PACK=16 ACT8="$1" \
+    MODEL="$Q8" TOKENIZER="$TOK" GPU_LAYER=1 KV_PACK=16 SEQ="$PPL_SEQ" ACT8="$1" \
         "$BIN" --template minimind3 --ppl "$CORPUS" 2>&1 \
         | sed -n 's/^PPL \([0-9.]*\).*/\1/p' | head -1
 }
