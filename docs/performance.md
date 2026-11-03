@@ -1538,3 +1538,44 @@ its head norm from raw q stored as q16 pairs (48 fetches instead of a 96-fetch
 serial scan in 8 fragments), which deletes the 0.99 ms draw and its drain at the cost
 of a redundant scan per fragment.  Do not retry "fold qrot into the matvec" on a
 qk-norm checkpoint; it is structurally blocked, not slow.
+
+## 2026-11-03: the qk-norm / k-norm scan is fetch-count bound, not latency bound
+
+Tested the WORKLOG candidate "shorten the dependent fetch chain": every 96-serial
+scan of one head's raw q rows (`att_qnorm_scale`, and the three identical scans in
+`att_kv_rope`) now issues its fetches in groups of 8 - same 96 fetches, same add
+order (`ss += z*z`, z ascending), so the value is bit-identical, but the dependent
+chain is 12 steps instead of 96.
+
+Gates stayed green on the Pi (`q8/q4` byte-identical, `PPL 311.1636`, default system
+prompt unchanged).  Interleaved A/B, plain mode, 32 tokens, 3 pairs, load 1.74:
+
+| | min | median |
+|---|---:|---:|
+| `engine_base` | 229.9 | 230.0 ms/token |
+| unrolled scans | 226.6 | 230.7 ms/token |
+| B vs A | **-1.4%** (median worse) | |
+
+CPU 118.1 -> 116.4 ms/token (user 85.5 -> 90.8, sys 32.6 -> 25.6).  -1.4% on the min
+with the median moving the other way is noise, so the change was reverted: it buys
+nothing and would only be a permanent shader-complexity tax.
+
+**What this measures.**  If these scans were latency bound, cutting the dependent
+chain 8x would have moved the total; it did not.  They are *fetch-count* bound, and
+the count is lopsided: the scale pass is 8 fragments x 96 = 768 fetches per layer,
+while `att_kv_rope` at `KVPACK=16` is 192 fragments x 96 = **18,432 fetches per layer**
+for four per-head scalars.  96% of the redundant scan work is in the KV write, not in
+the pass the profile blames.
+
+**Why the obvious fix is blocked.**  Hoisting the k-norm into the scale pass (12
+fragments: 8 q heads + 4 kv heads) and reading the scalar in `att_kv_rope` would
+delete those 18k fetches, but it cannot be bit-exact: the scale would have to be stored
+in an RGBA8 target, and `rk` enters the K values as an exact float today.  Storing
+`ss` or `rk` at 24 bits (the q path uses `enc24s(rq,65536)`) perturbs K by ~1e-5
+relative, which is exactly the 1-LSB drift the stop rule forbids.  The q-side
+quantisation is part of the reference pipeline; the k-side exact float is not something
+to give up for ~0.3 ms/layer.
+
+Per-pass numbers to use instead: `LAYER_PROFILE=1` laps are sync-inflated and not
+comparable across runs - on the same binary the `qknorm` lap reads 2.33 ms/layer here
+vs 0.99 ms/layer in the previous entry.  Compare laps only within one run.

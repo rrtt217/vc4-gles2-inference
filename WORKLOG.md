@@ -3,16 +3,17 @@
 Goal: Pi Zero MiniMind3 q8 decode **<=150 ms/token**, byte-identical output.
 
 | | value |
-| decode (default path) | 226.4 ms/token median (224.8 min), A/B vs engine_base 228.7 |
-| decode with FFN_FUSE=1 | 208.9 ms/token mean (206.3 / 213.1 / 207.3) |
-| CPU | 114.2 ms/token (user 90.1 / sys 24.1) |
-| gate | q8/q4 byte-identical, PPL 311.1636 (re-verified after the qknorm lap) |
+|---|---|
+| decode (default path) | 229.9 ms/token min, 230.0 median (A/B run, load 1.74) |
+| decode with FFN_FUSE=1 | 208.9 ms/token mean (206.3 / 213.1 / 207.3) - not bit-exact |
+| CPU | 118.1 ms/token (user 85.5 / sys 32.6) |
+| gate | q8/q4 byte-identical, PPL 311.1636 (re-verified after the fetch-unroll trial) |
 
 Landed commits: a053d35 (G1 GL state caching), e7cc839 (rms reduce fused),
 faa833a (results doc), 318ac15 (draw-bound finding), 84b9a88 (FFN merge plan),
 70bb245 (fused FFN kernel), 1a7da7c (per-draw cost: 0.18 ms, draw merging is
 not the lever), a40593a (paired logits rows: -6.8 ms, bit-exact,
-`LOGITS_SPLIT=1` restores the old path), then 66e5f00 (attention profile:
+`LOGITS_SPLIT=1` restores the old path), 66e5f00 (attention profile:
 `PROFATT2` marks inside `att_scores`; the score-viewport shrink was bit-exact but
 gained nothing and was reverted), 96edebb (qk-norm is ON: q chain is four
 passes; the qrot-into-matvec merge is structurally blocked and was reverted;
@@ -20,33 +21,40 @@ passes; the qrot-into-matvec merge is structurally blocked and was reverted;
 
 ## Next step (do this first)
 
-**MiniMind3 has qk-norm ON** (dim 768, 8 heads, head_dim 96, kv_dim 384,
-`QKNORM=1`; verified with `ATTN_QFUSE_DEBUG=1`).  The previous entry said qk_norm
-was off - it is not, and the scale draw runs on every layer.  `LAYER_PROFILE=1`
-now prints `PROFATT2 qknorm` too: decode split per layer is scale 0.99 ms, qrot
-1.56, score 2.20.  The q chain is qkv matvec -> qk-norm -> qrot -> score, i.e.
-**four dependent passes, three drains**, and 8 ms/token goes to a pass whose whole
-output is 8 scalars.
+**Make `FFN_FUSE` bit-exact.**  It is the only measured -20 ms on the table and it
+is currently disqualified by 1 LSB of q16 on 2 of ~28k values.  The cause is known:
+the fused gate+swiglu kernel accumulates with four accumulators, so the dot product
+lands in a different order (309.2918 / 312.1366 / 313.5574).  Restore the unfused
+add order inside the fused kernel (one accumulator, ascending k, same partial-sum
+parenthesisation as `x_matvec`), keep the same fragment/draw shape, and re-gate:
+byte-identical greedy text **and** PPL 311.1636 exactly.  If the single accumulator
+costs more than the 24 draws it saves, report the trade instead of shipping it.
+Landing this moves the default path to ~209 ms/token, i.e. -9%.
 
-**Fold the qk-norm scale into `qrot`** (one draw instead of two draws + a drain).
-`rq = 1/sqrt(sum q^2/HEADDIM + eps)` is per head and needed *before* the rotation,
-so it cannot move into the matvec or the score pass - but every qrot fragment can
-recompute it: store the raw q rows as q16 pairs (two rows per matvec fragment, the
-same integers the 24-bit encoding holds, so bit-exact) and let each fragment read
-its head 48 texels instead of doing a 96-serial-fetch scan in 8 fragments.
-Expected ~8 ms/token if the redundant scan is cheaper than the drain it removes;
-keep the summation order of `att_qnorm_scale` exactly (`for z in 0..HEADDIM`,
-`dec24q` -> q16 decode of the same integer) and stop if any value moves 1 LSB.
+**Do not retry "shorten the qk-norm fetch chain".**  Unrolling the 96-fetch scans
+into 8 independent fetches per step (bit-identical, gates green) measured 229.9 ->
+226.6 min / 230.0 -> 230.7 median, i.e. **noise at load 1.74**; reverted
+(`docs/performance.md`).  The scans are fetch-count bound, not latency bound - which
+also means the "qrot fragment recomputes its own head norm" idea from the previous
+entry is dead: it *adds* redundant fetches per fragment (384 x 48) instead of
+removing any.
 
-**Do not retry "fold qrot into the qkv matvec"** - implemented this run and
-reverted (`docs/performance.md`): with qk-norm on the scale pass needs the raw q
-rows, and a fragment writes one texel, so the matvec cannot emit raw q and rotated
-q at once.  It was inert by construction: gates green, A/B -1.7% at load 1.71 =
-noise.  The kernel is not in the tree.
+**Do not hoist the k-norm scalar out of `att_kv_rope`** unless a 24-bit encoding of
+`rk`/`ss` is proven byte-identical: it would delete 18,432 fetches per layer (192
+fragments x 96), but K is currently scaled by an exact float and any 24-bit rounding
+is the 1-LSB drift the stop rule forbids.  If revisited, gate on KV cache bytes, not
+just PPL.
+
+**Do not retry "fold qrot into the qkv matvec"** - structurally blocked on a qk-norm
+checkpoint (the scale pass needs the raw q rows and a fragment writes one texel),
+measured inert and reverted.
 
 Do **not** shrink viewports for attention passes (measured, no gain), and do not
 open with a fused prob+v.  Isolate decode by differencing a `--gen 12` run against
 `--gen 4` so prefill cancels, and normalise by `qkv`, which is position-independent.
+Compare `LAYER_PROFILE` laps only within a single run - they are sync-inflated (the
+`qknorm` lap reads 0.99 or 2.33 ms/layer for the same work depending on the run).
+
 ## Where the time goes
 
 `LAYER_PROFILE=1` (sync-inflated, use the ratios): attn 36%, ffn 27%, w2 17%,
