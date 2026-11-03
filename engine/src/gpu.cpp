@@ -855,8 +855,14 @@ GLuint GPU::x_q8_pair(int rows, int cols){
     }
 
 GLuint GPU::x_q8_pair_swiglu(int rows, int cols){
-        return x_prog("xq8ps_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(act_fmt_),
-                      matvec_q8_pair_swiglu(rows, cols, act_fmt_));
+        // Inline I16_2 decode is the default; FFN_SW_INLINE=0 restores the
+        // generic X4Q form in the same binary, so both can be A/B-ed
+        // interleaved on one binary.
+        const char* v = getenv("FFN_SW_INLINE");
+        const bool inl = !(v && strcmp(v, "0") == 0);
+        return x_prog("xq8ps_" + to_string(rows) + "_" + to_string(cols) + "_" +
+                      x_format_name(act_fmt_) + (inl ? "" : "_gen"),
+                      matvec_q8_pair_swiglu(rows, cols, act_fmt_, inl));
     }
 
 // Gate pair matvec for two rows per fragment plus swiglu, straight into a q16

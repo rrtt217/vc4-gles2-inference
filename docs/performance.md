@@ -1872,3 +1872,38 @@ moves quality, and it cannot become the default under the byte-identical rule.
 
 Note on `RMS_SPLIT`: alternated against the default it read +2..+3 ms at load 2.4, i.e. not a
 win.  Kept as-is; the fused form stays the default.
+
+## 2026-11-03 - FFN gate: inline I16_2 decode in `matvec_q8_pair_swiglu` (-1.0 ms, bit-exact)
+
+The FFN gate kernel (`matvec_q8_pair_swiglu`: two rows of w1 and of w3 per fragment, swiglu
+in the same draw, 2 chunks x 1216 rows x 96 q per layer) was the last hot q8 kernel still
+decoding its activation through the generic `X4Q` macro, which passes its two texel fetches
+as function arguments and compiles slower on VC4.  It now uses the same inline `dA`/`dB`
+scalar decoders as the other five; `FFN_SW_INLINE=0` restores the generic form in the same
+binary for the A/B.
+
+Gates: q8/q4 greedy byte-identical, default system prompt unchanged, PPL exactly 312.1366 /
+314.8067 (ACT8=2) / 309.7812 (ACT8=1), all re-run on the deployed binary.
+
+| decode ms/token | INLINE=1 | INLINE=0 |
+|---|---:|---:|
+| 8 interleaved pairs, clean rows | min **183.47**, median **184.76** | min **185.13**, median **186.02** |
+
+Median paired delta **-1.0 ms** (clean pairs ranged -2.4 to +1.8); two rows (236.9, 199.0)
+were stolen cores and are discarded, never averaged.  The effect is small because this
+kernel already amortises the activation decode over four dots (2 rows x w1/w3): 6 fetches
+per 16 MAC, so the decode is a smaller share of the work than in the 2-dot w2/wo kernel,
+where the same change was worth 3.8 ms.  The ratio transfers, the magnitude does not.
+
+### Correction: the "quad-row" plan was aimed at the wrong kernel
+
+The previous entry priced the gate from `matvec_q8_pair` (the FFN_FUSE=0 path): 2 weight +
+2 activation fetches per 8 MAC.  The *default* path is the fused `matvec_q8_pair_swiglu`,
+which already runs **4 weight + 2 activation fetches per 16 MAC (0.375/MAC)** - exactly the
+number the quad-row plan targeted.  A further 4-row form would be 10 fetches per 32 MAC
+(0.3125), and it cannot be built: a fragment writes one RGBA8 texel = one q16 pair, so four
+rows need two texels and therefore two fragments, or MRT.  One texel per fragment caps every
+q8 matvec at two output rows; that is why all six kernels have the shape they have.  The
+only remaining widenings are int8 activations (`ACT8`, quality-moving) or a multi-target
+path, so the next step is a capability check for multiple render targets on the VC4 driver,
+not another pair kernel.

@@ -168,11 +168,42 @@ string matvec_q8_pair_logits(int rows, int cols, XFormat xf) {
 // the viewport at rows/2.  The gate quantisation (int16 of s*ws) and the final q16
 // rounding are the same operations the separate passes perform, so the output is
 // bit-identical.
-string matvec_q8_pair_swiglu(int rows, int cols, XFormat xf) {
+string matvec_q8_pair_swiglu(int rows, int cols, XFormat xf, bool inl) {
     const int axw = x_texels(cols, xf);
     const string ROWS = to_string(rows), COLS4 = to_string(cols / 4), AXW = to_string(axw);
     const string WR0 = "vec2((float(q)+0.5)/float(" + COLS4 + "),(float(r0)+0.5)/float(" + ROWS + "))";
     const string WR1 = "vec2((float(q)+0.5)/float(" + COLS4 + "),(float(r1)+0.5)/float(" + ROWS + "))";
+    // Inline I16_2 decode.  The generic X4Q macro takes its two texel fetches as
+    // arguments and VC4 compiles that loop measurably slower (matvec_probe
+    // measured 177 vs 283 MMAC/s).  dA/dB are exactly the decode x_i16quadq
+    // performs and the four accumulators keep the same summation order, so the
+    // packed output is byte-identical.  FFN_SW_INLINE=0 restores the generic
+    // form in the same binary for an interleaved A/B.
+    if (inl && xf == XFormat::I16_2) {
+        return head(xf) + "uniform sampler2D W1,W2,X;uniform float ws1,ws2;"
+               "float dA(vec4 c){float u=c.r*65280.0+c.g*255.0;"
+               "return u>=32768.0?u-65536.0:u;}"
+               "float dB(vec4 c){float u=c.b*65280.0+c.a*255.0;"
+               "return u>=32768.0?u-65536.0:u;}"
+               "float qz(float v){return clamp(floor(v+0.5),-32768.0,32767.0);}"
+               "float sl(float q,float g){float a=q/256.0;return (a/(1.0+exp(-a)))*(g/256.0);}"
+               "void main(){int t=int(gl_FragCoord.x);int r0=2*t;"
+               "int r1=min(r0+1," + to_string(rows - 1) + ");float s10=0.0,s20=0.0,s11=0.0,s21=0.0;"
+               "for(int q=0;q<" + COLS4 + ";q++){"
+               "vec4 xa=texture2D(X,vec2((float(2*q)+0.5)/float(" + AXW + "),0.5));"
+               "vec4 xb=texture2D(X,vec2((float(2*q+1)+0.5)/float(" + AXW + "),0.5));"
+               "float a0=dA(xa),a1=dB(xa),a2=dA(xb),a3=dB(xb);"
+               "vec4 c=texture2D(W1," + WR0 + ");vec4 w=c*255.0-128.0;"
+               "s10+=w.x*a0+w.y*a1+w.z*a2+w.w*a3;"
+               "c=texture2D(W2," + WR0 + ");w=c*255.0-128.0;"
+               "s20+=w.x*a0+w.y*a1+w.z*a2+w.w*a3;"
+               "c=texture2D(W1," + WR1 + ");w=c*255.0-128.0;"
+               "s11+=w.x*a0+w.y*a1+w.z*a2+w.w*a3;"
+               "c=texture2D(W2," + WR1 + ");w=c*255.0-128.0;"
+               "s21+=w.x*a0+w.y*a1+w.z*a2+w.w*a3;}"
+               "float v1=(r0+1<" + to_string(rows) + ")?sl(qz(s11*ws1),qz(s21*ws2)):0.0;"
+               "gl_FragColor=x_st2(sl(qz(s10*ws1),qz(s20*ws2)),v1);}";
+    }
     return head(xf) +
         "uniform sampler2D W1,W2,X;uniform float ws1,ws2;"
         "float qz(float v){return clamp(floor(v+0.5),-32768.0,32767.0);}"
