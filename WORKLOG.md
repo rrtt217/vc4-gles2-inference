@@ -8,6 +8,7 @@ Goal: Pi Zero MiniMind3 q8 decode **<=150 ms/token**, byte-identical output.
 | decode with QKV_PAIR=0 | 200.7 min, 201.7 median - single-row qkv matvec |
 | decode with FFN_FUSE=0 | 228.7 min, 228.9 median - the two-pass FFN sequence |
 | CPU (default) | 112.9 ms/token (user 86.6 / sys 26.3); 114.2 in the 3-pair run |
+| fixed passes (PASS_DUP) | rms_att 13.4 + rms_ffn 15.5 + logits 15.1 = **44 ms of the 185 (24%)**; read-back 1.1; embed <1 |
 | gate | q8/q4 greedy byte-identical; PPL **exactly** 312.1366 (ACT8=2 314.8067, ACT8=1 309.7812) |
 
 Landed commits: a053d35 (G1 GL state caching), e7cc839 (rms reduce fused),
@@ -25,20 +26,21 @@ bit-exact - but only after the q16 readers recover the integers with floor(byte*
 8529dad (ATTN_DUP probe: attention is ~39 ms and qkv-bound; no decode change),
 de8e2e3 (inline I16_2 decode in matvec_q8_add_pair = w2/wo: 189.5 -> 185.6 min,
 -2.0%, bit-exact; Q8AP_INLINE=0 restores the generic form for in-binary A/B).
+73bcc80 (PASS_DUP probe: fixed passes are 44 of the 185 ms - rms 29, logits 15,
+read-back 1; default-off and bit-exact; the token has no idle term).
 
 ## Next step (do this first)
-**Price the fixed per-token passes, then attack the largest.**  The q8 kernel audit is
-closed: all six default-path q8 kernels (qkv pair, logits pair, FFN gate pair, w2+res
-pair, wo, swiglu) now use the inline I16_2 decode, and the last one (`Q8AP_INLINE`, this
-run) was worth -3.8 ms / -2.0%.  Decode is 185.3 min / 185.8 median, so the goal is 35 ms
-away and no kernel sits on a slow decode path.  Before choosing the next lever, price the
-remaining fixed passes with the `ATTN_DUP` method: rmsnorm x3 (att, ffn, final), the
-logits pair pass (~14 ms by the earlier pairing delta), embed, and the one read-back sync
-per token.  All of them are deterministic and write the same FBO from unchanged inputs,
-so a replay switch is bit-exact by construction and yields the true marginal cost.  Sum
-their cost and subtract it from 185: what is left is per-token GPU idle time created by
-the CPU stream and the sample sync, and that is the only lever left that is not matvec
-throughput.
+**Quad-row matvec for the FFN gate.**  Pass pricing is closed (`PASS_DUP`, this run): rmsnorm
+is 29 ms and logits 15, so the fixed passes are 44 of the 185 and the read-back sync is only
+~1 ms.  That leaves ~102 ms of non-qkv matvec at ~480 MMAC/s and **no idle term at all** - the
+token is GPU-work bound, so 150 ms needs 35 ms of work removed, not a better command stream.
+The FFN gate (2x2432x768 per layer, ~48% of the token MACs) is the biggest block; its pair
+kernel spends 4 fetches per 8 MAC (2 weight, 2 activation).  A quad-row form - 4 rows per
+fragment, 4 accumulators, one shared activation decode - drops that to 6 fetches per 16 MAC
+(0.375/MAC) and halves the fragment count again, and each row still sums over q in the same
+order, so it is bit-exact exactly as the pair kernels were.  Viewport stays legal (2432 rows /
+4 = 608 fragments).  Flip it with `FFN_QUAD=0` inside the same binary for the A/B, and price
+it with the switch, not against `engine_base` - a 5 ms effect needs alternation at this load.
 
 **Do not spend more runs on attention pass count.**  `ATTN_DUP` (bit-exact)
 prices the block at ~39 ms of the 185: qkv 23, att_v 4-19, qknorm 3.9, stats 2.7,
