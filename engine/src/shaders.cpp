@@ -124,6 +124,31 @@ string matvec_q8_pair_logits(int rows, int cols, XFormat xf) {
     const string ROWS = to_string(rows), COLS4 = to_string(cols / 4), AXW = to_string(axw);
     const string WR0 = "vec2((float(q)+0.5)/float(" + COLS4 + "),(float(r0)+0.5)/float(" + ROWS + "))";
     const string WR1 = "vec2((float(q)+0.5)/float(" + COLS4 + "),(float(r1)+0.5)/float(" + ROWS + "))";
+    // Inline I16_2 decode.  The generic X4Q helper takes two texel fetches as
+    // arguments and VC4 compiles that loop much slower (matvec_probe measured
+    // 177 vs 283 MMAC/s at 1536x768).  Decode, arithmetic and the q16 rounding
+    // are identical, so the packed output is byte-identical.
+    if (xf == XFormat::I16_2) {
+        return "precision highp float;uniform sampler2D W,X;uniform float ws;"
+               "float dA(vec4 c){float u=c.r*65280.0+c.g*255.0;"
+               "return u>=32768.0?u-65536.0:u;}"
+               "float dB(vec4 c){float u=c.b*65280.0+c.a*255.0;"
+               "return u>=32768.0?u-65536.0:u;}"
+               "vec2 enc16(float s,float w){float v=clamp(floor(s*w+0.5),-32768.0,32767.0);"
+               "if(v<0.0)v+=65536.0;float hi=floor(v/256.0);"
+               "return vec2(hi/255.0,(v-hi*256.0)/255.0);}"
+               "void main(){int t=int(gl_FragCoord.x);int r0=2*t;int r1=r0+1;float s0=0.0,s1=0.0;"
+               "for(int q=0;q<" + COLS4 + ";q++){"
+               "vec4 xa=texture2D(X,vec2((float(2*q)+0.5)/float(" + AXW + "),0.5));"
+               "vec4 xb=texture2D(X,vec2((float(2*q+1)+0.5)/float(" + AXW + "),0.5));"
+               "float a0=dA(xa),a1=dB(xa),a2=dA(xb),a3=dB(xb);"
+               "vec4 c=texture2D(W," + WR0 + ");vec4 w=c*255.0-128.0;"
+               "s0+=w.x*a0+w.y*a1+w.z*a2+w.w*a3;"
+               "c=texture2D(W," + WR1 + ");w=c*255.0-128.0;"
+               "s1+=w.x*a0+w.y*a1+w.z*a2+w.w*a3;}"
+               "vec2 p1=enc16(s0,ws),p2=enc16(s1,ws);"
+               "gl_FragColor=vec4(p1.x,p1.y,p2.x,p2.y);}";
+    }
     return head(xf) +
         "uniform sampler2D W,X;uniform float ws;"
         "void main(){int t=int(gl_FragCoord.x);int r0=2*t;int r1=r0+1;float s0=0.0,s1=0.0;"
@@ -171,6 +196,34 @@ string matvec_q8_pair_swiglu(int rows, int cols, XFormat xf) {
 string matvec_q8_pair_fused(int rows, int cols, XFormat xf) {
     const int axw = x_texels(cols, xf);
     const int rows2 = 2 * rows;
+    // The FFN gate/swiglu kernel is the hottest matvec in the token (4864x768
+    // per layer) and it was still decoding through the generic X4Q helper.
+    // Inline I16_2 decode is the same arithmetic with the fetches emitted in
+    // the loop body; matvec_probe measures 283 vs 177 MMAC/s for that shape.
+    if (xf == XFormat::I16_2) {
+        return "precision highp float;uniform sampler2D W,X;uniform float ws;"
+               "float dA(vec4 c){float u=c.r*65280.0+c.g*255.0;"
+               "return u>=32768.0?u-65536.0:u;}"
+               "float dB(vec4 c){float u=c.b*65280.0+c.a*255.0;"
+               "return u>=32768.0?u-65536.0:u;}"
+               "vec2 enc16(float s,float w){float v=clamp(floor(s*w+0.5),-32768.0,32767.0);"
+               "if(v<0.0)v+=65536.0;float hi=floor(v/256.0);"
+               "return vec2(hi/255.0,(v-hi*256.0)/255.0);}"
+               "void main(){int r=int(gl_FragCoord.x);float s1=0.0,s2=0.0;"
+               "for(int q=0;q<" + to_string(cols / 4) + ";q++){"
+               "vec4 xa=texture2D(X,vec2((float(2*q)+0.5)/float(" + to_string(axw) + "),0.5));"
+               "vec4 xb=texture2D(X,vec2((float(2*q+1)+0.5)/float(" + to_string(axw) + "),0.5));"
+               "float a0=dA(xa),a1=dB(xa),a2=dA(xb),a3=dB(xb);"
+               "vec4 c1=texture2D(W,vec2((float(q)+0.5)/float(" + to_string(cols / 4) + "),"
+               "(float(r)+0.5)/float(" + to_string(rows2) + ")));"
+               "vec4 c2=texture2D(W,vec2((float(q)+0.5)/float(" + to_string(cols / 4) + "),"
+               "(float(r+" + to_string(rows) + ")+0.5)/float(" + to_string(rows2) + ")));"
+               "vec4 w1=c1*255.0-128.0;vec4 w2=c2*255.0-128.0;"
+               "s1+=w1.x*a0+w1.y*a1+w1.z*a2+w1.w*a3;"
+               "s2+=w2.x*a0+w2.y*a1+w2.z*a2+w2.w*a3;}"
+               "vec2 p1=enc16(s1,ws),p2=enc16(s2,ws);"
+               "gl_FragColor=vec4(p1.x,p1.y,p2.x,p2.y);}";
+    }
     return head(xf) +
         "uniform sampler2D W,X;uniform float ws;"
         "void main(){int r=int(gl_FragCoord.x);float s1=0.0,s2=0.0;"

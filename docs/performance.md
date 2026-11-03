@@ -1671,3 +1671,54 @@ three PPL figures exactly equal to the pre-change reference (312.1366 / 314.8067
 309.7812).  The same decode-before-dump order that found the floor bug is the advice
 for the next format change: hash the decoded values, not the bytes, because a packed
 layout changes both.
+
+## 2026-11-03: inline I16_2 decode in the FFN gate and logits kernels (-2.4%, bit-exact)
+
+`matvec_q8_pair` has carried an inline I16_2 decode since the refactor because the
+VC4 compiler generates a slow loop when the decode goes through a helper that takes
+two texel fetches as arguments.  The two hottest q8 kernels never got that treatment:
+`matvec_q8_pair_fused` (the FFN gate+swiglu matvec, 4864x768 per layer, 47% of the
+token MACs) and `matvec_q8_pair_logits` (5 tiles of 1536x768) still decoded through
+the generic `X4Q` helper.  Both now emit the two activation fetches plus the `dA`/`dB`
+decoders in the loop body, with the same decode arithmetic, the same accumulation
+order and the same `x_q16enc` output rounding.
+
+Interleaved A/B against the previous binary (both built from this tree, plain mode,
+32 tokens, SEQ 768):
+
+| pairs | prev min / median | inline min / median |
+|---|---:|---:|
+| 3 pairs | 194.4 / 195.9 | **189.7 / 197.4** |
+| 4 pairs (load 1.66) | 193.4 / 193.8 | **189.0 / 189.7** |
+
+**-2.4% and -2.3% on the min**, median -2.1% in the clean run (the first run median
+moved the other way under load).  CPU/token 117.2 -> 114.2 (run 1), 108.7 -> 112.9
+(run 2).  Against `engine_base` in the same session: 232.2 -> 195.9 min (-15.6% from
+the campaign base), CPU 119.0 -> 109.6 ms/token.
+
+Gates: q8 and q4 greedy text byte-identical, default system prompt OK, and PPL
+**exactly** 312.1366 / ACT8=2 314.8067 / ACT8=1 309.7812 - the same three numbers as
+before the change, on the paths that exercise both kernels.
+
+### Side result: the standalone matvec probe does not size this engine
+
+`engine/probes/matvec_probe.cpp` was cross-built for armv6 and run on the Pi:
+
+| 1536x768 | ms/matvec | MMAC/s |
+|---|---:|---:|
+| q8 act1/texel | 7.23 | 163 |
+| q8 act2/texel (generic helper) | 6.68 | 177 |
+| q8 fast decode (inline) | 4.17 | 283 |
+| q8 paired rows | 5.75 | 205 |
+
+The engine runs the whole token (63.3M MACs) in ~190 ms, i.e. at least 333 MMAC/s
+including every non-matvec pass, so every probe variant is *slower* than the
+production kernels.  The probe absolute rates are not a ceiling, and its "paired
+rows" variant is not the engine pair kernel (it lacks the inline I16_2 form).  Only
+the helper-vs-inline ratio (177 vs 283) transferred, and it was worth just 2% end to
+end: this kernel family is not decode-bound enough for the ratio to matter.  Do not
+use this probe to size future levers; use an A/B of the real binary.
+
+Lesson: three of the six q8 kernels had drifted away from the inline decode form.
+When a kernel performs below the expected rate, first check whether it still uses
+the `X4Q` helper before inventing a new layout.
