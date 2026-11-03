@@ -4,7 +4,7 @@ Goal: Pi Zero MiniMind3 q8 decode **<=150 ms/token**, byte-identical output.
 
 | | value |
 |---|---|
-| decode (default path) | 189.0 ms/token min, 189.7 median (interleaved A/B vs the pre-inline build, 4 pairs); engine_base 232.2 in the same session |
+| decode (default path) | **185.3 ms/token min, 185.8 median** (same-binary `Q8AP_INLINE` A/B, 5 interleaved pairs, median paired delta -4.2 ms); `Q8AP_INLINE=0` 189.0/189.5, `engine_base` 229.0 in the same session |
 | decode with QKV_PAIR=0 | 200.7 min, 201.7 median - single-row qkv matvec |
 | decode with FFN_FUSE=0 | 228.7 min, 228.9 median - the two-pass FFN sequence |
 | CPU (default) | 112.9 ms/token (user 86.6 / sys 26.3); 114.2 in the 3-pair run |
@@ -22,27 +22,37 @@ passes; the qrot-into-matvec merge is structurally blocked and was reverted;
 b7dce0d (fused FFN gate+swiglu is the default: -10.6% decode, greedy gates green),
 b907b30 (paired qkv matvec rows: 200.7 -> 191.6 min / 201.7 -> 192.5 median, -4.5%,
 bit-exact - but only after the q16 readers recover the integers with floor(byte*255+0.5)).
-8529dad (ATTN_DUP probe: attention is ~39 ms and qkv-bound; no decode change).
+8529dad (ATTN_DUP probe: attention is ~39 ms and qkv-bound; no decode change),
+de8e2e3 (inline I16_2 decode in matvec_q8_add_pair = w2/wo: 189.5 -> 185.6 min,
+-2.0%, bit-exact; Q8AP_INLINE=0 restores the generic form for in-binary A/B).
 
 ## Next step (do this first)
-**Inline the I16_2 decode in `matvec_q8_add_pair`.**  The audit the last run asked for is
-done: this is the last default-path q8 kernel still decoding activations through the
-generic `X4Q` helper, and it covers w2 + residual (15M MAC/token) and wo (4.7M) - 33% of
-the token MACs, the largest block that has not had the treatment `138136a` gave the FFN
-gate and logits.  Copy the proven form from `matvec_q8_pair` (fetch xa/xb, compute dA/dB
-once, feed both rows), leave the accumulation order and the `x_st2q` rounding untouched.
-Gate: greedy q8/q4 byte-identical plus PPL exactly 312.1366 / 314.8067 / 309.7812.
+**Price the fixed per-token passes, then attack the largest.**  The q8 kernel audit is
+closed: all six default-path q8 kernels (qkv pair, logits pair, FFN gate pair, w2+res
+pair, wo, swiglu) now use the inline I16_2 decode, and the last one (`Q8AP_INLINE`, this
+run) was worth -3.8 ms / -2.0%.  Decode is 185.3 min / 185.8 median, so the goal is 35 ms
+away and no kernel sits on a slow decode path.  Before choosing the next lever, price the
+remaining fixed passes with the `ATTN_DUP` method: rmsnorm x3 (att, ffn, final), the
+logits pair pass (~14 ms by the earlier pairing delta), embed, and the one read-back sync
+per token.  All of them are deterministic and write the same FBO from unchanged inputs,
+so a replay switch is bit-exact by construction and yields the true marginal cost.  Sum
+their cost and subtract it from 185: what is left is per-token GPU idle time created by
+the CPU stream and the sample sync, and that is the only lever left that is not matvec
+throughput.
 
-**Do not spend more runs on attention pass count.**  `ATTN_DUP` (this run, bit-exact)
-prices the block at ~39 ms of 189: qkv 23, att_v 4-19, qknorm 3.9, stats 2.7, qrot 1.7,
-rope 1.3, scores 0.5.  The three laps the docs called pass-count bound are ~9 ms together,
-so viewport, draw-merging and pass-splitting ideas inside attention have nothing left to
-win; the token is matvec throughput (63.3M MAC at ~410 MMAC/s in the kernels, 335 overall).
+**Do not spend more runs on attention pass count.**  `ATTN_DUP` (bit-exact)
+prices the block at ~39 ms of the 185: qkv 23, att_v 4-19, qknorm 3.9, stats 2.7,
+qrot 1.7, rope 1.3, scores 0.5.  The three laps the docs called pass-count bound are
+~9 ms together, so viewport, draw-merging and pass-splitting ideas inside attention
+have nothing left to win; the token is matvec throughput (63.3M MAC at ~410 MMAC/s in
+the kernels, 335 overall).
 
 **Measurement rules that now matter.**  `ATTN_DUP` is bit-exact, so use it whenever a pass
-needs pricing.  The Pi runs a Minecraft server on its one core: a base row reading above
-~195 ms means the core was stolen, so discard that row instead of comparing across regimes
-(three of six rows were clean at 188.8-189.1 in this run).
+needs pricing.  The Pi runs a Minecraft server on its one core: a row reading more than
+~10 ms above the clean regime means the core was stolen - discard it, never average it in
+(the 198.264 row in this run; five rows sat at 185-190).  A shader change worth ~4 ms
+needs a switch inside one binary alternated against itself (`Q8AP_INLINE` is the model):
+a two-binary A/B answers "faster than the reference" but cannot resolve 4 ms at load 0.4-2.0.
 
 **Do not decode packed q16 bytes without `floor(byte*255+0.5)`.**  The qkv pairing
 looked correct on the raw bytes and still moved PPL (312.1366 -> 314.7118) because
