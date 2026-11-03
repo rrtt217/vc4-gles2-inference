@@ -1298,7 +1298,7 @@ bit-exactness check.
 
 The fused gate+swiglu kernel above is the fastest change on the board (-20 ms)
 but it moved PPL from 311.1636 to 312.1366, so the bisect planned in the
-WORKLOG was run.  A new `FFN_DUMP=1` debug hook prints the first 8 texels of
+the decode campaign was run.  A new `FFN_DUMP=1` debug hook prints the first 8 texels of
 `ha`/`hb` (raw RGBA8 bytes) right after the FFN gate stage, for every layer-0
 forward.
 
@@ -1363,7 +1363,7 @@ Consequences, which change the plan:
 * 188 draws are worth ~34 ms of the 229, not ~94.  The other ~195 ms is shader
   work inside the passes.
 * The planned "merge the two swiglu passes" step (8 draws, the next step in
-  WORKLOG) was worth ~1.5 ms and is **cancelled** before it was written.  It
+  plan) was worth ~1.5 ms and is **cancelled** before it was written.  It
   also needed the swiglu output to be read at an offset by `w2`, i.e. shader
   text churn for no measurable gain.
 * Re-reading the `FFN_FUSE` A/B (-20.4 ms for 24 draws): only ~4.3 ms of that is
@@ -1541,7 +1541,7 @@ qk-norm checkpoint; it is structurally blocked, not slow.
 
 ## 2026-11-03: the qk-norm / k-norm scan is fetch-count bound, not latency bound
 
-Tested the WORKLOG candidate "shorten the dependent fetch chain": every 96-serial
+Tested the candidate "shorten the dependent fetch chain": every 96-serial
 scan of one head's raw q rows (`att_qnorm_scale`, and the three identical scans in
 `att_kv_rope`) now issues its fetches in groups of 8 - same 96 fetches, same add
 order (`ss += z*z`, z ascending), so the value is bit-identical, but the dependent
@@ -1907,3 +1907,43 @@ q8 matvec at two output rows; that is why all six kernels have the shape they ha
 only remaining widenings are int8 activations (`ACT8`, quality-moving) or a multi-target
 path, so the next step is a capability check for multiple render targets on the VC4 driver,
 not another pair kernel.
+
+## Decode loop campaign summary (2026-11-02 .. 03)
+
+The end state of the G1/G2 + vlab campaign, on the Pi Zero with
+`GPU_LAYER=1 KV_PACK=16 SEQ=768`, plain mode, greedy.  Decode is the min of
+8 interleaved A/B pairs; CPU/token is the rusage delta between gen-32 and
+gen-128 runs, so it excludes prefill and model load.
+
+| stage | decode (min) | CPU/token | notes |
+|---|---:|---:|---|
+| `deef607` baseline | 237.3 | 136.4 | user 108.5 / sys 27.9 |
+| + G1 GL state caching | 234.6 | 123.0 | -11.6% CPU, only -1.1% wall: the CPU is already hidden |
+| + G2 rms reduce fused | 229.2 | 114.5 | draws 204 -> 188 |
+| + fused FFN gate+swiglu default | ~209 | - | -10.6% |
+| + paired qkv matvec rows | 191.6 | - | -4.5%, bit-exact |
+| + inline I16_2 decode (4 kernels) | **183.5** | **112.9** | user 86.6 / sys 26.3 |
+| `engine_base` in the same session | 229.0 | - | the old binary, measured alongside |
+
+Where the 183.5 ms goes (`ATTN_DUP` / `PASS_DUP` pricing, both bit-exact):
+
+| block | ms | detail |
+|---|---:|---|
+| FFN matvec | ~56 | fused kernel, 0.375 fetch/MAC |
+| attention | 39 | qkv 23, v 4-19, qknorm 3.9, stats 2.7, qrot 1.7, rope 1.3, score 0.5 |
+| fixed passes | 44 | rms_att 13.4 + rms_ffn 15.5 + logits 15.1 |
+| read-back + embed | ~1 | the per-token `glFinish`/read-back is not the problem |
+
+Knobs behind which the changes sit (all default to the fast path):
+`QKV_PAIR=0` restores the single-row qkv matvec (200.7 ms), `FFN_FUSE=0` the
+two-pass FFN (228.7 ms), `Q8AP_INLINE=0` / `FFN_SW_INLINE=0` the generic `X4Q`
+decode, `LOGITS_SPLIT=1` the unpaired logits, `RMS_SPLIT=1` the extra reduce
+draw.
+
+What this buys and what it does not: the token has **no idle term** - GPU work
+is the whole budget, so the remaining 33 ms to a 150 ms target cannot come from
+better submission, and the structure is capped at ~180 ms because a fragment
+writes one RGBA8 texel (one q16 pair) and VC4 has no MRT.  The dead ends are
+listed in [`future-optimization.md`](future-optimization.md#do-not-retry-measured-2026-11-03);
+the open directions are q4 (never touched by this work), the 8-bit KV cache, the
+~3.8 s shader-compile cold start, and batched prefill.

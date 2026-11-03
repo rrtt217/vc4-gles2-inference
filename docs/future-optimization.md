@@ -12,9 +12,9 @@ Last updated: 2026-11-02.
 |---|---|
 | Chat models | MiniMind3 64M q8/q4; MiniMind2 Small i16/q8/q4; TinyChat15M is a format probe only |
 | Default Pi context | q4: 1024; q8: 768 |
-| KV cache | packed q16 (KV_PACK=16) |
-| q8 decode (Pi) | ~238 ms/token, prefill ~20.5 s for a 16-token chat run |
-| q4 decode (Pi) | ~381 ms/token; paired gate + packed residual enabled by default |
+| KV cache | packed q16 (`KV_PACK=16`) by default; `KV_PACK=8` exists but has no speed or quality measurement, and its scale is a single global constant |
+| q8 decode (Pi) | **183.5 ms/token min** (2026-11-03, 8 interleaved pairs, `GPU_LAYER=1 KV_PACK=16 SEQ=768`); first-token latency is dominated by ~3.8 s of shader compilation, not by prompt tokens |
+| q4 decode (Pi) | ~381 ms/token, **not re-measured since 2026-11-02**: the 2026-11-03 structural work (FFN fusion, qkv/logits row pairing, inline I16_2 decode) is gated on `WeightType::INT8` and never touched q4 |
 | Tools | get_current_time, calculate_math, system_status |
 | Tool cache | single-tool q8 cache, 252 tokens, built on the Pi |
 | Direct chat cache | --chat --prefix-cache skips the cached prefix |
@@ -24,7 +24,7 @@ Last updated: 2026-11-02.
 | Prefix cache automation | `server/build_prefix_cache.py build|verify`, sidecar metadata, refuses stale caches |
 | Eval harness | `server/eval_suite.py` (fixed cases, JSON output) + `server/selftest.py` (54 assertions, no GPU) |
 | Thinking | format works, but MiniMind3 q4/q8 does not reliably close think tags |
-| Effective throughput | q8 on Pi: ~238 ms per decode token (2026-11-02), i.e. ~4.2 tok/s; older 517 ms figure is historical |
+| Effective throughput | q8 on Pi: 183.5 ms per decode token (2026-11-03), i.e. ~5.4 tok/s; the 517 ms and 238 ms figures are historical |
 
 ## P0: highest-value work
 
@@ -239,6 +239,40 @@ Not a practical Pi Zero target now:
 - a new GLES2 backend would be required.
 
 Revisit only for Pi 5, phone, or laptop.
+
+## Do not retry (measured, 2026-11-03)
+
+Every item below was tried, measured on the Pi Zero and rejected.  Each one costs
+a build, a gate run and a careful A/B to re-learn, so do not reopen it without a
+new measurement that contradicts the reason given.
+
+| Do not | Why (measured) |
+|---|---|
+| Widen matvec rows past two per fragment (the old "quad-row" plan) | A fragment writes exactly one RGBA8 texel = one q16 pair, and **VC4 exposes no MRT** (`EXT_draw_buffers` absent, no `glDrawBuffers`), so two output rows is the ceiling. The default fused FFN kernel is already at 0.375 fetch/MAC; the "quad-row" note priced the `FFN_FUSE=0` kernel by mistake. Bit-exact floor of this structure is ~180 ms. |
+| Merge draws to save per-draw cost | Measured at **0.18 ms per draw**. Merging the two swiglu draws was cancelled on that number alone. |
+| Batch the command stream (`FFN_NOFLUSH=1`) | **Slower**: 253-266 vs 234-239 ms/token over three alternating pairs. The `glFlush` is what lets the GPU start while the CPU builds the next list. |
+| Draw a 1536-wide matvec in one pass | Produces garbage tokens (`编写一个编写一个...` q8, `我我我我...` q4). The 768-wide strip stays. |
+| Unroll the qk-norm 96-fetch scans | Fetch-count bound, not latency bound: 229.9 -> 226.6 min but 230.0 -> 230.7 median = noise at load 1.74. Reverted. |
+| Hoist the k-norm scalar out of `att_kv_rope` | Deletes 18432 fetches per layer but cannot be bit-exact: K is scaled by an exact float and a 24-bit store perturbs it ~1e-5. |
+| Fold qrot into the qkv matvec | Structurally blocked on a qk-norm checkpoint: the scale pass needs the raw q rows and a fragment writes one texel. |
+| Shrink the score viewport to `(pos+2)/2` | Bit-exact by construction, passed every gate, measured **+4%** on the scores lap. No gain, as the profile predicted. |
+| Decode packed q16 bytes without `floor(byte*255+0.5)` | `(128/255)*65280` lands a few ulps off 32768; the qkv pairing looked correct on raw bytes and still moved PPL 312.1366 -> 314.7118. Diff packed formats on decoded integers per layer. |
+
+## Measurement rules that came out of this campaign
+
+- Compare **in one binary, behind an env switch**, never two builds: `Q8AP_INLINE`,
+  `FFN_SW_INLINE`, `QKV_PAIR`, `FFN_FUSE`, `LOGITS_SPLIT`, `RMS_FUSED`/`RMS_SPLIT`.
+- Price a pass with `ATTN_DUP` / `PASS_DUP` (replay it; deterministic shaders make the
+  replay bit-exact) instead of `LAYER_PROFILE`, whose `glFinish` also retires the draw
+  issued before the lap.
+- Judge a quantization change on **greedy** output.  A 64M model at temp 0.8 gives
+  wildly different samples for the same weights; Q4_K_M looked broken on one sample
+  and was perfectly coherent under `--temp 0`.
+- PPL on the 254-token corpus is a **tripwire**, not a bit-exact criterion: +-40 PPL
+  (+-13%) is pure sampling noise, and the shipped ACT8 settings already spread
+  309.78 / 311.16 / 314.81.
+- Discard runs that lose cores to `pumpkin`; alternate A/B pairs and take the median
+  paired delta.
 
 ## Non-goals
 
