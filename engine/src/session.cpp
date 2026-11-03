@@ -2,11 +2,33 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 
 #include <string>
 #include <vector>
+
+// Default-off probe (PASS_DUP=embed,rms_att,rms_ffn,rms_final,logits,logits_draw
+// or all): replay one fixed per-token pass.  Every shader involved is
+// deterministic and writes the same target from unchanged inputs, so the replay
+// reproduces the same texels and the output stays byte-identical; the end-to-end
+// delta is that pass's true marginal cost.  Prices what is left after the
+// matvec kernels: the fixed passes, the read-back and the per-token sync.
+static bool pass_dup(const char* name){
+    static const std::string env = getenv("PASS_DUP") ? getenv("PASS_DUP") : "";
+    if (env.empty()) return false;
+    const std::string want(name);
+    size_t p = 0;
+    while (p <= env.size()) {
+        const size_t q = env.find(",", p);
+        const std::string tok = env.substr(p, q == std::string::npos ? std::string::npos : q - p);
+        if (tok == want || tok == "all") return true;
+        if (q == std::string::npos) break;
+        p = q + 1;
+    }
+    return false;
+}
 
 Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
         gpu_layer_ = gpu_.gpu_layer_enabled();
@@ -248,10 +270,12 @@ GLuint Session::forward_gpu_hidden(int token, int pos, bool want_logits){
         };
         vector<float> emb = embedding(token);
         GLuint h = gpu_.upload_hidden(emb);
+        if (pass_dup("embed")) { emb = embedding(token); h = gpu_.upload_hidden(emb); }
         mark("embed", -1);
         for (int l = 0; l < m_.layers; ++l) {
             if (g_stop) return h;
             GLuint xb = gpu_.rmsnorm(h, gpu_.rms_att_tex_[l], gpu_.xb_);
+            if (pass_dup("rms_att")) xb = gpu_.rmsnorm(h, gpu_.rms_att_tex_[l], gpu_.xb_);
             mark("rms_att", l);
             GLuint att_tex = gpu_.attention_block(m_.qkv[l], xb, l, pos);
             mark("attn", l);
@@ -259,6 +283,7 @@ GLuint Session::forward_gpu_hidden(int token, int pos, bool want_logits){
             mark("wo", l);
             GLuint x1 = gpu_.hidden_b_.tex;
             GLuint xbf = gpu_.rmsnorm(x1, gpu_.rms_ffn_tex_[l], gpu_.xbf_);
+            if (pass_dup("rms_ffn")) xbf = gpu_.rmsnorm(x1, gpu_.rms_ffn_tex_[l], gpu_.xbf_);
             mark("rms_ffn", l);
             if (m_.ffn_chunked) {
                 GLuint ha, hb;
@@ -286,6 +311,7 @@ GLuint Session::forward_gpu_hidden(int token, int pos, bool want_logits){
         }
         if (!want_logits) return h;
         GLuint xf = gpu_.rmsnorm(h, gpu_.rms_final_tex_, gpu_.xf_);
+        if (pass_dup("rms_final")) xf = gpu_.rmsnorm(h, gpu_.rms_final_tex_, gpu_.xf_);
         mark("rms_final", -1);
         return xf;
     }
@@ -296,6 +322,8 @@ vector<float> Session::step(int token, int pos, bool want_logits){
             if (g_stop || !want_logits) return {};
             auto a = Clock::now();
             vector<float> out = gpu_.logits_from(m_.logits_tiles, xf);
+            if (pass_dup("logits_draw")) gpu_.logits_pass_only(m_.logits_tiles, xf);
+            if (pass_dup("logits")) { vector<float> dup = gpu_.logits_from(m_.logits_tiles, xf); (void)dup; }
             if (getenv("LAYER_PROFILE")) {
                 gpu_.sync();
                 cerr << "PROF logits " << elapsed_ms(a, Clock::now()) << "\n";

@@ -1822,3 +1822,53 @@ session, so the inline decode across the q8 kernels is worth -19% cumulatively.
 Still 35 ms from the 150 ms goal, and no kernel is on the slow decode path any
 more: what is left is matvec throughput, the fixed per-token passes and the
 read-back sync.
+
+### Pricing the fixed per-token passes: 44 of the 185 ms is not matvec (`PASS_DUP`, 2026-11-03)
+
+The kernel audit is closed, so the next question was how much of the 185 ms is *not* matvec
+throughput.  `PASS_DUP=<embed|rms_att|rms_ffn|rms_final|logits|logits_draw|all>` replays one
+fixed pass per token (and per layer, for the rms norms) inside the normal run.  Every shader
+involved is deterministic and writes the same target from unchanged inputs, so the replay
+reproduces the same texels: greedy q8/q4 stay byte-identical and PPL stays exactly 312.1366.
+The end-to-end delta is the pass's marginal cost - the same instrument as `ATTN_DUP`, but for
+the passes outside the layer stack.  `logits_draw` replays the logits draw without its
+finish/read-back, so the pass and the sample sync can be priced separately.
+
+Measured on MiniMind3 q8 (8 layers, dim 768, hidden 2432), greedy, 32 tokens, interleaved
+against the same binary with the switch off; load 1.4-2.4 (the Pi also runs a Minecraft
+server), so the table uses row minima and the deltas are medians of the clean pairs:
+
+| replay (`PASS_DUP=`) | extra ms/token | per pass |
+|---|---:|---:|
+| `rms_att` (8 passes) | +13.4 | 1.7 |
+| `rms_ffn` (8 passes) | +15.5 | 1.9 |
+| `logits_draw` (5 draws, 1 pass) | +14.0 | - |
+| `logits` (draw + finish + read-back) | +15.1 | - |
+| `rms_final` (1 pass) | +0.6 | ~0.6-1.7 |
+| `embed` (CPU table + upload) | 0 (below noise) | - |
+
+Additivity check: `PASS_DUP=all` costs **+58.2 ms** and the four measurable replays sum to
+58.0, so the probe is linear and the passes do not overlap each other.  Two conclusions, both
+of which change the plan:
+
+* **The read-back sync is ~1 ms, not tens.**  Full `logits` minus `logits_draw` is 1.1 ms for 5
+  tiles of 1536x768 floats.  The `CPU 112.9 ms/token` figure is command-stream building, not
+  a per-token GPU sync, so 'cut the sample sync' is not a lever.
+* **The fixed passes are 44 ms of the 185 (24%).**  rmsnorm alone is 29 ms - more than the
+  logits pass, and 1.7 ms for a 768-wide norm with ~6.7k fetches, which is 10x the 0.18 ms
+  trivial-draw cost.  They are latency, not throughput, bound, and they sit on the critical
+  path one after another, so a pass removed is ~1.7 ms back.
+
+What that leaves: 185 - 44 fixed - 39 attention (`ATTN_DUP`) = ~102 ms of matvec for the
+49M non-qkv MAC, i.e. ~480 MMAC/s.  The token is fully accounted for and has no idle term:
+decode is GPU-work bound, and 150 ms needs ~35 ms of *work* removed, not a better stream.
+The largest block of work left is the FFN gate (2x2432x768 per layer, 48% of the token MAC;
+qkv is inside the attention term).  Its pair kernel spends 4 fetches (2 weight, 2 activation)
+per 8 MAC; a quad-row form (4 rows per fragment) would amortise the activation fetch/decode
+over 4 rows and drop that to 0.375 fetch/MAC, with the same per-row summation order, so it
+is bit-exact by construction the way the pair kernel was.  That is the next step.  The
+alternative - `ACT8` int8 activations, ~1.6x on every matvec - is opt-in only because it
+moves quality, and it cannot become the default under the byte-identical rule.
+
+Note on `RMS_SPLIT`: alternated against the default it read +2..+3 ms at load 2.4, i.e. not a
+win.  Kept as-is; the fused form stays the default.

@@ -87,6 +87,10 @@ public:
 
     vector<float> logits_from(const vector<Mat>& tiles, GLuint x);
 
+    // PASS_DUP=logits_draw probe: re-run the logits draw only, without the
+    // finish/read-back, so the draw and the sync can be priced separately.
+    void logits_pass_only(const vector<Mat>& tiles, GLuint x);
+
     vector<uint8_t> read_bytes(Target& t, int w, int h);
 
     void sync();

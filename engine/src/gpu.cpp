@@ -787,6 +787,10 @@ vector<float> GPU::logits_from(const vector<Mat>& tiles, GLuint x){
         return read_logits_full(tiles);
     }
 
+void GPU::logits_pass_only(const vector<Mat>& tiles, GLuint x){
+        logits_pass(tiles, x);
+    }
+
 vector<uint8_t> GPU::read_bytes(Target& t, int w, int h){
         bind_fbo(t.fbo);
         glViewport(0, 0, t.w, t.h);
