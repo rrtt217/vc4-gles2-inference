@@ -1777,3 +1777,48 @@ only default-path q8 kernel still decoding activations through the generic `X4Q`
 helper.  It covers w2 + residual (15M MAC/token) and wo (4.7M), i.e. 33% of the
 token MACs.  The other five already use the inline I16_2 form.  Porting the same
 mechanical change is the next step.
+
+### The last generic q8 kernel: inline decode in `matvec_q8_add_pair` (2026-11-03)
+
+`matvec_q8_add_pair` carried w2 + residual (15M MAC/token) and wo (4.7M), 33% of
+the token MACs, through the generic `X4Q` helper while the other five q8 kernels
+used the inline I16_2 decode.  Porting the form `matvec_q8_pair` already uses (one
+texel fetch per pair, `dA`/`dB` scalar decoders, `enc16` for the packed q16 write;
+r0 is always even and r1 always odd, so both residuals come out of one I16_2
+texel) is bit-exact: greedy q8/q4 unchanged, PPL exactly 312.1366 / 314.8067 /
+309.7812.  That closes the audit - all six default-path q8 kernels now decode
+inline.
+
+`Q8AP_INLINE=0` restores the generic form inside the same binary, and that is what
+made the step measurable at all: the two-binary A/B against `engine_base` read B
+min 188.0 / median 201.3 in a window whose load hit 2.0 (the Pi also runs a Rust
+Minecraft server), while the same-binary switch, alternated five times, gives
+
+| decode ms/token | INLINE=1 | INLINE=0 |
+|---|---:|---:|
+| five interleaved rows | 188.249, 185.722, **198.264**, 185.302, 185.814 | 189.036, 191.860, 189.457, 190.051, 189.525 |
+| clean min / median | **185.30 / 185.77** | **189.04 / 189.53** |
+
+Paired deltas on the four clean pairs: -0.79, -6.14, -4.75, -3.71 ms, median
+**-4.2 ms**.  The 198.264 row is a stolen core (the INLINE=0 rows in the same
+window sit at 189-190 and the neighbouring INLINE=1 rows at 185-186), so it is
+dropped rather than averaged in.  An earlier three-pair round gave the same
+answer (min 186.29 vs 189.58), so the step is **-3.8 ms / -2.0%**: 189.5 -> 185.6.
+
+Why only 2% when `matvec_probe` puts the inline form at 283 vs 177 MMAC/s (1.6x)?
+The pair kernel does two weight fetches *and* one activation decode per loop
+iteration, so the decode is a minority of its work; 1.6x is the ceiling of a
+decode-dominated single-row kernel.  The ratio transfers, the magnitude does not -
+same lesson as the FFN gate.  Do not size this kernel family from the probe.
+
+Method rule: price a shader change with a switch inside one binary and an
+interleaved run.  A two-binary A/B against `engine_base` still answers "is the tree
+faster than the reference", but it cannot resolve 4 ms on a board whose load swings
+0.4-2.0; the switch removes the cross-binary and cross-session terms and leaves
+only the load term, which alternation then cancels.
+
+Decode is now 185.3 min / 185.8 median with `engine_base` at 229.0 min in the same
+session, so the inline decode across the q8 kernels is worth -19% cumulatively.
+Still 35 ms from the 150 ms goal, and no kernel is on the slow decode path any
+more: what is left is matvec throughput, the fixed per-token passes and the
+read-back sync.

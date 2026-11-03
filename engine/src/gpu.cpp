@@ -980,8 +980,14 @@ GLuint GPU::x_q8_add(int rows, int cols, XFormat xf){
     }
 
 GLuint GPU::x_q8_add_pair(int rows, int cols, XFormat xf){
-        return x_prog("xq8ap_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(xf),
-                      matvec_q8_add_pair(rows, cols, xf));
+        // The inline I16_2 decode is the default; Q8AP_INLINE=0 restores the
+        // generic X4Q form in the same binary, so the two can be A/B-ed
+        // interleaved without a second build.
+        const char* v = getenv("Q8AP_INLINE");
+        const bool inl = !(v && strcmp(v, "0") == 0);
+        return x_prog("xq8ap_" + to_string(rows) + "_" + to_string(cols) + "_" +
+                      x_format_name(xf) + (inl ? "" : "_gen"),
+                      matvec_q8_add_pair(rows, cols, xf, inl));
     }
 
 GLuint GPU::x_i4_add_pair(int rows, int cols, XFormat xf){

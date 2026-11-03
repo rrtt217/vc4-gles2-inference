@@ -30,7 +30,7 @@ std::string matvec_q8_pair_swiglu(int rows, int cols, XFormat xf);
 std::string matvec_q8_pair_fused(int rows, int cols, XFormat xf);
 std::string matvec_q8_pair_logits(int rows, int cols, XFormat xf);
 std::string matvec_q8_add(int rows, int cols, XFormat xf, XFormat rf);
-std::string matvec_q8_add_pair(int rows, int cols, XFormat xf);
+std::string matvec_q8_add_pair(int rows, int cols, XFormat xf, bool inl = true);
 std::string matvec_i16(int rows, int cols, XFormat xf);
 std::string matvec_i16_add(int rows, int cols, XFormat xf, XFormat rf);
 std::string matvec_i4(int rows, int cols, XFormat xf);
