@@ -22,15 +22,17 @@
 #                      prints the string.  A deliberate numeric change
 #                      re-baselines them in the same commit, with PPL and the
 #                      behaviour checks as evidence - see AGENTS.md.
-#   4. ppl           - printed for baseline/ACT8=2/ACT8=1; compared against
-#                      PPL_EXPECT (default 1% tolerance) when set.
+#   4. ppl           - printed for the q8 baseline/ACT8=2/ACT8=1 and for the
+#                      q4 baseline; compared against PPL_EXPECT /
+#                      Q4_PPL_EXPECT (default 1% tolerance) when set.
 #
 # Env:
 #   SYS          system prompt to pin (default: You are a helpful assistant.)
 #   Q8_EXPECT    expected q8 prefix; empty = print only
 #   Q4_EXPECT    expected q4 prefix; empty = print only
-#   PPL_EXPECT   expected baseline PPL; empty = print only
-#   PPL_TOL      relative tolerance for PPL_EXPECT (default 0.01)
+#   PPL_EXPECT   expected baseline q8 PPL; empty = print only
+#   Q4_PPL_EXPECT expected q4 PPL (same SEQ); empty = print only
+#   PPL_TOL      relative tolerance for both (default 0.01)
 #   PPL_FILE     corpus (default data/ppl_test.txt)
 #   PPL_SEQ      SEQ used for the ppl runs (default 768; values are not
 #                comparable across SEQ)
@@ -50,6 +52,7 @@ SYS="${SYS:-You are a helpful assistant.}"
 Q8_EXPECT="${Q8_EXPECT:-}"
 Q4_EXPECT="${Q4_EXPECT:-}"
 PPL_EXPECT="${PPL_EXPECT:-}"
+Q4_PPL_EXPECT="${Q4_PPL_EXPECT:-}"
 PPL_TOL="${PPL_TOL:-0.01}"
 PPL_SEQ="${PPL_SEQ:-768}"
 PROMPT="用一句话介绍你自己。"
@@ -140,28 +143,38 @@ behaviour poem "$poem"
 
 # SEQ is pinned: the ppl path chunks the corpus per window, so the token count
 # and the value both move with SEQ and are not comparable across settings.
+# $1 model, $2 ACT8 mode.  ACT8 only rewrites the all-INT8 activation feed,
+# so the q4 model is measured once, with ACT8=0.
 ppl() {
-    MODEL="$Q8" TOKENIZER="$TOK" GPU_LAYER=1 KV_PACK=16 SEQ="$PPL_SEQ" ACT8="$1" \
+    MODEL="$1" TOKENIZER="$TOK" GPU_LAYER=1 KV_PACK=16 SEQ="$PPL_SEQ" ACT8="$2" \
         "$BIN" --template minimind3 --ppl "$CORPUS" 2>&1 \
         | sed -n 's/^PPL \([0-9.]*\).*/\1/p' | head -1
 }
 
+check_ppl() {
+    tag="$1" want="$2" got="$3"
+    if [ -z "$want" ]; then echo "$tag (unpinned): $got"; return 0; fi
+    python3 - "$tag" "$want" "$got" "$PPL_TOL" <<'PY'
+import sys
+tag, want, got, tol = sys.argv[1], float(sys.argv[2]), float(sys.argv[3]), float(sys.argv[4])
+if abs(got - want) / want > tol:
+    print("%s FAIL: %.4f vs expected %.4f (>%.1f%%)" % (tag, got, want, tol * 100), file=sys.stderr)
+    sys.exit(1)
+print("%s OK: %.4f (expected %.4f)" % (tag, got, want))
+PY
+}
+
 p0=""
+q4p=""
 if [ "${NO_PPL:-0}" != 1 ]; then
-    p0=$(ppl 0); p2=$(ppl 2); p1=$(ppl 1)
+    p0=$(ppl "$Q8" 0); p2=$(ppl "$Q8" 2); p1=$(ppl "$Q8" 1)
+    q4p=$(ppl "$Q4" 0)
     echo "PPL baseline: $p0"
     echo "PPL ACT8=2:   $p2"
     echo "PPL ACT8=1:   $p1"
-    if [ -n "$PPL_EXPECT" ]; then
-        python3 - "$PPL_EXPECT" "$p0" "$PPL_TOL" <<'PY'
-import sys
-want, got, tol = float(sys.argv[1]), float(sys.argv[2]), float(sys.argv[3])
-if abs(got - want) / want > tol:
-    print("PPL FAIL: %.4f vs expected %.4f (>%.1f%%)" % (got, want, tol * 100), file=sys.stderr)
-    sys.exit(1)
-print("PPL OK: %.4f (expected %.4f)" % (got, want))
-PY
-    fi
+    echo "PPL q4:       $q4p"
+    check_ppl PPL "$PPL_EXPECT" "$p0"
+    check_ppl "PPL q4" "$Q4_PPL_EXPECT" "$q4p"
 fi
 
 if [ "$REBASE" = 1 ]; then
@@ -171,6 +184,7 @@ if [ "$REBASE" = 1 ]; then
 Q8_EXPECT='$q8'
 Q4_EXPECT='$q4'
 PPL_EXPECT='${p0:-}'
+Q4_PPL_EXPECT='${q4p:-}'
 EOF
 fi
 

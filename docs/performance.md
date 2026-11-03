@@ -2204,3 +2204,40 @@ per-matrix precision mix - not a cheaper decode.  The split implementation was
 reverted after measurement: the numbers and the RGBA4/RGBA8 conversion facts
 (`engine/probes/q4fmt_probe.cpp`) are what is worth keeping.  `Q4_BFAST` stays
 in the tree default-off as the byte-floor ceiling.
+
+## q4 perplexity is a gate now: 325.3751 at SEQ=768 (2026-11-04)
+
+The acceptance suite pinned only the q8 perplexity.  q4 was protected by its
+greedy prefix and nothing else, so a change that moved q4 numerics by less than
+1% - or a format change that only touched the INT4 path - could land without a
+numeric check.  The suite now runs the q4 model through the same `--ppl` path
+and compares it against `Q4_PPL_EXPECT` with the same 1% tolerance as
+`PPL_EXPECT`:
+
+```
+PPL_EXPECT=271.2855 Q4_PPL_EXPECT=325.3751 PPL_SEQ=768 \
+    sh engine/scripts/regression.sh bin/engine_mm3_pi
+```
+
+**Baseline: q4 PPL 325.3751 at SEQ=768** (`data/ppl_test.txt`, 293 tokens,
+`GPU_LAYER=1 KV_PACK=16 ACT8=0`), measured twice on the Pi with the same binary
+and identical both times.  q8 on the same binary and corpus is 271.2855, so q4
+costs **+19.9% perplexity against q8 for -49% decode time** (358 vs 183
+ms/token) - the exchange rate any per-matrix q4/q8 mix has to beat.
+
+Only one q4 arm is run: `ACT8` rewrites the all-INT8 activation feed
+(`session.cpp` enables it only when every qkv/wo/w2 matrix is INT8), so the q4
+model gives the same value for ACT8=0 and ACT8=2 (measured: 325.3751 both),
+so the two ACT8 passes stay q8-only.
+`--rebaseline` prints `Q4_PPL_EXPECT` next to the others.
+
+The suite grows from three PPL passes to four (~+100 s on the Pi): the q4 window
+is 358 ms/token against q8's 183, so the q4 pass is the slow one.  It is worth
+it - this is the only numeric gate over the INT4 kernels, and the next q4
+candidate (dropping q4 on selected matrices) moves this number by design, so it
+has to be pinned before that work starts.
+
+One measurement trap, for the record: `/home/david/vc4-llm-runtime/engine/` also
+holds an `engine_mm3_pi` (from 11-02), so a hand-run PPL from that directory
+measures a stale build - it reads 269.6078 for q8 and 327.8478 for q4 against
+this build's 271.2855 / 325.3751.  Always pass `bin/engine_mm3_pi` explicitly.
