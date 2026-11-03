@@ -45,6 +45,7 @@ public:
     // Paired gate matvec + swiglu for one FFN chunk.
     GLuint ffn_pair_chunk(const Mat& w1, const Mat& w3, GLuint x, int hidden, Target& pair_buf, Target& out);
     GLuint ffn_pair_swiglu_chunk(const Mat& w1, const Mat& w3, GLuint x, int rows, Target& out);
+    GLuint ffn_pair_i4_swiglu_chunk(const Mat& w1, const Mat& w3, GLuint x, int rows, Target& out);
 
     void ffn_split_chunked(const Mat& w1a, const Mat& w3a, const Mat& w1b, const Mat& w3b,
                            GLuint x, int n1, int n2, GLuint& ha, GLuint& hb);
@@ -111,6 +112,7 @@ private:
     GLuint x_q8_pair_swiglu(int rows, int cols);
     GLuint x_q8_pair_fused(int rows, int cols);
     GLuint x_i4_pair(int rows, int cols);
+    GLuint x_i4_pair_swiglu(int rows, int cols);
     GLuint x_q8_add(int rows, int cols, XFormat xf);
     GLuint x_q8_add_pair(int rows, int cols, XFormat xf);
     GLuint x_i4_add_pair(int rows, int cols, XFormat xf);

@@ -1980,3 +1980,30 @@ writes one RGBA8 texel (one q16 pair) and VC4 has no MRT.  The dead ends are
 listed in [`future-optimization.md`](future-optimization.md#do-not-retry-measured-2026-11-03);
 the open directions are q4 (never touched by this work), the 8-bit KV cache, the
 ~3.8 s shader-compile cold start, and batched prefill.
+
+## q4 FFN gate: fused two-row kernel (2026-11-03)
+
+q4 kept the phase-1 FFN shape: `matvec_i4_pair` writes one row per fragment (w1/w3
+paired, sharing the activation decode) and `swiglu_pair` packs it in a second draw, so a
+chunk cost two draws.  `matvec_i4_pair_swiglu` computes the row pair r0/r1 in one
+fragment, swiglus both rows in-kernel and writes the packed q16 pair: one draw per chunk,
+half the fragments.  The accumulator keeps the matvec_i4_pair raw-q16 convention and its
+per-group order (scale*dot + min*xsum), and `qz`/`sl` reproduce x_st2q -> x_i16pair ->
+x_st2 -> x_q16enc exactly, so the packed output is bit-identical.  The ramp is behind the
+existing `FFN_FUSE` switch, so `FFN_FUSE=0` selects the two-pass path in the same binary.
+
+q4 decode, 6 interleaved pairs of `bench_plain_ab` style runs (gen 32, plain mode,
+`GPU_LAYER=1 KV_PACK=16 SEQ=768`, model `minimind3.q4`):
+
+| q4 decode ms/token | FUSE=1 | FUSE=0 |
+|---|---:|---:|
+| 6 interleaved pairs | min **361.7**, median **363.9** | min **370.4**, median **371.4** |
+
+Every fused row beat every two-pass row; median paired delta **-7.5 ms (-2.0%)**, min
+-8.7 ms.  Small because q4 is ALU-bound on the nibble split (~20 ops per 4 weights), not
+fetch-bound: the activation stream and fragment overhead that the fusion removes are a
+thin slice of the token, unlike q8 where the same fusion was worth 10.6%.  Bit-exactness
+was checked over 64 greedy tokens on two prompts (byte-identical to `FFN_FUSE=0`), plus
+the suite (determinism, default system, behaviour, q4 golden) and the q8 baseline PPL,
+which stays exactly 271.2855 at SEQ=768 - the q8 path is untouched.
+

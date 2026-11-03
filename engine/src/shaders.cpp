@@ -508,6 +508,64 @@ string matvec_i4_pair(int rows, int cols, XFormat xf) {
         "gl_FragColor=x_st2q(s1,s2);}";
 }
 
+// q4 FFN gate + swiglu fused, two rows per fragment.  The row pair r0/r1
+// shares one activation decode and one xsum; each row w1/w3 dots are
+// swiglu-d in-kernel and the two results are written as one q16 pair, so the
+// chunk costs one draw instead of (matvec_i4_pair -> swiglu_pair) and the
+// fragment count halves.  The accumulator keeps the raw-q16 unit convention
+// and the per-group order (scale*dot + min*xsum) of matvec_i4_pair; qz/sl
+// reproduce x_st2q -> x_i16pair -> x_st2 exactly, so the packed output is
+// bit-identical to the two-pass path.
+string matvec_i4_pair_swiglu(int rows, int cols, XFormat xf) {
+    const int texw = cols / 8;
+    const int groups = (cols + 31) / 32;
+    const int axw = x_texels(cols, xf);
+    const string ROWS = to_string(rows), GROUPS = to_string(groups),
+                 TEXW = to_string(texw), AXW = to_string(axw);
+    return head(xf) +
+        "uniform sampler2D W1,W2,P1,P2,X;uniform float ps1,ps2;"
+        "float dot4(vec4 w0,vec4 xa,vec4 xb){"
+        "float b0=floor(w0.r*255.0+0.5),b1=floor(w0.g*255.0+0.5)," 
+        "b2=floor(w0.b*255.0+0.5),b3=floor(w0.a*255.0+0.5);"
+        "float h0=floor(b0*0.0625),h1=floor(b1*0.0625)," 
+        "h2=floor(b2*0.0625),h3=floor(b3*0.0625);"
+        "float l0=b0-h0*16.0,l1=b1-h1*16.0,l2=b2-h2*16.0,l3=b3-h3*16.0;"
+        "return l0*xa.x+h0*xa.y+l1*xa.z+h1*xa.w+l2*xb.x+h2*xb.y+l3*xb.z+h3*xb.w;}"
+        "float qz(float v){return clamp(floor(v+0.5),-32768.0,32767.0);}"
+        "float sl(float q,float g){float a=q/256.0;return (a/(1.0+exp(-a)))*(g/256.0);}"
+        "void main(){int t=int(gl_FragCoord.x);int r0=2*t;"
+        "int r1=min(r0+1," + to_string(rows - 1) + ");"
+        "float u0=float(r0),u1=float(r1);"
+        "float s10=0.0,s20=0.0,s11=0.0,s21=0.0;"
+        "for(int g=0;g<" + GROUPS + ";g++){"
+        "vec4 q1=texture2D(P1,vec2((float(g)+0.5)/float(" + GROUPS + "),(u0+0.5)/float(" + ROWS + ")));"
+        "vec4 q2=texture2D(P2,vec2((float(g)+0.5)/float(" + GROUPS + "),(u0+0.5)/float(" + ROWS + ")));"
+        "vec4 p1=texture2D(P1,vec2((float(g)+0.5)/float(" + GROUPS + "),(u1+0.5)/float(" + ROWS + ")));"
+        "vec4 p2=texture2D(P2,vec2((float(g)+0.5)/float(" + GROUPS + "),(u1+0.5)/float(" + ROWS + ")));"
+        "float sa1=x_i16raw(q1.rg)*ps1,ma1=x_i16raw(q1.ba)*ps1;"
+        "float sa2=x_i16raw(q2.rg)*ps2,ma2=x_i16raw(q2.ba)*ps2;"
+        "float sb1=x_i16raw(p1.rg)*ps1,mb1=x_i16raw(p1.ba)*ps1;"
+        "float sb2=x_i16raw(p2.rg)*ps2,mb2=x_i16raw(p2.ba)*ps2;"
+        "float xsum=0.0,d1=0.0,d2=0.0,e1=0.0,e2=0.0;"
+        "for(int q=0;q<4;q++){int c=g*32+q*8;"
+        "vec4 xa=X4Q(X,c," + AXW + ".0);"
+        "vec4 xb=X4Q(X,c+4," + AXW + ".0);"
+        "xsum+=xa.x+xa.y+xa.z+xa.w+xb.x+xb.y+xb.z+xb.w;"
+        "vec4 w0=texture2D(W1,vec2((float(g*4+q)+0.5)/float(" + TEXW + "),(u0+0.5)/float(" + ROWS + ")));"
+        "d1+=dot4(w0,xa,xb);"
+        "w0=texture2D(W2,vec2((float(g*4+q)+0.5)/float(" + TEXW + "),(u0+0.5)/float(" + ROWS + ")));"
+        "d2+=dot4(w0,xa,xb);"
+        "w0=texture2D(W1,vec2((float(g*4+q)+0.5)/float(" + TEXW + "),(u1+0.5)/float(" + ROWS + ")));"
+        "e1+=dot4(w0,xa,xb);"
+        "w0=texture2D(W2,vec2((float(g*4+q)+0.5)/float(" + TEXW + "),(u1+0.5)/float(" + ROWS + ")));"
+        "e2+=dot4(w0,xa,xb);}"
+        "s10+=sa1*d1+ma1*xsum;s20+=sa2*d2+ma2*xsum;"
+        "s11+=sb1*e1+mb1*xsum;s21+=sb2*e2+mb2*xsum;}"
+        "float v0=sl(qz(s10),qz(s20));"
+        "float v1=(r0+1<" + ROWS + ")?sl(qz(s11),qz(s21)):0.0;"
+        "gl_FragColor=x_st2(v0,v1);}";
+}
+
 string matvec_i4_add(int rows, int cols, XFormat xf, XFormat rf) {
     const int texw = cols / 8;
     const int groups = (cols + 31) / 32;

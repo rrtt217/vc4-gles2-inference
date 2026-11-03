@@ -259,6 +259,18 @@ void GPU::ffn_split_chunked(const Mat& w1a, const Mat& w3a, const Mat& w1b, cons
                 hb = ffn_pair_swiglu_chunk(w1b, w3b, x, n2, ffn_h_b_);
                 return;
             }
+            // q4 has no fused gate: matvec_i4_pair writes one row per fragment
+            // and a separate swiglu draw packs it.  The fused form computes the
+            // row pair in one fragment, swiglus both rows in-kernel and writes
+            // the packed q16 pair, so it is one draw per chunk and bit-identical
+            // (same group order, same qz/sl rounding).
+            if (fuse_env && w1a.type == WeightType::INT4 && ffn_fmt_ == XFormat::I16_2 &&
+                (n1 & 1) == 0 && (n2 & 1) == 0) {
+                ha = ffn_pair_i4_swiglu_chunk(w1a, w3a, x, n1, ffn_h_a_);
+                hb = ffn_pair_i4_swiglu_chunk(w1b, w3b, x, n2, ffn_h_b_);
+                return;
+            }
+
             ha = ffn_pair_chunk(w1a, w3a, x, n1, ffn_pair_a_, ffn_h_a_);
             hb = ffn_pair_chunk(w1b, w3b, x, n2, ffn_pair_b_, ffn_h_b_);
             return;
@@ -894,6 +906,30 @@ GLuint GPU::ffn_pair_swiglu_chunk(const Mat& w1, const Mat& w3, GLuint x, int ro
         return out.tex;
     }
 
+// q4 gate chunk: row pair per fragment, w1/w3 dots and both swiglu results in
+// one draw (see matvec_i4_pair_swiglu).
+GLuint GPU::ffn_pair_i4_swiglu_chunk(const Mat& w1, const Mat& w3, GLuint x, int rows, Target& out){
+        const int aw = x_texels(rows, ffn_fmt_);
+        if (out.tex == 0 || out.w != aw) out = make_target(aw, 1);
+        GLuint p = x_i4_pair_swiglu(rows, w1.cols);
+        bind_fbo(out.fbo);
+        glViewport(0, 0, aw, 1);
+        use_program(p);
+        bind_tex(0, w1.tex); set_sampler(p, "W1", 0);
+        bind_tex(1, w3.tex); set_sampler(p, "W2", 1);
+        bind_tex(2, x); set_sampler(p, "X", 2);
+        bind_tex(3, w1.q4_param_tex); set_sampler(p, "P1", 3);
+        bind_tex(4, w3.q4_param_tex); set_sampler(p, "P2", 4);
+        glUniform1f(uloc(p, "ps1"), w1.q4_param_scale);
+        glUniform1f(uloc(p, "ps2"), w3.q4_param_scale);
+        setup_attrib(p);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
+        else layer_finish("NF_FFN");
+        if (getenv("FFN_SYNC")) { glFlush(); glFinish(); }
+        return out.tex;
+}
+
 GLuint GPU::x_q8_pair_fused(int rows, int cols){
         return x_prog("xq8pf_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(act_fmt_),
                       matvec_q8_pair_fused(rows, cols, act_fmt_));
@@ -906,6 +942,11 @@ GLuint GPU::x_i4_pair(int rows, int cols){
         GLuint p = link_program(matvec_i4_pair(rows, cols, act_fmt_));
         programs_[key] = p;
         return p;
+    }
+
+GLuint GPU::x_i4_pair_swiglu(int rows, int cols){
+        return x_prog("xi4ps_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(act_fmt_),
+                      matvec_i4_pair_swiglu(rows, cols, act_fmt_));
     }
 
 // GL binding state is context-wide (GLES2 has no VAOs and the engine owns the
