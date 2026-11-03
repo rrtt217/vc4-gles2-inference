@@ -4,10 +4,11 @@ Goal: Pi Zero MiniMind3 q8 decode **<=150 ms/token**, byte-identical output.
 
 | | value |
 |---|---|
-| decode (default path) | 204.4 ms/token min, 214.8 median (A/B, 3 pairs, load 1.26) |
-| decode with FFN_FUSE=0 | 228.7 min, 228.9 median - the two-pass sequence |
-| CPU (default) | 115.2 ms/token (user 86.7 / sys 28.5) |
-| gate | q8/q4 greedy byte-identical; PPL 312.1366 (two-pass 311.1636, tripwire only) |
+| decode (default path) | 192.5 ms/token min, 195.5 median (A/B vs engine_base, 3 pairs) |
+| decode with QKV_PAIR=0 | 200.7 min, 201.7 median - single-row qkv matvec |
+| decode with FFN_FUSE=0 | 228.7 min, 228.9 median - the two-pass FFN sequence |
+| CPU (default) | 116.2 ms/token (user 93.8 / sys 22.4) |
+| gate | q8/q4 greedy byte-identical; PPL **exactly** 312.1366 (ACT8=2 314.8067, ACT8=1 309.7812) |
 
 Landed commits: a053d35 (G1 GL state caching), e7cc839 (rms reduce fused),
 faa833a (results doc), 318ac15 (draw-bound finding), 84b9a88 (FFN merge plan),
@@ -18,21 +19,21 @@ not the lever), a40593a (paired logits rows: -6.8 ms, bit-exact,
 gained nothing and was reverted), 96edebb (qk-norm is ON: q chain is four
 passes; the qrot-into-matvec merge is structurally blocked and was reverted;
 `PROFATT2 qknorm` lap added).
-b7dce0d (fused FFN gate+swiglu is the default: -10.6% decode, greedy gates green).
+b7dce0d (fused FFN gate+swiglu is the default: -10.6% decode, greedy gates green),
+b907b30 (paired qkv matvec rows: 200.7 -> 191.6 min / 201.7 -> 192.5 median, -4.5%,
+bit-exact - but only after the q16 readers recover the integers with floor(byte*255+0.5)).
 
 ## Next step (do this first)
-**Next: pair the QKV matvec rows.**  `qkv` is the largest single attention lap (5.22 of
-16.1 ms/block) and it still runs one interpreter row per fragment: every fragment
-decodes all 768 activations to produce one output value.  Pairing two consecutive rows
-per fragment - two accumulators, same per-row dot order, same q16/q24 write - halves
-that activation decode, exactly the shape that is already bit-exact in the FFN gate pair
-(`matvec_q8_pair`) and the paired logits (`matvec_q8_pair_logits`).  Gate on
-byte-identical greedy text (q8 and q4), keep q4/I16 checkpoints on the old kernel, and
-measure interleaved A/B.  Watch out: q needs its raw rows for the qk-norm scale pass, so
-the paired writer must preserve the exact per-row integers the single-row writer emits.
+**Re-run `LAYER_PROFILE` on the paired build**, then pick the largest remaining lap.
+The single-row matvec family is now fully paired (`qkv`, `wo`, `w2`, gate pair, logits),
+so the next lever is in the attention chain (rope, scores, v) or in the per-layer draw
+count.  Measure the new `qkv` lap first: it was 5.22 of 16.1 ms/block before this change.
 
-**Also on the table: re-run `LAYER_PROFILE` on the fused build** before picking anything
-else - the FFN share just changed by 2 draws per chunk, so the old 27% no longer holds.
+**Do not decode packed q16 bytes without `floor(byte*255+0.5)`.**  The qkv pairing
+looked correct on the raw bytes and still moved PPL (312.1366 -> 314.7118) because
+`(128/255)*65280` lands a few ulps off 32768, and that error feeds the qk-norm scans and
+the rope multiplies.  Diff packed formats on *decoded integers per layer*, never on the
+packed bytes.
 
 **Do not retry "shorten the qk-norm fetch chain".**  Unrolling the 96-fetch scans
 into 8 independent fetches per step (bit-identical, gates green) measured 229.9 ->
@@ -71,9 +72,12 @@ pass was the activation decode, not weight fetch).  183 draws are ~33 ms of the
 * **Draw merging.**  A draw costs ~0.18 ms, measured bit-exactly with
   `RMS_SPLIT=1` (17 extra trivial draws = +3.0 ms mean).  The old 0.5-1.2
   ms/draw model, and the ~94 ms of "draw overhead" it implied, were wrong.
-* **`FFN_FUSE` bit-exactness.**  1 LSB of q16 on 2 of ~28k values, caused by the
-  four-accumulator shape (accumulation orders 309.2918 / 312.1366 / 313.5574).
-  Keep it behind the switch and bank the -20 ms only as an opt-in.
+* **`FFN_FUSE` bit-exactness.**  The 1-LSB drift is inside the swiglu evaluation (how
+  VC4 lowers `exp()` in the fused versus the sampler round trip), not the add tree or
+  the gate encoding: three rewrites with different accumulation shapes all reproduced
+  PPL 312.1366 exactly.  The fused path is the default; its 0.3% PPL move is far
+  inside the 254-token sampling noise.  Do not chase it with shader variants - an
+  FFN_DUMP diff of one layer hidden activations is the way in.
 * **Merging the FFN weight textures.**  2432 rows exceeds the 2048 texture
   limit.  The fused kernel reaches the same draw reduction without a repack.
 
