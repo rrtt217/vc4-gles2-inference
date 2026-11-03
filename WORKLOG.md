@@ -4,7 +4,7 @@ Goal: Pi Zero MiniMind3 q8 decode **<=150 ms/token**, byte-identical output.
 
 | | value |
 |---|---|
-| decode (default path) | **185.3 ms/token min, 185.8 median** (same-binary `Q8AP_INLINE` A/B, 5 interleaved pairs, median paired delta -4.2 ms); `Q8AP_INLINE=0` 189.0/189.5, `engine_base` 229.0 in the same session |
+| decode (default path) | **183.5 ms/token min, 184.8 median** (same-binary `FFN_SW_INLINE` A/B, 8 interleaved pairs, median paired delta -1.0 ms); `FFN_SW_INLINE=0` 185.1/186.0, prior state 185.3/185.8, `engine_base` 229.0 in the same session |
 | decode with QKV_PAIR=0 | 200.7 min, 201.7 median - single-row qkv matvec |
 | decode with FFN_FUSE=0 | 228.7 min, 228.9 median - the two-pass FFN sequence |
 | CPU (default) | 112.9 ms/token (user 86.6 / sys 26.3); 114.2 in the 3-pair run |
@@ -28,19 +28,29 @@ de8e2e3 (inline I16_2 decode in matvec_q8_add_pair = w2/wo: 189.5 -> 185.6 min,
 -2.0%, bit-exact; Q8AP_INLINE=0 restores the generic form for in-binary A/B).
 73bcc80 (PASS_DUP probe: fixed passes are 44 of the 185 ms - rms 29, logits 15,
 read-back 1; default-off and bit-exact; the token has no idle term).
+d179d49 (inline I16_2 decode in the FFN gate kernel - the last hot q8 kernel on the
+generic X4Q path: 185.3 -> 183.5 min, -1.0 ms median, bit-exact; `FFN_SW_INLINE=0` A/B).
 
 ## Next step (do this first)
-**Quad-row matvec for the FFN gate.**  Pass pricing is closed (`PASS_DUP`, this run): rmsnorm
-is 29 ms and logits 15, so the fixed passes are 44 of the 185 and the read-back sync is only
-~1 ms.  That leaves ~102 ms of non-qkv matvec at ~480 MMAC/s and **no idle term at all** - the
-token is GPU-work bound, so 150 ms needs 35 ms of work removed, not a better command stream.
-The FFN gate (2x2432x768 per layer, ~48% of the token MACs) is the biggest block; its pair
-kernel spends 4 fetches per 8 MAC (2 weight, 2 activation).  A quad-row form - 4 rows per
-fragment, 4 accumulators, one shared activation decode - drops that to 6 fetches per 16 MAC
-(0.375/MAC) and halves the fragment count again, and each row still sums over q in the same
-order, so it is bit-exact exactly as the pair kernels were.  Viewport stays legal (2432 rows /
-4 = 608 fragments).  Flip it with `FFN_QUAD=0` inside the same binary for the A/B, and price
-it with the switch, not against `engine_base` - a 5 ms effect needs alternation at this load.
+**Check whether the VC4 driver gives us multiple render targets.**  The inline-decode family
+is closed: all six hot q8 kernels now decode activations inline, and the FFN gate change in
+this run was the last of them (-1.0 ms median).  The wall is structural, not arithmetic: a
+fragment writes one RGBA8 texel = one q16 pair, so every matvec is capped at two output rows,
+and `matvec_q8_pair_swiglu` already hits the 0.375 fetch/MAC the old "quad-row" plan aimed at
+(that plan priced the FFN_FUSE=0 kernel by mistake; correction recorded in
+`docs/performance.md`).  Going wider needs two texels per fragment, i.e. MRT.
+
+So: build `engine/probes/matvec_probe.cpp` for the Pi (it prints `GL_EXTENSIONS`) and look
+for `EXT_draw_buffers` (or a GL 2.1 context with core glDrawBuffers) and
+`MAX_DRAW_BUFFERS_EXT`.  If MRT exists, prototype it on the simplest case - the gate writing
+two q16 pairs into two attachments, w2 reading the two halves in column order so the
+summation order is unchanged - and gate on the byte-identical greedy strings and PPL.
+If it does not exist, the bit-exact floor of this structure is ~180 ms and the remaining
+work is instruction-count shaving inside the six kernels, not row widening.
+
+**Do not build a 4-row fragment that writes two texels with one gl_FragColor.**  It is not a
+shader change, it is impossible: fragment to pixel is 1:1.  Any quad-row variant must either
+write one texel (and drop half its rows) or use MRT.
 
 **Do not spend more runs on attention pass count.**  `ATTN_DUP` (bit-exact)
 prices the block at ~39 ms of the 185: qkv 23, att_v 4-19, qknorm 3.9, stats 2.7,
