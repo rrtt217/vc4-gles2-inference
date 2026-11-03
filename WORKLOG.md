@@ -4,10 +4,10 @@ Goal: Pi Zero MiniMind3 q8 decode **<=150 ms/token**, byte-identical output.
 
 | | value |
 |---|---|
-| decode (default path) | 192.5 ms/token min, 195.5 median (A/B vs engine_base, 3 pairs) |
+| decode (default path) | 189.0 ms/token min, 189.7 median (interleaved A/B vs the pre-inline build, 4 pairs); engine_base 232.2 in the same session |
 | decode with QKV_PAIR=0 | 200.7 min, 201.7 median - single-row qkv matvec |
 | decode with FFN_FUSE=0 | 228.7 min, 228.9 median - the two-pass FFN sequence |
-| CPU (default) | 116.2 ms/token (user 93.8 / sys 22.4) |
+| CPU (default) | 112.9 ms/token (user 86.6 / sys 26.3); 114.2 in the 3-pair run |
 | gate | q8/q4 greedy byte-identical; PPL **exactly** 312.1366 (ACT8=2 314.8067, ACT8=1 309.7812) |
 
 Landed commits: a053d35 (G1 GL state caching), e7cc839 (rms reduce fused),
@@ -24,10 +24,17 @@ b907b30 (paired qkv matvec rows: 200.7 -> 191.6 min / 201.7 -> 192.5 median, -4.
 bit-exact - but only after the q16 readers recover the integers with floor(byte*255+0.5)).
 
 ## Next step (do this first)
-**Re-run `LAYER_PROFILE` on the paired build**, then pick the largest remaining lap.
-The single-row matvec family is now fully paired (`qkv`, `wo`, `w2`, gate pair, logits),
-so the next lever is in the attention chain (rope, scores, v) or in the per-layer draw
-count.  Measure the new `qkv` lap first: it was 5.22 of 16.1 ms/block before this change.
+**Duplicate-pass probe on the attention chain.**  The three attention laps the docs
+call pass-count bound (`scores`, `stats`, `att_v`) have never been timed without the
+`LAYER_PROFILE` finish.  Running one pass twice per layer behind a default-off switch is
+bit-exact (the second draw recomputes the same texels) and the delta is the true cost of
+that pass; calibrate it on the qkv matvec, whose cost is known from the pair A/B.  Only
+then can we say whether the remaining ~40 ms sits in the attention passes, in the two
+rmsnorm calls, or in the 183 draws.
+
+Also: `matvec_q8_pair_swiglu` (chunked-FFN path only) still uses the generic `X4Q` decode;
+check it for the same drift before touching anything else.  Three of the six q8 kernels
+had drifted off the inline form, so audit for that pattern first when a kernel looks slow.
 
 **Do not decode packed q16 bytes without `floor(byte*255+0.5)`.**  The qkv pairing
 looked correct on the raw bytes and still moved PPL (312.1366 -> 314.7118) because
