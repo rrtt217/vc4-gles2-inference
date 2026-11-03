@@ -2096,3 +2096,48 @@ q8: the q4 loop is dominated by the nibble unpack (~112 ALU ops per 32-weight gr
 against 8 mul-adds), so the helper-call overhead is a thinner slice of the token.
 The next q4 lever is that unpack and the per-group `mn*xsum`, not the loop shape.
 
+
+## q4: the unpack is the cost, the min term is free (2026-11-04)
+
+The two q4 levers left after the row-pair work were priced with default-off
+probes in one binary, so every arm ran byte-identical code except the single
+kernel change under test.  Interleaved on the Pi (`minimind3.q4`,
+`GPU_LAYER=1 KV_PACK=16 SEQ=768`, 32 tokens, plain mode, `IGNORE_EOS=1` so both
+arms generate all 32 tokens; 9 control runs over two sessions):
+
+| arm | what it changes | median ms/token | vs control |
+|---|---|---:|---:|
+| control | default kernels | 359.2 | |
+| `Q4_NOMIN=1` | drops `mn*xsum` and the 7 adds per texel that build xsum | 363.4 | **+1.2%** |
+| `Q4_HFAST=1` | builds h straight from the texel, fetch-to-h chain 4 ops -> 2 | 367.6 | **+2.3%** |
+| `Q4_NOUNPACK=1` | nibble unpack replaced by 8 multiplies (wrong weights) | 235.5 | **-34.4%** |
+
+1. **The min term is free, so the xsum precompute is dead.**  Removing 28 adds
+   per 32-weight group made the kernel slower.  A precomputed per-group
+   activation sum would put a fetch and a 24-bit decode where adds cost
+   nothing: worst case is a regression, best case is noise.  On VC4 the ADD
+   and MUL pipelines dual-issue, so a pure add rides along with the multiply
+   or floor it is packed with.
+2. **A shorter unpack chain buys nothing.**  `floor(w*15.9375+0.03125)` is
+   exactly `floor(b/16)` (255/16 is exact) and cuts the fetch-to-h chain from
+   four ops to two at the same op count: bit-exact (PPL 271.2855 on all three
+   PPL legs, greedy strings unchanged) and 2.3% slower.  Chain length is not
+   the limiter.
+3. **The floors are.**  Replacing the whole unpack with eight multiplies takes
+   the token from 359.2 to 235.5 ms, so the 12 ops per 8-weight texel that the
+   unpack adds (8 floors, 4 muls, 4 mads) cost 124 ms, about 10 ms per op per
+   texel.  That is the ceiling of any exact q4 format on VC4.
+
+The remaining q4 lever is **fewer ops per weight, not another loop shape**.  A
+hi/lo split format (two byte-per-nibble planes; each nibble comes back with a
+mad and one floor) costs 16 ops per 8 weights against 20, which projects to
+about -40 ms (-11%) on the per-op number above.  It needs a format change:
+`make_q4.py`, a second weight plane in every INT4 kernel, and a re-quantised
+model.  The nibble values do not change, so the acceptance gate stays
+bit-exact and the golden strings must not move.
+
+`Q4_NOMIN=1` and `Q4_NOUNPACK=1` stay in the tree as the negative control and
+the ceiling for that work.  `Q4_HFAST=1` stays as the record that chain
+length was tried and rejected.  All are default off, and the shared
+`q4_taps`/`q4_h` builders emit the original shader text when off: suite ACCEPT
+with PPL exactly 271.2855 and both greedy strings unchanged.

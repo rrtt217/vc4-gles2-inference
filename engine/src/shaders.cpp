@@ -1,6 +1,8 @@
 #include "shaders.h"
 
 #include <string>
+#include <cstdlib>
+#include <cstring>
 
 using std::string;
 using std::to_string;
@@ -55,6 +57,67 @@ static string q4_act(XFormat xf, int cols, bool inl) {
         "float a0=dA(t0),a1=dB(t0),a2=dA(t1),a3=dB(t1)," 
         "a4=dA(t2),a5=dB(t2),a6=dA(t3),a7=dB(t3);"
         "vec4 xa=vec4(a0,a1,a2,a3);vec4 xb=vec4(a4,a5,a6,a7);";
+}
+
+// Default-off probe (Q4_NOMIN=1): drop the per-group min term (mn*xsum) and
+// the seven adds that build xsum from the INT4 kernels.  The output is wrong
+// on purpose - this prices the ALU that a precomputed per-group activation
+// sum would remove, before any pass or texture plumbing is built for it.
+static bool q4_nomin() {
+    static const char* e = getenv("Q4_NOMIN");
+    static const bool v = e && strcmp(e, "0") != 0;
+    return v;
+}
+
+static string q4_mint() {
+    return q4_nomin() ? "" : "+mn*(xa.x+xa.y+xa.z+xa.w+xb.x+xb.y+xb.z+xb.w)";
+}
+
+static string q4_xsum() {
+    return q4_nomin() ? "" : "xsum+=xa.x+xa.y+xa.z+xa.w+xb.x+xb.y+xb.z+xb.w;";
+}
+
+// Default-off probe (Q4_NOUNPACK=1): swap the nibble unpack for a handful of
+// multiplies (the weights are nonsense on purpose) to price the four fetches
+// plus the floor chain.  A large win here is the only thing that would justify
+// a hi/lo split weight format, which needs a re-quantised model.
+static bool q4_nounpack() {
+    static const char* e = getenv("Q4_NOUNPACK");
+    static const bool v = e && strcmp(e, "0") != 0;
+    return v;
+}
+
+// The unpack of one 8-weight texel, shared verbatim by the INT4 kernels so the
+// probe swaps it in one place.  q4_h is defined below; W is the texel name.
+static string q4_h(const string& w);
+static string q4_taps(const char* W) {
+    const string w(W);
+    if (q4_nounpack())
+        return "float h0=" + w + ".r*15.0,l0=" + w + ".g*15.0,h1=" + w + ".b*15.0,"
+               "l1=" + w + ".a*15.0,h2=" + w + ".r*7.0,l2=" + w + ".g*7.0,"
+               "h3=" + w + ".b*7.0,l3=" + w + ".a*7.0;";
+    return "float b0=floor(" + w + ".r*255.0+0.5),b1=floor(" + w + ".g*255.0+0.5),"
+           "b2=floor(" + w + ".b*255.0+0.5),b3=floor(" + w + ".a*255.0+0.5);"
+           + q4_h(w) +
+           "float l0=b0-h0*16.0,l1=b1-h1*16.0,l2=b2-h2*16.0,l3=b3-h3*16.0;";
+}
+
+// Q4_HFAST=1 builds the high nibble straight from the texel instead of from
+// the byte: 255/16 is exact, so floor(w*15.9375 + 1/32) == floor(b/16) and the
+// value is unchanged.  Same two ops, but the chain from the fetch to h drops
+// from four ops to two.
+static bool q4_hfast() {
+    static const char* e = getenv("Q4_HFAST");
+    static const bool v = e && strcmp(e, "0") != 0;
+    return v;
+}
+
+static string q4_h(const string& w) {
+    if (q4_hfast())
+        return "float h0=floor(" + w + ".r*15.9375+0.03125),h1=floor(" + w + ".g*15.9375+0.03125)," 
+               "h2=floor(" + w + ".b*15.9375+0.03125),h3=floor(" + w + ".a*15.9375+0.03125);";
+    return "float h0=floor(b0*0.0625),h1=floor(b1*0.0625)," 
+           "h2=floor(b2*0.0625),h3=floor(b3*0.0625);";
 }
 }  // namespace
 
@@ -437,11 +500,7 @@ string matvec_i4(int rows, int cols, XFormat xf, bool inl) {
         "for(int t=0;t<4;t++){int c=g*32+t*8;"
         "vec4 w=texture2D(W,vec2((float(g*4+t)+0.5)/float(" + to_string(texw) + "),"
         "(float(r)+0.5)/float(" + to_string(rows) + ")));"
-        "float b0=floor(w.r*255.0+0.5),b1=floor(w.g*255.0+0.5),"
-        "b2=floor(w.b*255.0+0.5),b3=floor(w.a*255.0+0.5);"
-        "float h0=floor(b0*0.0625),h1=floor(b1*0.0625),"
-        "h2=floor(b2*0.0625),h3=floor(b3*0.0625);"
-        "float l0=b0-h0*16.0,l1=b1-h1*16.0,l2=b2-h2*16.0,l3=b3-h3*16.0;"
+        + q4_taps("w")
         + q4_act(xf, cols, inl) +
         // (n*sc + mn)*x sums to sc*sum(n*x) + mn*sum(x): the min term is paid
         // once per group instead of once per weight, and the activation sum
@@ -450,7 +509,7 @@ string matvec_i4(int rows, int cols, XFormat xf, bool inl) {
         "float d1=l1*xa.z+h1*xa.w;"
         "float d2=l2*xb.x+h2*xb.y;"
         "float d3=l3*xb.z+h3*xb.w;"
-        "s+=sc*(d0+d1+d2+d3)+mn*(xa.x+xa.y+xa.z+xa.w+xb.x+xb.y+xb.z+xb.w);}}"
+        "s+=sc*(d0+d1+d2+d3)" + q4_mint() + ";}}"
         "gl_FragColor=x_i24encq(s);}";
 }
 
@@ -465,11 +524,7 @@ string matvec_i4_add_pair(int rows, int cols, XFormat xf, bool inl) {
     return q4_head(xf, inl) + x_residual_glsl(XFormat::I16_2) +
         "uniform sampler2D W,P,X,R;uniform float ps;"
         "float dot4(vec4 w0,vec4 xa,vec4 xb){"
-        "float b0=floor(w0.r*255.0+0.5),b1=floor(w0.g*255.0+0.5),"
-        "b2=floor(w0.b*255.0+0.5),b3=floor(w0.a*255.0+0.5);"
-        "float h0=floor(b0*0.0625),h1=floor(b1*0.0625),"
-        "h2=floor(b2*0.0625),h3=floor(b3*0.0625);"
-        "float l0=b0-h0*16.0,l1=b1-h1*16.0,l2=b2-h2*16.0,l3=b3-h3*16.0;"
+        + q4_taps("w0") +
         "return l0*xa.x+h0*xa.y+l1*xa.z+h1*xa.w+l2*xb.x+h2*xb.y+l3*xb.z+h3*xb.w;}"
         "void main(){int t=int(gl_FragCoord.x);int r0=2*t;int r1=r0+1;"
         "float s0=0.0,s1=0.0;"
@@ -483,7 +538,7 @@ string matvec_i4_add_pair(int rows, int cols, XFormat xf, bool inl) {
         "float xsum=0.0,dota=0.0,dotb=0.0;"
         "for(int q=0;q<4;q++){int c=g*32+q*8;"
         + q4_act(xf, cols, inl) +
-        "xsum+=xa.x+xa.y+xa.z+xa.w+xb.x+xb.y+xb.z+xb.w;"
+        q4_xsum() +
         "vec4 w0=texture2D(W,vec2((float(g*4+q)+0.5)/float(" + to_string(texw) + "),"
         "(float(r0)+0.5)/float(" + to_string(rows) + ")));"
         "dota+=dot4(w0,xa,xb);"
@@ -522,7 +577,7 @@ string matvec_i4_pair(int rows, int cols, XFormat xf) {
         "for(int q=0;q<4;q++){int c=g*32+q*8;"
         "vec4 xa=X4Q(X,c," + to_string(axw) + ".0);"
         "vec4 xb=X4Q(X,c+4," + to_string(axw) + ".0);"
-        "xsum+=xa.x+xa.y+xa.z+xa.w+xb.x+xb.y+xb.z+xb.w;"
+        + q4_xsum() +
         "vec4 w0=texture2D(W1,vec2((float(g*4+q)+0.5)/float(" + to_string(texw) + "),"
         "(float(r)+0.5)/float(" + to_string(rows) + ")));"
         "d1+=dot4(w0,xa,xb);"
@@ -550,11 +605,7 @@ string matvec_i4_pair_swiglu(int rows, int cols, XFormat xf, bool inl) {
     return q4_head(xf, inl) +
         "uniform sampler2D W1,W2,P1,P2,X;uniform float ps1,ps2;"
         "float dot4(vec4 w0,vec4 xa,vec4 xb){"
-        "float b0=floor(w0.r*255.0+0.5),b1=floor(w0.g*255.0+0.5)," 
-        "b2=floor(w0.b*255.0+0.5),b3=floor(w0.a*255.0+0.5);"
-        "float h0=floor(b0*0.0625),h1=floor(b1*0.0625)," 
-        "h2=floor(b2*0.0625),h3=floor(b3*0.0625);"
-        "float l0=b0-h0*16.0,l1=b1-h1*16.0,l2=b2-h2*16.0,l3=b3-h3*16.0;"
+        + q4_taps("w0") +
         "return l0*xa.x+h0*xa.y+l1*xa.z+h1*xa.w+l2*xb.x+h2*xb.y+l3*xb.z+h3*xb.w;}"
         "float qz(float v){return clamp(floor(v+0.5),-32768.0,32767.0);}"
         "float sl(float q,float g){float a=q/256.0;return (a/(1.0+exp(-a)))*(g/256.0);}"
@@ -574,7 +625,7 @@ string matvec_i4_pair_swiglu(int rows, int cols, XFormat xf, bool inl) {
         "float xsum=0.0,d1=0.0,d2=0.0,e1=0.0,e2=0.0;"
         "for(int q=0;q<4;q++){int c=g*32+q*8;"
         + q4_act(xf, cols, inl) +
-        "xsum+=xa.x+xa.y+xa.z+xa.w+xb.x+xb.y+xb.z+xb.w;"
+        q4_xsum() +
         "vec4 w0=texture2D(W1,vec2((float(g*4+q)+0.5)/float(" + TEXW + "),(u0+0.5)/float(" + ROWS + ")));"
         "d1+=dot4(w0,xa,xb);"
         "w0=texture2D(W2,vec2((float(g*4+q)+0.5)/float(" + TEXW + "),(u0+0.5)/float(" + ROWS + ")));"
@@ -618,7 +669,7 @@ string matvec_i4_add(int rows, int cols, XFormat xf, XFormat rf) {
         "float d1=l1*xa.z+h1*xa.w;"
         "float d2=l2*xb.x+h2*xb.y;"
         "float d3=l3*xb.z+h3*xb.w;"
-        "s+=sc*(d0+d1+d2+d3)+mn*(xa.x+xa.y+xa.z+xa.w+xb.x+xb.y+xb.z+xb.w);}}"
+        "s+=sc*(d0+d1+d2+d3)" + q4_mint() + ";}}"
         "float res=R1Q(R,r," + to_string(x_texels(rows, rf)) + ".0);"
         "gl_FragColor=x_st1q(s+res);}";
 }
