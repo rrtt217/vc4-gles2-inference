@@ -13,19 +13,72 @@
 
 // first hidden chunk; second is hidden - ffn_chunk
 
+    // The checkpoint is mapped once and kept for the process lifetime.  The
+    // loaders then point each Mat straight at its bytes in the map instead of
+    // allocating a private copy: on this 426 MB board the 69 MB q8 copy is
+    // what pushed the kernel into swap and evicted the file (and the Mesa
+    // driver) between runs, so a warm start read 69 MB from the SD card at
+    // 11 MB/s in every single run.  Borrowed pages are page cache: reclaimable,
+    // never swapped, and free to re-read.
     bool Model::load(const string& path){
+        int fd = open(path.c_str(), O_RDONLY);
+        if (fd < 0) { cerr << "cannot open model: " << path << "\n"; return false; }
         struct stat st {};
-        if (stat(path.c_str(), &st) == 0) {
-            source_size = (uint64_t)st.st_size;
-            source_mtime = (uint64_t)st.st_mtime;
+        if (fstat(fd, &st) != 0 || st.st_size < 4) {
+            close(fd); cerr << "cannot stat model: " << path << "\n"; return false;
         }
-        ifstream magic_file(path, ios::binary);
-        uint32_t magic = 0; magic_file.read((char*)&magic, 4);
-        if (magic == MAGIC_Q8 || magic == MAGIC_Q8_V2) return load_q8(path);
-        if (magic == MAGIC_I16 || magic == MAGIC_I16_V2) return load_i16(path);
-        if (magic == MAGIC_Q4) return load_q4(path);
-        return load_legacy(path);
+        void* base = mmap(nullptr, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+        close(fd);
+        if (base == MAP_FAILED) { cerr << "mmap failed: " << path << "\n"; return false; }
+        source_size = (uint64_t)st.st_size;
+        source_mtime = (uint64_t)st.st_mtime;
+        fbase_ = (const uint8_t*)base;
+        fsize_ = (size_t)st.st_size;
+        // Start the SD read now: it overlaps the EGL/Mesa init that follows, and
+        // a warm start then finds every page already in the page cache.
+        madvise(base, (size_t)st.st_size, MADV_WILLNEED);
+        fpos_ = 0;
+        borrow_ = !(getenv("MODEL_BORROW") && !strcmp(getenv("MODEL_BORROW"), "0"));
+        uint32_t magic = 0; memcpy(&magic, fbase_, 4);
+        bool ok;
+        if (magic == MAGIC_Q8 || magic == MAGIC_Q8_V2) ok = load_q8(path);
+        else if (magic == MAGIC_I16 || magic == MAGIC_I16_V2) ok = load_i16(path);
+        else if (magic == MAGIC_Q4) ok = load_q4(path);
+        else ok = load_legacy(path);
+        fbase_ = nullptr; fsize_ = fpos_ = 0;
+        if (borrow_ && ok) { map_ = base; map_size_ = (size_t)st.st_size; }
+        else munmap(base, (size_t)st.st_size);
+        return ok;
     }
+
+Model::~Model(){
+    if (map_) munmap(map_, map_size_);
+    map_ = nullptr; map_size_ = 0;
+}
+// After the upload the whole checkpoint is on the GPU.  Unmapping it drops the
+// resident file pages from this process - they stay in the page cache, so the
+// next start is still warm - and clears the borrowed pointers so nothing can
+// read a stale view of a mapping that no longer exists.
+void Model::release_map(){
+    if (map_) munmap(map_, map_size_);
+    map_ = nullptr; map_size_ = 0;
+    auto clear = [](vector<Mat>& v){
+        for (auto& m : v) {
+            m.ext8 = nullptr; m.ext16 = nullptr; m.ext4 = nullptr;
+            m.ext_scale4 = nullptr; m.ext_min4 = nullptr;
+        }
+    };
+    clear(qkv); clear(wo); clear(w13); clear(w1); clear(w3); clear(w2); clear(logits_tiles);
+    clear(w1a); clear(w1b); clear(w3a); clear(w3b); clear(w2a); clear(w2b);
+}
+
+void Model::materialize(Mat& m){
+    if (m.ext8) { m.q8.assign(m.ext8, m.ext8 + (size_t)m.rows * m.cols); m.ext8 = nullptr; }
+    if (m.ext16) { m.q16.assign(m.ext16, m.ext16 + (size_t)m.rows * m.cols); m.ext16 = nullptr; }
+    if (m.ext4) { m.q4.assign(m.ext4, m.ext4 + (size_t)m.rows * (m.cols / 2)); m.ext4 = nullptr; }
+    if (m.ext_scale4) { m.q4_scale.assign(m.ext_scale4, m.ext_scale4 + (size_t)m.rows * m.groups); m.ext_scale4 = nullptr; }
+    if (m.ext_min4) { m.q4_min.assign(m.ext_min4, m.ext_min4 + (size_t)m.rows * m.groups); m.ext_min4 = nullptr; }
+}
 
 void Model::split_ffn(){
         if (hidden <= 2048) return;
@@ -44,6 +97,7 @@ void Model::split_ffn(){
     }
 
 bool Model::quantize_q4(Mat& m){
+        materialize(m);
         if (m.type == WeightType::INT4) return true;
         if ((m.cols % 32) != 0) return false;
         const int group = 32;
@@ -157,6 +211,7 @@ void Model::apply_precision(const string& layers_spec, const string& parts_spec)
         }
         auto convert = [&](Mat& m) {
             if (m.type == WeightType::INT8) return;
+            materialize(m);
             float mx = 0;
             for (int i = 0; i < m.rows * m.cols; ++i) mx = max(mx, fabsf((float)m.q16[i] * m.scale));
             if (mx == 0) mx = 1;
@@ -178,34 +233,26 @@ void Model::apply_precision(const string& layers_spec, const string& parts_spec)
         if (has_part("logits")) for (auto& m : logits_tiles) convert(m);
     }
 
-void Model::read_exact(ifstream& f, void* p, size_t n){
-        f.read((char*)p, n);
-        if (!f) { cerr << "truncated checkpoint\n"; exit(1); }
+void Model::read_exact(void* p, size_t n){
+        if (n > fsize_ - fpos_) { cerr << "truncated checkpoint\n"; exit(1); }
+        memcpy(p, fbase_ + fpos_, n);
+        fpos_ += n;
     }
 
-Mat Model::read_mat(ifstream& f, bool int16){
+Mat Model::read_mat(bool int16){
         Mat m;
         int32_t rows = 0, cols = 0; float scale = 0;
-        read_exact(f, &rows, 4); read_exact(f, &cols, 4); read_exact(f, &scale, 4);
+        read_exact(&rows, 4); read_exact(&cols, 4); read_exact(&scale, 4);
         m.rows = rows; m.cols = cols; m.scale = scale;
         m.type = int16 ? WeightType::INT16 : WeightType::INT8;
-        if (int16) {
-            m.q16.resize((size_t)rows * cols);
-            read_exact(f, m.q16.data(), m.q16.size() * 2);
-        } else {
-            m.q8.resize((size_t)rows * cols);
-            read_exact(f, m.q8.data(), m.q8.size());
-        }
+        if (rows < 0 || cols <= 0) { cerr << "bad matrix header\n"; exit(1); }
+        const size_t n = (size_t)rows * cols;
+        if (int16) read_seq(m.q16, m.ext16, n);
+        else read_seq(m.q8, m.ext8, n);
         return m;
     }
-
 bool Model::load_legacy(const string& path){
-        int fd = open(path.c_str(), O_RDONLY);
-        if (fd < 0) { cerr << "cannot open model: " << path << "\n"; return false; }
-        struct stat st; fstat(fd, &st);
-        uint8_t* base = (uint8_t*)mmap(nullptr, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-        close(fd);
-        if (base == MAP_FAILED) { cerr << "mmap failed\n"; return false; }
+        const uint8_t* base = fbase_;
         int32_t cfg[7]; memcpy(cfg, base, 28);
         dim = cfg[0]; hidden = cfg[1]; layers = cfg[2]; heads = cfg[3];
         kv_heads = cfg[4]; int vs = cfg[5]; seq = cfg[6];
@@ -254,43 +301,38 @@ bool Model::load_legacy(const string& path){
         }
         for (int st = 0; st < vocab; st += 1536)
             logits_tiles.push_back(quantize(wcls + (size_t)st * dim, min(1536, vocab - st), dim, qt));
-        munmap(base, st.st_size);
+
         return true;
     }
 
 bool Model::load_q4(const string& path){
-        ifstream f(path, ios::binary);
-        if (!f) { cerr << "cannot open q4 model\n"; return false; }
         uint32_t magic = 0; int32_t cfg[7]; float theta = 0; int32_t half = 0, split = 0, qk = 0;
-        read_exact(f, &magic, 4); read_exact(f, cfg, 28); read_exact(f, &theta, 4);
-        read_exact(f, &half, 4); read_exact(f, &split, 4); read_exact(f, &qk, 4);
+        read_exact(&magic, 4); read_exact(cfg, 28); read_exact(&theta, 4);
+        read_exact(&half, 4); read_exact(&split, 4); read_exact(&qk, 4);
         dim = cfg[0]; hidden = cfg[1]; layers = cfg[2]; heads = cfg[3];
         kv_heads = cfg[4]; vocab = cfg[5]; seq = cfg[6];
         if (getenv("SEQ")) seq = atoi(getenv("SEQ"));
         rope_theta = theta; rope_half = half != 0; qk_norm = qk != 0;
         head_dim = dim / heads; kv_dim = kv_heads * head_dim;
         has_q8_emb = true;
-        emb_q8.resize((size_t)vocab * dim); read_exact(f, emb_q8.data(), emb_q8.size());
-        emb_scale.resize(vocab); read_exact(f, emb_scale.data(), emb_scale.size() * 4);
-        rms_att.resize((size_t)layers * dim); read_exact(f, rms_att.data(), rms_att.size() * 4);
-        rms_ffn.resize((size_t)layers * dim); read_exact(f, rms_ffn.data(), rms_ffn.size() * 4);
-        rms_final.resize(dim); read_exact(f, rms_final.data(), rms_final.size() * 4);
+        emb_q8.resize((size_t)vocab * dim); read_exact(emb_q8.data(), emb_q8.size());
+        emb_scale.resize(vocab); read_exact(emb_scale.data(), emb_scale.size() * 4);
+        rms_att.resize((size_t)layers * dim); read_exact(rms_att.data(), rms_att.size() * 4);
+        rms_ffn.resize((size_t)layers * dim); read_exact(rms_ffn.data(), rms_ffn.size() * 4);
+        rms_final.resize(dim); read_exact(rms_final.data(), rms_final.size() * 4);
         if (qk_norm) {
-            q_norm.resize((size_t)layers * head_dim); read_exact(f, q_norm.data(), q_norm.size() * 4);
-            k_norm.resize((size_t)layers * head_dim); read_exact(f, k_norm.data(), k_norm.size() * 4);
+            q_norm.resize((size_t)layers * head_dim); read_exact(q_norm.data(), q_norm.size() * 4);
+            k_norm.resize((size_t)layers * head_dim); read_exact(k_norm.data(), k_norm.size() * 4);
         }
         auto read_q4_mat = [&]() {
             int32_t rows = 0, cols = 0, groups = 0; float ps = 1.0f;
-            read_exact(f, &rows, 4); read_exact(f, &cols, 4);
-            read_exact(f, &groups, 4); read_exact(f, &ps, 4);
+            read_exact(&rows, 4); read_exact(&cols, 4);
+            read_exact(&groups, 4); read_exact(&ps, 4);
             Mat m; m.rows = rows; m.cols = cols; m.type = WeightType::INT4;
             m.group = 32; m.groups = groups; m.q4_param_scale = ps;
-            m.q4.resize((size_t)rows * (cols / 2));
-            read_exact(f, m.q4.data(), m.q4.size());
-            m.q4_scale.resize((size_t)rows * groups);
-            read_exact(f, m.q4_scale.data(), m.q4_scale.size() * 2);
-            m.q4_min.resize((size_t)rows * groups);
-            read_exact(f, m.q4_min.data(), m.q4_min.size() * 2);
+            read_seq(m.q4, m.ext4, (size_t)rows * (cols / 2));
+            read_seq(m.q4_scale, m.ext_scale4, (size_t)rows * groups);
+            read_seq(m.q4_min, m.ext_min4, (size_t)rows * groups);
             return m;
         };
         for (int l = 0; l < layers; ++l) {
@@ -303,65 +345,60 @@ bool Model::load_q4(const string& path){
         int nt = (vocab + 1535) / 1536;
         for (int i = 0; i < nt; ++i) {
             int32_t rows = 0, cols = 0; float sc = 1.0f;
-            read_exact(f, &rows, 4); read_exact(f, &cols, 4); read_exact(f, &sc, 4);
+            read_exact(&rows, 4); read_exact(&cols, 4); read_exact(&sc, 4);
             Mat m; m.rows = rows; m.cols = cols; m.scale = sc; m.type = WeightType::INT8;
-            m.q8.resize((size_t)rows * cols);
-            read_exact(f, m.q8.data(), m.q8.size());
+            read_seq(m.q8, m.ext8, (size_t)rows * cols);
             logits_tiles.push_back(m);
         }
         return true;
     }
 
 bool Model::load_q8(const string& path){
-        ifstream f(path, ios::binary);
-        if (!f) { cerr << "cannot open q8 model\n"; return false; }
         uint32_t magic = 0; int32_t cfg[7]; int32_t split = 0;
-        read_exact(f, &magic, 4); read_exact(f, cfg, 28);
+        read_exact(&magic, 4); read_exact(cfg, 28);
         dim = cfg[0]; hidden = cfg[1]; layers = cfg[2]; heads = cfg[3];
         kv_heads = cfg[4]; vocab = cfg[5]; seq = cfg[6];
         if (getenv("SEQ")) seq = atoi(getenv("SEQ"));
         head_dim = dim / heads; kv_dim = kv_heads * head_dim;
         if (magic == MAGIC_Q8_V2) {
             int32_t half = 0, qk = 0;
-            read_exact(f, &rope_theta, 4); read_exact(f, &half, 4);
-            read_exact(f, &split, 4); read_exact(f, &qk, 4);
+            read_exact(&rope_theta, 4); read_exact(&half, 4);
+            read_exact(&split, 4); read_exact(&qk, 4);
             rope_half = half != 0; qk_norm = qk != 0;
         } else {
-            read_exact(f, &split, 4);
+            read_exact(&split, 4);
             if (getenv("ROPE_THETA")) rope_theta = atof(getenv("ROPE_THETA"));
             rope_half = getenv("ROPE_HALF") != nullptr;
         }
         has_q8_emb = true;
         emb_q8.resize((size_t)vocab * dim);
-        read_exact(f, emb_q8.data(), emb_q8.size());
-        emb_scale.resize(vocab); read_exact(f, emb_scale.data(), emb_scale.size() * 4);
-        rms_att.resize((size_t)layers * dim); read_exact(f, rms_att.data(), rms_att.size() * 4);
-        rms_ffn.resize((size_t)layers * dim); read_exact(f, rms_ffn.data(), rms_ffn.size() * 4);
-        rms_final.resize(dim); read_exact(f, rms_final.data(), rms_final.size() * 4);
+        read_exact(emb_q8.data(), emb_q8.size());
+        emb_scale.resize(vocab); read_exact(emb_scale.data(), emb_scale.size() * 4);
+        rms_att.resize((size_t)layers * dim); read_exact(rms_att.data(), rms_att.size() * 4);
+        rms_ffn.resize((size_t)layers * dim); read_exact(rms_ffn.data(), rms_ffn.size() * 4);
+        rms_final.resize(dim); read_exact(rms_final.data(), rms_final.size() * 4);
         if (qk_norm) {
-            q_norm.resize((size_t)layers * head_dim); read_exact(f, q_norm.data(), q_norm.size() * 4);
-            k_norm.resize((size_t)layers * head_dim); read_exact(f, k_norm.data(), k_norm.size() * 4);
+            q_norm.resize((size_t)layers * head_dim); read_exact(q_norm.data(), q_norm.size() * 4);
+            k_norm.resize((size_t)layers * head_dim); read_exact(k_norm.data(), k_norm.size() * 4);
         }
         for (int l = 0; l < layers; ++l) {
-            qkv.push_back(read_mat(f, false));
-            wo.push_back(read_mat(f, false));
-            if (split) { w1.push_back(read_mat(f, false)); w3.push_back(read_mat(f, false)); }
-            else w13.push_back(read_mat(f, false));
-            w2.push_back(read_mat(f, false));
+            qkv.push_back(read_mat(false));
+            wo.push_back(read_mat(false));
+            if (split) { w1.push_back(read_mat(false)); w3.push_back(read_mat(false)); }
+            else w13.push_back(read_mat(false));
+            w2.push_back(read_mat(false));
         }
         int nt = (vocab + 1535) / 1536;
-        for (int i = 0; i < nt; ++i) logits_tiles.push_back(read_mat(f, false));
+        for (int i = 0; i < nt; ++i) logits_tiles.push_back(read_mat(false));
         return true;
     }
 
 bool Model::load_i16(const string& path){
-        ifstream f(path, ios::binary);
-        if (!f) { cerr << "cannot open i16 model\n"; return false; }
         uint32_t magic = 0; int32_t cfg[7]; float theta = 0; int32_t half = 0, split = 0;
-        read_exact(f, &magic, 4); read_exact(f, cfg, 28); read_exact(f, &theta, 4);
-        read_exact(f, &half, 4); read_exact(f, &split, 4);
+        read_exact(&magic, 4); read_exact(cfg, 28); read_exact(&theta, 4);
+        read_exact(&half, 4); read_exact(&split, 4);
         if (magic == MAGIC_I16_V2) {
-            int32_t qk = 0; read_exact(f, &qk, 4); qk_norm = qk != 0;
+            int32_t qk = 0; read_exact(&qk, 4); qk_norm = qk != 0;
         }
         dim = cfg[0]; hidden = cfg[1]; layers = cfg[2]; heads = cfg[3];
         kv_heads = cfg[4]; vocab = cfg[5]; seq = cfg[6];
@@ -370,43 +407,57 @@ bool Model::load_i16(const string& path){
         head_dim = dim / heads; kv_dim = kv_heads * head_dim;
         has_i16_emb = true;
         emb_i16.resize((size_t)vocab * dim);
-        read_exact(f, emb_i16.data(), emb_i16.size() * 2);
-        emb_scale.resize(vocab); read_exact(f, emb_scale.data(), emb_scale.size() * 4);
-        rms_att.resize((size_t)layers * dim); read_exact(f, rms_att.data(), rms_att.size() * 4);
-        rms_ffn.resize((size_t)layers * dim); read_exact(f, rms_ffn.data(), rms_ffn.size() * 4);
-        rms_final.resize(dim); read_exact(f, rms_final.data(), rms_final.size() * 4);
+        read_exact(emb_i16.data(), emb_i16.size() * 2);
+        emb_scale.resize(vocab); read_exact(emb_scale.data(), emb_scale.size() * 4);
+        rms_att.resize((size_t)layers * dim); read_exact(rms_att.data(), rms_att.size() * 4);
+        rms_ffn.resize((size_t)layers * dim); read_exact(rms_ffn.data(), rms_ffn.size() * 4);
+        rms_final.resize(dim); read_exact(rms_final.data(), rms_final.size() * 4);
         if (qk_norm) {
-            q_norm.resize((size_t)layers * head_dim); read_exact(f, q_norm.data(), q_norm.size() * 4);
-            k_norm.resize((size_t)layers * head_dim); read_exact(f, k_norm.data(), k_norm.size() * 4);
+            q_norm.resize((size_t)layers * head_dim); read_exact(q_norm.data(), q_norm.size() * 4);
+            k_norm.resize((size_t)layers * head_dim); read_exact(k_norm.data(), k_norm.size() * 4);
         }
         for (int l = 0; l < layers; ++l) {
-            qkv.push_back(read_mat(f, true));
-            wo.push_back(read_mat(f, true));
-            if (split) { w1.push_back(read_mat(f, true)); w3.push_back(read_mat(f, true)); }
-            else w13.push_back(read_mat(f, true));
-            w2.push_back(read_mat(f, true));
+            qkv.push_back(read_mat(true));
+            wo.push_back(read_mat(true));
+            if (split) { w1.push_back(read_mat(true)); w3.push_back(read_mat(true)); }
+            else w13.push_back(read_mat(true));
+            w2.push_back(read_mat(true));
         }
         int nt = (vocab + 1535) / 1536;
-        for (int i = 0; i < nt; ++i) logits_tiles.push_back(read_mat(f, true));
+        for (int i = 0; i < nt; ++i) logits_tiles.push_back(read_mat(true));
         return true;
     }
 
 Mat Model::slice_rows(const Mat& src, int r0, int r1){
         Mat m; m.rows = r1 - r0; m.cols = src.cols; m.type = src.type; m.scale = src.scale;
         if (src.type == WeightType::INT8) {
-            m.q8.resize((size_t)m.rows * m.cols);
-            memcpy(m.q8.data(), src.q8.data() + (size_t)r0 * m.cols, m.q8.size());
+            if (src.ext8) {
+                m.ext8 = src.ext8 + (size_t)r0 * m.cols;
+            } else {
+                m.q8.resize((size_t)m.rows * m.cols);
+                memcpy(m.q8.data(), src.q8.data() + (size_t)r0 * m.cols, m.q8.size());
+            }
         } else if (src.type == WeightType::INT16) {
-            m.q16.resize((size_t)m.rows * m.cols);
-            memcpy(m.q16.data(), src.q16.data() + (size_t)r0 * m.cols, m.q16.size() * 2);
+            if (src.ext16) {
+                m.ext16 = src.ext16 + (size_t)r0 * m.cols;
+            } else {
+                m.q16.resize((size_t)m.rows * m.cols);
+                memcpy(m.q16.data(), src.q16.data() + (size_t)r0 * m.cols, m.q16.size() * 2);
+            }
         } else {
             m.group = src.group; m.groups = src.groups; m.q4_param_scale = src.q4_param_scale;
-            m.q4.resize((size_t)m.rows * (m.cols / 2));
-            memcpy(m.q4.data(), src.q4.data() + (size_t)r0 * (m.cols / 2), m.q4.size());
-            m.q4_scale.resize((size_t)m.rows * m.groups);
-            memcpy(m.q4_scale.data(), src.q4_scale.data() + (size_t)r0 * m.groups, m.q4_scale.size() * 2);
-            m.q4_min.resize((size_t)m.rows * m.groups);
-            memcpy(m.q4_min.data(), src.q4_min.data() + (size_t)r0 * m.groups, m.q4_min.size() * 2);
+            if (src.ext4) {
+                m.ext4 = src.ext4 + (size_t)r0 * (m.cols / 2);
+                m.ext_scale4 = src.ext_scale4 + (size_t)r0 * m.groups;
+                m.ext_min4 = src.ext_min4 + (size_t)r0 * m.groups;
+            } else {
+                m.q4.resize((size_t)m.rows * (m.cols / 2));
+                memcpy(m.q4.data(), src.q4.data() + (size_t)r0 * (m.cols / 2), m.q4.size());
+                m.q4_scale.resize((size_t)m.rows * m.groups);
+                memcpy(m.q4_scale.data(), src.q4_scale.data() + (size_t)r0 * m.groups, m.q4_scale.size() * 2);
+                m.q4_min.resize((size_t)m.rows * m.groups);
+                memcpy(m.q4_min.data(), src.q4_min.data() + (size_t)r0 * m.groups, m.q4_min.size() * 2);
+            }
         }
         return m;
     }
@@ -416,11 +467,11 @@ Mat Model::slice_cols(const Mat& src, int c0, int c1){
         if (src.type == WeightType::INT8) {
             m.q8.resize((size_t)m.rows * m.cols);
             for (int r = 0; r < m.rows; ++r)
-                memcpy(m.q8.data() + (size_t)r * m.cols, src.q8.data() + (size_t)r * src.cols + c0, m.cols);
+                memcpy(m.q8.data() + (size_t)r * m.cols, src.w8() + (size_t)r * src.cols + c0, m.cols);
         } else if (src.type == WeightType::INT16) {
             m.q16.resize((size_t)m.rows * m.cols);
             for (int r = 0; r < m.rows; ++r)
-                memcpy(m.q16.data() + (size_t)r * m.cols, src.q16.data() + (size_t)r * src.cols + c0, m.cols * 2);
+                memcpy(m.q16.data() + (size_t)r * m.cols, src.w16() + (size_t)r * src.cols + c0, m.cols * 2);
         } else {
             if ((c0 % src.group) != 0 || (m.cols % src.group) != 0)
                 throw runtime_error("q4 column slice must be group aligned");
@@ -430,8 +481,8 @@ Mat Model::slice_cols(const Mat& src, int c0, int c1){
             for (int r = 0; r < m.rows; ++r) {
                 for (int c = 0; c < m.cols; c += 2) {
                     int s0 = c0 + c, s1 = s0 + 1;
-                    int b0 = src.q4[(size_t)r * (src.cols / 2) + s0 / 2];
-                    int b1 = src.q4[(size_t)r * (src.cols / 2) + s1 / 2];
+                    int b0 = src.w4()[(size_t)r * (src.cols / 2) + s0 / 2];
+                    int b1 = src.w4()[(size_t)r * (src.cols / 2) + s1 / 2];
                     int q0 = (s0 & 1) ? (b0 >> 4) : (b0 & 15);
                     int q1 = (s1 & 1) ? (b1 >> 4) : (b1 & 15);
                     m.q4[(size_t)r * (m.cols / 2) + c / 2] = (uint8_t)(q0 | (q1 << 4));
@@ -441,9 +492,9 @@ Mat Model::slice_cols(const Mat& src, int c0, int c1){
             m.q4_min.resize((size_t)m.rows * m.groups);
             for (int r = 0; r < m.rows; ++r) {
                 memcpy(m.q4_scale.data() + (size_t)r * m.groups,
-                       src.q4_scale.data() + (size_t)r * src.groups + g0, m.groups * 2);
+                       src.s4() + (size_t)r * src.groups + g0, m.groups * 2);
                 memcpy(m.q4_min.data() + (size_t)r * m.groups,
-                       src.q4_min.data() + (size_t)r * src.groups + g0, m.groups * 2);
+                       src.m4() + (size_t)r * src.groups + g0, m.groups * 2);
             }
         }
         return m;

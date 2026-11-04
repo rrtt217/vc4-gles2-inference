@@ -83,16 +83,22 @@ GPU::~GPU(){
     }
 
 void GPU::upload(Mat& m){
+        // Weights may be borrowed straight from the checkpoint mmap, so every
+        // reader goes through the w8()/w16()/w4() accessors; the +128 bias of INT8
+        // cannot be applied in place to a read-only map.
         if (m.type == WeightType::INT8) {
-            vector<uint8_t> data((size_t)m.rows * m.cols);
-            for (size_t i = 0; i < data.size(); ++i) data[i] = (uint8_t)((int)m.q8[i] + 128);
+            const int8_t* src = m.w8();
+            const size_t n = (size_t)m.rows * m.cols;
+            vector<uint8_t> data(n);
+            for (size_t i = 0; i < n; ++i) data[i] = (uint8_t)((int)src[i] + 128);
             m.tex = make_texture(m.cols / 4, m.rows, data.data());
         } else if (m.type == WeightType::INT16) {
+            const int16_t* src = m.w16();
             const int tex_w = (m.cols + 1) / 2;
             vector<uint8_t> data((size_t)m.rows * tex_w * 4);
             for (int r = 0; r < m.rows; ++r) {
                 for (int c = 0; c < m.cols; ++c) {
-                    uint16_t u = (uint16_t)m.q16[(size_t)r * m.cols + c];
+                    uint16_t u = (uint16_t)src[(size_t)r * m.cols + c];
                     int o = ((size_t)r * tex_w + c / 2) * 4;
                     if ((c & 1) == 0) { data[o] = u & 255; data[o + 1] = u >> 8; }
                     else               { data[o + 2] = u & 255; data[o + 3] = u >> 8; }
@@ -100,12 +106,15 @@ void GPU::upload(Mat& m){
             }
             m.tex = make_texture(tex_w, m.rows, data.data());
         } else {
-            m.tex = make_texture((m.cols + 7) / 8, m.rows, m.q4.data());
+            const uint8_t* src4 = m.w4();
+            const int16_t* s4 = m.s4();
+            const int16_t* mn4 = m.m4();
+            m.tex = make_texture((m.cols + 7) / 8, m.rows, src4);
             vector<uint8_t> pd((size_t)m.rows * m.groups * 4);
             for (int r = 0; r < m.rows; ++r) {
                 for (int g = 0; g < m.groups; ++g) {
-                    uint16_t sc = (uint16_t)m.q4_scale[(size_t)r * m.groups + g];
-                    uint16_t mn = (uint16_t)m.q4_min[(size_t)r * m.groups + g];
+                    uint16_t sc = (uint16_t)s4[(size_t)r * m.groups + g];
+                    uint16_t mn = (uint16_t)mn4[(size_t)r * m.groups + g];
                     size_t o = ((size_t)r * m.groups + g) * 4;
                     pd[o + 0] = sc >> 8; pd[o + 1] = sc & 255;
                     pd[o + 2] = mn >> 8; pd[o + 3] = mn & 255;

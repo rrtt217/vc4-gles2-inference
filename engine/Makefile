@@ -58,8 +58,11 @@ probes/q4fmt_probe_pi: probes/q4fmt_probe.cpp
 probes/progbinary_probe_pi: probes/progbinary_probe.cpp
 	@test -d "$(CROSS_SYSROOT)" || { echo "missing CROSS_SYSROOT=$(CROSS_SYSROOT)" >&2; exit 2; }
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -o $@ $< $(CROSS_LDLIBS)
+probes/load_probe_pi: probes/load_probe.cpp
+	@test -d "$(CROSS_SYSROOT)" || { echo "missing CROSS_SYSROOT=$(CROSS_SYSROOT)" >&2; exit 2; }
+	$(CROSS_CXX) $(CROSS_CXXFLAGS) -o $@ $< $(CROSS_LDLIBS)
 
 clean:
 	rm -f engine engine_mm3 engine_mm3_pi
-	rm -f probes/vc4_probe probes/vc4_ffn_probe probes/vc4_topk_probe
+	rm -f probes/vc4_probe probes/vc4_ffn_probe probes/vc4_topk_probe probes/load_probe_pi
 	rm -f probes/matvec_probe probes/texsize_probe probes/q4fmt_probe_pi

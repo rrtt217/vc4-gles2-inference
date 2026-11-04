@@ -2497,3 +2497,67 @@ unchanged - ACCEPT.  No draw path is touched, so decode is unchanged
 Next lever on this item is the ~12 s *before* the first link: the 69 MB model
 load on a swapping 426 MB machine, EGL init and the weight upload - not the
 shaders.
+
+### Startup, part 2: borrow the checkpoint instead of copying it
+
+The 69 MB model read was never the slow part of startup - the *copy* was.  A
+probe (`engine/probes/load_probe.cpp`, `make probes/load_probe_pi`) times every
+way the loader could get the file into RAM, at both temperatures.  Cold is
+forced with `posix_fadvise(POSIX_FADV_DONTNEED)` on the file, which drops clean
+page-cache pages without root.
+
+| method | cold (DONTNEED) | warm |
+|---|---:|---:|
+| `ifstream` (the old loader) | 6024-6134 ms | 384-399 ms |
+| `mmap` + `memcpy` into the vectors | 6358-6859 ms | 382-427 ms |
+| `mmap` + touch one byte per page | 6198-6375 ms | **45-57 ms** |
+| `read()` in 1 MiB buffers | 5887-6221 ms | 216-238 ms |
+| `mmap` + `MADV_WILLNEED` + `memcpy` | 6300-6708 ms | - |
+
+Cold is the SD card: 69 MB in ~6 s is 11 MB/s and no API changes that.  What
+the API changes is whether the pages are still there for the next run.  The old
+loader copied all 69 MB into private vectors; on this 426 MB board (168 MB of
+swap already in use) that allocation evicted the checkpoint *and* the Mesa
+driver between runs, so every start paid the 6 s SD read again and the EGL line
+swung 2.9-5.5 s with nothing running in between.
+
+So the loader now maps the checkpoint once (`MAP_PRIVATE`, read-only) and points
+each `Mat` at its bytes in the map (`Mat::ext8/ext16/ext4`, read through the
+`w8()/w16()/w4()/s4()/m4()` accessors).  Borrowed pages are page cache:
+reclaimable, never swapped, and still cached after `munmap`, so the mapping is
+dropped right after the weight upload (`Model::release_map()`).  The opt-in
+rewrite paths (`Q8_PARTS`, `Q4_WEIGHTS`) materialise the bytes they touch;
+`MODEL_BORROW=0` restores the copying loader for A/B.
+
+q8, `GPU_LAYER=1 KV_PACK=16 SEQ=768`, 14-token chat prompt, `SHADER_TIME=1`,
+medians of 3-4 runs per binary (min in parentheses):
+
+| phase | before | after |
+|---|---:|---:|
+| model loaded | 2226 ms (1724) | **139 ms (58)** |
+| EGL context (`GPU gpu;`) | 5935 ms (3102) | **1300 ms (1246)** |
+| FFN split (new mark) | - | 1557 ms (1387) |
+| weight upload | 11408 ms (6302) | 6870 ms (3951) |
+| session ready | 11656 ms (6441) | **7076 ms (4061)** |
+| prefill (incl. links) | 9.86 s | 9.66 s |
+| **first token** | **21.5 s (16.6)** | **17.3 s (13.4)** |
+
+The upload line did not get cheaper, it got *later*: on a cold start the SD read
+now happens on the first touch of each borrowed page, i.e. inside the upload,
+where `MADV_WILLNEED` started it earlier so it overlaps the EGL init.  The win
+is the warm start: the checkpoint stays cached, load is 50-150 ms and the driver
+is not evicted, so EGL init is back to ~1.2 s.
+
+One regression was found and fixed in the same step: keeping the 69 MB mapped
+through decode cost **2-3% decode** (min 183.4 -> 187.5 ms/token, twice in a
+row).  `release_map()` after the upload removes the mapping - the pages stay in
+the page cache - and the same A/B then reads 185.4/183.3 vs 184.2/183.5 ms/token,
+i.e. parity.
+
+A second build (before `release_map`) measured the same phases at
+9.7 / 5.3 / 4.2 / 4.9 s session-ready and 13.3-19.6 s first token in four
+consecutive runs, so the phase wins are stable while the total still wanders by
+several seconds with the board swap state.
+
+Suite on the final build: q8 271.2855, q4 325.3751, both greedy strings
+byte-identical, ACT8 arms unchanged - ACCEPT.

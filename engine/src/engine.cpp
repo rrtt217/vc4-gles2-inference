@@ -114,6 +114,7 @@ int main(int argc, char** argv) {
     if (getenv("SHADER_TIME")) fprintf(stderr, "STARTUP %7.1f ms  egl ready\n", run_time_ms());
     if (getenv("Q8_PARTS")) model.apply_precision(getenv("Q8_LAYERS") ? getenv("Q8_LAYERS") : "", getenv("Q8_PARTS"));
     model.split_ffn();
+    if (getenv("SHADER_TIME")) fprintf(stderr, "STARTUP %7.1f ms  ffn split\n", run_time_ms());
     if (getenv("Q4_WEIGHTS")) model.quantize_q4_weights(getenv("Q4_SCOPE") ? getenv("Q4_SCOPE") : "all");
     if (!tools_json.empty() && model.seq < 768) model.seq = 768;
     if ((worker || !build_cache_prompt.empty()) && model.seq < 1024 && !getenv("SEQ")) model.seq = 1024;
@@ -142,6 +143,7 @@ int main(int argc, char** argv) {
     for (auto& m : model.w2a) gpu.upload(m);
     for (auto& m : model.w2b) gpu.upload(m);
     for (auto& m : model.logits_tiles) gpu.upload(m);
+    model.release_map();
     if (getenv("SHADER_TIME")) fprintf(stderr, "STARTUP %7.1f ms  weights uploaded\n", run_time_ms());
 
     Session session(model, gpu);

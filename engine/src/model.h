@@ -2,6 +2,7 @@
 
 #include "common.h"
 #include <fstream>
+#include <iostream>
 #include <string>
 #include <vector>
 
@@ -28,6 +29,16 @@ public:
     int ffn_chunk = 0; // first hidden chunk; second is hidden - ffn_chunk
 
     bool load(const string& path);
+    ~Model();
+    // Drop the mapping once every weight is on the GPU.  The pages stay in the
+    // page cache - clean file pages, not process memory - so the next start is
+    // still warm, while this process carries no 69 MB of RSS through decode.
+    void release_map();
+
+    // Copy any borrowed weights back into their vectors (only the opt-in
+    // rewrite paths need that; upload reads the borrowed bytes directly).
+    static void materialize(Mat& m);
+
 
     void split_ffn();
 
@@ -37,10 +48,33 @@ public:
 
     void apply_precision(const string& layers_spec, const string& parts_spec);
 
-private:
-    static void read_exact(ifstream& f, void* p, size_t n);
 
-    Mat read_mat(ifstream& f, bool int16);
+private:
+    void read_exact(void* p, size_t n);
+
+    Mat read_mat(bool int16);
+
+    template <typename T> void read_seq(vector<T>& v, const T*& ext, size_t n){
+        const size_t bytes = n * sizeof(T);
+        if (fpos_ + bytes > fsize_) { cerr << "truncated checkpoint\n"; exit(1); }
+        if (borrow_ && (fpos_ % sizeof(T)) == 0) {
+            ext = (const T*)(fbase_ + fpos_);
+        } else {
+            v.resize(n);
+            memcpy(v.data(), fbase_ + fpos_, bytes);
+        }
+        fpos_ += bytes;
+    }
+
+    // The checkpoint stays mapped for the process lifetime: borrowed weights
+    // point into it.  Those pages are page cache - reclaimable, never swapped -
+    // so the next run reads them back from RAM instead of the SD card.
+    const uint8_t* fbase_ = nullptr;
+    size_t fsize_ = 0, fpos_ = 0;
+    void* map_ = nullptr;
+    size_t map_size_ = 0;
+    bool borrow_ = true;
+
 
     bool load_legacy(const string& path);
 

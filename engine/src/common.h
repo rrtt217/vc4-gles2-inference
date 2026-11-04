@@ -37,6 +37,22 @@ struct Mat {
     float q4_param_scale = 1.0f;
     float scale = 1.0f;
     GLuint tex = 0, q4_param_tex = 0;
+    // Borrowed weights: when one of these is set the matching vector above is
+    // empty and the bytes live in the checkpoint mmap (page cache) instead of
+    // anonymous memory.  A 69 MB q8 checkpoint then costs no RAM, stays
+    // cached across runs and reloads in tens of milliseconds.  Readers must
+    // go through the accessors below.
+    const int16_t* ext16 = nullptr;
+    const int8_t* ext8 = nullptr;
+    const uint8_t* ext4 = nullptr;
+    const int16_t* ext_scale4 = nullptr;
+    const int16_t* ext_min4 = nullptr;
+    const int8_t* w8() const { return ext8 ? ext8 : q8.data(); }
+    const int16_t* w16() const { return ext16 ? ext16 : q16.data(); }
+    const uint8_t* w4() const { return ext4 ? ext4 : q4.data(); }
+    const int16_t* s4() const { return ext_scale4 ? ext_scale4 : q4_scale.data(); }
+    const int16_t* m4() const { return ext_min4 ? ext_min4 : q4_min.data(); }
+    bool borrowed() const { return ext8 || ext16 || ext4; }
 };
 
 struct Target {
