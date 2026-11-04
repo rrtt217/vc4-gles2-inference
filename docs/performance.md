@@ -3107,6 +3107,16 @@ row pairing (the q8 paired kernel applied to q4) is the second, smaller lever
 at +14.9 ms.
 ## q4 parity step 8b: the vec4 gate is not faster, and the gate is draw-bound (2026-11-05)
 
+> **Partly withdrawn by 8c (2026-11-05).**  The 2432-row point in this section
+> was a draw over an incomplete texture: this driver caps textures at 2048 per
+> side, the 2432-row weight upload fails with `GL_INVALID_VALUE`, and the shader
+> sampled nothing.  The "one 2432-row draw is cheaper than two 1216-row draws",
+> the "14.4 against 7.7 us per fragment" occupancy cliff and the 21% vec4
+> penalty at that size are all artifacts of that.  The vec4 penalty at the
+> *valid* sizes (608 and 304 rows) stands, and so does the conclusion that the
+> vec4 rewrite is not the lever.  Corrected sweep and the real per-MAC
+> comparison are in the 8c section.
+
 **The 8a hypothesis is dead.**  `matvec_i4_pair_swiglu` now has a vec4 form
 (`Q4_MV4=1`, default off): the four texel bytes stay a `vec4`, the nibble split
 is an `ivec4` shift/mask, the eight activations decode into even/odd vec4 halves,
@@ -3173,3 +3183,62 @@ column-sliced w2 passes read the two halves of that one 1216-wide texture throug
 an x-offset uniform.  w2 keeps its group order, residual chain and q16 rounding,
 and the gate is row-independent, so the path stays byte-identical; expected
 -8 ms/layer, about -62 ms/token, gate 2.03x -> ~1.1x.
+
+## q4 parity step 8c: the one-draw gate cannot exist on this driver (2026-11-05)
+
+**The 8b plan is dead at the hardware limit, and 8b itself was measuring an
+empty texture.**  8c tried to keep w1/w3 full width and draw the fused q4 gate
+once at 2432 rows into a 1216-texel target, with the two w2 column slices
+reading the halves through an x-offset.  The engine came up with a gate of
+**zeros**: `FFN_DUMP` printed `ha` as eight `00000000` texels at layer 0 and the
+hidden stream diverged from the first layer on.
+
+**Root cause: this driver has `GL_MAX_TEXTURE_SIZE` 2048 and a q4 weight matrix
+costs one texel row per output row.**  `texsize_probe` on the board today:
+`h=2048 -> err=0x0`, `h=2432 -> GL_INVALID_VALUE (0x501)`.  So a 2432-row w1
+texture is never allocated, the sampler is incomplete, every fetch returns 0,
+and `sl(0,0)` writes a zero gate.  The engine cannot merge the two gate chunks
+without a two-sampler kernel that selects the texture by row; the texture-side
+merge is not available at all.
+
+**That also voids the 8b measurement.**  The row sweep in `q4mv_probe` went to
+2432 without checking `glTexImage2D`, so its 2432-row point was a draw over an
+incomplete texture: 9.39 ms was an empty shader run, and `hash 302bc5c5`,
+identical in the scalar and vec4 forms, was uninitialised target memory - two
+empty draws hash the same because neither reads a weight.  The 8b claims built
+on that point are withdrawn: one 2432-row draw is **not** cheaper than two
+1216-row draws, and the "14.4 against 7.7 us per fragment" occupancy cliff does
+not exist.
+
+**Corrected sweep** (`q4mv_probe`, upload error checked, `nz` = non-zero bytes
+read back; 20 pipelined draws and one sync per draw agree):
+
+| rows | fragments | ms/draw pipelined | ms/draw per-draw sync | nz bytes |
+|---:|---:|---:|---:|---:|
+| 304 | 152 | 2.98 | 3.01 | 251 / 608 |
+| 608 | 304 | 5.12 | 5.14 | 531 / 1216 |
+| 1216 | 608 | 8.68 | 8.71 | 1029 / 2432 |
+| 2048 | 1024 | 13.81 | 13.58 | 1748 / 4096 |
+
+The per-fragment cost is flat once past the smallest size: 16.9, 14.3, 13.3 us
+at 304, 608, 1024 fragments.  Fitting the top two points gives **1.6 ms per
+draw + 11.7 us per fragment**, so a hypothetical merged 1216-fragment draw
+would cost about 15.8 ms against the 17.4 ms the engine pays for its two
+608-fragment draws: **1.6 ms/layer, about 13 ms/token**, and it needs the
+two-sampler kernel.  That is not worth it while a structural lever exists.
+
+**Where the 2.03x actually lives: ALU per MAC.**  Each fragment does four
+768-wide dots (w1 and w3 for two rows) = 3072 MACs.  The q4 gate runs at
+3072 / 11.7 us = **263 MMAC/s**; the q8 gate stage (67.53 ms over 8 layers,
+2 draws of 608 fragments each) runs at 3072 / 6.94 us = **442 MMAC/s**.  q4 is
+59% of q8 per MAC, with the same fetch count per fragment and the same output
+shape.  The remaining q4 gate cost is the unpack plus the eight-tap scalar dot,
+and 8b already showed the vec4 rewrite does not help - the compiler vectorises
+the taps on its own.
+
+**Probe fix (this commit).**  `q4mv_probe` now clears and checks `glGetError`
+around both uploads, prints `SKIP upload err ...` instead of timing an
+unallocated texture, stops the sweep at 2048 rows, and reports `nz` so a
+zero/garbage read-back is visible in the same line as the timing.  The engine
+changes for 8c were reverted; the shipped binary is byte-identical to 8b
+(`1183f09`), golden q8/q4/poem strings re-checked on the board.
