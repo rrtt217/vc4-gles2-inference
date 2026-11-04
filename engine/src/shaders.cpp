@@ -414,21 +414,116 @@ string matvec_q8_p2(int rows, int cols) {
         "gl_FragColor=x_p2_stq(sa*ws,sb*ws);}";
 }
 
-// Prefill batching, step 7c: the packed gate kernel reads ONE texture holding
-// position A in [0,tw) and B in [tw,2*tw), both in the I16_2 activation layout
-// - the shape upload_input2 builds on the CPU.  Building it on the GPU is a
-// pure texel copy of the two textures side by side (no decode, no
-// re-quantisation), so the gate kernel reads exactly the bytes the serial
-// kernel would have read from its own FFN input.
-string pair_pack(int count) {
-    const string TW = to_string(x_texels(count, XFormat::I16_2));
-    return "precision highp float;"
-        "uniform sampler2D A,B;"
-        "void main(){int j=int(gl_FragCoord.x);"
-        "if(j<" + TW + "){gl_FragColor=texture2D(A,vec2((float(j)+0.5)/" + TW + ".0,0.5));}"
-        "else{gl_FragColor=texture2D(B,vec2((float(j-" + TW + ")+0.5)/" + TW + ".0,0.5));}"
-        "}";
+// Prefill batching, step 7d.  Step 7c needed a pack pass because the FFN input
+// was two per-position I16_2 textures and the packed gate wanted one texture.
+// The fix is to build that texture in the layout the gate reads: one stats draw
+// over both residuals plus one normalising draw that writes the P2 layout
+// (value k of A in .rg, value k of B in .ba).  On VC4 every pass ends in a
+// glFinish, so the passes 7c added (two rmsnorms, the pack and four splits) are
+// what made the pair path slower than serial; this is two draws for the FFN
+// input and no split at all.  The gate also reads P2 directly, which keeps the
+// fetch count of matvec_q8_gate2 (four activation texels per iteration) while
+// dropping the concatenated-half addressing.
+//
+// Exactness: the per-position sum of squares is the same 32 partials of 24
+// values in the same order as rms_stats_split, and the normalising expression
+// is the same R1(X,i)*inv*w[i] encoded by the same x_st2.  Only the layout the
+// result lands in changes, so the gate sees the q16 integers the serial
+// rmsnorm would have produced.
+string rms_stats2(int dim, XFormat rf) {
+    const string D = to_string(dim);
+    const string RW = to_string(x_texels(dim, rf));
+    return head(XFormat::I16_2) + x_residual_glsl(rf) + q24_helpers() +
+        "uniform sampler2D XA,XB;"
+        "vec4 encs(float s){float q=floor(s*4096.0+0.5)+8388608.0;"
+        "float r0=floor(q/16777216.0),g=floor(q/65536.0)-r0*256.0,"
+        "b=floor(q/256.0)-r0*65536.0-g*256.0,a=q-r0*16777216.0-g*65536.0-b*256.0;"
+        "return vec4(r0/255.0,g/255.0,b/255.0,a/255.0);}"
+        "void main(){int pid=int(gl_FragCoord.x);int per=(" + D + "+31)/32;"
+        "int i0=(pid-(pid/32)*32)*per;"
+        "float s=0.0;"
+        "for(int k=0;k<per;k++){int i=i0+k;if(i<" + D + "){"
+        "float v=(pid<32)?R1(XA,i," + RW + ".0):R1(XB,i," + RW + ".0);s+=v*v;}}"
+        "gl_FragColor=encs(s);}";
 }
+
+string rms_norm_pair2(int dim, XFormat rf) {
+    const string D = to_string(dim);
+    const string RW = to_string(x_texels(dim, rf));
+    const string DW = to_string(x_texels(dim, XFormat::I16_2));
+    return head(XFormat::I16_2) + x_residual_glsl(rf) + x_pair2_glsl() + q24_helpers() +
+        "uniform sampler2D XA,XB,W,S;"
+        "void main(){int k=int(gl_FragCoord.x);"
+        "float ssa=0.0,ssb=0.0;"
+        "for(int p=0;p<32;p++){"
+        "ssa+=x_i24raw(texture2D(S,vec2((float(p)+0.5)/64.0,0.5)))/4096.0;"
+        "ssb+=x_i24raw(texture2D(S,vec2((float(p+32)+0.5)/64.0,0.5)))/4096.0;}"
+        "float inva=1.0/sqrt(ssa/float(" + D + ")+1e-5);"
+        "float invb=1.0/sqrt(ssb/float(" + D + ")+1e-5);"
+        "vec4 wc=texture2D(W,vec2((float(k/2)+0.5)/float(" + DW + "),0.5));"
+        "float wk=((k/2)*2==k)?x_i16(wc.rg):x_i16(wc.ba);"
+        "float va=R1(XA,k," + RW + ".0)*inva*wk;"
+        "float vb=R1(XB,k," + RW + ".0)*invb*wk;"
+        "gl_FragColor=x_p2_st(va,vb);}";
+}
+
+
+// The packed gate on the P2 FFN input: four activation texels per iteration,
+// each carrying one value per position, so the fetch count and the MAC order
+// are exactly those of matvec_q8_gate2 and the output bytes match it.
+string matvec_q8_gate2_p2(int rows, int cols) {
+    const string ROWS = to_string(rows), COLS4 = to_string(cols / 4);
+    const string CW = to_string(cols);
+    const string WR = "vec2((float(q)+0.5)/float(" + COLS4 + ")," 
+                      "(float(r)+0.5)/float(" + ROWS + "))";
+    return head(XFormat::I16_2) + x_pair2_glsl() +
+        "uniform sampler2D W1,W2,X;uniform float ws1,ws2;"
+        "float qz(float v){return clamp(floor(v+0.5),-32768.0,32767.0);}"
+        "float sl(float q,float g){float a=q/256.0;"
+        "return (a/(1.0+exp(-a)))*(g/256.0);}"
+        "void main(){int r=int(gl_FragCoord.x);"
+        "float s10=0.0,s20=0.0,s11=0.0,s21=0.0;"
+        "for(int q=0;q<" + COLS4 + ";q++){"
+        "vec4 t0=texture2D(X,vec2((float(4*q)+0.5)/float(" + CW + "),0.5));"
+        "vec4 t1=texture2D(X,vec2((float(4*q+1)+0.5)/float(" + CW + "),0.5));"
+        "vec4 t2=texture2D(X,vec2((float(4*q+2)+0.5)/float(" + CW + "),0.5));"
+        "vec4 t3=texture2D(X,vec2((float(4*q+3)+0.5)/float(" + CW + "),0.5));"
+        "float a0=x_p2_a(t0),a1=x_p2_a(t1),a2=x_p2_a(t2),a3=x_p2_a(t3);"
+        "float b0=x_p2_b(t0),b1=x_p2_b(t1),b2=x_p2_b(t2),b3=x_p2_b(t3);"
+        "vec4 c=texture2D(W1," + WR + ");vec4 w=c*255.0-128.0;"
+        "s10+=w.x*a0+w.y*a1+w.z*a2+w.w*a3;"
+        "s11+=w.x*b0+w.y*b1+w.z*b2+w.w*b3;"
+        "c=texture2D(W2," + WR + ");w=c*255.0-128.0;"
+        "s20+=w.x*a0+w.y*a1+w.z*a2+w.w*a3;"
+        "s21+=w.x*b0+w.y*b1+w.z*b2+w.w*b3;}"
+        "gl_FragColor=x_p2_st(sl(qz(s10*ws1),qz(s20*ws2)),"
+        "sl(qz(s11*ws1),qz(s21*ws2)));}";
+}
+
+// Two-position w2 whose residual is the previous w2 chunk output, which is
+// already P2: one texel carries both positions value r, so the add reads one
+// texel instead of two and the add itself is the same expression.
+string matvec_q8_p2_add_p2(int rows, int cols) {
+    const string ROWS = to_string(rows), COLS4 = to_string(cols / 4), CW = to_string(cols);
+    return head(XFormat::I16_2) + x_pair2_glsl() +
+        "uniform sampler2D W,X,RA;uniform float ws;"
+        "void main(){int r=int(gl_FragCoord.x);float sa=0.0,sb=0.0;"
+        "for(int q=0;q<" + COLS4 + ";q++){"
+        "vec4 c=texture2D(W,vec2((float(q)+0.5)/float(" + COLS4 + ")," 
+        "(float(r)+0.5)/float(" + ROWS + ")));"
+        "vec4 w=c*255.0-128.0;"
+        "vec4 t0=texture2D(X,vec2((float(4*q)+0.5)/float(" + CW + "),0.5));"
+        "vec4 t1=texture2D(X,vec2((float(4*q+1)+0.5)/float(" + CW + "),0.5));"
+        "vec4 t2=texture2D(X,vec2((float(4*q+2)+0.5)/float(" + CW + "),0.5));"
+        "vec4 t3=texture2D(X,vec2((float(4*q+3)+0.5)/float(" + CW + "),0.5));"
+        "float a0=x_p2_a(t0),a1=x_p2_a(t1),a2=x_p2_a(t2),a3=x_p2_a(t3);"
+        "float b0=x_p2_b(t0),b1=x_p2_b(t1),b2=x_p2_b(t2),b3=x_p2_b(t3);"
+        "sa+=w.x*a0+w.y*a1+w.z*a2+w.w*a3;"
+        "sb+=w.x*b0+w.y*b1+w.z*b2+w.w*b3;}"
+        "vec4 rc=texture2D(RA,vec2((float(r)+0.5)/float(" + ROWS + "),0.5));"
+        "gl_FragColor=x_p2_stq(sa*ws+x_p2_a(rc),sb*ws+x_p2_b(rc));}";
+}
+
 
 // Two-position w2 with the residual add (step 7c).  The single-position path
 // adds the residual *before* rounding (enc16(s*ws+res)); rounding the matvec

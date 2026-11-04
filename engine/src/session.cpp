@@ -377,32 +377,35 @@ vector<float> Session::step_pair(int tok_a, int pos_a, int tok_b, int pos_b, boo
             GLuint att_b = gpu_.attention_block(m_.qkv[l], xbb, l, pos_b);
             gpu_.matvec_add(m_.wo[l], att_b, h_b, gpu_.pp_b2_, gpu_.act_fmt_);
             plap("att");
-            GLuint xbf_a = gpu_.rmsnorm(gpu_.pp_a2_.tex, gpu_.rms_ffn_tex_[l], gpu_.xbf_);
-            GLuint xbf_b = gpu_.rmsnorm(gpu_.pp_b2_.tex, gpu_.rms_ffn_tex_[l], gpu_.xbf2_);
-            gpu_.pair_pack(xbf_a, xbf_b, gpu_.pp_in_);
+            // 7d: the FFN input is built straight into P2 - one stats draw for
+            // both positions, one normalising draw - so there is no pack pass,
+            // and the second w2 chunk takes its residual from the first chunk P2
+            // output, which removes the four splits 7c needed.  Only the two
+            // splits that hand the layer output back as per-position residuals
+            // remain.
+            GLuint xin2 = gpu_.rmsnorm_pair2(gpu_.pp_a2_.tex, gpu_.pp_b2_.tex,
+                                             gpu_.rms_ffn_tex_[l], gpu_.pp_in2_);
             if (m_.ffn_chunked) {
-                gpu_.ffn_pair_swiglu_chunk2(m_.w1a[l], m_.w3a[l], gpu_.pp_in_.tex,
-                                            m_.ffn_chunk, gpu_.pp_g_);
+                gpu_.ffn_pair_swiglu_chunk2_p2(m_.w1a[l], m_.w3a[l], xin2,
+                                               m_.ffn_chunk, gpu_.pp_g_);
                 plap("gate0");
                 gpu_.matvec_p2_add(m_.w2a[l], gpu_.pp_g_.tex,
                                    gpu_.pp_a2_.tex, gpu_.pp_b2_.tex, gpu_.pp_w2_);
                 plap("w20");
-                gpu_.p2_split(gpu_.pp_w2_.tex, gpu_.pp_a3_, 0);
-                gpu_.p2_split(gpu_.pp_w2_.tex, gpu_.pp_b3_, 1);
-                gpu_.ffn_pair_swiglu_chunk2(m_.w1b[l], m_.w3b[l], gpu_.pp_in_.tex,
-                                            m_.hidden - m_.ffn_chunk, gpu_.pp_g_);
-                gpu_.matvec_p2_add(m_.w2b[l], gpu_.pp_g_.tex,
-                                   gpu_.pp_a3_.tex, gpu_.pp_b3_.tex, gpu_.pp_w2_);
-                gpu_.p2_split(gpu_.pp_w2_.tex, gpu_.pp_a_, 0);
-                gpu_.p2_split(gpu_.pp_w2_.tex, gpu_.pp_b_, 1);
+                gpu_.ffn_pair_swiglu_chunk2_p2(m_.w1b[l], m_.w3b[l], xin2,
+                                               m_.hidden - m_.ffn_chunk, gpu_.pp_g_);
+                gpu_.matvec_p2_add_p2(m_.w2b[l], gpu_.pp_g_.tex, gpu_.pp_w2_.tex, gpu_.pp_w2b_);
+                gpu_.p2_split(gpu_.pp_w2b_.tex, gpu_.pp_a_, 0);
+                gpu_.p2_split(gpu_.pp_w2b_.tex, gpu_.pp_b_, 1);
             } else {
-                gpu_.ffn_pair_swiglu_chunk2(m_.w1[l], m_.w3[l], gpu_.pp_in_.tex,
-                                            m_.hidden, gpu_.pp_g_);
+                gpu_.ffn_pair_swiglu_chunk2_p2(m_.w1[l], m_.w3[l], xin2,
+                                               m_.hidden, gpu_.pp_g_);
                 gpu_.matvec_p2_add(m_.w2[l], gpu_.pp_g_.tex,
                                    gpu_.pp_a2_.tex, gpu_.pp_b2_.tex, gpu_.pp_w2_);
                 gpu_.p2_split(gpu_.pp_w2_.tex, gpu_.pp_a_, 0);
                 gpu_.p2_split(gpu_.pp_w2_.tex, gpu_.pp_b_, 1);
             }
+
             plap("ffn");
             h_a = gpu_.pp_a_.tex;
             h_b = gpu_.pp_b_.tex;

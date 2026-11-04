@@ -2860,3 +2860,75 @@ target switches.  The next step is to cut the pass count - keep the pair stream
 in P2 and let rmsnorm read it, or have the packed gate read the two activation
 textures directly and drop `pair_pack` - or to go to B=4, where one weight fetch
 serves four positions.
+
+## Prefill batching, step 4: the pair path pays (2026-11-04)
+
+Step 3 wired the two-position FFN into `Session` and judged it **6% slower**,
+pricing the loss to the five extra passes per layer.  The passes were real.
+The measurement was also carrying something else: the plain-mode `prefill`
+timer starts before the first draw, and on VC4 every fragment program is
+linked lazily at first use.  `SHADER_TIME` puts **2.5-4.0 s of a cold prefill**
+in `glLinkProgram` (14 programs on the serial path, 20 on the pair path), so
+two modes that drive different kernels were being compared including their
+different compiler time.  Wall-clock prefill on this board is also noisy: the
+Pi Zero runs the Minecraft server, so a 21-token prefill measured 15.9-30.6 s
+in one afternoon with the engine unchanged.
+
+Step 4 removes the passes and measures the warm path.
+
+**What changed.**  The FFN input is now *built* in the layout the packed gate
+reads instead of being packed into it, and the second w2 chunk reads its
+residual from the chunk-0 P2 output (a P2 texel already holds value r of both
+positions, so one fetch replaces two):
+
+| FFN stage, two positions | step 3 | step 4 |
+|---|---|---|
+| FFN input | 2 rmsnorm (4 draws) + `pair_pack` | `rms_stats2` + `rms_norm_pair2` (2 draws, writes P2) |
+| gate, both chunks | `matvec_q8_gate2` on the A-half-B-half layout | `matvec_q8_gate2_p2` on P2 (same 4 activation fetches per iteration) |
+| w2 chunk 0 | `matvec_q8_p2_add`, residual per position | unchanged |
+| w2 chunk 1 | 2 splits, then `matvec_q8_p2_add` | `matvec_q8_p2_add_p2`, residual is the chunk-0 P2, output stays P2 |
+| layer output | 2 splits | 2 splits |
+
+Per layer for two positions that is **14 draws against 18** for the same work
+on the serial path (19 in step 3).  Four of the fourteen are the packed FFN
+kernels; the other ten are attention and rmsnorm, which batching does not
+touch.
+
+**Exactness.**  The sum of squares keeps the serial order - 32 partials of 24
+values, then p=0..31 - and the normalising pass keeps the same
+`R1(X,i)*inv*w[i]` expression and the same `x_st2` encoding, so the q16 stream
+into the gate is the same bytes, not merely the same value.  The w2 residual
+add stays inside the kernel in the serial expression order (`s*ws+res` before
+the encode), which step 3 established is what makes the path bit-exact.  On the
+Pi: the identity prompt still answers
+`我是一个AI助手，没有自我意识，也没有身体，所以我无法` and the q4 prompt
+`我是MiniMind，一个高效的小参数AI模型，专注于`; a ~30-token English prompt
+with 24 greedy tokens gives the **same text character for character** with
+`PREFILL_PAIR=0` and `=1`, so the KV cache the pair path writes is byte-equal
+(one LSB anywhere in a hidden state moves greedy output within a few tokens).
+
+**Warm prefill.**  `PREFILL_REPEAT=n` now re-runs the prefill in one process,
+which skips every link and, more importantly, every QPU program generation.
+Comparing `n=1` with `n=3` and differencing also removes model load and the
+decode step, so what is left is two warm prefills.  CPU (user+sys) per 21-token
+prefill, two interleaved runs of each mode:
+
+| mode | run 1 | run 2 |
+|---|---:|---:|
+| serial `PREFILL_PAIR=0` | 6.81 s | 6.96 s |
+| pair `PREFILL_PAIR=1` | 5.74 s | 5.66 s |
+
+**-17% for the same prefill.**  CPU rather than wall time is the metric here:
+the process totals are stable to ~2% (the board is single-core and shared),
+while wall time is not.  Cold prefill in the same set of runs was 15.9-22.2 s
+pair against 18.0-30.6 s serial, but cold numbers are the compiler plus the
+board and are not a kernel measurement.
+
+**Where the losses were.**  The five draws step 3 added on top of what the layer
+needs - three for the FFN input, two splits after chunk 0 - cost about as much as
+the FFN packing won (4 ms per layer), which is why step 3 measured slower.
+Removing them, and keeping the second w2 residual in P2 so the splits after
+chunk 1 also disappear, makes the pair path cheaper than serial in both kernels
+and draw count.  The remaining question is the default: `PREFILL_PAIR` is still
+opt-in until the suite has been run with it on (item 7e).
+

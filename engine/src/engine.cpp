@@ -544,27 +544,49 @@ int main(int argc, char** argv) {
     cout << "tokens:";
     for (int t : tokens) cout << " " << t;
     cout << "\n";
-    auto start = Clock::now();
-    if (getenv("SHADER_TIME")) fprintf(stderr, "STARTUP %7.1f ms  first step\n", run_time_ms());
     vector<float> logits;
     CandidateResult cand;
     bool cand_mode = topk != 0 && !greedy && !sampling_penalties_active();
-    for (size_t i = 0; i < tokens.size(); ++i) {
-        if (g_stop) break;
-        bool last = (i + 1 == tokens.size());
-        if (last && cand_mode) {
-            cand = session.step_candidates(tokens[i], (int)i, topk, temp, top_p);
-            if (!cand.complete) { logits = std::move(cand.full); cand_mode = false; }
-        } else if (!last && i + 2 < tokens.size() && (int)i + 1 < model.seq && session.pair_ok()) {
-            session.step_pair(tokens[i], (int)i, tokens[i + 1], (int)i + 1, false);
-            ++i;
-        } else {
-            logits = session.step(tokens[i], (int)i, last);
+    // PREFILL_REPEAT=n runs the same prefill n times in one process.  The first
+    // pass pays every lazy shader link and every QPU program generation, which
+    // on VC4 is seconds; a comparison between two modes that compile different
+    // program sets otherwise measures the compiler, not the kernels (that is
+    // how step 7c came out "6% slower" while its kernels were faster).  The
+    // repeats are exact re-runs - every KV entry is rewritten with the same
+    // bytes before it is read - so prefill_warm is the number the server sees.
+    auto prefill_once = [&]() {
+        vector<float> lg;
+        for (size_t i = 0; i < tokens.size(); ++i) {
+            if (g_stop) break;
+            bool last = (i + 1 == tokens.size());
+            if (last && cand_mode) {
+                cand = session.step_candidates(tokens[i], (int)i, topk, temp, top_p);
+                if (!cand.complete) { lg = std::move(cand.full); cand_mode = false; }
+            } else if (!last && i + 2 < tokens.size() && (int)i + 1 < model.seq && session.pair_ok()) {
+                session.step_pair(tokens[i], (int)i, tokens[i + 1], (int)i + 1, false);
+                ++i;
+            } else {
+                lg = session.step(tokens[i], (int)i, last);
+            }
         }
-    }
+        return lg;
+    };
+    auto start = Clock::now();
+    if (getenv("SHADER_TIME")) fprintf(stderr, "STARTUP %7.1f ms  first step\n", run_time_ms());
+    logits = prefill_once();
     if (g_stop) { gpu.sync(); cout << "\n[interrupted]\n"; return 0; }
     double prefill = chrono::duration<double>(Clock::now() - start).count();
     cout << "prefill " << prefill << " s\n";
+    if (getenv("PREFILL_REPEAT")) {
+        int n = max(1, atoi(getenv("PREFILL_REPEAT")));
+        for (int r = 1; r < n; ++r) {
+            auto t = Clock::now();
+            logits = prefill_once();
+            double w = chrono::duration<double>(Clock::now() - t).count();
+            cout << "prefill_warm " << w << " s\n";
+        }
+    }
+
     if (!cand_mode && getenv("LOGITS_OUT")) {
         ofstream f(getenv("LOGITS_OUT"), ios::binary);
         f.write((char*)logits.data(), logits.size() * 4);

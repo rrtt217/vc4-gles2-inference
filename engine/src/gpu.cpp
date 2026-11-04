@@ -1090,8 +1090,24 @@ void GPU::matvec_p2(const Mat& m, GLuint xp2, Target& out){
         if (getenv("FFN_SYNC")) { glFlush(); glFinish(); }
     }
 
-GLuint GPU::x_pair_pack(int count){
-        return x_prog("xp2pk_" + to_string(count), ::pair_pack(count));
+GLuint GPU::x_rms_stats2(){
+        return x_prog("xrms2s_" + to_string(att_dim_) + "_" + x_format_name(res_fmt_),
+                      ::rms_stats2(att_dim_, res_fmt_));
+    }
+
+GLuint GPU::x_rms_norm_pair2(){
+        return x_prog("xrms2n_" + to_string(att_dim_) + "_" + x_format_name(res_fmt_),
+                      ::rms_norm_pair2(att_dim_, res_fmt_));
+    }
+
+GLuint GPU::x_q8_gate2_p2(int rows, int cols){
+        return x_prog("xq8g2p2_" + to_string(rows) + "_" + to_string(cols),
+                      ::matvec_q8_gate2_p2(rows, cols));
+    }
+
+GLuint GPU::x_q8_p2_add_p2(int rows, int cols){
+        return x_prog("xq8p2a2_" + to_string(rows) + "_" + to_string(cols),
+                      ::matvec_q8_p2_add_p2(rows, cols));
     }
 
 GLuint GPU::x_q8_p2_add(int rows, int cols){
@@ -1104,19 +1120,76 @@ GLuint GPU::x_p2_split(int rows){
                       ::p2_split(rows, res_fmt_));
     }
 
-// Two positions FFN input -> one texture, A texels then B texels, exactly the
-// bytes upload_input2 builds on the CPU (the I16_2 layout, not the P2 target).
-void GPU::pair_pack(GLuint a, GLuint b, Target& out){
-        const int w = 2 * x_texels(att_dim_, XFormat::I16_2);
-        if (out.tex == 0 || out.w != w) out = make_target(w, 1);
-        GLuint p = x_pair_pack(att_dim_);
-        bind_fbo(out.fbo);
-        glViewport(0, 0, w, 1);
-        use_program(p);
-        bind_tex(0, a); set_sampler(p, "A", 0);
-        bind_tex(1, b); set_sampler(p, "B", 1);
-        setup_attrib(p);
+// Prefill step 7d: two per-position FFN residuals -> one P2 texture in two
+// draws (sum of squares for both positions, then one normalising pass).
+GLuint GPU::rmsnorm_pair2(GLuint xa, GLuint xb, GLuint w, Target& out){
+        const int aw = att_dim_;   // P2: one texel per value per position
+        if (out.tex == 0 || out.w != aw) out = make_target(aw, 1);
+        if (rms_partial2_.tex == 0 || rms_partial2_.w != 64) rms_partial2_ = make_target(64, 1);
+        GLuint ps = x_rms_stats2();
+        bind_fbo(rms_partial2_.fbo);
+        glViewport(0, 0, 64, 1);
+        use_program(ps);
+        bind_tex(0, xa); set_sampler(ps, "XA", 0);
+        bind_tex(1, xb); set_sampler(ps, "XB", 1);
+        setup_attrib(ps);
         glDrawArrays(GL_TRIANGLES, 0, 3);
+        layer_finish("NF_RMS");
+        GLuint pn = x_rms_norm_pair2();
+        bind_fbo(out.fbo);
+        glViewport(0, 0, aw, 1);
+        use_program(pn);
+        bind_tex(0, xa); set_sampler(pn, "XA", 0);
+        bind_tex(1, xb); set_sampler(pn, "XB", 1);
+        bind_tex(2, w); set_sampler(pn, "W", 2);
+        bind_tex(3, rms_partial2_.tex); set_sampler(pn, "S", 3);
+        setup_attrib(pn);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        layer_finish("NF_RMS");
+        return out.tex;
+    }
+
+GLuint GPU::ffn_pair_swiglu_chunk2_p2(const Mat& w1, const Mat& w3, GLuint xp2, int rows, Target& out){
+        if (out.tex == 0 || out.w != rows) out = make_target(rows, 1);
+        GLuint p = x_q8_gate2_p2(rows, w1.cols);
+        bind_fbo(out.fbo);
+        use_program(p);
+        bind_tex(0, w1.tex); set_sampler(p, "W1", 0);
+        bind_tex(1, w3.tex); set_sampler(p, "W2", 1);
+        bind_tex(2, xp2); set_sampler(p, "X", 2);
+        glUniform1f(uloc(p, "ws1"), w1.scale);
+        glUniform1f(uloc(p, "ws2"), w3.scale);
+        setup_attrib(p);
+        for (int x0 = 0; x0 < rows; x0 += 1024) {
+            const int w = min(1024, rows - x0);
+            glViewport(x0, 0, w, 1);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+        }
+        if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
+        else layer_finish("NF_FFN");
+        if (getenv("FFN_SYNC")) { glFlush(); glFinish(); }
+        return out.tex;
+    }
+
+// Two-position w2 whose residual is the previous chunk P2 output: one texel
+// carries both positions value r, so the add reads one texel, and the
+// expression order (add inside the kernel, before the q16 encode) is the
+// serial one that step 7c had to preserve.
+void GPU::matvec_p2_add_p2(const Mat& m, GLuint xp2, GLuint rp2, Target& out){
+        if (out.tex == 0 || out.w != m.rows) out = make_target(m.rows, 1);
+        GLuint p = x_q8_p2_add_p2(m.rows, m.cols);
+        bind_fbo(out.fbo);
+        use_program(p);
+        bind_tex(0, m.tex); set_sampler(p, "W", 0);
+        bind_tex(1, xp2); set_sampler(p, "X", 1);
+        bind_tex(2, rp2); set_sampler(p, "RA", 2);
+        glUniform1f(uloc(p, "ws"), m.scale);
+        setup_attrib(p);
+        for (int x0 = 0; x0 < m.rows; x0 += 1024) {
+            const int w = min(1024, m.rows - x0);
+            glViewport(x0, 0, w, 1);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+        }
         if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
         else layer_finish("NF_FFN");
         if (getenv("FFN_SYNC")) { glFlush(); glFinish(); }
