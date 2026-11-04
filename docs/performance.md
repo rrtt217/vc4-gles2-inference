@@ -3105,3 +3105,63 @@ vec4) and compare the gate bytes against the current kernel with
 1-LSB move in 2 of 768 values is enough to change the greedy text.  The qkv
 row pairing (the q8 paired kernel applied to q4) is the second, smaller lever
 at +14.9 ms.
+## q4 parity step 8b: the vec4 gate is not faster, and the gate is draw-bound (2026-11-05)
+
+**The 8a hypothesis is dead.**  `matvec_i4_pair_swiglu` now has a vec4 form
+(`Q4_MV4=1`, default off): the four texel bytes stay a `vec4`, the nibble split
+is an `ivec4` shift/mask, the eight activations decode into even/odd vec4 halves,
+and each weight texel accumulates `lo*xe+hi*xo` into four vec4 accumulators that
+are flattened once per 32-weight group.  At 2432x768 the bytes match -
+`q4mv_probe` prints `hash 302bc5c5` for both forms - and the dot itself cannot
+move a bit by construction: taps are integers in [0,15] and activations are raw
+q16 integers, so every product and every partial sum of eight
+(8 x 15 x 32767 < 2^24) is an exact fp32 integer.
+
+**Exact at the model shape, not in general.**  The sweep shows the bytes are
+not universally identical: at 608 rows one q16 value in 608 differs (bytes
+202-203, 17151 against 17279 units) and at 1216 rows another does.  The dot
+cannot be the source - every product and partial sum is an exact integer - so
+the difference has to sit in the final scaled accumulate, where
+`sa1*d1 + ma1*xsum` may be contracted to an FMA in one form and not the other.
+A 1-ULP difference there flips a `qz()` boundary, and a large gate value g turns
+that one-unit flip into about g/65536 = 0.5 of output, which is the step the
+dump shows.  That is the 7c trap again: the gate is q16, and one value in 608 is
+enough to move the greedy text.  Default off is therefore not caution, it is the
+measurement.
+
+It is **21% slower**: 11.35 against 9.39 ms per 2432-row gate draw, and 3.58
+against 3.05 at 304 rows.  The compiler was already vectorising the scalar taps
+(four components of one texel, same op), so the explicit vec4 form added nothing
+but four live accumulators.  **The gate is not ALU-bound**, so the 8a reading -
+eight scalar taps against four vec4 lanes - was wrong about where the time goes.
+
+**What the gate is: under-occupied per draw.**  The same probe with the scalar
+kernel, sweeping the row count, in two regimes: 20 pipelined draws with one
+`glFinish`, and one `glFinish` per draw (the engine regime).  The two regimes
+agree, so there is no pipelining win to recover; a second build after a board
+reboot reproduced all four points within 1%.
+
+| rows | fragments | ms/draw pipelined | ms/draw per-draw sync |
+|---:|---:|---:|---:|
+| 304 | 152 | 3.05 | 3.02 |
+| 608 | 304 | 5.18 | 5.24 |
+| 1216 | 608 | 8.71 | 8.73 |
+| 2432 | 1216 | 9.39 | 9.37 |
+
+Doubling from 608 to 1216 fragments costs **0.6 ms**, and **one 2432-row draw
+(9.39 ms) is cheaper than the two 1216-row draws the engine issues per layer
+(2 x 8.71 = 17.4 ms)**.  The profile agrees: the gate stage is 137.03 ms over 8
+layers = 17.1 ms/layer, i.e. two 608-fragment draws at 8.7 ms each.  Most of the
+2.03x q4/q8 gate ratio is therefore not arithmetic: it is the chunk split
+doubling the draw count at a fragment count where this kernel runs at half rate
+(14.4 us/fragment at 608 against 7.7 at 1216, which is where the q8 kernel
+already sits at 608).
+
+**Next step (8c): one gate draw per layer.**  `split_ffn()` splits the FFN at
+hidden > 2048 because the *non-fused* two-pass path needs a 2432-wide target;
+the fused gate only needs a 1216-texel I16_2 output, which fits.  Plan: keep
+w1/w3 full width, draw the gate once (2432 rows, 9.39 ms), and let the two
+column-sliced w2 passes read the two halves of that one 1216-wide texture through
+an x-offset uniform.  w2 keeps its group order, residual chain and q16 rounding,
+and the gate is row-independent, so the path stays byte-identical; expected
+-8 ms/layer, about -62 ms/token, gate 2.03x -> ~1.1x.

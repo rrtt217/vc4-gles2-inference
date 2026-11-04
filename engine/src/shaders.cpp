@@ -78,6 +78,47 @@ static string q4_xsum() {
     return q4_nomin() ? "" : "xsum+=xa.x+xa.y+xa.z+xa.w+xb.x+xb.y+xb.z+xb.w;";
 }
 
+// Vec4 form of the fused-gate tap decode (Q4_MV4=1, default off).  It is
+// byte-identical to the scalar form but 21% slower at the model shape
+// (q4mv_probe: 11.35 against 9.39 ms per 2432-row draw), so it ships off and
+// stays as the A/B that killed the ALU hypothesis.  Every tap is an integer
+// in [0,15] and every activation an integer in [-32768,32767], so each
+// product is exact and any sum of the eight per group stays below 2^24: the
+// lane split and the horizontal add cannot move a bit.  The caller declares
+// bb/ib/hi/lo once per loop body, so the statements below are assignments.
+static bool q4_mv4() {
+    static const char* e = getenv("Q4_MV4");
+    static const bool v = e && strcmp(e, "0") != 0;
+    return v;
+}
+
+static string q4_taps4(const char* W) {
+    const string w(W);
+    return "bb=floor(" + w + "*255.0+0.5);ib=ivec4(bb);"
+           "hi=vec4(ib>>4);lo=vec4(ib&15);";
+}
+
+// The eight activations of one 32-weight group, even columns in xe and odd in
+// xo, so lo*xe+hi*xo is the same term order as the scalar l0..h3 chain.
+static string q4_act8(XFormat xf, int cols, bool inl) {
+    const string AXW = to_string(x_texels(cols, xf));
+    if (!inl || xf != XFormat::I16_2)
+        return "vec4 xa=X4Q(X,c," + AXW + ".0);vec4 xb=X4Q(X,c+4," + AXW + ".0);"
+               "vec4 xe=vec4(xa.x,xa.z,xb.x,xb.z),xo=vec4(xa.y,xa.w,xb.y,xb.w);";
+    return
+        "vec4 t0=texture2D(X,vec2((float(c/2)+0.5)/" + AXW + ".0,0.5));"
+        "vec4 t1=texture2D(X,vec2((float(c/2+1)+0.5)/" + AXW + ".0,0.5));"
+        "vec4 t2=texture2D(X,vec2((float(c/2+2)+0.5)/" + AXW + ".0,0.5));"
+        "vec4 t3=texture2D(X,vec2((float(c/2+3)+0.5)/" + AXW + ".0,0.5));"
+        "vec4 xe=vec4(dA(t0),dA(t1),dA(t2),dA(t3));"
+        "vec4 xo=vec4(dB(t0),dB(t1),dB(t2),dB(t3));";
+}
+
+static string q4_xsum8() {
+    return q4_nomin() ? "" : "vec4 xs=xe+xo;xsum+=xs.x+xs.y+xs.z+xs.w;";
+}
+
+
 // Default-off probe (Q4_NOUNPACK=1): swap the nibble unpack for a handful of
 // multiplies (the weights are nonsense on purpose) to price the four fetches
 // plus the floor chain.  A large win here is the only thing that would justify
@@ -865,11 +906,39 @@ string matvec_i4_pair_swiglu(int rows, int cols, XFormat xf, bool inl) {
     const int axw = x_texels(cols, xf);
     const string ROWS = to_string(rows), GROUPS = to_string(groups),
                  TEXW = to_string(texw), AXW = to_string(axw);
+    // Q4_MV4=1 selects the vec4 tap/dot form.  The default scalar path emits
+    // exactly the GLSL this kernel shipped with: same strings, same order.
+    const bool mv4 = q4_mv4() && gpu_q4_shift() && !q4_nounpack();
+    const string ACC = mv4
+        ? ";vec4 d1=vec4(0.0),d2=vec4(0.0),e1=vec4(0.0),e2=vec4(0.0);"
+          "vec4 w0;vec4 bb;ivec4 ib;vec4 hi,lo;"
+        : ",d1=0.0,d2=0.0,e1=0.0,e2=0.0;";
+    // mv4 flattens the four vec4 accumulators once per group, so the
+    // horizontal add costs four sums per group instead of twelve per texel.
+    const string SUM = mv4
+        ? "float f1=d1.x+d1.y+d1.z+d1.w,f2=d2.x+d2.y+d2.z+d2.w,"
+          "f3=e1.x+e1.y+e1.z+e1.w,f4=e2.x+e2.y+e2.z+e2.w;"
+          "s10+=sa1*f1+ma1*xsum;s20+=sa2*f2+ma2*xsum;"
+          "s11+=sb1*f3+mb1*xsum;s21+=sb2*f4+mb2*xsum;}"
+        : "s10+=sa1*d1+ma1*xsum;s20+=sa2*d2+ma2*xsum;"
+          "s11+=sb1*e1+mb1*xsum;s21+=sb2*e2+mb2*xsum;}";
+    // The first scalar tap declares w0 and the rest assign it: that is the
+    // exact text of the kernel before Q4_MV4 existed, so the default path
+    // compiles to the same program (argument order is not evaluation order,
+    // hence the explicit index).
+    auto wtap = [&](const char* dst, const char* W, const char* row, int idx) {
+        const bool decl = !mv4 && idx == 0;
+        string s = string(decl ? "vec4 w0=texture2D(" : "w0=texture2D(") + W +
+                   ",vec2((float(g*4+q)+0.5)/float(" + TEXW + "),(u" + row +
+                   "+0.5)/float(" + ROWS + ")));";
+        if (mv4) return s + q4_taps4("w0") + dst + "+=lo*xe+hi*xo;";
+        return s + dst + "+=dot4(w0,xa,xb);";
+    };
     return q4_head(xf, inl) +
-        "uniform sampler2D W1,W2,P1,P2,X;uniform float ps1,ps2;"
-        "float dot4(vec4 w0,vec4 xa,vec4 xb){"
-        + q4_taps("w0") +
-        "return l0*xa.x+h0*xa.y+l1*xa.z+h1*xa.w+l2*xb.x+h2*xb.y+l3*xb.z+h3*xb.w;}"
+        "uniform sampler2D W1,W2,P1,P2,X;uniform float ps1,ps2;" +
+        (mv4 ? string()
+             : "float dot4(vec4 w0,vec4 xa,vec4 xb){" + q4_taps("w0") +
+               "return l0*xa.x+h0*xa.y+l1*xa.z+h1*xa.w+l2*xb.x+h2*xb.y+l3*xb.z+h3*xb.w;}") +
         "float qz(float v){return clamp(floor(v+0.5),-32768.0,32767.0);}"
         "float sl(float q,float g){float a=q/256.0;return (a/(1.0+exp(-a)))*(g/256.0);}"
         "void main(){int t=int(gl_FragCoord.x);int r0=2*t;"
@@ -885,24 +954,17 @@ string matvec_i4_pair_swiglu(int rows, int cols, XFormat xf, bool inl) {
         "float sa2=x_i16raw(q2.rg)*ps2,ma2=x_i16raw(q2.ba)*ps2;"
         "float sb1=x_i16raw(p1.rg)*ps1,mb1=x_i16raw(p1.ba)*ps1;"
         "float sb2=x_i16raw(p2.rg)*ps2,mb2=x_i16raw(p2.ba)*ps2;"
-        "float xsum=0.0,d1=0.0,d2=0.0,e1=0.0,e2=0.0;"
-        "for(int q=0;q<4;q++){int c=g*32+q*8;"
-        + q4_act(xf, cols, inl) +
-        q4_xsum() +
-        "vec4 w0=texture2D(W1,vec2((float(g*4+q)+0.5)/float(" + TEXW + "),(u0+0.5)/float(" + ROWS + ")));"
-        "d1+=dot4(w0,xa,xb);"
-        "w0=texture2D(W2,vec2((float(g*4+q)+0.5)/float(" + TEXW + "),(u0+0.5)/float(" + ROWS + ")));"
-        "d2+=dot4(w0,xa,xb);"
-        "w0=texture2D(W1,vec2((float(g*4+q)+0.5)/float(" + TEXW + "),(u1+0.5)/float(" + ROWS + ")));"
-        "e1+=dot4(w0,xa,xb);"
-        "w0=texture2D(W2,vec2((float(g*4+q)+0.5)/float(" + TEXW + "),(u1+0.5)/float(" + ROWS + ")));"
-        "e2+=dot4(w0,xa,xb);}"
-        "s10+=sa1*d1+ma1*xsum;s20+=sa2*d2+ma2*xsum;"
-        "s11+=sb1*e1+mb1*xsum;s21+=sb2*e2+mb2*xsum;}"
+        "float xsum=0.0" + ACC +
+        "for(int q=0;q<4;q++){int c=g*32+q*8;" +
+        (mv4 ? q4_act8(xf, cols, inl) + q4_xsum8()
+             : q4_act(xf, cols, inl) + q4_xsum()) +
+        wtap("d1", "W1", "0", 0) + wtap("d2", "W2", "0", 1) +
+        wtap("e1", "W1", "1", 2) + wtap("e2", "W2", "1", 3) + "}" + SUM +
         "float v0=sl(qz(s10),qz(s20));"
         "float v1=(r0+1<" + ROWS + ")?sl(qz(s11),qz(s21)):0.0;"
         "gl_FragColor=x_st2(v0,v1);}";
 }
+
 
 string matvec_i4_add(int rows, int cols, XFormat xf, XFormat rf) {
     const int texw = cols / 8;
