@@ -689,6 +689,21 @@ GLuint GPU::attention_block(const Mat& qkv, GLuint x, int layer, int pos){
         if (attn_dup("qkv")) draw_qkv();
         att_finish();
         lap("qkv");
+        // QKV_DUMP: exact per-row q16 values of the matvec output, layout-agnostic
+        // (QKV_DUMP=1 hashes every layer/position, 2 also prints the first two
+        // positions).  This is how a 1-LSB scheduling difference is caught: the
+        // row-pair family has produced one before.
+        if (getenv("QKV_DUMP") && layer < 8) {
+            const char* d = getenv("QKV_DUMP");
+            if (atoi(d) >= 2 && pos < 2) {
+                const vector<int> v = qkv_values(qkv.rows);
+                cerr << "QKVV " << layer << " " << pos;
+                for (int x : v) cerr << " " << x;
+                cerr << "\n";
+            } else {
+                cerr << "QKVD " << layer << " " << pos << " " << qkv_hash(qkv.rows) << "\n";
+            }
+        }
         kv_rope_write(layer, pos);
         if (attn_dup("rope")) kv_rope_write(layer, pos);
         lap("rope");
@@ -873,6 +888,46 @@ void GPU::dump_target(const Target& t, const char* name, int n){
         for (int i = 0; i < n; i++) fprintf(stderr, " %02x%02x%02x%02x", b[i*4], b[i*4+1], b[i*4+2], b[i*4+3]);
         fprintf(stderr, "\n");
 }
+
+// Decode the qkv target to per-row q16 integers.  The decode is over the
+// integers, not the texels, so the one-row (24-bit) and the paired (packed q16)
+// layouts decode alike: a QKV_PAIR=0 run and a QKV_PAIR=1 run of the same model
+// must produce the same vector for every layer and position.  QKV_DUMP uses it.
+vector<int> GPU::qkv_values(int rows){
+        vector<int> out(rows, 0);
+        if (qkv_target_.tex == 0) return out;
+        const int tw = att_qkv_pair_ ? (rows + 1) / 2 : rows;
+        vector<uint8_t> b((size_t)tw * 4);
+        glFinish();
+        glBindFramebuffer(GL_FRAMEBUFFER, qkv_target_.fbo);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(0, 0, tw, 1, GL_RGBA, GL_UNSIGNED_BYTE, b.data());
+        gl_state_forget_bindings();
+        for (int i = 0; i < rows; ++i) {
+            if (att_qkv_pair_) {
+                const int o = (i / 2) * 4 + ((i & 1) ? 2 : 0);
+                int v = (int)b[o] * 256 + (int)b[o + 1];
+                if (v >= 32768) v -= 65536;
+                out[i] = v;
+            } else {
+                const int o = i * 4;
+                const int64_t u = (int64_t)b[o] * 16777216 + (int64_t)b[o + 1] * 65536 +
+                                  (int64_t)b[o + 2] * 256 + b[o + 3] - 8388608;
+                out[i] = (int)u;
+            }
+        }
+        return out;
+    }
+
+unsigned long long GPU::qkv_hash(int rows){
+        const vector<int> v = qkv_values(rows);
+        unsigned long long h = 1469598103934665603ull;
+        for (int x : v) {
+            h ^= (unsigned long long)(uint32_t)x;
+            h *= 1099511628211ull;
+        }
+        return h;
+    }
 
 bool GPU::rms_fused() const{
         // RMS_FUSED forces it on, RMS_SPLIT forces the old two-pass form.

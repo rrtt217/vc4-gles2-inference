@@ -74,7 +74,8 @@ Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
         }
         // Paired qkv matvec: two output rows per fragment, half the activation
         // decode.  Only the int8 checkpoint uses it; QKV_PAIR=0 restores the
-        // single-row kernel.
+        // single-row kernel.  The int4 pair kernel was tried and rejected: it
+        // shifts q4 PPL 325.3751 -> 331.6324 and decodes 1.2% slower.
         bool qkv_pair = true;
         for (const Mat& m : m_.qkv)
             if (m.type != WeightType::INT8 || (m.rows & 1)) qkv_pair = false;

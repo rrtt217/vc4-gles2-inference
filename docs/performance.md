@@ -3242,3 +3242,66 @@ unallocated texture, stops the sweep at 2048 rows, and reports `nz` so a
 zero/garbage read-back is visible in the same line as the timing.  The engine
 changes for 8c were reverted; the shipped binary is byte-identical to 8b
 (`1183f09`), golden q8/q4/poem strings re-checked on the board.
+
+## q4 parity step 8d: the qkv row pair is not bit-exact, and not faster (2026-11-05)
+
+**The 8c hand-off put +14.9 ms/token on the q4 qkv draw because q8 renders two
+output rows per fragment and q4 does not.  The q4 pair kernel was built and
+measured: it moves the q4 PPL gate and it is slower.  Dead on both counts.**
+
+`matvec_i4_pair_logits(rows, cols, xf)` is the q4 twin of
+`matvec_q8_pair_logits`: one weight texel row per output row, rows 2t and 2t+1
+in one fragment, both `P` (scale/min) rows fetched once per group, one
+activation decode and one per-group activation sum shared, and the two results
+written as the packed q16 pair the paired reader already expects.  Per row the
+accumulator keeps `matvec_i4` order exactly (`sc*(d0+d1+d2+d3)+mn*xsum`, taps
+from the same `q4_taps`), and the taps are exact integers below 2^24, so the
+only possible difference is the compiler's reassociation of the final float
+combine.
+
+**Not bit-exact.**  A new `QKV_DUMP` probe (below) shows the decoded per-row
+q16 integers identical for the first **65 positions x 8 layers**, so the
+kernel is functionally right - and yet the q4 PPL at `SEQ=768` moves
+**325.3751 -> 331.6324 (+1.92%, gate is 1%)**, while the 16-token golden string
+survives.  That combination is the whole argument for keeping both a hash probe
+and PPL in the loop: the greedy string is not sensitive enough to see a
+1-LSB event, and the hash over the first two tokens is not long enough.
+This is the same rare rounding in a two-row fragment that the 2026-11-03
+attempt hit; it is not a derivation bug and re-writing the expression does not
+move it.
+
+**Slower too.**  Three interleaved plain-mode pairs of 32 greedy tokens on the
+same binary (`QKV_PAIR=0` against `QKV_PAIR=1`, MiniMind3 q4, `GPU_LAYER=1
+KV_PACK=16 SEQ=768`):
+
+| run | pair off | pair on |
+|---|---:|---:|
+| 1 | 285.6 | 288.0 |
+| 2 | 285.4 | 290.8 |
+| 3 | 287.1 | 289.1 |
+| median | **285.6** | **289.1** |
+
++1.2% slower.  q4 is ALU bound (263 against q8 442 MMAC/s, step 8c), so
+sharing one activation decode and one per-group sum does not pay for the
+doubled `P` fetches and the doubled live accumulators; the draw count that
+pairing saves (two strips of a 1536-row pass against one 768-fragment draw) is
+worth ~0.2-0.4 ms, exactly as the 2026-11-03 attempt found.  The row-pair family is
+now exhausted on q4 - gate+swiglu -2.0%, qkv -0.4% then, +1.2% now, wo/w2
+already paired - and the qkv gap in the 8a attribution is **not** a pairing
+artifact: q8 pairs **and** is faster because its kernel is fetch-bound, while
+q4's is bound by the unpack ALU.
+
+**Landed: the probe, not the kernel.**  `QKV_DUMP=1` decodes the qkv target
+back to per-row q16 integers and prints a hash for every layer/position;
+`QKV_DUMP=2` also prints the values for the first two positions.  The decode is
+layout-agnostic - the one-row 24-bit texel and the packed q16 pair decode to the
+same integers - so `QKV_PAIR=0` and `QKV_PAIR=1` runs of the same model can be
+diffed line by line, which is how a 1-LSB divergence gets located to a layer
+and a position.  The engine default is untouched: the q4 pair path is removed
+and the q8 pair path is byte-identical to the previous build.
+
+**Trap for the next person in `attention_block`:** the first cut of the probe
+was spliced in ahead of the `kv_rope_write(layer, pos)` line and deleted it, so
+the KV cache was never written, every model answered with garbage, and nothing
+was logged - the golden strings caught it at once.  Insert debug code around
+that call, never over it, and keep the suite in the loop.

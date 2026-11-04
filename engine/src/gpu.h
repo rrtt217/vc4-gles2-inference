@@ -121,6 +121,11 @@ public:
     // this, or a later bind_tex()/bind_fbo() will skip a needed bind.
     void forget_state();
     void dump_target(const Target& t, const char* name, int n);
+    // Decoded per-row q16 integers of the qkv target, hashed.  Layout-agnostic
+    // (24-bit row texels and packed q16 pairs hash alike), so QKV_PAIR=0 and
+    // QKV_PAIR=1 runs can be compared exactly for every layer and position.
+    std::vector<int> qkv_values(int rows);
+    unsigned long long qkv_hash(int rows);
     bool needs_finish() const;
     bool rms_fused() const;
     int max_target_dim() const { return max_target_dim_; }
