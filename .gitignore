@@ -48,6 +48,7 @@ engine/probes/progbinary_probe_pi
 engine/probes/load_probe_pi
 engine/probes/glsl_probe_pi
 engine/probes/q4mv_probe_pi
+engine/probes/draw_probe_pi
 
 # Editor / OS
 .DS_Store
