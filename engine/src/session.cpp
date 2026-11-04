@@ -95,7 +95,7 @@ bool Session::save_prefix_cache(const string& path, const vector<int>& toks){
         f.write(magic, 8);
         auto u32 = [&](uint32_t v) { f.write((char*)&v, 4); };
         auto u64 = [&](uint64_t v) { f.write((char*)&v, 8); };
-        u32(1);
+        u32(2);
         u64(m_.source_size); u64(m_.source_mtime);
         u32(m_.dim); u32(m_.hidden); u32(m_.layers); u32(m_.heads);
         u32(m_.kv_heads); u32(m_.vocab); u32(m_.seq); u32(m_.head_dim);
@@ -105,6 +105,7 @@ bool Session::save_prefix_cache(const string& path, const vector<int>& toks){
             (gpu_.act_fmt_ == XFormat::I8_4 ? 16u : 0u));
         u32((uint32_t)toks.size());
         u32((uint32_t)gpu_.att_kv_width_);
+        f.write((char*)&gpu_.att_kv_scale_, 4);
         for (int t : toks) u32((uint32_t)t);
         gpu_.sync();
         glPixelStorei(GL_PACK_ALIGNMENT, 1);
@@ -130,13 +131,13 @@ bool Session::load_prefix_cache(const string& path, vector<int>& toks){
         auto u64 = [&](uint64_t& v) { f.read((char*)&v, 8); };
         uint32_t version = 0, dim = 0, hidden = 0, layers = 0, heads = 0, kv_heads = 0;
         uint32_t vocab = 0, seq = 0, head_dim = 0, flags = 0, n = 0, width = 0;
-        uint64_t size = 0, mtime = 0; float theta = 0;
+        uint64_t size = 0, mtime = 0; float theta = 0, kscale = 0;
         u32(version); u64(size); u64(mtime);
         u32(dim); u32(hidden); u32(layers); u32(heads); u32(kv_heads);
         u32(vocab); u32(seq); u32(head_dim);
         f.read((char*)&theta, 4);
-        u32(flags); u32(n); u32(width);
-        if (!f || version != 1 || dim != (uint32_t)m_.dim || hidden != (uint32_t)m_.hidden ||
+        u32(flags); u32(n); u32(width); f.read((char*)&kscale, 4);
+        if (!f || version != 2 || dim != (uint32_t)m_.dim || hidden != (uint32_t)m_.hidden ||
             layers != (uint32_t)m_.layers || heads != (uint32_t)m_.heads ||
             kv_heads != (uint32_t)m_.kv_heads || vocab != (uint32_t)m_.vocab ||
             seq != (uint32_t)m_.seq || head_dim != (uint32_t)m_.head_dim ||
@@ -146,6 +147,11 @@ bool Session::load_prefix_cache(const string& path, vector<int>& toks){
             flags != ((m_.qk_norm ? 1u : 0u) | (m_.rope_half ? 2u : 0u) |
                       (gpu_.att_kv_bits_ == 16 ? 4u : gpu_.att_kv_bits_ == 8 ? 8u : 0u) |
                       (gpu_.act_fmt_ == XFormat::I8_4 ? 16u : 0u))) return false;
+        if (memcmp(&kscale, &gpu_.att_kv_scale_, sizeof(float)) != 0) {
+            cerr << "PREFIX_CACHE KV_SCALE mismatch: cache " << kscale
+                 << ", process " << gpu_.att_kv_scale_ << endl;
+            return false;
+        }
         vector<int> tmp(n);
         for (uint32_t i = 0; i < n; ++i) { uint32_t v = 0; u32(v); tmp[i] = (int)v; }
         if (!f) return false;

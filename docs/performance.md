@@ -2360,3 +2360,47 @@ the model's answers and needs a per-model `KV_SCALE` and its own golden
 string.  On q8 the default 8-bit grid happens to *lower* PPL by 4% on the
 pinned corpus - a direction surprising enough that it needs a second corpus
 before anyone promotes it; on q4 it is a clear 8% loss and should stay off.
+
+## Prefix cache: the header now pins `KV_SCALE` (2026-11-04)
+
+Item 5b.  The `MMKV1` header recorded the pack width (`KV_PACK`) but not the
+grid (`KV_SCALE`), which is the other half of the KV encoding: a cache built
+at `KV_SCALE=16` loaded silently under the 2048 default and the answers moved
+by 4-8% PPL (see the 8-bit KV section above).  The header is now **version
+2**: one float after the width, and the loader rejects a mismatch with a
+`PREFIX_CACHE KV_SCALE mismatch: cache <f>, process <f>` line before it
+touches the KV textures.  The pack-mode bits are unchanged, so the existing
+cross-pack rejection still works.
+
+Files written by the current binary (same 19-token prompt, `SEQ=768`):
+
+| `KV_PACK` | width | scale in header | file size | arithmetic |
+|---|---:|---:|---:|---|
+| 16 | 384 | 16 | 233,628 | 80 + 4x19 + 8x384x19x4 |
+| 8 | 192 | 16 | 116,892 | 80 + 4x19 + 8x192x19x4 |
+| 24-bit | 768 | 16384 | 467,100 | 80 + 4x19 + 8x768x19x4 |
+
+The header grew from 76 to 80 bytes (2,428 -> 2,432 B for the 588-token tool
+cache), so the data:file ratio is unchanged and the 2:1 packing arithmetic
+above still holds.
+
+Rejection matrix on the current binary (`--worker --prefix-cache`, 19-token
+cache built at `KV_PACK=16 KV_SCALE=16`):
+
+| process | result |
+|---|---|
+| `KV_PACK=16 KV_SCALE=16` | loaded 19 tokens; the matching request reports `cached_tokens=19, prefill_tokens=1` and the same text as the uncached run |
+| `KV_PACK=16` (scale 2048) | `KV_SCALE mismatch: cache 16, process 2048`, ignored |
+| `KV_PACK=16 KV_SCALE=32` | `KV_SCALE mismatch: cache 16, process 32`, ignored |
+| `KV_PACK=8` | ignored on the pack bits, as before |
+| version 1 file (old binary) | ignored by the version check; the old binary still loads it |
+
+Regression suite on the same build: q8 PPL 271.2855, q4 PPL 325.3751, both
+greedy strings unchanged - ACCEPT.  The change is header-only, no GPU path is
+touched, so decode timing is not re-measured here.
+
+One pre-existing trap found while testing (not introduced by this change):
+`SEQ` is forced to 1024 for `--worker` and `--build-prefix-cache` when the
+model is smaller, but the `--chat` path keeps the model's native seq.  A cache
+built without `SEQ` therefore loads in worker mode and is ignored in chat
+mode.  Pass `SEQ` on both sides, as `build_prefix_cache.py` already does.
