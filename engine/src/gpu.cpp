@@ -203,7 +203,7 @@ GLuint GPU::ffn_fused(const Mat& w13, GLuint x, int hidden){
             set_sampler(p, "X", 1);
             glUniform1f(uloc(p, "ws"), w13.scale);
             setup_attrib(p);
-            glDrawArrays(GL_TRIANGLES, 0, 3);
+            glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
             GLuint ps = x_swiglu_pair(hidden);
             bind_fbo(ffn_h_a_.fbo);
             glViewport(0, 0, aw, 1);
@@ -211,7 +211,7 @@ GLuint GPU::ffn_fused(const Mat& w13, GLuint x, int hidden){
             bind_tex(0, ffn_pair_a_.tex);
             set_sampler(ps, "A", 0);
             setup_attrib(ps);
-            glDrawArrays(GL_TRIANGLES, 0, 3);
+            glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
             if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
             else layer_finish("NF_FFN");
             if (getenv("FFN_SYNC")) { glFlush(); glFinish(); }
@@ -249,7 +249,7 @@ GLuint GPU::ffn_fused(const Mat& w13, GLuint x, int hidden){
             glUniform1f(uloc(pp, "ws2"), w3.scale);
         }
         setup_attrib(pp);
-        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
 
         GLuint ps = x_swiglu_pair(hidden);
@@ -259,7 +259,7 @@ GLuint GPU::ffn_fused(const Mat& w13, GLuint x, int hidden){
         bind_tex(0, pair_buf.tex);
         set_sampler(ps, "A", 0);
         setup_attrib(ps);
-        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
         else layer_finish("NF_FFN");
         if (getenv("FFN_SYNC")) { glFlush(); glFinish(); }
@@ -327,7 +327,7 @@ GLuint GPU::swiglu_2row(Target& src, int hidden, Target& out){
         use_program(p);
         bind_tex(0, src.tex); set_sampler(p, "A", 0);
         setup_attrib(p);
-        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
         else layer_finish("NF_FFN");
         if (getenv("FFN_SYNC")) { glFlush(); glFinish(); }
@@ -344,7 +344,7 @@ GLuint GPU::swiglu_split(Target& a, Target& b){
         bind_tex(0, a.tex); set_sampler(p, "A", 0);
         bind_tex(1, b.tex); set_sampler(p, "B", 1);
         setup_attrib(p);
-        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
         else layer_finish("NF_FFN");
         if (getenv("FFN_SYNC")) { glFlush(); glFinish(); }
@@ -360,7 +360,7 @@ GLuint GPU::swiglu_fused(Target& src, int hidden){
         use_program(p);
         bind_tex(0, src.tex); set_sampler(p, "A", 0);
         setup_attrib(p);
-        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
         else layer_finish("NF_FFN");
         if (getenv("FFN_SYNC")) { glFlush(); glFinish(); }
@@ -399,7 +399,7 @@ void GPU::logits_pass(const vector<Mat>& tiles, GLuint x){
                 glUniform1f(uloc(p, "ws"), m.scale);
                 setup_attrib(p);
                 glViewport(0, i, (m.rows + 1) / 2, 1);
-                glDrawArrays(GL_TRIANGLES, 0, 3);
+                glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
             }
             return;
         }
@@ -483,7 +483,7 @@ CandidateResult GPU::logits_candidates_from(const vector<Mat>& tiles, GLuint xt,
                 glUniform1f(uloc(p, "tr"), (float)i);
                 glUniform1f(uloc(p, "nr"), (float)rows);
                 setup_attrib(p);
-                glDrawArrays(GL_TRIANGLES, 0, 3);
+                glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
             }
             if (needs_finish()) { glFlush(); glFinish(); }
             vector<uint8_t> raw = read_bytes(candidate_target_, out_w, rows);
@@ -524,7 +524,7 @@ CandidateResult GPU::logits_candidates_from(const vector<Mat>& tiles, GLuint xt,
             glUniform1f(uloc(p, "nr"), (float)rows);
             glUniform1f(uloc(p, "invt"), 1.0f / max(0.0001f, temp));
             setup_attrib(p);
-            glDrawArrays(GL_TRIANGLES, 0, 3);
+            glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         }
         if (needs_finish()) { glFlush(); glFinish(); }
         vector<uint8_t> raw = read_bytes(candidate_target_, out_w, rows);
@@ -680,7 +680,7 @@ GLuint GPU::attention_block(const Mat& qkv, GLuint x, int layer, int pos){
                 bind_tex(1, x); set_sampler(p, "X", 1);
                 glUniform1f(uloc(p, "ws"), qkv.scale);
                 setup_attrib(p);
-                glDrawArrays(GL_TRIANGLES, 0, 3);
+                glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
             } else {
                 matvec_to(qkv, x, qkv_target_);
             }
@@ -763,7 +763,7 @@ GLuint GPU::rmsnorm(GLuint x, GLuint w, Target& out){
         bind_tex(0, x);
         set_sampler(ps, "X", 0);
         setup_attrib(ps);
-        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         // RMS_FUSED folds the 32-way reduce into every normalising fragment:
         // same summation order, so bit-identical, one draw less per rmsnorm.
         // VC4 defaults to the fused reduce (one draw less per rmsnorm, same
@@ -779,7 +779,7 @@ GLuint GPU::rmsnorm(GLuint x, GLuint w, Target& out){
             bind_tex(0, rms_partial_.tex);
             set_sampler(pr, "S", 0);
             setup_attrib(pr);
-            glDrawArrays(GL_TRIANGLES, 0, 3);
+            glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         }
         layer_finish("NF_RMS");
 
@@ -794,7 +794,7 @@ GLuint GPU::rmsnorm(GLuint x, GLuint w, Target& out){
         bind_tex(2, fused_reduce ? rms_partial_.tex : rms_stats_.tex);
         set_sampler(pn, "S", 2);
         setup_attrib(pn);
-        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         layer_finish("NF_RMS");
         return out.tex;
     }
@@ -833,7 +833,7 @@ void GPU::matvec_add(const Mat& m, GLuint x, GLuint residual, Target& out, XForm
         for (int x0 = 0; x0 < m.rows; x0 += strip) {
             int w = min(strip, m.rows - x0);
             glViewport(x0, 0, w, 1);
-            glDrawArrays(GL_TRIANGLES, 0, 3);
+            glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         }
         layer_finish("NF_MAT");
     }
@@ -933,7 +933,7 @@ void GPU::check_program_runs(GLuint p, const string& key){
         glClear(GL_COLOR_BUFFER_BIT);
         use_program(p);
         setup_attrib(p);
-        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         glFinish();
         vector<uint8_t> b = read_bytes(probe_, 1, 1);
         glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
@@ -1005,7 +1005,7 @@ GLuint GPU::ffn_pair_swiglu_chunk(const Mat& w1, const Mat& w3, GLuint x, int ro
         glUniform1f(uloc(p, "ws1"), w1.scale);
         glUniform1f(uloc(p, "ws2"), w3.scale);
         setup_attrib(p);
-        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
         else layer_finish("NF_FFN");
         if (getenv("FFN_SYNC")) { glFlush(); glFinish(); }
@@ -1062,7 +1062,7 @@ GLuint GPU::ffn_pair_swiglu_chunk2(const Mat& w1, const Mat& w3, GLuint x2, int 
         for (int x0 = 0; x0 < rows; x0 += 1024) {
             const int w = min(1024, rows - x0);
             glViewport(x0, 0, w, 1);
-            glDrawArrays(GL_TRIANGLES, 0, 3);
+            glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         }
         if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
         else layer_finish("NF_FFN");
@@ -1083,7 +1083,7 @@ void GPU::matvec_p2(const Mat& m, GLuint xp2, Target& out){
         for (int x0 = 0; x0 < m.rows; x0 += 1024) {
             const int w = min(1024, m.rows - x0);
             glViewport(x0, 0, w, 1);
-            glDrawArrays(GL_TRIANGLES, 0, 3);
+            glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         }
         if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
         else layer_finish("NF_FFN");
@@ -1133,7 +1133,7 @@ GLuint GPU::rmsnorm_pair2(GLuint xa, GLuint xb, GLuint w, Target& out){
         bind_tex(0, xa); set_sampler(ps, "XA", 0);
         bind_tex(1, xb); set_sampler(ps, "XB", 1);
         setup_attrib(ps);
-        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         layer_finish("NF_RMS");
         GLuint pn = x_rms_norm_pair2();
         bind_fbo(out.fbo);
@@ -1144,7 +1144,7 @@ GLuint GPU::rmsnorm_pair2(GLuint xa, GLuint xb, GLuint w, Target& out){
         bind_tex(2, w); set_sampler(pn, "W", 2);
         bind_tex(3, rms_partial2_.tex); set_sampler(pn, "S", 3);
         setup_attrib(pn);
-        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         layer_finish("NF_RMS");
         return out.tex;
     }
@@ -1163,7 +1163,7 @@ GLuint GPU::ffn_pair_swiglu_chunk2_p2(const Mat& w1, const Mat& w3, GLuint xp2, 
         for (int x0 = 0; x0 < rows; x0 += 1024) {
             const int w = min(1024, rows - x0);
             glViewport(x0, 0, w, 1);
-            glDrawArrays(GL_TRIANGLES, 0, 3);
+            glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         }
         if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
         else layer_finish("NF_FFN");
@@ -1188,7 +1188,7 @@ void GPU::matvec_p2_add_p2(const Mat& m, GLuint xp2, GLuint rp2, Target& out){
         for (int x0 = 0; x0 < m.rows; x0 += 1024) {
             const int w = min(1024, m.rows - x0);
             glViewport(x0, 0, w, 1);
-            glDrawArrays(GL_TRIANGLES, 0, 3);
+            glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         }
         if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
         else layer_finish("NF_FFN");
@@ -1211,7 +1211,7 @@ void GPU::matvec_p2_add(const Mat& m, GLuint xp2, GLuint ra, GLuint rb, Target& 
         for (int x0 = 0; x0 < m.rows; x0 += 1024) {
             const int w = min(1024, m.rows - x0);
             glViewport(x0, 0, w, 1);
-            glDrawArrays(GL_TRIANGLES, 0, 3);
+            glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         }
         if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
         else layer_finish("NF_FFN");
@@ -1229,7 +1229,7 @@ void GPU::p2_split(GLuint xp2, Target& out, int which){
         bind_tex(0, xp2); set_sampler(p, "X", 0);
         glUniform1f(uloc(p, "which"), (float)which);
         setup_attrib(p);
-        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
         else layer_finish("NF_FFN");
         if (getenv("FFN_SYNC")) { glFlush(); glFinish(); }
@@ -1252,7 +1252,7 @@ GLuint GPU::ffn_pair_i4_swiglu_chunk(const Mat& w1, const Mat& w3, GLuint x, int
         glUniform1f(uloc(p, "ps1"), w1.q4_param_scale);
         glUniform1f(uloc(p, "ps2"), w3.q4_param_scale);
         setup_attrib(p);
-        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
         else layer_finish("NF_FFN");
         if (getenv("FFN_SYNC")) { glFlush(); glFinish(); }
@@ -1716,7 +1716,7 @@ void GPU::att_finish() {
         }
         glUniform1f(uloc(p, "pos"), (float)pos);
         setup_attrib(p);
-        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         att_finish();
     }
 
@@ -1751,7 +1751,7 @@ void GPU::att_scores(int layer, int pos){
             glUniform1f(uloc(pi, "pos"), (float)pos);
             glUniform1f(uloc(pi, "invsqrt"), 1.0f / sqrtf((float)att_head_dim_));
             setup_attrib(pi);
-            glDrawArrays(GL_TRIANGLES, 0, 3);
+            glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
             att_finish();
             slap("qknorm");
             return;
@@ -1768,7 +1768,7 @@ void GPU::att_scores(int layer, int pos){
                 bind_tex(0, qkv_target_.tex);
                 set_sampler(pq, "R", 0);
                 setup_attrib(pq);
-                glDrawArrays(GL_TRIANGLES, 0, 3);
+                glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
                 att_finish();
             };
             go();
@@ -1794,7 +1794,7 @@ void GPU::att_scores(int layer, int pos){
             }
             glUniform1f(uloc(pr, "pos"), (float)pos);
             setup_attrib(pr);
-            glDrawArrays(GL_TRIANGLES, 0, 3);
+            glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
             att_finish();
         };
         go_qrot();
@@ -1813,7 +1813,7 @@ void GPU::att_scores(int layer, int pos){
             glUniform1f(uloc(p, "pos"), (float)pos);
             glUniform1f(uloc(p, "invsqrt"), 1.0f / sqrtf((float)att_head_dim_));
             setup_attrib(p);
-            glDrawArrays(GL_TRIANGLES, 0, 3);
+            glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
             att_finish();
         };
         go_score();
@@ -1830,7 +1830,7 @@ void GPU::att_stats(int pos){
         set_sampler(p, "S", 0);
         glUniform1f(uloc(p, "pos"), (float)pos);
         setup_attrib(p);
-        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         att_finish();
     }
 
@@ -1845,7 +1845,7 @@ void GPU::att_probs(int pos){
         set_sampler(p, "ST", 1);
         glUniform1f(uloc(p, "pos"), (float)pos);
         setup_attrib(p);
-        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         att_finish();
     }
 
@@ -1869,7 +1869,7 @@ void GPU::att_v(int layer, int pos){
         set_sampler(p, "KV", 1);
         glUniform1f(uloc(p, "pos"), (float)pos);
         setup_attrib(p);
-        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         att_finish();
     }
 
@@ -1907,7 +1907,7 @@ void GPU::draw(const Mat& m, GLuint x, Target& t, int row ){
         for (int x0 = 0; x0 < m.rows; x0 += strip) {
             int w = min(strip, m.rows - x0);
             glViewport(x0, row, w, 1);
-            glDrawArrays(GL_TRIANGLES, 0, 3);
+            glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         }
     }
 

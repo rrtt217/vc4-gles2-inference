@@ -3031,3 +3031,77 @@ after the reboot: the same pair binary took 17.1 s cold on its first run and
 7.2 s on the next, with one program link falling from 2792 to 301 ms.  Cold
 prefill is not a kernel measurement on this board; the six programs are a
 first-token cost, not a warm one.
+
+
+## q4 parity, step 1: where the 1.5x lives (2026-11-05)
+
+Attribution before any rewrite.  Same board, same prompt, q8 and q4 MiniMind3
+checkpoints, `LAYER_PROFILE=1` (a `glFinish` after every pass) for 12 greedy
+tokens; each number is the sum over the 8 layers of one token, so it is the
+same quantity as a decode ms/token figure (the 252 / 388 matrix pair is from
+a different clock state, see below).
+
+| stage | q8 | q4 | q4/q8 |
+|---|---:|---:|---:|
+| rms_att | 17.64 | 17.98 | 1.02 |
+| attn (qkv + 4 passes) | 101.56 | 116.47 | 1.15 |
+| wo | 19.98 | 26.20 | 1.31 |
+| rms_ffn | 17.34 | 18.06 | 1.04 |
+| ffn gate | 67.53 | 137.03 | 2.03 |
+| w2 | 50.03 | 68.25 | 1.36 |
+| **sum** | **273.4** | **383.9** | **1.40** |
+
+The laps add a constant sync cost per pass, so both columns sum above the
+unprofiled 188 / 290 ms measured on the same board at a 1-token prompt; the
+deltas are the measurement, not the absolutes.  **The FFN gate is 63% of the
+gap** (+69.5 of +109.9 ms), w2 is 17% (+18.2) and the whole attention block is
+14% (+14.9).  Inside attention the per-pass laps put all of that difference on
+the qkv matvec - 5.19 against 3.65 ms per layer (1.42x) - while rope, qk-norm,
+q-rot, scores, stats and v stay within 0.06 ms per layer.  That is structural:
+q8 draws two qkv rows per fragment (`matvec_q8_pair_logits`), q4 falls back to
+the one-row `matvec_i4`.
+
+**Live decode on the same binary.**  Plain mode, 32 greedy tokens, `SEQ=768`,
+three interleaved runs each: q8 195.5 / 196.7 / 185.8 and q4 291.7 / 290.9 /
+304.1 ms/token (median 195.5 against 291.7, **1.49x**; best 185.8 against
+290.9).  The profile delta of +109.9 ms predicts the live +96 ms gap within the
+sync constant, which is about 90 ms/token in both columns - that is why the
+profile ratio (1.40) is lower than the live one.  The 2026-11-02 matrix quotes
+251.8 / 387.6 ms/token for the same models; today both are ~26% faster while
+prefill matches it within 2% (10.73 against 10.95 s), and `vcgencmd
+measure_clock core` reads 300 MHz, so the matrix looks like a lower GPU clock
+state - decode is GPU-bound and prefill is CPU-bound.  The ratio and the
+per-stage deltas carry over; the absolute matrix numbers do not.
+
+**Draws are not the problem.**  `DRAWCOUNT` was dead instrumentation until this
+step - `draws_` was never incremented - and wired up it gives **159 draws per
+decode token for q8 and 143 for q4** (a gen-1 against gen-13 difference, so
+prefill drops out): the q4 path issues fewer draws.
+
+**The unpack is 23% of the gate, and removing it does not reach parity.**
+`Q4_NOUNPACK=1` (wrong on purpose: the eight nibble taps become eight plain
+multiplies, the same four weight fetches stay) prices the unpack on the shipped
+binary: gate 137.03 -> 105.0 ms, w2 68.25 -> 56.5.  Under the old float decode
+(`Q4_SHIFT=0`) the same probe gives 169.5 -> 105.0, so the integer split is
+worth 32 ms of the gate (23%) and the float form costs 64.5 ms (38%).  This
+probe only became meaningful in this step: while `Q4_SHIFT` was on it took the
+shift branch first and silently did nothing.
+At **zero** unpack cost the q4 gate is still 105 ms against q8 67.5, with 25%
+fewer texture fetches per fragment (864 against 1152) and the same 3072 MACs.
+The rest of the gap is therefore the inner-loop shape: q4 builds eight scalar
+taps and an eight-term scalar dot per weight texel, q8 keeps the dot in vec4 lanes
+and a four-term dot.  The QPU is 4-wide, so the vec4 form can issue four MACs
+per instruction slot while the taps force scalar ops.  That is the hypothesis
+step 2 tests, not yet a result.
+
+The per-group min term is not a lever: `Q4_NOMIN=1` measured -4.5% in one run
+and +6% in another, i.e. the re-scheduled shader moves more than the
+arithmetic.
+
+**Next step (item 8, step 2):** rewrite `matvec_i4_pair_swiglu` to build the
+taps in vec4 form (vector floor/shift where the split allows, `dot()` over
+vec4) and compare the gate bytes against the current kernel with
+`q4mv_probe` before wiring it in - the output is q16 and step 7c showed that a
+1-LSB move in 2 of 768 values is enough to change the greedy text.  The qkv
+row pairing (the q8 paired kernel applied to q4) is the second, smaller lever
+at +14.9 ms.
