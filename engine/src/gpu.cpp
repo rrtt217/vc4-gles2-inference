@@ -906,6 +906,34 @@ double run_time_ms(){
         return elapsed_ms(g_run_t0, Clock::now());
     }
 
+// A program can pass link and still fail: vc4 generates the QPU code at the
+// first draw, and when its register allocator gives up it skips the draw
+// silently (vc4_draw.c: "shader compile failed, skipping draw call").  GL raises
+// no error, so the kernel keeps returning whatever the target already held and
+// every later number is wrong with no diagnostic.  Draw each new program once
+// into a sentinel-filled 1x1 target and stop if nothing was written.
+void GPU::check_program_runs(GLuint p, const string& key){
+        if (getenv("NO_SHADER_SELFTEST")) return;
+        if (probe_.tex == 0) probe_ = make_target(1, 1);
+        bind_fbo(probe_.fbo);
+        glViewport(0, 0, 1, 1);
+        glClearColor(0.2f, 0.4f, 0.6f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        use_program(p);
+        setup_attrib(p);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glFinish();
+        vector<uint8_t> b = read_bytes(probe_, 1, 1);
+        glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+        if (b.size() == 4 && b[0] == 51 && b[1] == 102 && b[2] == 153) {
+                cerr << "program '" << key << "' did not draw: the driver skipped the\n"
+                        "  draw call, most likely because vc4's register allocator failed\n"
+                        "  (run with MESA_DEBUG=1 to see it).  Refusing to continue with a\n"
+                        "  kernel that would silently return stale data.\n";
+                exit(1);
+        }
+    }
+
 GLuint GPU::x_prog(const string& key, const string& src){
         auto it = programs_.find(key);
         if (it != programs_.end()) return it->second;
@@ -923,6 +951,7 @@ GLuint GPU::x_prog(const string& key, const string& src){
         }
         g_prog_key = key.c_str();
         GLuint p = link_program(src);
+        check_program_runs(p, key);
         programs_[key] = p;
         text_programs_[h] = p;
         return p;
@@ -1217,7 +1246,27 @@ GLuint GPU::x_top2_packed(int rows, int chunk){
         return x_prog("xt2p_" + to_string(rows) + "_" + to_string(chunk), top2_packed(rows, chunk));
     }
 
+// Q4_SHIFT=1 re-emits a shader as ESSL 3.00 so it can use bitwise ops (the
+// only way to get b>>4 / b&15; ESSL 1.00 forbids them).  It needs Mesa's
+// MESA_GLES_VERSION_OVERRIDE=3.0 + MESA_GLSL_VERSION_OVERRIDE=300, which change
+// only the version the front end reports, not the driver's capabilities.
+static bool q4_shift_on(){
+        static const char* e = getenv("Q4_SHIFT");
+        static const bool v = e && strcmp(e, "0") != 0;
+        return v;
+    }
+
 void GPU::init_egl(){
+        // Q4_SHIFT emits ESSL 3.00 kernels, and Mesa only accepts those when the
+        // front end is told the context is ES 3.0.  The overrides change the
+        // version the *compiler* is offered, not the driver's capabilities (vc4
+        // still has no MRT, no integer textures, and no fround_even), so they
+        // are set here, before eglInitialize, and never overwrite a value the
+        // caller picked.  Q4_SHIFT_MESA=0 skips this for an A/B.
+        if (q4_shift_on() && !getenv("Q4_SHIFT_NO_MESA")) {
+                setenv("MESA_GLES_VERSION_OVERRIDE", "3.0", 0);
+                setenv("MESA_GLSL_VERSION_OVERRIDE", "300", 0);
+        }
         auto get_platform_display = (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress("eglGetPlatformDisplayEXT");
         dpy_ = get_platform_display(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr);
         EGLint major = 0, minor = 0;
@@ -1239,6 +1288,16 @@ void GPU::init_egl(){
         ctx_ = ctx;
         const char* r = (const char*)glGetString(GL_RENDERER);
         renderer_ = r ? r : "";
+        if (q4_shift_on()) {
+                const char* glsl = (const char*)glGetString(GL_SHADING_LANGUAGE_VERSION);
+                if (!glsl || strncmp(glsl, "OpenGL ES GLSL ES 3", 19) != 0) {
+                        cerr << "Q4_SHIFT=1 needs an ESSL 3.00 context, but the driver offers "
+                             << (glsl ? glsl : "(unknown)")
+                             << "\n  (Mesa's MESA_GLES_VERSION_OVERRIDE / "
+                                "MESA_GLSL_VERSION_OVERRIDE did not take effect)\n";
+                        exit(1);
+                }
+        }
     }
 
 void GPU::init_gl(){
@@ -1246,6 +1305,16 @@ void GPU::init_gl(){
         glBindBuffer(GL_ARRAY_BUFFER, vbo_);
         float verts[] = { -1, -1, 3, -1, -1, 3 };
         glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
+    }
+
+static string es3ify(const string& src, bool vertex){
+        if (src.find("#version") != string::npos) return src;
+        if (vertex) return "#version 300 es\n#define attribute in\n" + src;
+        // A duplicate precision statement is legal, so the original text can
+        // stay untouched: only the version line, the out declaration and the
+        // gl_FragColor alias are added.
+        return "#version 300 es\nprecision highp float;\nout vec4 frag_color;\n"
+               "#define gl_FragColor frag_color\n" + src;
     }
 
 GLuint GPU::compile_shader(GLenum type, const string& src){
@@ -1261,8 +1330,13 @@ GLuint GPU::compile_shader(GLenum type, const string& src){
         return s;
     }
 
-GLuint GPU::link_program(const string& fs){
-        const char* vs = "attribute vec2 p; void main(){ gl_Position=vec4(p,0.,1.); }";
+GLuint GPU::link_program(const string& fs_in){
+        const bool needs_es3 = q4_shift_on() && fs_in.find("&15") != string::npos;
+        const string fs = needs_es3 ? es3ify(fs_in, false) : fs_in;
+        string vs = "attribute vec2 p; void main(){ gl_Position=vec4(p,0.,1.); }";
+        // The vertex shader must match the fragment stage's language when that
+        // stage was rewritten above; every other program stays ESSL 1.00.
+        if (needs_es3) vs = es3ify(vs, true);
         const bool tm = shader_time_on();
         const double t0 = tm ? shader_time_ms() : 0.0;
         GLuint p = glCreateProgram();

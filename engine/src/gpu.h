@@ -205,6 +205,7 @@ private:
     int max_target_dim_ = 0;
     vector<GLuint> q_norm_tex_, k_norm_tex_;
     GLuint vbo_ = 0;
+    Target probe_;
     string renderer_;
 
     void init_egl();
@@ -216,6 +217,7 @@ private:
     static double shader_time_ms();
 
     static GLuint link_program(const string& fs);
+    void check_program_runs(GLuint p, const string& key);
 
     static GLuint make_texture(int w, int h, const void* data);
 

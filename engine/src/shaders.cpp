@@ -110,6 +110,15 @@ static string q4_byte(const string& w, char ch) {
 static string q4_h(const string& w);
 static string q4_taps(const char* W) {
     const string w(W);
+    if (getenv("Q4_SHIFT")) {
+        // Bitwise split: ASR + AND, one QPU instruction each (vc4_program.c
+        // handles nir_op_ishr/iand directly).  Needs ESSL 3.00, which
+        // GPU::link_program emits when it sees the "&15" in this text.
+        return "int b0=int(" + w + ".r*255.0+0.5),b1=int(" + w + ".g*255.0+0.5),"
+               "b2=int(" + w + ".b*255.0+0.5),b3=int(" + w + ".a*255.0+0.5);"
+               "float h0=float(b0>>4),h1=float(b1>>4),h2=float(b2>>4),h3=float(b3>>4);"
+               "float l0=float(b0&15),l1=float(b1&15),l2=float(b2&15),l3=float(b3&15);";
+    }
     if (q4_nounpack())
         return "float h0=" + w + ".r*15.0,l0=" + w + ".g*15.0,h1=" + w + ".b*15.0,"
                "l1=" + w + ".a*15.0,h2=" + w + ".r*7.0,l2=" + w + ".g*7.0,"
