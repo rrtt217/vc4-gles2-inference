@@ -2693,3 +2693,58 @@ Iris Xe run gives the same q4 answer with and without the shift path.
 Full suite on the default build, Pi Zero:
 determinism, default system prompt, q8/q4 strings, poem behaviour,
 q8 PPL `271.2855`, q4 PPL `325.3751`, ACT8 arms `272.5406` / `272.0165` - ACCEPT.
+
+## Prefill batching, step 1: what a draw and a weight byte cost (2026-11-04)
+
+`docs/future-optimization.md` says to price the per-draw overhead with a null
+shader before committing to batching, because that decides where a batching
+implementation has to win.  `engine/probes/draw_probe.cpp` does that, plus the
+two terms around it (a whole rmsnorm pass, and the q8 matvec at the shapes the
+model actually draws).  Pi Zero, VC4 V3D 2.1, Mesa 26.2.2, two runs, same
+numbers:
+
+| case | ms/call | notes |
+|---|---:|---|
+| null draw 1x1, no finish | 0.008–0.014 | one fragment, nothing read back |
+| null draw 384x1, no finish | 0.011–0.013 | |
+| null draw 1216x1, no finish | 0.018–0.019 | |
+| null draw 1x1 + `glFinish` | 0.39–0.43 | i.e. a finish costs ~0.4 ms |
+| rmsnorm dim 768 (2 draws) | **1.79–2.17** | 6 KB of data, `RMS_SPLIT=1` no better |
+| q8 matvec 768x768 | 2.05 | 0.56 MB → 275 MB/s |
+| q8 matvec 1216x768 | 3.18 | 0.89 MB → 280 MB/s |
+| q8 matvec 1536x768 | 4.13 | 1.12 MB → 272 MB/s |
+| q8 matvec 2048x768 | 1.93 | **wrong output**, see below |
+| CPU: rebuild `matvec_q8(1536,768)` text | 0.014–0.024 | `x_prog()` takes the text by value |
+| CPU: rebuild `rms_norm(768)` text | 0.042–0.054 | |
+
+**A draw is ~10 µs.**  Reducing the draw count is therefore not a lever: a
+layer is ~11 draws and a token ~90, so all the issue overhead in a token is
+under 2 ms.  Batching positions cannot pay for itself that way; it can only pay
+by making one weight fetch feed several positions.
+
+**Weights stream at ~275 MB/s, and a token re-reads the whole checkpoint.**
+MiniMind3 q8 is 66 MB, so 66 MB / 275 MB/s = 240 ms/token — which is exactly
+the measured prefill (~260 ms/token, 9.3–9.7 s for the 36-token chat prompt) and
+decode (183–244 ms/token).  Decode and prefill are both at the streaming limit,
+which is why every structural win so far (activation packing, paired rows) moved
+prefill and decode together, and why B positions per weight fetch is the whole
+prefill story: the measured term divides by B and nothing else changes.
+
+**2048-wide draws are silently wrong.**  At 2048 rows the matvec runs 1.93 ms
+instead of the ~5.5 ms the 1536-row point predicts, and its bytes differ from
+two half-width draws of the same weights in 5030 of 8192 places.  This is the
+same failure mode `q4mv_probe` found in the register allocator: vc4 drops work
+and reports no GL error.  The engine is clean today — logits tiles are 1536 rows
+and the FFN chunk is 1216 — but a batching or packing change must not push any
+draw past 1536, and `halves identical` in the probe is the check that catches it.
+
+**rmsnorm is the fixed cost worth watching.**  1.8 ms for two draws over 6 KB is
+not bandwidth and not CPU (0.05 ms of string rebuild): it is the per-fragment
+fetch latency of the 32-way reduce, and fusing vs splitting the reduce does not
+change it.  With 16 rmsnorms per token that is ~29 ms/token, ~16% of a decode
+token and the same share of prefill — a separate item, not something batching
+helps.
+
+So item 7 stays as planned, with the target now explicit: pack B positions into
+one activation texel so a single weight fetch serves B MACs, keeping every draw
+≤1536 wide, and expect prefill ≈ 240/B ms/token plus the fixed passes.
