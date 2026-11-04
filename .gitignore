@@ -44,6 +44,7 @@ engine/probes/vc4_topk_probe
 engine/probes/matvec_probe
 engine/probes/texsize_probe
 engine/probes/q4fmt_probe_pi
+engine/probes/progbinary_probe_pi
 
 # Editor / OS
 .DS_Store

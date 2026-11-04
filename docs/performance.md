@@ -2404,3 +2404,96 @@ One pre-existing trap found while testing (not introduced by this change):
 model is smaller, but the `--chat` path keeps the model's native seq.  A cache
 built without `SEQ` therefore loads in worker mode and is ignored in chat
 mode.  Pass `SEQ` on both sides, as `build_prefix_cache.py` already does.
+
+## First-token latency: 13 program links, and the 12 s of loading before them (2026-11-04)
+
+Item 6.  The backlog entry guessed "~3.8 s shader cold start"; the probe says
+the links are 1.9 s of a 17-20 s first token, and that what dominates on a Pi
+Zero is loading under memory pressure, not compilation.
+
+`SHADER_TIME=1` prints `STARTUP <ms> ...` at five points in `main()` and one
+`SHADER_TIME #nn at <ms> link <ms> src <bytes> h=<hash> key=<key> cum <ms>`
+line per fragment program, plus `SHADER_TIME reuse key ...` when a second key
+is served by an already compiled program.  Default off: one `getenv` on the
+compile path, nothing on the draw path.
+
+### The program set (MiniMind3 q8, `GPU_LAYER=1 KV_PACK=16 SEQ=768`, 14-token prompt)
+
+| # | key | source | link ms (3 runs) | median |
+|---:|---|---:|---|---:|
+| 1 | `xrmss_768_x16_2` | 3147 B | 300 / 1188 / 291 | 300 |
+| 2 | `xrmsn_768_x16_2_x16_2_f` | 3847 B | 232 / 243 / 234 | 234 |
+| 3 | `xqkvp_1536_768_x16_2` | 982 B | 62 / 66 / 61 | 62 |
+| 4 | `xkv` | 5919 B | 327 / 268 / 218 | 268 |
+| 5 | `xqn` | 2711 B | 68 / 64 / 65 | 65 |
+| 6 | `xqr` | 3462 B | 187 / 184 / 184 | 184 |
+| 7 | `xsc_1` | 3270 B | 108 / 114 / 107 | 108 |
+| 8 | `xst` | 3018 B | 91 / 127 / 91 | 91 |
+| 9 | `xv_768_x16_2` | 5942 B | 165 / 157 / 156 | 157 |
+| 10 | `xq8ap_768_768_x16_2` | 1096 B | 77 / 127 / 92 | 92 |
+| 11 | `xq8ps_1216_768_x16_2` | 3567 B | 125 / 143 / 203 | 143 |
+| 12 | `xq8ap_768_1216_x16_2` | 1096 B | 81 / 101 / 101 | 101 |
+| 13 | `xq8pl_256_768_x16_2` | 980 B | 69 / 63 / 67 | 67 |
+
+Total **1.87 / 2.84 / 1.87 s, median 1.89 s** for 13 programs.  The first
+compile carries the one-time driver setup (300 ms against 1188 ms in the run
+that swapped harder), and it is 10x the second compile of the same source
+size, so per-program time after the first is 60-330 ms and tracks the source
+size.  q4 (`minimind3.q4`, one run) compiles 14 programs for 3,144 ms: its
+INT4 kernels are 4.3-5.7 KB of source against q8 1.0-5.9 KB and the two
+`xi4ap`/`xi4ps` pair-write kernels are the expensive ones (292 / 430 / 320 ms).
+
+### Where the first token goes (q8, same three runs)
+
+| phase | run 1 | run 2 | run 3 | median |
+|---|---:|---:|---:|---:|
+| model load (69 MB) | 6.40 | 6.12 | 5.89 | 6.12 |
+| EGL context (`GPU gpu;`) | 5.47 | 4.23 | 2.93 | 4.23 |
+| weight upload | 2.99 | 3.22 | 2.67 | 2.99 |
+| Session constructor | 0.15 | 0.12 | 0.11 | 0.12 |
+| 13 program links | 1.89 | 2.84 | 1.87 | 1.89 |
+| prefill draws (14 tokens) | 3.6 | 3.9 | 2.5 | 3.6 |
+| **first token** | **20.5** | **20.5** | **17.2** | **20.5** |
+
+All values in seconds.  "prefill draws" is the engine's `prefill` timer minus the
+link time that falls inside it.
+
+`free -m` right after a run: 280 MB used of 426, 77 MB free, **168 MB swap in
+use**.  The 69 MB model read evicts most of the page cache, so the next touch
+of a non-resident page - the Mesa driver inside `GPU gpu;` - pays SD-card
+latency; that is why the EGL line swings 2.5 s between runs of the same
+binary, with nothing in between but the model read.  Startup on this board is
+a memory question first: the shaders are 10-15% of the first token.
+
+### A cache keyed by program text: in-process only
+
+Two ways to persist compiled programs, both measured:
+
+1. **Mesa's own shader cache.**  `MESA_SHADER_CACHE_DIR=<dir>` (Mesa 26.2.2)
+   with a full run leaves the directory **empty**, and
+   `MESA_SHADER_CACHE_DEBUG=1` prints nothing: vc4 does not implement
+   `pipe_screen::get_disk_shader_cache`, so the cache is a no-op on this
+   driver.
+2. **A hand-rolled binary cache** needs `glGetProgramBinary`.  The ES2 profile
+   does advertise `GL_OES_get_program_binary`, but
+   `engine/probes/progbinary_probe.cpp` shows the driver cannot honour it:
+   `GL_PROGRAM_BINARY_LENGTH_OES` is 0 and `glGetProgramBinaryOES` raises
+   `GL_INVALID_OPERATION` (0x0502) after a successful link *and* draw.  The
+   same probe gives the floor for one compile: 209 ms link + 108 ms first
+   draw for a single 32-iteration matvec shader.
+
+So the only usable cache is the in-process one, and it is now keyed by
+program *text* as well as by name: `xqkvp_1536_768_x16_2` and
+`xq8pl_1536_768_x16_2` build byte-identical source (982 B, hash `0xec6b3f69` -
+the same matvec, one for the qkv projection and one for the logits tiles), and
+the second key reuses the first program object.  **14 -> 13 compiles, 64.7 ms**
+and one program object saved.  The hash is 64-bit; a collision would need two
+different sources under one hash, which is not a practical risk here.
+
+Suite on the same build: q8 271.2855, q4 325.3751, both greedy strings
+unchanged - ACCEPT.  No draw path is touched, so decode is unchanged
+(182 ms/token in these runs).
+
+Next lever on this item is the ~12 s *before* the first link: the 69 MB model
+load on a swapping 426 MB machine, EGL init and the weight upload - not the
+shaders.

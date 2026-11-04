@@ -9,6 +9,11 @@
 #include <unordered_map>
 #include <vector>
 
+// Wall clock since main() started; a static default keeps the probe usable
+// before the engine sets it (it then only measures from first use).
+void gpu_set_run_t0(Clock::time_point t);
+double run_time_ms();
+
 struct Candidate { float value; int token; };
 struct CandidateResult {
     vector<Candidate> cand;
@@ -147,6 +152,7 @@ private:
     EGLDisplay dpy_ = EGL_NO_DISPLAY;
     EGLContext ctx_ = EGL_NO_CONTEXT;
     unordered_map<string, GLuint> programs_;
+    unordered_map<size_t, GLuint> text_programs_;  // program text hash -> program
     struct ULocRec { const char* name; GLint loc; };
     unordered_map<GLuint, vector<ULocRec>> uloc_cache_;
     GLuint uloc_prog_ = 0;
@@ -206,6 +212,8 @@ private:
     void init_gl();
 
     static GLuint compile_shader(GLenum type, const string& src);
+    static bool shader_time_on();
+    static double shader_time_ms();
 
     static GLuint link_program(const string& fs);
 

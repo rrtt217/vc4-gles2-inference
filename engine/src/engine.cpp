@@ -51,6 +51,7 @@ static const char* kDefaultSystem = "You are a helpful assistant.";
 
 int main(int argc, char** argv) {
     install_stop_handlers();
+    gpu_set_run_t0(Clock::now());
     string model_path = getenv("MODEL") ? getenv("MODEL") : "../models/llama2c/stories15M.bin";
     string tokenizer_path = getenv("TOKENIZER") ? getenv("TOKENIZER") : "../models/llama2c/tokenizer.bin";
     string prompt = "One day, Lily";
@@ -108,7 +109,9 @@ int main(int argc, char** argv) {
 
     Model model;
     if (!model.load(model_path)) return 1;
+    if (getenv("SHADER_TIME")) fprintf(stderr, "STARTUP %7.1f ms  model loaded\n", run_time_ms());
     GPU gpu;
+    if (getenv("SHADER_TIME")) fprintf(stderr, "STARTUP %7.1f ms  egl ready\n", run_time_ms());
     if (getenv("Q8_PARTS")) model.apply_precision(getenv("Q8_LAYERS") ? getenv("Q8_LAYERS") : "", getenv("Q8_PARTS"));
     model.split_ffn();
     if (getenv("Q4_WEIGHTS")) model.quantize_q4_weights(getenv("Q4_SCOPE") ? getenv("Q4_SCOPE") : "all");
@@ -139,8 +142,10 @@ int main(int argc, char** argv) {
     for (auto& m : model.w2a) gpu.upload(m);
     for (auto& m : model.w2b) gpu.upload(m);
     for (auto& m : model.logits_tiles) gpu.upload(m);
+    if (getenv("SHADER_TIME")) fprintf(stderr, "STARTUP %7.1f ms  weights uploaded\n", run_time_ms());
 
     Session session(model, gpu);
+    if (getenv("SHADER_TIME")) fprintf(stderr, "STARTUP %7.1f ms  session ready\n", run_time_ms());
 
     if (!ppl_path.empty()) {
         string text;
@@ -529,6 +534,7 @@ int main(int argc, char** argv) {
     for (int t : tokens) cout << " " << t;
     cout << "\n";
     auto start = Clock::now();
+    if (getenv("SHADER_TIME")) fprintf(stderr, "STARTUP %7.1f ms  first step\n", run_time_ms());
     vector<float> logits;
     CandidateResult cand;
     bool cand_mode = topk != 0 && !greedy && !sampling_penalties_active();

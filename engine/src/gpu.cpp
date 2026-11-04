@@ -875,11 +875,47 @@ AttnConfig GPU::att_cfg() const{
         return c;
     }
 
+// Default-off probe (SHADER_TIME=1): time every fragment-program link and
+// report when it happened relative to process start.  First-token latency is
+// a compile-count question first: x_prog also merges keys that build
+// byte-identical program text, so a repeat compile cannot hide here.
+bool GPU::shader_time_on(){
+        static const bool on = getenv("SHADER_TIME") != nullptr;
+        return on;
+    }
+
+double GPU::shader_time_ms(){
+        return run_time_ms();
+    }
+
+static const char* g_prog_key = "?";
+static Clock::time_point g_run_t0;
+
+void gpu_set_run_t0(Clock::time_point t){ g_run_t0 = t; }
+
+double run_time_ms(){
+        return elapsed_ms(g_run_t0, Clock::now());
+    }
+
 GLuint GPU::x_prog(const string& key, const string& src){
         auto it = programs_.find(key);
         if (it != programs_.end()) return it->second;
+        // Two keys can build byte-identical text (xq8pl and xqkvp both do): a
+        // program is a pure function of its shaders, so share the object and
+        // skip the second compile.  64-bit hash; a collision would need two
+        // different texts and is not a practical risk here.
+        const size_t h = std::hash<string>{}(src);
+        auto t = text_programs_.find(h);
+        if (t != text_programs_.end()) {
+            programs_[key] = t->second;
+            if (shader_time_on())
+                fprintf(stderr, "SHADER_TIME reuse key %s (identical text)\n", key.c_str());
+            return t->second;
+        }
+        g_prog_key = key.c_str();
         GLuint p = link_program(src);
         programs_[key] = p;
+        text_programs_[h] = p;
         return p;
     }
 
@@ -959,6 +995,7 @@ GLuint GPU::x_i4_pair(int rows, int cols){
         const string key = "xi4p_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(act_fmt_);
         auto it = programs_.find(key);
         if (it != programs_.end()) return it->second;
+        g_prog_key = key.c_str();
         GLuint p = link_program(matvec_i4_pair(rows, cols, act_fmt_));
         programs_[key] = p;
         return p;
@@ -1074,6 +1111,7 @@ GLuint GPU::x_i4_add_pair(int rows, int cols, XFormat xf){
         const string key = "xi4ap_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(xf) + (inl ? "" : "_gen");
         auto it = programs_.find(key);
         if (it != programs_.end()) return it->second;
+        g_prog_key = key.c_str();
         GLuint p = link_program(matvec_i4_add_pair(rows, cols, xf, inl));
         programs_[key] = p;
         return p;
@@ -1216,6 +1254,8 @@ GLuint GPU::compile_shader(GLenum type, const string& src){
 
 GLuint GPU::link_program(const string& fs){
         const char* vs = "attribute vec2 p; void main(){ gl_Position=vec4(p,0.,1.); }";
+        const bool tm = shader_time_on();
+        const double t0 = tm ? shader_time_ms() : 0.0;
         GLuint p = glCreateProgram();
         glAttachShader(p, compile_shader(GL_VERTEX_SHADER, vs));
         glAttachShader(p, compile_shader(GL_FRAGMENT_SHADER, fs));
@@ -1224,6 +1264,15 @@ GLuint GPU::link_program(const string& fs){
         if (!ok) {
             char log[8192]; glGetProgramInfoLog(p, sizeof(log), nullptr, log);
             cerr << "program link failed:\n" << log << "\n"; exit(1);
+        }
+        if (tm) {
+            static int count = 0;
+            static double total = 0.0;
+            const double ms = shader_time_ms() - t0;
+            ++count; total += ms;
+            fprintf(stderr, "SHADER_TIME #%02d at %8.1f ms  link %6.1f ms  src %5zu B  h=%08zx  key=%s  cum %7.1f ms\n",
+                    count, shader_time_ms(), ms, fs.size(),
+                    (size_t)std::hash<string>{}(fs), g_prog_key, total);
         }
         return p;
     }
