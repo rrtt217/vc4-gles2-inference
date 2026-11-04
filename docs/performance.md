@@ -3157,6 +3157,14 @@ doubling the draw count at a fragment count where this kernel runs at half rate
 (14.4 us/fragment at 608 against 7.7 at 1216, which is where the q8 kernel
 already sits at 608).
 
+**Live on the shipped build (Q4_MV4 unset).**  32 greedy tokens, `SEQ=768`,
+three interleaved runs against `bin/engine_base` with this board just rebooted:
+q8 230.7 -> 192.6 median ms/token, q4 377.5 -> 285.9 (-19.2% / -24.3%).  Those
+deltas are the cumulative work since the stored baseline, not this step: the
+default gate program is byte-identical to the previous build, so this step moves
+no default timing at all.  q4 today is 285.9 ms/token against q8 192.6, a 1.48x
+ratio that still sits where 8a left it.
+
 **Next step (8c): one gate draw per layer.**  `split_ffn()` splits the FFN at
 hidden > 2048 because the *non-fused* two-pass path needs a 2432-wide target;
 the fused gate only needs a 1216-texel I16_2 output, which fits.  Plan: keep
