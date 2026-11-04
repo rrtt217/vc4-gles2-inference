@@ -2677,5 +2677,19 @@ Pi Zero, q4, `GPU_LAYER=1 KV_PACK=16 SEQ=768`:
 | PPL (`SEQ=768`) | 325.3751 | 325.3751 (`nll` 5.7850, 293 tokens) |
 
 q8 still reads `271.2855`; the shift path only exists inside `q4_taps`.
-Default-on is not enabled yet: it needs a full suite run on the Pi and a
-decision on what a non-VC4 driver should do with the version override.
+
+**It is on by default.**  `init_egl` sets the two Mesa overrides before
+`eglInitialize` and then records whether the context really reports ESSL 3.xx;
+a driver that cannot gets the float decode back with one warning line instead
+of a fatal error, so an older Mesa degrades rather than refusing to start.
+`Q4_SHIFT=0` forces the float path, `Q4_SHIFT_NO_MESA=1` leaves the overrides
+out for an A/B, and `Q4_SHIFT_VERBOSE=1` (or `SHADER_TIME=1`) prints which
+decode the driver got.
+
+The "is this a VC4" question is deliberately not asked: the overrides cap a
+higher-version driver at 3.0, and the engine uses nothing above ESSL 3.00 - the
+Iris Xe run gives the same q4 answer with and without the shift path.
+
+Full suite on the default build, Pi Zero:
+determinism, default system prompt, q8/q4 strings, poem behaviour,
+q8 PPL `271.2855`, q4 PPL `325.3751`, ACT8 arms `272.5406` / `272.0165` - ACCEPT.
