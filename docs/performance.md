@@ -2561,3 +2561,75 @@ several seconds with the board swap state.
 
 Suite on the final build: q8 271.2855, q4 325.3751, both greedy strings
 byte-identical, ACT8 arms unchanged - ACCEPT.
+
+## Q4_EXACTFAST: the integer nibble unpack is a dead end (2026-11-04)
+
+The idea was to decode each q4 byte with integer ops instead of three float
+floor chains: `int b = int(roundEven(c*255.0)); int h = b>>4; int l = b&15;`,
+with the expected peephole `f2i32(fround_even(x)) -> FTOIN` turning the
+conversion into one instruction.  `engine/probes/glsl_probe.cpp` compiles every
+form of the decode in every language a vc4 context can be given and checks all
+256 byte values across four channels; `engine/probes/q4mv_probe.cpp` runs the
+engine INT4 kernels on a synthetic matrix so a decode change can be judged
+apart from the model.
+
+**The peephole is not in this Mesa, and roundEven is a hard abort.**  With
+`MESA_GLES_VERSION_OVERRIDE=3.0 MESA_GLSL_VERSION_OVERRIDE=300` the ES2 context
+reports `OpenGL ES 3.0` / `OpenGL ES GLSL ES 3.00` and an ESSL 3.00
+`#version 300 es` shader compiles, so the override itself works - though
+`gl_FragColor` is undeclared there, so an exact-fast kernel would have to be
+rewritten in ES3 style, not just re-tagged.  But as soon as
+`roundEven` gets a runtime value the vc4 backend aborts the whole process:
+
+```
+MESA: error: unknown NIR ALU inst: 32    %12 = fround_even %11
+```
+
+This is not a shader compile error - it is SIGABRT, before any draw.  The
+earlier hand check on the Pi used literals (`roundEven(0.6)`, `int(2.7)`), which
+Mesa folds in the front end, so the intrinsic never reached vc4.  An ES3
+context running `engine_merge` says nothing about this path.
+
+**Every other form is exact but slower.**  Bitwise operators are rejected in
+ESSL 1.00 (`bit-wise operations are forbidden in GLSL ES 1.00`), so the only
+version-free form is integer division:
+
+```
+int b0=int(w.r*255.0+0.5), ...;   // fmul, fadd, f2i32
+int i0=b0/16, ...;                // imax, imin, iabs, ushr, imul
+float h0=float(i0), ...;           // i2f32
+float l0=float(b0-i0*16), ...;     // ishl, ineg, iadd, i2f32
+```
+
+13 NIR ops per byte against 7 for the float form (`fmul 255, fadd .5, ffloor,
+fmul .0625, ffloor, fmul 16, fsub`): signed division by 16 is five ops of sign
+correction, and h and l each need an `i2f32`.  Both this form and the ESSL 3.00
+bit form decode all 256 byte values exactly (`bad=0/1024` in glsl_probe; drop the
++0.5 and it is 1016/1024 wrong, the same trap as Q4_BFAST), so the
+arithmetic is right - it is just more work.  q4, 32 tokens, interleaved, 3 runs:
+
+| q4 decode | ms/token (3 runs) | median |
+|---|---:|---:|
+| float unpack (shipped) | 365.0 / 430.7 / 358.4 | **365.0** |
+| integer unpack, matvec only (exact) | 378.8 / 380.0 / 375.4 | **378.8 (+3.8%)** |
+| integer unpack in the fused gate | 193.3 / 203.1 / 194.0 | broken, see below |
+
+**The fused gate miscompiles.**  `Q4_EXACTFAST=gate` (only
+`matvec_i4_pair_swiglu`) printed `等等等等...` instead of the golden string, while
+`mv`, `add`, `add1` and `pair` stayed byte-identical.  q4mv_probe at the model
+shape (2432x768) shows why: the float gate kernel takes **11.92 ms per call**
+and the integer one **0.24 ms**, with 16 of the first 32 output bytes different.
+The vc4 backend drops the loop body instead of compiling it - the speedup is the
+work disappearing, and the 193 ms/token is a broken shader, not a win.
+
+q4 therefore keeps the float decode.  Item 0 closes as a negative result: the
+FTOIN peephole is not in Mesa 26.2.2, roundEven aborts the vc4 backend, and the
+portable integer form costs +3.8% on arithmetic alone.
+
+**GLSL version override: usable boundary.**  `MESA_GLES_VERSION_OVERRIDE` /
+`MESA_GLSL_VERSION_OVERRIDE` change only the version *reported to the front
+end*; they add no capabilities.  They do let an ESSL 3.00 shader compile
+(bitwise ops, `#version 300 es`), but any intrinsic vc4 does not lower aborts
+the process at compile time, and MRT / integer textures / float textures stay
+unavailable (`GL_MAX_DRAW_BUFFERS=1`, no `EXT_texture_integer`).  It is a debug
+switch, not an API surface; nothing in the engine uses it.
