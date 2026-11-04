@@ -55,7 +55,7 @@ static string q4_act(XFormat xf, int cols, bool inl) {
         "vec4 t1=texture2D(X,vec2((float(c/2+1)+0.5)/" + AXW + ".0,0.5));"
         "vec4 t2=texture2D(X,vec2((float(c/2+2)+0.5)/" + AXW + ".0,0.5));"
         "vec4 t3=texture2D(X,vec2((float(c/2+3)+0.5)/" + AXW + ".0,0.5));"
-        "float a0=dA(t0),a1=dB(t0),a2=dA(t1),a3=dB(t1)," 
+        "float a0=dA(t0),a1=dB(t0),a2=dA(t1),a3=dB(t1),"
         "a4=dA(t2),a5=dB(t2),a6=dA(t3),a7=dB(t3);"
         "vec4 xa=vec4(a0,a1,a2,a3);vec4 xb=vec4(a4,a5,a6,a7);";
 }
@@ -142,7 +142,7 @@ static bool q4_hfast() {
 
 static string q4_h(const string& w) {
     if (q4_hfast())
-        return "float h0=floor(" + w + ".r*15.9375+0.03125),h1=floor(" + w + ".g*15.9375+0.03125)," 
+        return "float h0=floor(" + w + ".r*15.9375+0.03125),h1=floor(" + w + ".g*15.9375+0.03125),"
                "h2=floor(" + w + ".b*15.9375+0.03125),h3=floor(" + w + ".a*15.9375+0.03125);";
     return "float h0=floor(b0*0.0625),h1=floor(b1*0.0625),"
            "h2=floor(b2*0.0625),h3=floor(b3*0.0625);";
@@ -340,6 +340,78 @@ string matvec_q8_pair_swiglu(int rows, int cols, XFormat xf, bool inl) {
         "s21+=w.x*x.x+w.y*x.y+w.z*x.z+w.w*x.w;}"
         "float v1=(r0+1<" + to_string(rows) + ")?sl(qz(s11*ws1),qz(s21*ws2)):0.0;"
         "gl_FragColor=x_st2(sl(qz(s10*ws1),qz(s20*ws2)),v1);}";
+}
+
+// Two-position gate packing (WORKLOG item 7b).  One fragment evaluates one
+// gate row for BOTH positions: the two weight texels (W1 and W3, row r) are
+// fetched once and each feeds two activation quads, so a weight byte is used
+// twice and the weight traffic per position halves.  A fragment writes one
+// RGBA8 texel, i.e. two q16 values, which is one row for two positions - that
+// is why this kernel is one row per fragment (viewport rows wide) and not the
+// row pair the single-position kernel uses: four q16 would need two texels and
+// vc4 has no MRT.  The activation input is one texture holding position A in
+// [0,axw) and position B in [axw,2*axw); the output is the P2 layout
+// (xformat.h).  Per (row, position) the fetch order, the four MACs and the
+// qz/sl/encode steps are the same operations in the same order as
+// matvec_q8_pair_swiglu, so the bytes must match two single-position draws.
+string matvec_q8_gate2(int rows, int cols) {
+    const int axw = x_texels(cols, XFormat::I16_2);
+    const string ROWS = to_string(rows), COLS4 = to_string(cols / 4);
+    const string AXW = to_string(axw), AXW2 = to_string(2 * axw);
+    const string WR = "vec2((float(q)+0.5)/float(" + COLS4 + "),"
+                      "(float(r)+0.5)/float(" + ROWS + "))";
+    return head(XFormat::I16_2) + x_pair2_glsl() +
+        "uniform sampler2D W1,W2,X;uniform float ws1,ws2;"
+        "float dA(vec4 c){float u=c.r*65280.0+c.g*255.0;"
+        "return u>=32768.0?u-65536.0:u;}"
+        "float dB(vec4 c){float u=c.b*65280.0+c.a*255.0;"
+        "return u>=32768.0?u-65536.0:u;}"
+        "float qz(float v){return clamp(floor(v+0.5),-32768.0,32767.0);}"
+        "float sl(float q,float g){float a=q/256.0;"
+        "return (a/(1.0+exp(-a)))*(g/256.0);}"
+        "void main(){int r=int(gl_FragCoord.x);"
+        "float s10=0.0,s20=0.0,s11=0.0,s21=0.0;"
+        "for(int q=0;q<" + COLS4 + ";q++){"
+        "vec4 xa=texture2D(X,vec2((float(2*q)+0.5)/float(" + AXW2 + "),0.5));"
+        "vec4 xb=texture2D(X,vec2((float(2*q+1)+0.5)/float(" + AXW2 + "),0.5));"
+        "vec4 xc=texture2D(X,vec2((float(2*q+" + AXW + ")+0.5)/float(" + AXW2 + "),0.5));"
+        "vec4 xd=texture2D(X,vec2((float(2*q+" + AXW + "+1)+0.5)/float(" + AXW2 + "),0.5));"
+        "float a0=dA(xa),a1=dB(xa),a2=dA(xb),a3=dB(xb);"
+        "float b0=dA(xc),b1=dB(xc),b2=dA(xd),b3=dB(xd);"
+        "vec4 c=texture2D(W1," + WR + ");vec4 w=c*255.0-128.0;"
+        "s10+=w.x*a0+w.y*a1+w.z*a2+w.w*a3;"
+        "s11+=w.x*b0+w.y*b1+w.z*b2+w.w*b3;"
+        "c=texture2D(W2," + WR + ");w=c*255.0-128.0;"
+        "s20+=w.x*a0+w.y*a1+w.z*a2+w.w*a3;"
+        "s21+=w.x*b0+w.y*b1+w.z*b2+w.w*b3;}"
+        "gl_FragColor=x_p2_st(sl(qz(s10*ws1),qz(s20*ws2)),"
+        "sl(qz(s11*ws1),qz(s21*ws2)));}";
+}
+
+// Two-position w2 matvec: one fragment evaluates output row r for both
+// positions.  The P2 gate output gives .rg = position A and .ba = position B
+// for the same column, so a four-weight texel needs four P2 texels and feeds
+// eight MACs (four per position): the weight byte is used twice.  The output
+// is the P2 layout, which the CPU read-back deinterleaves.
+string matvec_q8_p2(int rows, int cols) {
+    const string ROWS = to_string(rows), COLS4 = to_string(cols / 4);
+    const string CW = to_string(cols);
+    return head(XFormat::I16_2) + x_pair2_glsl() +
+        "uniform sampler2D W,X;uniform float ws;"
+        "void main(){int r=int(gl_FragCoord.x);float sa=0.0,sb=0.0;"
+        "for(int q=0;q<" + COLS4 + ";q++){"
+        "vec4 c=texture2D(W,vec2((float(q)+0.5)/float(" + COLS4 + "),"
+        "(float(r)+0.5)/float(" + ROWS + ")));"
+        "vec4 w=c*255.0-128.0;"
+        "vec4 t0=texture2D(X,vec2((float(4*q)+0.5)/float(" + CW + "),0.5));"
+        "vec4 t1=texture2D(X,vec2((float(4*q+1)+0.5)/float(" + CW + "),0.5));"
+        "vec4 t2=texture2D(X,vec2((float(4*q+2)+0.5)/float(" + CW + "),0.5));"
+        "vec4 t3=texture2D(X,vec2((float(4*q+3)+0.5)/float(" + CW + "),0.5));"
+        "float a0=x_p2_a(t0),a1=x_p2_a(t1),a2=x_p2_a(t2),a3=x_p2_a(t3);"
+        "float b0=x_p2_b(t0),b1=x_p2_b(t1),b2=x_p2_b(t2),b3=x_p2_b(t3);"
+        "sa+=w.x*a0+w.y*a1+w.z*a2+w.w*a3;"
+        "sb+=w.x*b0+w.y*b1+w.z*b2+w.w*b3;}"
+        "gl_FragColor=x_p2_stq(sa*ws,sb*ws);}";
 }
 
 string matvec_q8_pair_fused(int rows, int cols, XFormat xf) {

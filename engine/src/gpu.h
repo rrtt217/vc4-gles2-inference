@@ -39,6 +39,8 @@ public:
     vector<float> matvec(const Mat& m, const vector<float>& x);
 
     GLuint upload_input(const vector<float>& x);
+    // Prefill batch: position A then position B in one texture (see upload_input2).
+    GLuint upload_input2(const vector<float>& a, const vector<float>& b);
 
     void matvec_to(const Mat& m, GLuint x, Target& out);
 
@@ -52,6 +54,9 @@ public:
     // Paired gate matvec + swiglu for one FFN chunk.
     GLuint ffn_pair_chunk(const Mat& w1, const Mat& w3, GLuint x, int hidden, Target& pair_buf, Target& out);
     GLuint ffn_pair_swiglu_chunk(const Mat& w1, const Mat& w3, GLuint x, int rows, Target& out);
+    // Two-position variants: one weight fetch feeds two positions (item 7b).
+    GLuint ffn_pair_swiglu_chunk2(const Mat& w1, const Mat& w3, GLuint x2, int rows, Target& out);
+    void matvec_p2(const Mat& m, GLuint xp2, Target& out);
     GLuint ffn_pair_i4_swiglu_chunk(const Mat& w1, const Mat& w3, GLuint x, int rows, Target& out);
 
     void ffn_split_chunked(const Mat& w1a, const Mat& w3a, const Mat& w1b, const Mat& w3b,
@@ -117,6 +122,8 @@ private:
     GLuint x_q8(int rows, int cols);
     GLuint x_q8_pair(int rows, int cols);
     GLuint x_q8_pair_swiglu(int rows, int cols);
+    GLuint x_q8_gate2(int rows, int cols);
+    GLuint x_q8_p2(int rows, int cols);
     GLuint x_q8_pair_fused(int rows, int cols);
     GLuint x_i4_pair(int rows, int cols);
     GLuint x_i4_pair_swiglu(int rows, int cols);
@@ -177,6 +184,7 @@ private:
     struct SampRec { const char* name; int unit; };
     unordered_map<GLuint, vector<SampRec>> sampler_set_;
     unordered_map<int, GLuint> input_textures_;
+    unordered_map<int, GLuint> input_textures2_;  // pair-of-positions activation
     unordered_map<int, Target> targets_;
     Target logits_target_;
     Target candidate_target_;

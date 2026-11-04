@@ -1000,6 +1000,84 @@ GLuint GPU::ffn_pair_swiglu_chunk(const Mat& w1, const Mat& w3, GLuint x, int ro
         return out.tex;
     }
 
+GLuint GPU::x_q8_gate2(int rows, int cols){
+        return x_prog("xq8g2_" + to_string(rows) + "_" + to_string(cols),
+                      matvec_q8_gate2(rows, cols));
+    }
+
+GLuint GPU::x_q8_p2(int rows, int cols){
+        return x_prog("xq8p2_" + to_string(rows) + "_" + to_string(cols),
+                      matvec_q8_p2(rows, cols));
+    }
+
+// Position A then position B in one texture, one row wide: the 2-position
+// kernels read A at texel [0,axw) and B at [axw,2*axw).  Keyed by length like
+// upload_input, but kept in its own map: a single-position upload of the same
+// length would otherwise overwrite one half.
+GLuint GPU::upload_input2(const vector<float>& a, const vector<float>& b){
+        const int n = (int)a.size();
+        const int tw = x_texels(n, act_fmt_);
+        vector<uint8_t> data = x_pack(a, act_fmt_);
+        vector<uint8_t> db = x_pack(b, act_fmt_);
+        if ((int)data.size() != tw * 4 || (int)db.size() != tw * 4) {
+            cerr << "upload_input2: activation size mismatch\n";
+            exit(1);
+        }
+        data.insert(data.end(), db.begin(), db.end());
+        auto it = input_textures2_.find(n);
+        if (it == input_textures2_.end()) {
+            input_textures2_[n] = make_texture(2 * tw, 1, data.data());
+            return input_textures2_[n];
+        }
+        bind_tex(0, it->second);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 2 * tw, 1, GL_RGBA, GL_UNSIGNED_BYTE, data.data());
+        if (needs_finish()) { glFlush(); glFinish(); }
+        return it->second;
+    }
+
+// Two-position FFN gate: one draw for both positions (see matvec_q8_gate2).
+GLuint GPU::ffn_pair_swiglu_chunk2(const Mat& w1, const Mat& w3, GLuint x2, int rows, Target& out){
+        if (out.tex == 0 || out.w != rows) out = make_target(rows, 1);
+        GLuint p = x_q8_gate2(rows, w1.cols);
+        bind_fbo(out.fbo);
+        use_program(p);
+        bind_tex(0, w1.tex); set_sampler(p, "W1", 0);
+        bind_tex(1, w3.tex); set_sampler(p, "W2", 1);
+        bind_tex(2, x2); set_sampler(p, "X", 2);
+        glUniform1f(uloc(p, "ws1"), w1.scale);
+        glUniform1f(uloc(p, "ws2"), w3.scale);
+        setup_attrib(p);
+        for (int x0 = 0; x0 < rows; x0 += 1024) {
+            const int w = min(1024, rows - x0);
+            glViewport(x0, 0, w, 1);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+        }
+        if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
+        else layer_finish("NF_FFN");
+        if (getenv("FFN_SYNC")) { glFlush(); glFinish(); }
+        return out.tex;
+    }
+
+// Two-position w2: reads the P2 gate output, writes one P2 q16 texel per row.
+void GPU::matvec_p2(const Mat& m, GLuint xp2, Target& out){
+        if (out.tex == 0 || out.w != m.rows) out = make_target(m.rows, 1);
+        GLuint p = x_q8_p2(m.rows, m.cols);
+        bind_fbo(out.fbo);
+        use_program(p);
+        bind_tex(0, m.tex); set_sampler(p, "W", 0);
+        bind_tex(1, xp2); set_sampler(p, "X", 1);
+        glUniform1f(uloc(p, "ws"), m.scale);
+        setup_attrib(p);
+        for (int x0 = 0; x0 < m.rows; x0 += 1024) {
+            const int w = min(1024, m.rows - x0);
+            glViewport(x0, 0, w, 1);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+        }
+        if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
+        else layer_finish("NF_FFN");
+        if (getenv("FFN_SYNC")) { glFlush(); glFinish(); }
+    }
+
 // q4 gate chunk: row pair per fragment, w1/w3 dots and both swiglu results in
 // one draw (see matvec_i4_pair_swiglu).
 GLuint GPU::ffn_pair_i4_swiglu_chunk(const Mat& w1, const Mat& w3, GLuint x, int rows, Target& out){

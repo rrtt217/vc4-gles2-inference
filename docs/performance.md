@@ -2748,3 +2748,71 @@ helps.
 So item 7 stays as planned, with the target now explicit: pack B positions into
 one activation texel so a single weight fetch serves B MACs, keeping every draw
 ≤1536 wide, and expect prefill ≈ 240/B ms/token plus the fixed passes.
+
+## Prefill batching, step 2: two positions per weight fetch (2026-11-04)
+
+Step 1 priced the terms; step 2 builds the first packed kernels and asks two
+questions at once - can one weight fetch serve two positions, and does it stay
+byte-identical?  `engine/probes/ffn2_probe.cpp` (Pi Zero, VC4 V3D 2.1, Mesa
+26.2.2) answers both; the kernels are `matvec_q8_gate2` and `matvec_q8_p2` in
+`engine/src/shaders.cpp`, the layout helpers in `xformat.h`.
+
+**The shape the hardware allows.**  A vc4 fragment writes one RGBA8 texel, two
+q16 values, and there is no MRT.  Two positions x one row is exactly two q16,
+so that is the packed shape; two positions x two rows would be four q16 in two
+texels and cannot be done.  The price is the row pairing the single-position
+gate kernel uses: the packed gate runs one row per fragment (viewport `rows`
+wide, still under the 1536-wide safety line) and reuses that row's W1/W3
+texels for both positions.
+
+```
+serial gate, 2 positions   192 iters x (4 W + 2 A)  per 2 rows x 1 position
+packed gate, 2 positions   192 iters x (2 W + 4 A)  per 1 row  x 2 positions
+```
+
+The fetch *count* is the same (six per iteration); only the split changes, and
+that is exactly what the timings show.
+
+| kernel, two positions | serial | packed | |
+|---|---:|---:|---:|
+| gate 1216x768 | 8.83 ms | 7.16 ms | **1.23x** |
+| w2 768x1216 | 7.85 ms | 5.86 ms | **1.33x** |
+| one FFN layer (2 gate + 2 w2 chunks) | 33.4 ms | 26.1 ms | **1.28x** |
+| per position | 16.7 ms | 13.0 ms | |
+
+Two runs, the two sets agree to 0.02 ms.
+
+**It is exact.**  Both kernels reproduce the serial path byte for byte (gate
+0/1216 and w2 0/768 q16 values differ, for both positions), and the serial path
+is itself 768/768 rows within 1 LSB of a double-precision CPU dot product, so
+the 1.28x is not bought with numerics.  Fetch order, the q16 rounding of the
+gate output, the swiglu and the final rounding are the same operations in the
+same order in both forms.
+
+**Why 1.28x and not 2x.**  These kernels are fetch-count bound, not byte bound.
+With the same six fetches per iteration the packed form only wins the share of
+time that weight bytes were paying: it halves weight fetches and doubles
+activation fetches (four texels instead of two, from a cached 4 KB texture).
+At these shapes a weight fetch costs roughly 1.8x an activation fetch, so the
+trade nets 1.2-1.3x.  The 240 ms/token streaming figure from step 1 is the
+*byte* limit of the fully serial form; the packed form moves about 1.3x of it,
+so prefill should land near **240/1.3 ms/token**, not 240/2.
+
+**The P2 layout.**  The packed gate output is a third activation layout: texel
+k holds value k of position A in `.rg` and value k of position B in `.ba`, both
+q16 (`xformat.h`: `x_pair2_texels`, `x_pair2_glsl`, `x_p2_a`/`x_p2_b`/
+`x_p2_stq`).  It is a *target* layout, not an `XFormat` - one texel carries one
+value per position rather than two values of one vector, so `x_per_texel` does
+not apply and the width is the value count.
+
+One trap, worth the sentence: `x_st2` takes *real* values and multiplies by 256
+inside, so a matvec that already accumulates in q16 units must use `x_p2_stq`.
+With `x_p2_st` the whole output is 256x too large and every row still looks
+plausible - only the probe's CPU reference caught it.
+
+**Next (7c).**  Wiring it into `Session`: the layer loop has to produce both
+positions' attention before the packed FFN (attention stays per position and
+writes its own KV slot in order), the w2 result comes back as one P2 texel per
+row and has to be deinterleaved on the CPU before `add_q16`, and q4 / ACT8 /
+non-I16_2 keep the serial path.  The win to expect is the measured FFN share at
+1.28x; attention and rmsnorm are untouched.

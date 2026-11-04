@@ -27,6 +27,8 @@ std::string att_helpers();
 std::string matvec_q8(int rows, int cols, XFormat xf);
 std::string matvec_q8_pair(int rows, int cols, XFormat xf);
 std::string matvec_q8_pair_swiglu(int rows, int cols, XFormat xf, bool inl = true);
+std::string matvec_q8_gate2(int rows, int cols);
+std::string matvec_q8_p2(int rows, int cols);
 std::string matvec_q8_pair_fused(int rows, int cols, XFormat xf);
 std::string matvec_q8_pair_logits(int rows, int cols, XFormat xf);
 std::string matvec_q8_add(int rows, int cols, XFormat xf, XFormat rf);

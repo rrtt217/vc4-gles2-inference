@@ -43,3 +43,16 @@ std::string x_glsl(XFormat f);
 // Residual-stream variants use distinct R1/R2 names so a shader can read an
 // int8 activation and a q16 residual with different layouts in one pass.
 std::string x_residual_glsl(XFormat f);
+
+// Two-position ("batch pair", P2) target layout, used by the 2-position prefill
+// kernels: a vector of n values occupies n texels, texel k holding value k of
+// position A in .rg and value k of position B in .ba, both q16.  It is a
+// *target* layout, not an input XFormat - one texel carries one value per
+// position rather than two values of one vector, so x_per_texel() does not
+// apply and the width is x_pair2_texels(n) == n.
+int x_pair2_texels(int count);
+
+// x_p2_a/x_p2_b return raw q16 units (what a matvec accumulates).  x_p2_st packs
+// two *real* values as one P2 texel (x_st2 multiplies by 256), x_p2_stq packs two
+// values already in q16 units.  Call after x_glsl(): both use its encoders.
+std::string x_pair2_glsl();
