@@ -2966,3 +2966,68 @@ That is still the right default here: the Pi Zero is single-core and shared
 with the Minecraft server, so 15% less CPU in the prefill loop is real
 capacity and it costs no measurable latency.  The path is bit-exact and
 `PREFILL_PAIR=0` is a one-variable escape hatch if a workload ever disagrees.
+
+
+## Prefill batching, step 6: B=4 priced, and it does not pay (2026-11-05)
+
+Step 5 made the two-position path the default.  The open question was whether a
+fourth position per weight fetch is worth building.  It is not, and the probe
+now carries the measurement (`engine/probes/ffn2_probe.cpp`, last section).
+
+**The encoding constraint comes first.**  A fragment writes one RGBA8 texel -
+two q16 values - and vc4 has no MRT, so four positions of one gate row (four
+q16 = 8 bytes) cannot come out of a single draw.  There are exactly two
+encodings:
+
+* **two passes of the B=2 kernel.**  The second pass re-fetches the same
+  weights, so the work per position is the B=2 work by construction (measured:
+  3.60 ms per position either way) and the only cost is one more draw per gate
+  chunk (8-19 us, step 7a).
+* **one pass writing the four gate values as int8.**  A per-row scale cannot be
+  produced in the same fragment either (one texel, no max over the row), so the
+  scale has to be fixed; this is the fastest B=4 gate that can exist, so it is
+  the upper bound for any B=4 design.
+
+**The int8 gate is fast, and it does not reach the layer.**  Pi, 1216x768 gate,
+min of three interleaved blocks of six draws, two runs:
+
+| | per position | four positions, one FFN layer |
+|---|---:|---:|
+| B=2 (two draws per chunk) | 3.60 ms | 52.5 ms |
+| B=4 int8 gate | 2.30 ms (**1.57x**) | 42.0 ms (**1.25x**) |
+
+The gate itself is 1.57x per position, but the layer moves 1.25x because the w2
+output is the FFN residual and has to stay q16: four positions of a w2 row are
+8 bytes again, so w2 cannot batch past B=2, and 23.6 ms of the 42.0 ms is w2.
+Batching w2 would quantise the hidden state itself, which is the model, not an
+optimisation.
+
+**What that is worth end to end.**  MiniMind3 is 8 layers at dim 768 / hidden
+2432, and one FFN layer is 13.1 ms per position at B=2 (26.1 ms for two), so
+the FFN is about 105 ms of a ~244 ms prefill token.  A 1.25x FFN is ~21 ms per
+token: **at most 1.10x on prefill**, and only where prefill dominates.
+
+**And the price is exactness.**  The int8 gate is quantised to 1/127 of the row
+range, q16 is 1/256 absolute.  On the probe data the gate range is 0.363
+(93 q16), so one int8 step is 0.7 q16 LSB and the measured error - rms 0.36
+LSB, max 1 LSB, 4864/4864 values within 1 LSB, and the byte stream is not dead
+(0 values stuck at the zero code) - *cannot* show the loss.  A real layer has a
+gate range of a few units, so a step is 5-20 q16 LSB, and step 7c established
+that 2 of 768 values moving by 1 LSB changes the greedy text.  An int8 gate can
+therefore never be the default under the byte-identical rule.  **Verdict: B=4
+rejected; B=2 stays the exact default and item 7 is closed.**
+
+**The six extra programs, explained.**  Step 5 left one thing open: a ~1.5-2 s
+gap in the first warm prefill repeat at 109 tokens.  It is not a warm-path cost.
+`SHADER_TIME=1` on the deployed binary counts the programs: **20 in pair mode
+against 14 serial**, and the six pair-only ones are exactly what step 4 added -
+`xrms2s_768_x16_2`, `xrms2n_768_x16_2`, `xq8g2p2_1216_768`,
+`xq8p2a_768_1216_x16_2`, `xq8p2a2_768_1216`, `xp2sp_768_x16_2`, 681 ms of link
+time between them (link total 2898 against 1821 ms).  Cold prefill on a
+10-token prompt differs by 1.7 s (7.16 against 5.46 s); the warm repeats on the
+same runs are 2.49/2.53 s against 2.41/2.40 s, **+3.5%**, so the warm path has
+no structural gap.  The 7e number was the compiler state of the first process
+after the reboot: the same pair binary took 17.1 s cold on its first run and
+7.2 s on the next, with one program link falling from 2792 to 301 ms.  Cold
+prefill is not a kernel measurement on this board; the six programs are a
+first-token cost, not a warm one.
