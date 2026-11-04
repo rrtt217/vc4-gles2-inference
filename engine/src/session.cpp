@@ -307,6 +307,10 @@ GLuint Session::forward_gpu_hidden(int token, int pos, bool want_logits){
                 gpu_.matvec_add(m_.w2b[l], hb, gpu_.hidden_a_.tex, gpu_.hidden_b_, gpu_.ffn_fmt_);
                 mark("w2", l);
                 h = gpu_.hidden_b_.tex;
+            if (getenv("HIDDEN_DUMP")) {
+                gpu_.sync();
+                gpu_.dump_target(gpu_.hidden_b_, "hidA", 4096);
+            }
             } else {
                 GLuint hffn;
                 if (!m_.w1.empty()) hffn = gpu_.ffn_split(m_.w1[l], m_.w3[l], xbf, m_.hidden);
@@ -315,6 +319,10 @@ GLuint Session::forward_gpu_hidden(int token, int pos, bool want_logits){
                 gpu_.matvec_add(m_.w2[l], hffn, x1, gpu_.hidden_a_, gpu_.ffn_fmt_);
                 mark("w2", l);
                 h = gpu_.hidden_a_.tex;
+            if (getenv("HIDDEN_DUMP")) {
+                gpu_.sync();
+                gpu_.dump_target(gpu_.hidden_a_, "hidA", 4096);
+            }
             }
         }
         if (!want_logits) return h;
@@ -322,6 +330,91 @@ GLuint Session::forward_gpu_hidden(int token, int pos, bool want_logits){
         if (pass_dup("rms_final")) xf = gpu_.rmsnorm(h, gpu_.rms_final_tex_, gpu_.xf_);
         mark("rms_final", -1);
         return xf;
+    }
+
+// Prefill batching, step 7c.  The packed path handles two consecutive token
+// positions in one layer pass: the FFN reads each q8 weight texel once and
+// feeds both positions.  It is byte-identical to the serial path (verified on
+// the logits and on every hidden state), but at B=2 the FFN saving (2.0 ms per
+// chunk, 4 ms per layer) does not cover the five extra passes it needs (pack,
+// two w2 residual adds and four splits), and end-to-end prefill measures ~6%
+// slower: 10.75-11.24 s versus 9.96-10.41 s over nine interleaved pairs.  So it
+// stays opt-in (PREFILL_PAIR=1) until the pass count comes down or B goes up.
+// Attention and rmsnorm stay per position (latency, not weight traffic) and
+// q4 / ACT8 / int16 / fused-w13 models keep the serial loop.
+bool Session::pair_ok() const {
+        if (!gpu_layer_) return false;
+        const char* e = getenv("PREFILL_PAIR");
+        if (!e || strcmp(e, "1") != 0) return false;
+        // The packed kernels are INT8-only and read and write I16_2 activations.
+        if (gpu_.act_fmt_ != XFormat::I16_2 || gpu_.ffn_fmt_ != XFormat::I16_2) return false;
+        if ((m_.dim & 1) || (m_.hidden & 1)) return false;
+        const vector<Mat>& w1 = !m_.w1a.empty() ? m_.w1a : m_.w1;
+        const vector<Mat>& w3 = !m_.w3a.empty() ? m_.w3a : m_.w3;
+        const vector<Mat>& w2 = !m_.w2a.empty() ? m_.w2a : m_.w2;
+        if (w1.empty() || w3.empty() || w2.empty()) return false;
+        return w1[0].type == WeightType::INT8 && w3[0].type == WeightType::INT8 &&
+               w2[0].type == WeightType::INT8;
+    }
+
+vector<float> Session::step_pair(int tok_a, int pos_a, int tok_b, int pos_b, bool want_logits){
+        if (!pair_ok()) {
+            step(tok_a, pos_a, false);
+            return step(tok_b, pos_b, want_logits);
+        }
+        GLuint h_a = gpu_.upload_hidden(embedding(tok_a));
+        GLuint h_b = gpu_.upload_hidden_b(embedding(tok_b));
+        for (int l = 0; l < m_.layers; ++l) {
+            auto pt = Clock::now();
+            auto plap = [&](const char* n) { if (getenv("PAIR_PROFILE")) { gpu_.sync(); cerr << "PAIRP " << n << " " << elapsed_ms(pt, Clock::now()) << "\n"; pt = Clock::now(); } };
+            if (g_stop) return {};
+            // A writes KV slot pos_a and B reads it; the command stream is
+            // ordered, so attention can stay per position and single-draw.
+            GLuint xba = gpu_.rmsnorm(h_a, gpu_.rms_att_tex_[l], gpu_.xb_);
+            GLuint att_a = gpu_.attention_block(m_.qkv[l], xba, l, pos_a);
+            gpu_.matvec_add(m_.wo[l], att_a, h_a, gpu_.pp_a2_, gpu_.act_fmt_);
+            GLuint xbb = gpu_.rmsnorm(h_b, gpu_.rms_att_tex_[l], gpu_.xb2_);
+            GLuint att_b = gpu_.attention_block(m_.qkv[l], xbb, l, pos_b);
+            gpu_.matvec_add(m_.wo[l], att_b, h_b, gpu_.pp_b2_, gpu_.act_fmt_);
+            plap("att");
+            GLuint xbf_a = gpu_.rmsnorm(gpu_.pp_a2_.tex, gpu_.rms_ffn_tex_[l], gpu_.xbf_);
+            GLuint xbf_b = gpu_.rmsnorm(gpu_.pp_b2_.tex, gpu_.rms_ffn_tex_[l], gpu_.xbf2_);
+            gpu_.pair_pack(xbf_a, xbf_b, gpu_.pp_in_);
+            if (m_.ffn_chunked) {
+                gpu_.ffn_pair_swiglu_chunk2(m_.w1a[l], m_.w3a[l], gpu_.pp_in_.tex,
+                                            m_.ffn_chunk, gpu_.pp_g_);
+                plap("gate0");
+                gpu_.matvec_p2_add(m_.w2a[l], gpu_.pp_g_.tex,
+                                   gpu_.pp_a2_.tex, gpu_.pp_b2_.tex, gpu_.pp_w2_);
+                plap("w20");
+                gpu_.p2_split(gpu_.pp_w2_.tex, gpu_.pp_a3_, 0);
+                gpu_.p2_split(gpu_.pp_w2_.tex, gpu_.pp_b3_, 1);
+                gpu_.ffn_pair_swiglu_chunk2(m_.w1b[l], m_.w3b[l], gpu_.pp_in_.tex,
+                                            m_.hidden - m_.ffn_chunk, gpu_.pp_g_);
+                gpu_.matvec_p2_add(m_.w2b[l], gpu_.pp_g_.tex,
+                                   gpu_.pp_a3_.tex, gpu_.pp_b3_.tex, gpu_.pp_w2_);
+                gpu_.p2_split(gpu_.pp_w2_.tex, gpu_.pp_a_, 0);
+                gpu_.p2_split(gpu_.pp_w2_.tex, gpu_.pp_b_, 1);
+            } else {
+                gpu_.ffn_pair_swiglu_chunk2(m_.w1[l], m_.w3[l], gpu_.pp_in_.tex,
+                                            m_.hidden, gpu_.pp_g_);
+                gpu_.matvec_p2_add(m_.w2[l], gpu_.pp_g_.tex,
+                                   gpu_.pp_a2_.tex, gpu_.pp_b2_.tex, gpu_.pp_w2_);
+                gpu_.p2_split(gpu_.pp_w2_.tex, gpu_.pp_a_, 0);
+                gpu_.p2_split(gpu_.pp_w2_.tex, gpu_.pp_b_, 1);
+            }
+            plap("ffn");
+            h_a = gpu_.pp_a_.tex;
+            h_b = gpu_.pp_b_.tex;
+            if (getenv("HIDDEN_DUMP")) {
+                gpu_.sync();
+                gpu_.dump_target(gpu_.pp_a_, "hidA", 4096);
+                gpu_.dump_target(gpu_.pp_b_, "hidB", 4096);
+            }
+        }
+        if (!want_logits || g_stop) return {};
+        GLuint xf = gpu_.rmsnorm(h_b, gpu_.rms_final_tex_, gpu_.xf_);
+        return gpu_.logits_from(m_.logits_tiles, xf);
     }
 
 vector<float> Session::step(int token, int pos, bool want_logits){

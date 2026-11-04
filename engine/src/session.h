@@ -22,6 +22,13 @@ public:
 
     vector<float> step(int token, int pos, bool want_logits);
 
+    // Prefill batching (WORKLOG 7c): run one layer pass for two consecutive
+    // positions.  Returns B logits when want_logits; a pair never contains the
+    // last prompt token, whose logits are the only ones the caller needs.
+    vector<float> step_pair(int tok_a, int pos_a, int tok_b, int pos_b, bool want_logits);
+
+    bool pair_ok() const;
+
     CandidateResult step_candidates(int token, int pos, int topk, float temp, float top_p);
 
 private:

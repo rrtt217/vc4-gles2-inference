@@ -414,6 +414,74 @@ string matvec_q8_p2(int rows, int cols) {
         "gl_FragColor=x_p2_stq(sa*ws,sb*ws);}";
 }
 
+// Prefill batching, step 7c: the packed gate kernel reads ONE texture holding
+// position A in [0,tw) and B in [tw,2*tw), both in the I16_2 activation layout
+// - the shape upload_input2 builds on the CPU.  Building it on the GPU is a
+// pure texel copy of the two textures side by side (no decode, no
+// re-quantisation), so the gate kernel reads exactly the bytes the serial
+// kernel would have read from its own FFN input.
+string pair_pack(int count) {
+    const string TW = to_string(x_texels(count, XFormat::I16_2));
+    return "precision highp float;"
+        "uniform sampler2D A,B;"
+        "void main(){int j=int(gl_FragCoord.x);"
+        "if(j<" + TW + "){gl_FragColor=texture2D(A,vec2((float(j)+0.5)/" + TW + ".0,0.5));}"
+        "else{gl_FragColor=texture2D(B,vec2((float(j-" + TW + ")+0.5)/" + TW + ".0,0.5));}"
+        "}";
+}
+
+// Two-position w2 with the residual add (step 7c).  The single-position path
+// adds the residual *before* rounding (enc16(s*ws+res)); rounding the matvec
+// first and adding afterwards is not the same expression and it shows: at
+// layer 0 of MiniMind3 (token 0) 2 of 768 q16 values moved by one LSB, where
+// the float sum lands inside one ULP of a 0.5 boundary.  So the add has to
+// happen inside the kernel, in the same expression order as the serial path.
+string matvec_q8_p2_add(int rows, int cols, XFormat rf) {
+    const string ROWS = to_string(rows), COLS4 = to_string(cols / 4), CW = to_string(cols);
+    const string RW = to_string(x_texels(rows, rf));
+    return head(XFormat::I16_2) + x_pair2_glsl() + x_residual_glsl(rf) +
+        "uniform sampler2D W,X,RA,RB;uniform float ws;"
+        "void main(){int r=int(gl_FragCoord.x);float sa=0.0,sb=0.0;"
+        "for(int q=0;q<" + COLS4 + ";q++){"
+        "vec4 c=texture2D(W,vec2((float(q)+0.5)/float(" + COLS4 + ")," 
+        "(float(r)+0.5)/float(" + ROWS + ")));"
+        "vec4 w=c*255.0-128.0;"
+        "vec4 t0=texture2D(X,vec2((float(4*q)+0.5)/float(" + CW + "),0.5));"
+        "vec4 t1=texture2D(X,vec2((float(4*q+1)+0.5)/float(" + CW + "),0.5));"
+        "vec4 t2=texture2D(X,vec2((float(4*q+2)+0.5)/float(" + CW + "),0.5));"
+        "vec4 t3=texture2D(X,vec2((float(4*q+3)+0.5)/float(" + CW + "),0.5));"
+        "float a0=x_p2_a(t0),a1=x_p2_a(t1),a2=x_p2_a(t2),a3=x_p2_a(t3);"
+        "float b0=x_p2_b(t0),b1=x_p2_b(t1),b2=x_p2_b(t2),b3=x_p2_b(t3);"
+        "sa+=w.x*a0+w.y*a1+w.z*a2+w.w*a3;"
+        "sb+=w.x*b0+w.y*b1+w.z*b2+w.w*b3;}"
+        "float ra=R1Q(RA,r," + RW + ".0),rb=R1Q(RB,r," + RW + ".0);"
+        "gl_FragColor=x_p2_stq(sa*ws+ra,sb*ws+rb);}";
+}
+
+// Split a P2 row back into one position residual stream.  The values are q16
+// integers, so this is a re-encode and cannot move a value; it exists because
+// a draw has one target and the next pass wants the per-position layout.
+string p2_split(int rows, XFormat rf) {
+    const string ROWS = to_string(rows), RW = to_string(x_texels(rows, rf));
+    const string H = head(XFormat::I16_2) + x_pair2_glsl() + x_residual_glsl(rf);
+    if (rf == XFormat::I16_1)
+        return H +
+            "uniform sampler2D X;uniform float which;"
+            "void main(){int i=int(gl_FragCoord.x);"
+            "vec4 c=texture2D(X,vec2((float(i)+0.5)/float(" + ROWS + "),0.5));"
+            "float q=(which<0.5)?x_p2_a(c):x_p2_b(c);"
+            "gl_FragColor=x_st1q(q);}";
+    return H +
+        "uniform sampler2D X;uniform float which;"
+        "void main(){int t=int(gl_FragCoord.x);"
+        "int t1=min(2*t+1," + to_string(rows - 1) + ");"
+        "vec4 ca=texture2D(X,vec2((float(2*t)+0.5)/float(" + ROWS + "),0.5));"
+        "vec4 cb=texture2D(X,vec2((float(t1)+0.5)/float(" + ROWS + "),0.5));"
+        "float q0=(which<0.5)?x_p2_a(ca):x_p2_b(ca);"
+        "float q1=(which<0.5)?x_p2_a(cb):x_p2_b(cb);"
+        "gl_FragColor=x_st2q(q0,q1);}";
+}
+
 string matvec_q8_pair_fused(int rows, int cols, XFormat xf) {
     const int axw = x_texels(cols, xf);
     const int rows2 = 2 * rows;

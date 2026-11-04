@@ -2816,3 +2816,47 @@ writes its own KV slot in order), the w2 result comes back as one P2 texel per
 row and has to be deinterleaved on the CPU before `add_q16`, and q4 / ACT8 /
 non-I16_2 keep the serial path.  The win to expect is the measured FFN share at
 1.28x; attention and rmsnorm are untouched.
+
+## Prefill batching, step 3: two positions wired into Session (2026-11-04)
+
+Step 2 proved the packed FFN kernels byte-identical but left them unused.  This
+step drives them from the layer loop: `Session::step_pair(tok_a, pos_a, tok_b,
+pos_b)` runs one layer for two consecutive prompt positions - attention and
+rmsnorm stay per position (they are latency, not weight traffic), the FFN runs
+once for both - and the three prefill loops (chat, tool, single prompt) consume
+two tokens at a time, leaving the last token on the single-position path
+because its logits are the ones the caller needs.
+
+Three new pieces were needed:
+
+| pass | why |
+|---|---|
+| `pair_pack` | the packed gate reads one texture with A in [0,tw) and B in [tw,2tw), the shape `upload_input2` builds on the CPU; on the GPU it is a texel copy of the two I16_2 inputs, so the bytes cannot drift |
+| `matvec_q8_p2_add` | w2 for both positions *with the residual add inside the kernel* (see below) |
+| `p2_split` | one P2 row back into one position residual stream; a re-encode of q16 integers, exact by construction |
+
+**The trap that cost the first wiring.**  The serial path adds the residual
+before rounding, `enc16(s*ws+res)`; the first version of the pair path rounded
+the matvec to q16 and added the residual in a later pass.  Both look equivalent
+- the residual is an integer - but in float32 the sum can land on the other side
+of a 0.5 boundary: at layer 0, token 0, **2 of 768 q16 values moved by one LSB**,
+and that was enough to change the greedy continuation.  Moving the add into the
+w2 kernel (two extra fetches per fragment, one per position) restored the exact
+expression order, and with it exactness: every hidden state of every token and
+layer compares byte-identical between `PREFILL_PAIR=0` and `=1`, the `LOGITS_OUT`
+dumps are bit-identical, and the suite keeps the same greedy strings and PPL.
+
+**What it costs.**  Per layer for two positions (`PAIR_PROFILE=1` laps, steady
+state): gate 7.3 ms against 8.94 ms for one position, w2 6.3 against 6.73, so
+the FFN for a pair is 27.9 ms against 31.4 ms serial.  But the pair path needs
+five extra passes per layer (one pack and four splits), and they cost more than
+the FFN saves.  End to end, on a 45-token prompt, the second (warm) turn
+prefills in **10.75-11.24 s with pairs against 9.96-10.41 s serial**: nine
+interleaved pairs, min and median both about 6% worse.
+
+So the wiring ships **opt-in** (`PREFILL_PAIR=1`, default off).  It is exact and
+gated, but at B=2 the packing win (4 ms per layer) does not cover the extra
+target switches.  The next step is to cut the pass count - keep the pair stream
+in P2 and let rmsnorm read it, or have the packed gate read the two activation
+textures directly and drop `pair_pack` - or to go to B=4, where one weight fetch
+serves four positions.

@@ -57,6 +57,11 @@ public:
     // Two-position variants: one weight fetch feeds two positions (item 7b).
     GLuint ffn_pair_swiglu_chunk2(const Mat& w1, const Mat& w3, GLuint x2, int rows, Target& out);
     void matvec_p2(const Mat& m, GLuint xp2, Target& out);
+    // Prefill pair (WORKLOG 7c): pack two positions activations into P2, run
+    // w2 for both with the residual add, and split the result back out.
+    void pair_pack(GLuint a, GLuint b, Target& out);
+    void matvec_p2_add(const Mat& m, GLuint xp2, GLuint ra, GLuint rb, Target& out);
+    void p2_split(GLuint xp2, Target& out, int which);
     GLuint ffn_pair_i4_swiglu_chunk(const Mat& w1, const Mat& w3, GLuint x, int rows, Target& out);
 
     void ffn_split_chunked(const Mat& w1a, const Mat& w3a, const Mat& w1b, const Mat& w3b,
@@ -93,6 +98,8 @@ public:
                         const vector<float>& rms_ffn, const vector<float>& rms_final);
 
     GLuint upload_hidden(const vector<float>& x);
+    // Second hidden upload slot, so two positions can be in flight at once.
+    GLuint upload_hidden_b(const vector<float>& x);
 
     GLuint rmsnorm(GLuint x, GLuint w, Target& out);
 
@@ -124,6 +131,9 @@ private:
     GLuint x_q8_pair_swiglu(int rows, int cols);
     GLuint x_q8_gate2(int rows, int cols);
     GLuint x_q8_p2(int rows, int cols);
+    GLuint x_pair_pack(int count);
+    GLuint x_q8_p2_add(int rows, int cols);
+    GLuint x_p2_split(int rows);
     GLuint x_q8_pair_fused(int rows, int cols);
     GLuint x_i4_pair(int rows, int cols);
     GLuint x_i4_pair_swiglu(int rows, int cols);
@@ -194,12 +204,18 @@ private:
     Target qkv_target_, att_scores_, att_stats_, att_probs_, att_out_, qrot_target_, qscale_target_;
     vector<Target> kv_cache_;
     Target hidden_a_, hidden_b_, xb_, xbf_, xf_, rms_stats_, rms_partial_, ffn_pair_a_, ffn_pair_b_;
+    // Prefill pair (7c): two hidden streams, their post-attention scratch and
+    // the FFN chunk-0 intermediate.  pp_a_ is also the layer output slot, so
+    // the three roles rotate inside one layer and never feedback.
+    Target pp_a_, pp_a2_, pp_a3_, pp_b_, pp_b2_, pp_b3_;
+    Target pp_in_, pp_g_, pp_w2_, xb2_, xbf2_;
     bool layer_fast_finish_ = false;
     bool res_pack_ = false;   // residual stream holds two int16 per texel
     XFormat act_fmt_ = XFormat::I16_2;  // matvec input (qkv/wo/gate/logits)
     XFormat ffn_fmt_ = XFormat::I16_2;  // FFN hidden state (w2 input)
     XFormat res_fmt_ = XFormat::I16_1;  // residual stream layout
     GLuint hidden_in_ = 0;
+    GLuint hidden_in_b_ = 0;
     vector<GLuint> rms_att_tex_, rms_ffn_tex_;
     GLuint rms_final_tex_ = 0;
     GLuint rope_tex_ = 0;

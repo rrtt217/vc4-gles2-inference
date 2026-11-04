@@ -718,6 +718,7 @@ void GPU::init_persistent(int dim, int layers, const vector<float>& rms_att,
         xf_ = make_target(aw, 1);
         rms_stats_ = make_target(1, 1);
         hidden_in_ = make_texture(rw, 1, nullptr);
+        hidden_in_b_ = make_texture(rw, 1, nullptr);
         rms_att_tex_.clear(); rms_ffn_tex_.clear();
         for (int l = 0; l < layers; ++l) {
             vector<float> a(rms_att.begin() + (size_t)l * dim, rms_att.begin() + (size_t)(l + 1) * dim);
@@ -735,6 +736,17 @@ GLuint GPU::upload_hidden(const vector<float>& x){
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, tw, 1, GL_RGBA, GL_UNSIGNED_BYTE, data.data());
         layer_finish("NF_UPLOAD");
         return hidden_in_;
+    }
+
+// Same upload into the second slot: the prefill pair has two positions in
+// flight, and hidden_in_ would be overwritten by the second upload.
+GLuint GPU::upload_hidden_b(const vector<float>& x){
+        const int tw = x_texels((int)x.size(), res_fmt_);
+        vector<uint8_t> data = x_pack(x, res_fmt_);
+        bind_tex(0, hidden_in_b_);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, tw, 1, GL_RGBA, GL_UNSIGNED_BYTE, data.data());
+        layer_finish("NF_UPLOAD");
+        return hidden_in_b_;
     }
 
 GLuint GPU::rmsnorm(GLuint x, GLuint w, Target& out){
@@ -1073,6 +1085,78 @@ void GPU::matvec_p2(const Mat& m, GLuint xp2, Target& out){
             glViewport(x0, 0, w, 1);
             glDrawArrays(GL_TRIANGLES, 0, 3);
         }
+        if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
+        else layer_finish("NF_FFN");
+        if (getenv("FFN_SYNC")) { glFlush(); glFinish(); }
+    }
+
+GLuint GPU::x_pair_pack(int count){
+        return x_prog("xp2pk_" + to_string(count), ::pair_pack(count));
+    }
+
+GLuint GPU::x_q8_p2_add(int rows, int cols){
+        return x_prog("xq8p2a_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(res_fmt_),
+                      ::matvec_q8_p2_add(rows, cols, res_fmt_));
+    }
+
+GLuint GPU::x_p2_split(int rows){
+        return x_prog("xp2sp_" + to_string(rows) + "_" + x_format_name(res_fmt_),
+                      ::p2_split(rows, res_fmt_));
+    }
+
+// Two positions FFN input -> one texture, A texels then B texels, exactly the
+// bytes upload_input2 builds on the CPU (the I16_2 layout, not the P2 target).
+void GPU::pair_pack(GLuint a, GLuint b, Target& out){
+        const int w = 2 * x_texels(att_dim_, XFormat::I16_2);
+        if (out.tex == 0 || out.w != w) out = make_target(w, 1);
+        GLuint p = x_pair_pack(att_dim_);
+        bind_fbo(out.fbo);
+        glViewport(0, 0, w, 1);
+        use_program(p);
+        bind_tex(0, a); set_sampler(p, "A", 0);
+        bind_tex(1, b); set_sampler(p, "B", 1);
+        setup_attrib(p);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
+        else layer_finish("NF_FFN");
+        if (getenv("FFN_SYNC")) { glFlush(); glFinish(); }
+    }
+
+// Two-position w2 including the residual add: one draw per FFN chunk for both
+// positions, reading each position residual stream (step 7c).
+void GPU::matvec_p2_add(const Mat& m, GLuint xp2, GLuint ra, GLuint rb, Target& out){
+        if (out.tex == 0 || out.w != m.rows) out = make_target(m.rows, 1);
+        GLuint p = x_q8_p2_add(m.rows, m.cols);
+        bind_fbo(out.fbo);
+        use_program(p);
+        bind_tex(0, m.tex); set_sampler(p, "W", 0);
+        bind_tex(1, xp2); set_sampler(p, "X", 1);
+        bind_tex(2, ra); set_sampler(p, "RA", 2);
+        bind_tex(3, rb); set_sampler(p, "RB", 3);
+        glUniform1f(uloc(p, "ws"), m.scale);
+        setup_attrib(p);
+        for (int x0 = 0; x0 < m.rows; x0 += 1024) {
+            const int w = min(1024, m.rows - x0);
+            glViewport(x0, 0, w, 1);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+        }
+        if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
+        else layer_finish("NF_FFN");
+        if (getenv("FFN_SYNC")) { glFlush(); glFinish(); }
+    }
+
+// One position of a P2 row into its residual stream (which = 0 A, 1 B).
+void GPU::p2_split(GLuint xp2, Target& out, int which){
+        const int ow = x_texels(att_dim_, res_fmt_);
+        if (out.tex == 0 || out.w != ow) out = make_target(ow, 1);
+        GLuint p = x_p2_split(att_dim_);
+        bind_fbo(out.fbo);
+        glViewport(0, 0, ow, 1);
+        use_program(p);
+        bind_tex(0, xp2); set_sampler(p, "X", 0);
+        glUniform1f(uloc(p, "which"), (float)which);
+        setup_attrib(p);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
         if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
         else layer_finish("NF_FFN");
         if (getenv("FFN_SYNC")) { glFlush(); glFinish(); }

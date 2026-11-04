@@ -375,6 +375,12 @@ int main(int argc, char** argv) {
             if (last && cand_mode) {
                 cand = session.step_candidates(tokens[i], pos++, topk, temp, top_p);
                 if (!cand.complete) { logits = std::move(cand.full); cand_mode = false; }
+            } else if (!last && i + 2 < tokens.size() && pos + 1 < model.seq && session.pair_ok()) {
+                // Two prompt tokens per layer pass; the last token stays on the
+                // single-position path because its logits are the ones we need.
+                session.step_pair(tokens[i], pos, tokens[i + 1], pos + 1, false);
+                pos += 2;
+                ++i;
             } else {
                 logits = session.step(tokens[i], pos++, last);
             }
@@ -454,6 +460,9 @@ int main(int argc, char** argv) {
                 if (last && cand_mode) {
                     cand = session.step_candidates(tokens[i], (int)i, topk, temp, top_p);
                     if (!cand.complete) { logits = std::move(cand.full); cand_mode = false; }
+                } else if (!last && i + 2 < tokens.size() && (int)i + 1 < model.seq && session.pair_ok()) {
+                    session.step_pair(tokens[i], (int)i, tokens[i + 1], (int)i + 1, false);
+                    ++i;
                 } else {
                     logits = session.step(tokens[i], (int)i, last);
                 }
@@ -546,6 +555,9 @@ int main(int argc, char** argv) {
         if (last && cand_mode) {
             cand = session.step_candidates(tokens[i], (int)i, topk, temp, top_p);
             if (!cand.complete) { logits = std::move(cand.full); cand_mode = false; }
+        } else if (!last && i + 2 < tokens.size() && (int)i + 1 < model.seq && session.pair_ok()) {
+            session.step_pair(tokens[i], (int)i, tokens[i + 1], (int)i + 1, false);
+            ++i;
         } else {
             logits = session.step(tokens[i], (int)i, last);
         }
