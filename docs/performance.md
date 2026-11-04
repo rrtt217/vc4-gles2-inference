@@ -2619,8 +2619,16 @@ arithmetic is right - it is just more work.  q4, 32 tokens, interleaved, 3 runs:
 `mv`, `add`, `add1` and `pair` stayed byte-identical.  q4mv_probe at the model
 shape (2432x768) shows why: the float gate kernel takes **11.92 ms per call**
 and the integer one **0.24 ms**, with 16 of the first 32 output bytes different.
-The vc4 backend drops the loop body instead of compiling it - the speedup is the
-work disappearing, and the 193 ms/token is a broken shader, not a win.
+That is not the loop being dropped: vc4's register allocator gives up on the
+integer form (`b/16` lowers through nir_lower_idiv, `vc4_program.c:2268`, into
+imax/imin/iabs/ushr/imul) and the driver then **skips the draw call** -
+`vc4_draw.c` logs "shader compile failed, skipping draw call" through a
+warn-once and raises no GL error, so the kernel keeps reading whatever the
+target held.  `GPU::check_program_runs` now draws every new program once into a
+sentinel-filled 1x1 target and exits with the program's key if nothing was
+written; with it the same run reports
+`program 'xi4ps_2432_768_x16_2' did not draw: ...`, and the 193 ms/token figure
+is a failed shader rather than a measurement.
 
 q4 therefore keeps the float decode.  Item 0 closes as a negative result: the
 FTOIN peephole is not in Mesa 26.2.2, roundEven aborts the vc4 backend, and the
@@ -2633,3 +2641,41 @@ end*; they add no capabilities.  They do let an ESSL 3.00 shader compile
 the process at compile time, and MRT / integer textures / float textures stay
 unavailable (`GL_MAX_DRAW_BUFFERS=1`, no `EXT_texture_integer`).  It is a debug
 switch, not an API surface; nothing in the engine uses it.
+
+## Q4_SHIFT: the shift decode lands (2026-11-04)
+
+The negative result above only rules out integer *division*.  The nibble split
+itself costs nothing on vc4 - `vc4_program.c` lowers `nir_op_ishr` to ASR and
+`nir_op_iand` to AND, one QPU instruction each - but bitwise operators need
+ESSL 3.00, and `gl_FragColor` is undeclared there.
+
+`Q4_SHIFT=1` therefore re-emits the affected fragments (and their vertex
+shader) as `#version 300 es` with an `out` variable and a `gl_FragColor`
+alias, and sets `MESA_GLES_VERSION_OVERRIDE=3.0` +
+`MESA_GLSL_VERSION_OVERRIDE=300` in `init_egl` before `eglInitialize` (only
+when the caller has not set them; `Q4_SHIFT_NO_MESA=1` skips).  `init_egl`
+then checks that the context really reports ESSL 3.xx and exits with a clear
+message otherwise.  Every other program stays ESSL 1.00, and q8 is untouched.
+
+The decode becomes four instructions per byte instead of twelve: `floor` is
+five QPU instructions on vc4 (`ntq_ffloor` is FTOI + ITOF + FSUB(sf) +
+conditional FSUB + MOV) and the unpack calls it twice.
+
+```glsl
+int   b = int(c * 255.0 + 0.5);   // MAD + FTOI
+float h = float(b >> 4);          // ASR + ITOF
+float l = float(b & 15);          // AND + ITOF
+```
+
+Pi Zero, q4, `GPU_LAYER=1 KV_PACK=16 SEQ=768`:
+
+| measurement | float decode | Q4_SHIFT=1 |
+|---|---:|---:|
+| fused gate kernel (`q4mv_probe`, 2432x768) | 11.887 ms/iter | **9.446 ms/iter (-20.5%)** |
+| 32-token wall, three interleaved pairs | 40.8 / 31.5 / 38.1 s | **35.2 / 27.5 / 31.1 s (-13%)** |
+| greedy 16-token answer | `我是MiniMind，一个高效的小参数AI模型，专注于` | identical |
+| PPL (`SEQ=768`) | 325.3751 | 325.3751 (`nll` 5.7850, 293 tokens) |
+
+q8 still reads `271.2855`; the shift path only exists inside `q4_taps`.
+Default-on is not enabled yet: it needs a full suite run on the Pi and a
+decision on what a non-VC4 driver should do with the version override.
