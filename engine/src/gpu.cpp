@@ -1246,15 +1246,19 @@ GLuint GPU::x_top2_packed(int rows, int chunk){
         return x_prog("xt2p_" + to_string(rows) + "_" + to_string(chunk), top2_packed(rows, chunk));
     }
 
-// Q4_SHIFT=1 re-emits a shader as ESSL 3.00 so it can use bitwise ops (the
-// only way to get b>>4 / b&15; ESSL 1.00 forbids them).  It needs Mesa's
-// MESA_GLES_VERSION_OVERRIDE=3.0 + MESA_GLSL_VERSION_OVERRIDE=300, which change
-// only the version the front end reports, not the driver's capabilities.
-static bool q4_shift_on(){
-        static const char* e = getenv("Q4_SHIFT");
-        static const bool v = e && strcmp(e, "0") != 0;
-        return v;
+// The q4 decode wants ESSL 3.00 for its bitwise nibble split (b>>4 / b&15;
+// ESSL 1.00 forbids them).  It is on by default and resolved in two steps: the
+// environment says whether it is wanted (Q4_SHIFT=0 turns it off), and
+// init_egl records whether the context really offers ESSL 3.00.  A driver that
+// cannot gets the float decode back with a warning instead of a fatal error.
+static bool g_q4_shift_ok = false;
+
+static bool q4_shift_wanted(){
+        const char* e = getenv("Q4_SHIFT");
+        return !(e && strcmp(e, "0") == 0);
     }
+
+bool gpu_q4_shift(){ return g_q4_shift_ok; }
 
 void GPU::init_egl(){
         // Q4_SHIFT emits ESSL 3.00 kernels, and Mesa only accepts those when the
@@ -1263,7 +1267,7 @@ void GPU::init_egl(){
         // still has no MRT, no integer textures, and no fround_even), so they
         // are set here, before eglInitialize, and never overwrite a value the
         // caller picked.  Q4_SHIFT_MESA=0 skips this for an A/B.
-        if (q4_shift_on() && !getenv("Q4_SHIFT_NO_MESA")) {
+        if (q4_shift_wanted() && !getenv("Q4_SHIFT_NO_MESA")) {
                 setenv("MESA_GLES_VERSION_OVERRIDE", "3.0", 0);
                 setenv("MESA_GLSL_VERSION_OVERRIDE", "300", 0);
         }
@@ -1288,15 +1292,16 @@ void GPU::init_egl(){
         ctx_ = ctx;
         const char* r = (const char*)glGetString(GL_RENDERER);
         renderer_ = r ? r : "";
-        if (q4_shift_on()) {
+        if (q4_shift_wanted()) {
                 const char* glsl = (const char*)glGetString(GL_SHADING_LANGUAGE_VERSION);
-                if (!glsl || strncmp(glsl, "OpenGL ES GLSL ES 3", 19) != 0) {
-                        cerr << "Q4_SHIFT=1 needs an ESSL 3.00 context, but the driver offers "
-                             << (glsl ? glsl : "(unknown)")
-                             << "\n  (Mesa's MESA_GLES_VERSION_OVERRIDE / "
-                                "MESA_GLSL_VERSION_OVERRIDE did not take effect)\n";
-                        exit(1);
-                }
+                g_q4_shift_ok = glsl && strncmp(glsl, "OpenGL ES GLSL ES 3", 19) == 0;
+                if (g_q4_shift_ok) {
+                        if (getenv("SHADER_TIME") || getenv("Q4_SHIFT_VERBOSE"))
+                                fprintf(stderr, "Q4_SHIFT: integer nibble split on %s (ESSL %s)\n",
+                                        renderer_.c_str(), glsl + 18);
+                } else
+                        fprintf(stderr, "Q4_SHIFT: %s offers %s; using the float q4 decode\n",
+                                renderer_.c_str(), glsl ? glsl : "(unknown)");
         }
     }
 
@@ -1331,7 +1336,7 @@ GLuint GPU::compile_shader(GLenum type, const string& src){
     }
 
 GLuint GPU::link_program(const string& fs_in){
-        const bool needs_es3 = q4_shift_on() && fs_in.find("&15") != string::npos;
+        const bool needs_es3 = g_q4_shift_ok && fs_in.find("&15") != string::npos;
         const string fs = needs_es3 ? es3ify(fs_in, false) : fs_in;
         string vs = "attribute vec2 p; void main(){ gl_Position=vec4(p,0.,1.); }";
         // The vertex shader must match the fragment stage's language when that

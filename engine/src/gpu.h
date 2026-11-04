@@ -12,6 +12,8 @@
 // Wall clock since main() started; a static default keeps the probe usable
 // before the engine sets it (it then only measures from first use).
 void gpu_set_run_t0(Clock::time_point t);
+// True when the context offers ESSL 3.00 and the q4 shift decode is enabled.
+bool gpu_q4_shift();
 double run_time_ms();
 
 struct Candidate { float value; int token; };

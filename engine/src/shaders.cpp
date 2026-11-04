@@ -1,4 +1,5 @@
 #include "shaders.h"
+#include "gpu.h"
 
 #include <string>
 #include <cstdlib>
@@ -110,7 +111,7 @@ static string q4_byte(const string& w, char ch) {
 static string q4_h(const string& w);
 static string q4_taps(const char* W) {
     const string w(W);
-    if (getenv("Q4_SHIFT")) {
+    if (gpu_q4_shift()) {
         // Bitwise split: ASR + AND, one QPU instruction each (vc4_program.c
         // handles nir_op_ishr/iand directly).  Needs ESSL 3.00, which
         // GPU::link_program emits when it sees the "&15" in this text.
