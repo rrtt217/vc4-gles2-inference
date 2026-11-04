@@ -332,20 +332,22 @@ GLuint Session::forward_gpu_hidden(int token, int pos, bool want_logits){
         return xf;
     }
 
-// Prefill batching, step 7c.  The packed path handles two consecutive token
-// positions in one layer pass: the FFN reads each q8 weight texel once and
-// feeds both positions.  It is byte-identical to the serial path (verified on
-// the logits and on every hidden state), but at B=2 the FFN saving (2.0 ms per
-// chunk, 4 ms per layer) does not cover the five extra passes it needs (pack,
-// two w2 residual adds and four splits), and end-to-end prefill measures ~6%
-// slower: 10.75-11.24 s versus 9.96-10.41 s over nine interleaved pairs.  So it
-// stays opt-in (PREFILL_PAIR=1) until the pass count comes down or B goes up.
+// Prefill batching, steps 7c-7e.  The packed path handles two consecutive
+// token positions in one layer pass: the FFN reads each q8 weight texel once
+// and feeds both positions.  It is byte-identical to the serial path (every
+// hidden state, the logits, the greedy strings and the KV bytes), and since
+// step 7d it is also cheaper: the FFN input is built in P2 and the second w2
+// chunk residual stays there, so a layer needs 14 draws against 18 serial and
+// warm prefill CPU drops from 6.81-6.96 s to 5.66-5.74 s (21-token prompt);
+// wall time is neutral within this board noise (+1.5% median over 14 warm
+// samples, against a 6.30-7.50 s spread), so CPU is what the default buys.
+// Step 7e makes it the default; PREFILL_PAIR=0 restores the serial loop.
 // Attention and rmsnorm stay per position (latency, not weight traffic) and
 // q4 / ACT8 / int16 / fused-w13 models keep the serial loop.
 bool Session::pair_ok() const {
         if (!gpu_layer_) return false;
         const char* e = getenv("PREFILL_PAIR");
-        if (!e || strcmp(e, "1") != 0) return false;
+        if (e && strcmp(e, "0") == 0) return false;
         // The packed kernels are INT8-only and read and write I16_2 activations.
         if (gpu_.act_fmt_ != XFormat::I16_2 || gpu_.ffn_fmt_ != XFormat::I16_2) return false;
         if ((m_.dim & 1) || (m_.hidden & 1)) return false;

@@ -2932,3 +2932,37 @@ chunk 1 also disappear, makes the pair path cheaper than serial in both kernels
 and draw count.  The remaining question is the default: `PREFILL_PAIR` is still
 opt-in until the suite has been run with it on (item 7e).
 
+
+## Prefill batching, step 5: the pair path is the default (2026-11-05)
+
+Step 4 left the two-position path opt-in until the acceptance suite had run
+with it on.  This step runs the suite and turns it on: `pair_ok()` now returns
+true unless `PREFILL_PAIR=0`, which restores the serial loop.  The eligibility
+gate is unchanged (INT8 weights, I16_2 activations, even dim and hidden), so
+q4, ACT8=1/2, int16 and fused-w13 models still fall back to the serial loop -
+the q4 golden run in the suite is what exercises that fallback with the flag
+defaulting on.
+
+**Gate.**  Pi suite on the default build: **ACCEPT**.  PPL 271.2855 and q4
+325.3751, exactly the serial numbers (the `--ppl` path steps one token at a
+time and never takes the pair path, so it is still the same serial
+measurement), q8 and q4 golden strings unchanged, determinism and the poem
+check pass.  On the same binary `PREFILL_PAIR=0` prints the same q8 string, so
+the escape hatch is verified too.
+
+**Wall time.**  The step-4 CPU win does not become a wall win, and this board
+cannot resolve one: a 37-token prompt with `PREFILL_REPEAT=9` (two alternating
+runs per mode, repeats 3-9 = 14 warm samples each) gives serial **6.49 s
+median / 6.63 s mean** against pair **6.59 / 6.71** (+1.5% median), and the
+serial samples alone spread 6.30-7.50 s.  A 109-token prompt (4 warm samples
+per mode) gives 19.6 s serial mean against 20.3 s pair, and the gap sits in
+the first warm repeat after the cold pass; the later repeats are equal
+(19.2/20.7 s serial against 19.3/19.6 s pair).  Samples taken in the first
+quarter-hour after a board reboot showed a 4-5% pair deficit that the steady
+state does not reproduce, so the defensible statement is **wall neutral within
+noise, CPU -15-17%**.
+
+That is still the right default here: the Pi Zero is single-core and shared
+with the Minecraft server, so 15% less CPU in the prefill loop is real
+capacity and it costs no measurable latency.  The path is bit-exact and
+`PREFILL_PAIR=0` is a one-variable escape hatch if a workload ever disagrees.
