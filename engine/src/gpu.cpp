@@ -1658,7 +1658,17 @@ void GPU::draw(const Mat& m, GLuint x, Target& t, int row ){
         // VC4 is unreliable for a single 1536-column pass (the logits tile
         // and fused-W13 width).  Split only that width; other widths are fine
         // and keeping them in one draw avoids per-draw overhead.
-        const int strip = (m.rows == 1536) ? 768 : m.rows;
+        // A single draw must stay below GL_MAX_TEXTURE_SIZE: at exactly 2048
+        // fragments wide vc4 silently produces wrong bytes (2040 is fine,
+        // 2048 differs in 5029/8192 bytes and finishes 3x too fast), while the
+        // same matrix drawn as two viewport-offset halves is exact.  Splitting
+        // costs one draw (~10 us), so cap every strip at 1024 and keep the
+        // gl_FragCoord-absolute convention the shader relies on.
+        // MATVEC_STRIP overrides the cap for experiments.
+        const char* sv = getenv("MATVEC_STRIP");
+        const int env_strip = sv ? atoi(sv) : 0;
+        const int cap = (env_strip > 0) ? env_strip : 1024;
+        const int strip = std::min(cap, m.rows);
         for (int x0 = 0; x0 < m.rows; x0 += strip) {
             int w = min(strip, m.rows - x0);
             glViewport(x0, row, w, 1);
