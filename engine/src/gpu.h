@@ -15,6 +15,8 @@ void gpu_set_run_t0(Clock::time_point t);
 // True when the context offers ESSL 3.00 and the q4 shift decode is enabled.
 bool gpu_q4_shift();
 double run_time_ms();
+int gpu_upload_textures();
+double gpu_upload_texture_ms();
 
 struct Candidate { float value; int token; };
 struct CandidateResult {

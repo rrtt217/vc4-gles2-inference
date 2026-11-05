@@ -130,6 +130,7 @@ int main(int argc, char** argv) {
     tokenizer.set_qwen(qwen_template || minimind3_template);
     tokenizer.set_bytelevel(minimind3_template);
 
+    const auto up_t0 = Clock::now();
     for (auto& m : model.qkv) gpu.upload(m);
     for (auto& m : model.wo) gpu.upload(m);
     for (auto& m : model.w13) gpu.upload(m);
@@ -144,6 +145,9 @@ int main(int argc, char** argv) {
     for (auto& m : model.w2b) gpu.upload(m);
     for (auto& m : model.logits_tiles) gpu.upload(m);
     model.release_map();
+    if (getenv("SHADER_TIME") || getenv("UPLOAD_TIME"))
+        fprintf(stderr, "UPLOAD %.2f s wall, %d textures, texture time %.0f ms\n",
+                elapsed_ms(up_t0, Clock::now()) / 1000.0, gpu_upload_textures(), gpu_upload_texture_ms());
     if (getenv("SHADER_TIME")) fprintf(stderr, "STARTUP %7.1f ms  weights uploaded\n", run_time_ms());
 
     Session session(model, gpu);

@@ -3523,3 +3523,69 @@ mode.  Pass `SEQ` on both sides.
 in all four formats and the CLI now behaves like the worker: one re-seated
 token, then generation.  The regression suite on the deployed build is ACCEPT
 (q8 PPL 271.2855, q4 PPL 325.3751, greedy strings unchanged).
+
+## First token, step 11: the upload conversion and one vertex shader (2026-11-05)
+
+The first token has three parts on this board: startup (checkpoint map, EGL,
+weight upload), the lazy shader work of the first prefill, and the prefill
+itself.  `UPLOAD_TIME=1` now prints the upload wall and the time spent inside
+`make_texture`, so the split reads from one run.
+
+**Warm start (checkpoint in the page cache), q8, `SEQ=768`, `KV_PACK=16`,
+36-token ChatML prompt, `SHADER_TIME=1 UPLOAD_TIME=1`:**
+
+| phase | value |
+|---|---:|
+| model loaded (borrowed mmap) | 28 ms |
+| EGL context (`GPU gpu;`) | 540-700 ms |
+| FFN split | 90 ms |
+| weight upload (69 textures, 69 MB) | 1.7-2.6 s, of which 0.9-1.1 s inside `make_texture` |
+| Session constructor | 120 ms |
+| session ready (cumulative) | 2.6-3.5 s |
+| first prefill (19 programs) | 9.3-10.6 s |
+| second prefill, same process | 3.2 s |
+
+So ~6 s of the first token is one-time shader work: 2.6-3.5 s of GLSL compile
+and link, ~3 s of QPU code generation at each program first draw.  Cold
+(checkpoint pages dropped) startup adds the 6-7 s SD read of the 69 MB file;
+`MADV_WILLNEED` at mmap time already overlaps what it can with EGL init.
+
+**1. INT8 -> uint8 upload conversion, four bytes at a time.**  The +128 bias is
+a bit flip, `(v + 128) & 255 == v ^ 0x80`, so the 69 MB conversion is a 32-bit
+XOR (`UPLOAD_XOR=0` restores the byte loop).  Warm, four interleaved runs per
+arm with `cat` of the checkpoint before each: upload wall median **2.68 s byte
+loop against 1.74 s XOR (-0.9 s)**.  All of it is the conversion (wall minus
+`make_texture`: 1.8 -> 0.85 s); the texture time itself (0.9-1.1 s) does not
+move.  The texture bytes are identical by construction, so the numeric path
+cannot drift - the suite below confirms it.
+
+**2. One vertex shader for every program.**  `link_program` compiled the same
+full-screen-quad vertex shader once per program because each
+`compile_shader()` creates a new object; it is now compiled once per language
+(the q4 shift kernels take the ESSL 3.00 form) and attached to all of them.
+Link sum over 19 programs, four interleaved runs per binary: **3200 ms median
+before, 2967 ms after** (~5 ms per link).
+
+**Rejected: dropping the per-texture `glFinish()`.**  69 uploads serialised
+against the GPU looked promising.  It is not: warm, the upload is 1.65-2.04 s
+with and without the finish; cold (checkpoint dropped with
+`dd iflag=nocache`) both arms scatter 10.3-18.7 s with no order in them.  The
+finish stays.
+
+**What is left is the driver, not the engine.**  vc4 has no usable shader
+cache: Mesa disk cache is a no-op here (the directory stays empty) and
+`glGetProgramBinaryOES` reports length 0 and raises `GL_INVALID_OPERATION`
+(see startup part 1 above).  Every process compiles its 19 programs again, so
+the only way to keep that off a user request is a warm process - the server
+does it with `--warmup`, one 1-token generation at startup.
+
+**Verdict.**  Item 11 lands ~1 s of the first token with the draw path
+untouched: upload conversion 0.9 s, shared vertex shader ~0.1 s.  Suite on the
+deployed build: **ACCEPT** - determinism, q8 `我是一个AI助手，没有自我意识，也没有身体，所以我无法`,
+q4 `我是MiniMind，一个高效的小参数AI模型，专注于`, poem OK, PPL 271.2855 /
+325.3751 (both exact).  Plain decode A/B against the pre-step binary, two
+interleaved runs of three, min / median ms per token: A 191.8 / 196.4 and
+191.9 / 193.7, B 185.8 / 187.4 and 195.2 / 198.0 - no resolvable difference,
+and none is possible from a texture upload and a link-time shader object.  The
+remaining ~6 s is vc4 code generation; the 19-program count is the only lever
+left.

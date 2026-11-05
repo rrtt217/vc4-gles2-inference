@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <iostream>
 #include <cstring>
+#include <cstdint>
 #include <cstdlib>
 
 #include <EGL/egl.h>
@@ -13,6 +14,12 @@
 // Defined next to the bind cache helpers further down; declared here because the
 // debug dump and the prefix cache invalidate the cache from earlier in the file.
 static void gl_state_forget_bindings();
+// Startup upload accounting (SHADER_TIME=1 / UPLOAD_TIME=1): the weight
+// upload is the last large, controllable part of a cold start on this board.
+static int g_up_tex = 0;
+static double g_up_tex_ms = 0.0;
+int gpu_upload_textures(){ return g_up_tex; }
+double gpu_upload_texture_ms(){ return g_up_tex_ms; }
 
 // Default-off probe (ATTN_DUP=qkv,rope,qknorm,qrot,score,stats,v or all):
 // replay one attention pass per layer.  Every shader involved is deterministic
@@ -90,7 +97,18 @@ void GPU::upload(Mat& m){
             const int8_t* src = m.w8();
             const size_t n = (size_t)m.rows * m.cols;
             vector<uint8_t> data(n);
-            for (size_t i = 0; i < n; ++i) data[i] = (uint8_t)((int)src[i] + 128);
+            // +128 on int8 is a bit flip: (v + 128) & 255 == v ^ 0x80, so the
+            // matrix converts four bytes at a time (UPLOAD_XOR=0 for an A/B).
+            size_t i = 0;
+            const char* xo = getenv("UPLOAD_XOR");
+            if (!(xo && strcmp(xo, "0") == 0)) {
+                while (i < n && ((size_t)(src + i) & 3u)) { data[i] = (uint8_t)((int)src[i] + 128); ++i; }
+                for (; i + 4 <= n; i += 4) {
+                    uint32_t v; memcpy(&v, src + i, 4); v ^= 0x80808080u;
+                    memcpy(data.data() + i, &v, 4);
+                }
+            }
+            for (; i < n; ++i) data[i] = (uint8_t)((int)src[i] + 128);
             m.tex = make_texture(m.cols / 4, m.rows, data.data());
         } else if (m.type == WeightType::INT16) {
             const int16_t* src = m.w16();
@@ -1646,10 +1664,17 @@ GLuint GPU::link_program(const string& fs_in){
         // The vertex shader must match the fragment stage's language when that
         // stage was rewritten above; every other program stays ESSL 1.00.
         if (needs_es3) vs = es3ify(vs, true);
+        // The vertex shader is the same text for every program, so compile it
+        // once per language and attach the shared object: 19 links otherwise
+        // run the same full-screen-quad vertex shader through the compiler 19
+        // times.  (The ESSL 3.00 form exists only for the q4 shift kernels.)
+        static GLuint vs_obj[2] = {0, 0};
+        GLuint& vs_use = vs_obj[needs_es3 ? 1 : 0];
+        if (!vs_use) vs_use = compile_shader(GL_VERTEX_SHADER, vs);
         const bool tm = shader_time_on();
         const double t0 = tm ? shader_time_ms() : 0.0;
         GLuint p = glCreateProgram();
-        glAttachShader(p, compile_shader(GL_VERTEX_SHADER, vs));
+        glAttachShader(p, vs_use);
         glAttachShader(p, compile_shader(GL_FRAGMENT_SHADER, fs));
         glLinkProgram(p);
         GLint ok = 0; glGetProgramiv(p, GL_LINK_STATUS, &ok);
@@ -1670,6 +1695,7 @@ GLuint GPU::link_program(const string& fs_in){
     }
 
 GLuint GPU::make_texture(int w, int h, const void* data){
+        const double t0 = shader_time_ms();
         GLuint t = 0; glGenTextures(1, &t); glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, t); gl_state_forget_bindings();
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
@@ -1677,6 +1703,7 @@ GLuint GPU::make_texture(int w, int h, const void* data){
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         glFlush(); glFinish();
+        g_up_tex_ms += shader_time_ms() - t0; ++g_up_tex;
         return t;
     }
 
