@@ -22,8 +22,8 @@ python3 server.py --host 127.0.0.1 --port 8000
 默认：
 
 - engine：`../engine/engine_mm3`
-- model：`../models/minimind3/minimind3.q8`
-- tokenizer：`../models/minimind3/minimind3.tok`
+- model：`../models/minimind3/minimind3.q8.mmcf`
+- tokenizer：容器内置（只有旧式 `.tok` 采用 `--tokenizer`）
 - model id：`minimind3-64m`
 - cache：1024 tokens
 - KV packing：关闭（24-bit）；可用 `--kv-pack 16` 或 `8`
@@ -32,11 +32,26 @@ python3 server.py --host 127.0.0.1 --port 8000
 使用离线 q4：
 
 ```bash
-MODEL=../models/minimind3/minimind3.q4 \
+MODEL=../models/minimind3/minimind3.q4.mmcf \
 python3 server.py --seq 768 --kv-pack 16
 ```
 
 不要把 `Q4_WEIGHTS=1` 和 Q4M1 模型文件一起设置。
+
+## 对话模板
+
+模板由 checkpoint 自己声明（MMCF 元数据 kind 3 = TinyBrainBot，2 = MiniMind3，
+1 = chatml，0 = plain），worker 在 `ready` 事件里上报；服务器按这个模板渲染
+prompt，而不是永远拼 ChatML。`GET /health` 的 `template` 字段就是它。
+
+| template | prompt |
+|---|---|
+| `minimind3` / `chatml` | 与之前完全一致：`<|im_start|>system ...` 加 `<think>` 块 |
+| `tinybrainbot` | `<|user|> {q}<|assistant|> `，无 system turn、无 `<think>`；历史轮以 `<|end|>` 结尾 |
+| `plain` / 未知 | 回退到 chatml，并打印一次警告 |
+
+TinyBrainBot 还需要 `--no-gpu-layer`：它在 VC4 上的整层 GPU 路径目前不正确
+（见 docs/performance.md 的 item 12），可部署的是 CPU 路径。
 
 ## 接口
 
