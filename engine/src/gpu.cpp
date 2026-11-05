@@ -909,20 +909,45 @@ vector<uint8_t> GPU::read_bytes(Target& t, int w, int h){
 void GPU::sync(){ glFinish(); }
 
 void GPU::forget_state(){ gl_state_forget_bindings(); }
+// One row of an activation target, in the exact bytes a GL read-back returns,
+// plus a hash of the whole row.  The GPU probe (dump_target) and the CPU probe
+// (dump_cpu_row) both print through here, so a GPU_LAYER=0 dump and a
+// GPU_LAYER=1 dump of the same model are diffable byte for byte.
+// The hash covers the row, not the printed prefix: n may be shorter than w.
+static unsigned long long fnv_row(const uint8_t* p, size_t n){
+        unsigned long long h = 1469598103934665603ull;
+        for (size_t i = 0; i < n; ++i) { h ^= p[i]; h *= 1099511628211ull; }
+        return h;
+}
+
+static void dump_row(const uint8_t* p, int w, const char* name, int n){
+        if (n > w) n = w;
+        fprintf(stderr, "DUMP %s w=%d h=%016llx", name, w, fnv_row(p, (size_t)w * 4));
+        for (int i = 0; i < n; i++) fprintf(stderr, " %02x%02x%02x%02x", p[i*4], p[i*4+1], p[i*4+2], p[i*4+3]);
+        fprintf(stderr, "\n");
+}
 
 void GPU::dump_target(const Target& t, const char* name, int n){
         if (t.tex == 0) return;
-        if (n > t.w) n = t.w;
         vector<uint8_t> b((size_t)t.w * 4);
         glFinish();
         glBindFramebuffer(GL_FRAMEBUFFER, t.fbo);
         glPixelStorei(GL_PACK_ALIGNMENT, 1);
         glReadPixels(0, 0, t.w, 1, GL_RGBA, GL_UNSIGNED_BYTE, &b[0]);
         gl_state_forget_bindings();
-        fprintf(stderr, "DUMP %s w=%d", name, t.w);
-        for (int i = 0; i < n; i++) fprintf(stderr, " %02x%02x%02x%02x", b[i*4], b[i*4+1], b[i*4+2], b[i*4+3]);
-        fprintf(stderr, "\n");
+        dump_row(&b[0], t.w, name, n);
 }
+
+// The CPU path has no target to read back: the activation is a plain float
+// vector.  Pack it exactly as a GPU producer would (x_pack applies the same
+// q16 quantisation and the same layout) and print it with the same printer.
+void GPU::dump_cpu_row(const vector<float>& v, XFormat f, const char* name, int n){
+        const int w = x_texels((int)v.size(), f);
+        vector<uint8_t> b = x_pack(v, f);
+        if ((int)b.size() < w * 4) b.resize((size_t)w * 4, 0);
+        dump_row(&b[0], w, name, n);
+}
+
 
 // Decode the qkv target to per-row q16 integers.  The decode is over the
 // integers, not the texels, so the one-row (24-bit) and the paired (packed q16)

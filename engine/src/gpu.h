@@ -123,6 +123,9 @@ public:
     // this, or a later bind_tex()/bind_fbo() will skip a needed bind.
     void forget_state();
     void dump_target(const Target& t, const char* name, int n);
+    // CPU path: the same bytes and the same printer, so HIDDEN_DUMP under
+    // GPU_LAYER=0 is diffable against GPU_LAYER=1 (see dump_row in gpu.cpp).
+    void dump_cpu_row(const vector<float>& v, XFormat f, const char* name, int n);
     // Decoded per-row q16 integers of the qkv target, hashed.  Layout-agnostic
     // (24-bit row texels and packed q16 pairs hash alike), so QKV_PAIR=0 and
     // QKV_PAIR=1 runs can be compared exactly for every layer and position.

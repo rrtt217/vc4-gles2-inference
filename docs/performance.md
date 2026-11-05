@@ -3609,3 +3609,64 @@ that has to be allocated, filled and freed while the board is page-cache tight;
 Everything else in the container is a correctness wash, verified on both
 machines: q8 270.3170 (Xe) / 271.2855 (Pi), q4 330.5302 / 325.3751, i16 280.2156
 (Xe), and the pinned greedy strings for each machine.
+
+## TinyBrainBot on VC4 (item 12, first look)
+
+Same binary, same container (`models/tinybrainbot/tinybrainbot.q4.mmcf`),
+prompt `Hello, who are you?`, `--gen 16 --greedy`: the CPU path
+(`GPU_LAYER=0`) answers `<|end|>Here is a response based on the given
+information:` style text, the GPU path (`GPU_LAYER=1`) answers
+`<|end|>:belive` / `<|end|>:belive:belive, the truth`.  TinyBrainBot q8 is not
+a usable correctness signal: both paths degenerate to `future future ...` on
+this prompt (the single global q8 scale, item 15), so the correctness work
+here is q4.  The shape table that differs from MiniMind3:
+dim 768, hidden 2048 (chunk 1024), 12 layers, heads 12 / kv 4 / head_dim 64,
+vocab 32000, qk_norm 0, seq 512, theta 10000.
+
+**The layer probes now work on both paths.**  `HIDDEN_DUMP=1` printed only on
+the GPU path.  `GPU::dump_cpu_row` packs the CPU activation vector with
+`x_pack` into the same RGBA8 q16 bytes a GPU target returns and prints it
+through the same `dump_row`, so the CPU path emits the same
+`DUMP hidA w=384 h=<hash>` lines.  A new `STAGE_DUMP=1` dumps the five stages
+of every layer, in order: `xb` (rms_att out), `att` (attention block out),
+`x1` (after the wo residual), `xbf` (rms_ffn out), `hidA` (layer out).  Every
+dump line now carries an FNV-1a hash of the whole row, so two runs are compared
+on hashes and only the interesting rows are decoded.
+
+**Where it breaks.**  Both paths emit the same first generated token
+(`<|end|>`) and part company on the second (`Here` against `:belive`).  At
+position 0 the softmax has one key, so `att` is exactly V and the qk-score
+path is not exercised at all; from position 1 it is.  That is the current lead:
+the score/softmax path, not the embedding, the rmsnorm, the qkv matvec, the wo
+residual or the FFN.  Position 0 agreeing is weak evidence, not proof, but it
+is the only split the run gives.
+
+**Negative results from the same run.**  `KV_PACK=0` (24-bit cache) and
+`QKV_PAIR=0` produce the identical wrong text, so neither the KV packing nor
+the paired qkv kernel is the cause.  `--prompt Hello` (one token) gives the
+same split, so it is not the prompt length.
+
+**The CPU path is not a numerical oracle, which changes item 13.**  The CPU
+path keeps float32 activations; the GPU path round-trips q16 at every stage.
+Per-layer cosine between the two paths, same prompt, same container:
+
+| layer | MiniMind3 q8 (works) | TinyBrainBot q4 (broken) |
+|---|---:|---:|
+| 0 | 0.9998 | 0.980 |
+| 3 | 0.973 | 0.937 |
+| 7 | 0.458 | 0.356 |
+| 11 | - | -0.03 |
+
+MiniMind3 answers correctly with cos 0.458 at layer 7, so a cross-path delta of
+this size is normal (the residual stream saturates at the q16 clamp and the two
+numerics part company).  A CPU-vs-GPU dump diff can therefore point at a stage,
+but it cannot decide whether a kernel is wrong; the deciding test has to be a
+same-path A/B, one flag against one kernel.  `engine/scripts/diff_paths.sh`
+prints the cross-path table with that caveat in its header.
+
+**Suite on the deployed build:** ACCEPT - determinism, q8
+`我是一个AI助手，没有自我意识，也没有身体，所以我无法`, q4
+`我是MiniMind，一个高效的小参数AI模型，专注于`, poem OK, PPL 271.2855 /
+325.3751 exact.  Every probe is env-guarded (`STAGE_DUMP`, `HIDDEN_DUMP`) and
+the dump path is not in the draw path, so no number can move; the suite is the
+proof.
