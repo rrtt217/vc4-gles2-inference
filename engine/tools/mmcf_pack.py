@@ -27,6 +27,31 @@ a re-baseline.
 import argparse
 import json
 import struct
+
+# tensor table record: id, dtype, flags, group, pad, rows, cols, offset, bytes,
+# crc32, pad, scale, pad  -> exactly 48 bytes, no implicit padding with "<"
+# tensor table record, built by explicit concatenation so its size is exact:
+#   id u16 | dtype u8 | flags u8 | group u8 | pad u8 | rows u32 | cols u32
+#   offset u64 | bytes u64 | crc32 u32 | scale f32 | pad to 48
+REC_SIZE = 48
+
+
+def pack_rec(tid, dt, flags, group, rows, cols, off, blen, crc, scale):
+    b = struct.pack("<HBBBB", tid, dt, flags, group, 0)
+    b += struct.pack("<II", rows, cols)
+    b += struct.pack("<QQ", off, blen)
+    b += struct.pack("<I", crc)
+    b += struct.pack("<f", float(scale))
+    return b.ljust(REC_SIZE, b"\0")
+
+
+def unpack_rec(rec):
+    tid, dt, flags, group, _pad = struct.unpack("<HBBBB", rec[:6])
+    rows, cols = struct.unpack("<II", rec[6:14])
+    off, blen = struct.unpack("<QQ", rec[14:30])
+    crc, = struct.unpack("<I", rec[30:34])
+    scale, = struct.unpack("<f", rec[34:38])
+    return tid, dt, rows, cols, off, blen, crc, scale
 import sys
 from pathlib import Path
 
@@ -113,7 +138,7 @@ def parse_legacy(path):
             meta["half"] = False
             meta["qk_norm"] = False
         meta["scheme"], meta["group"], meta["split"] = "q8", 0, bool(split)
-        tensors.append((T_EMB, DT_Q8I8, vocab, dim, 0, r.take(vocab * dim), 0.0))
+        tensors.append((T_EMB, DT_Q8I8, vocab, dim, 0, r.take(vocab * dim), 0.0))  # CPU side: stay signed
         scale_bytes = r.take(vocab * 4)
         tensors.append((T_EMB_SCALE, DT_F32, vocab, 1, 0, scale_bytes, 0.0))
         tensors.append((T_RMS_ATT, DT_F32, layers, dim, 0, r.take(layers * dim * 4), 0.0))
@@ -171,12 +196,13 @@ def build(meta, tensors, tok_blob, args):
     table_off = (table_off + ALIGN - 1) // ALIGN * ALIGN
     table = bytearray()
     data = bytearray()
-    data_off = table_off + len(tensors) * 40
+    data_off = table_off + len(tensors) * REC_SIZE
     import zlib
     for tid, dt, rows, cols, group, payload, scale in tensors:
-        if dt == DT_Q8I8:
-            # +128 is a bit flip; the container stores the biased form so the
-            # engine uploads it verbatim.
+        # +128 is a bit flip.  Texture tensors (the per-layer matrices and the
+        # logits tiles) are stored biased so the upload is a copy; the embedding
+        # stays signed because the CPU reads it.
+        if dt == DT_Q8I8 and tid != T_EMB:
             payload = bytes((b ^ 0x80) for b in payload)
             dt = DT_Q8U8
         while (data_off + len(data)) % ALIGN:
@@ -184,10 +210,8 @@ def build(meta, tensors, tok_blob, args):
         off = len(data)
         data += payload
         crc = zlib.crc32(payload) & 0xFFFFFFFF
-        table += struct.pack("<HBBBBIIQQIIH", tid, dt, 0, group, 0, rows, cols,
-                             off, len(payload), crc, 0, 0)
-        _ = scale
-    data_off_final = table_off + len(tensors) * 40
+        table += pack_rec(tid, dt, 0, group, rows, cols, off, len(payload), crc, scale)
+    data_off_final = table_off + len(tensors) * REC_SIZE
     file_size = data_off_final + len(data)
     head = MAGIC + struct.pack("<HHIIIIQQI", VERSION, HEADER_SIZE, len(tensors),
                                caps_val, meta_off, len(md), data_off_final, file_size, 0)
@@ -212,8 +236,8 @@ def verify(path, tensors):
     import zlib
     bad = 0
     for i in range(n):
-        rec = raw[doff - n * 40 + i * 40: doff - n * 40 + (i + 1) * 40]
-        tid, dt, _f, _g, _p, rows, cols, off, blen, crc, _x, _y = struct.unpack("<HBBBBIIQQIIH", rec)
+        rec = raw[doff - n * REC_SIZE + i * REC_SIZE: doff - n * REC_SIZE + (i + 1) * REC_SIZE]
+        tid, dt, rows, cols, off, blen, crc, _sc = unpack_rec(rec)
         body = raw[doff + off: doff + off + blen]
         if zlib.crc32(body) & 0xFFFFFFFF != crc:
             bad += 1
@@ -249,7 +273,7 @@ def main():
             raise SystemExit("verify failed")
         # weights must match the source bit for bit (after the bias)
         for tid, dt, rows, cols, group, payload, scale in tensors:
-            if dt == DT_Q8I8:
+            if dt == DT_Q8I8 and tid != T_EMB:
                 payload = bytes((b ^ 0x80) for b in payload)
             if payload not in Path(args.out).read_bytes():
                 raise SystemExit("verify: tensor %d not found verbatim" % tid)

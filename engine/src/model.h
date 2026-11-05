@@ -29,6 +29,8 @@ public:
     int ffn_chunk = 0; // first hidden chunk; second is hidden - ffn_chunk
 
     bool load(const string& path);
+    // MMCF v2 container (docs/checkpoint-container.md).
+    bool load_mmcf();
     ~Model();
     // Drop the mapping once every weight is on the GPU.  The pages stay in the
     // page cache - clean file pages, not process memory - so the next start is

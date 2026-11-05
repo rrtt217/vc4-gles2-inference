@@ -53,6 +53,9 @@ struct Mat {
     const int16_t* s4() const { return ext_scale4 ? ext_scale4 : q4_scale.data(); }
     const int16_t* m4() const { return ext_min4 ? ext_min4 : q4_min.data(); }
     bool borrowed() const { return ext8 || ext16 || ext4; }
+    // MMCF q8u8 tensors carry the +128 bias already applied, so the upload
+    // copies the bytes to the texture instead of flipping the sign bit.
+    bool prebiased = false;
 };
 
 struct Target {

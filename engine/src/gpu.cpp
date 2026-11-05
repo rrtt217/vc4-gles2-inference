@@ -99,6 +99,12 @@ void GPU::upload(Mat& m){
             vector<uint8_t> data(n);
             // +128 on int8 is a bit flip: (v + 128) & 255 == v ^ 0x80, so the
             // matrix converts four bytes at a time (UPLOAD_XOR=0 for an A/B).
+            if (m.prebiased) {
+                // Already biased at pack time: no arithmetic, just the copy.
+                memcpy(data.data(), src, n);
+                m.tex = make_texture(m.cols / 4, m.rows, data.data());
+                return;
+            }
             size_t i = 0;
             const char* xo = getenv("UPLOAD_XOR");
             if (!(xo && strcmp(xo, "0") == 0)) {

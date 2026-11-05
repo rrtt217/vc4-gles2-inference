@@ -41,11 +41,26 @@
         borrow_ = !(getenv("MODEL_BORROW") && !strcmp(getenv("MODEL_BORROW"), "0"));
         uint32_t magic = 0; memcpy(&magic, fbase_, 4);
         bool ok;
-        if (magic == MAGIC_Q8 || magic == MAGIC_Q8_V2) ok = load_q8(path);
+        if (magic == 0x46434D4DU) ok = load_mmcf();  // "MMCF"
+        else if (magic == MAGIC_Q8 || magic == MAGIC_Q8_V2) ok = load_q8(path);
         else if (magic == MAGIC_I16 || magic == MAGIC_I16_V2) ok = load_i16(path);
         else if (magic == MAGIC_Q4) ok = load_q4(path);
         else ok = load_legacy(path);
         fbase_ = nullptr; fsize_ = fpos_ = 0;
+        if (ok && getenv("MODEL_DUMP")) {
+                auto head = [](const char* n, const Mat& m) {
+                        if (m.rows == 0) { cerr << "DUMP " << n << " empty\n"; return; }
+                        char b[64]; int k = 0;
+                        for (int i = 0; i < 8 && i < m.rows * m.cols; ++i)
+                                k += snprintf(b + k, sizeof(b) - k, "%d ", (int)m.w8()[i]);
+                        cerr << "DUMP " << n << " " << m.rows << "x" << m.cols << " s=" << m.scale
+                             << " pb=" << m.prebiased << " [" << b << "]\n";
+                };
+                head("qkv0", qkv.empty() ? Mat() : qkv[0]);
+                head("w2_0", w2.empty() ? Mat() : w2[0]);
+                if (has_q8_emb) cerr << "DUMP emb0 [" << (int)emb_q8[0] << " " << (int)emb_q8[1] << "] es0=" << emb_scale[0] << "\n";
+                cerr << "DUMP rms_att0=" << (rms_att.empty() ? 0.0f : rms_att[0]) << " theta=" << rope_theta << " half=" << rope_half << " qk=" << qk_norm << "\n";
+        }
         if (borrow_ && ok) { map_ = base; map_size_ = (size_t)st.st_size; }
         else munmap(base, (size_t)st.st_size);
         return ok;
@@ -353,6 +368,159 @@ bool Model::load_q4(const string& path){
         return true;
     }
 
+// MMCF v2 container.  Layout and field list: docs/checkpoint-container.md.
+// Only what the q8 checkpoints need is implemented here: f32 tensors (norms,
+// scales) and q8 tensors (matrices, logits tiles, embedding).  The matrices are
+// pre-biased at pack time, so they are borrowed straight out of the mapping and
+// the upload copies them without the +128 pass.
+namespace {
+struct MmcfRec {
+        uint16_t id = 0;
+        uint8_t dtype = 0, flags = 0, group = 0;
+        uint32_t rows = 0, cols = 0;
+        uint64_t off = 0, bytes = 0;
+        uint32_t crc = 0;
+        float scale = 0.0f;
+};
+
+constexpr int MMCF_REC_SIZE = 48;
+
+static uint16_t rd16(const uint8_t* p){ uint16_t v; memcpy(&v, p, 2); return v; }
+static uint32_t rd32(const uint8_t* p){ uint32_t v; memcpy(&v, p, 4); return v; }
+static uint64_t rd64(const uint8_t* p){ uint64_t v; memcpy(&v, p, 8); return v; }
+static float rdf(const uint8_t* p){ float v; memcpy(&v, p, 4); return v; }
+}  // namespace
+
+bool Model::load_mmcf(){
+        if (fsize_ < 64) { cerr << "mmcf: truncated header\n"; return false; }
+        const uint8_t* h = fbase_;
+        if (rd16(h + 4) != 2) { cerr << "mmcf: unsupported version " << rd16(h + 4) << "\n"; return false; }
+        if (rd16(h + 6) != 64) { cerr << "mmcf: bad header size\n"; return false; }
+        const uint32_t n_tensors = rd32(h + 8);
+        const uint32_t caps = rd32(h + 12);
+        const uint32_t meta_off = rd32(h + 16), meta_size = rd32(h + 20);
+        const uint64_t data_off = rd64(h + 24), file_size = rd64(h + 32);
+        if (file_size != (uint64_t)fsize_) { cerr << "mmcf: size field " << file_size << " != file " << fsize_ << "\n"; return false; }
+        if ((uint64_t)meta_off + meta_size > fsize_ || data_off > fsize_ ||
+            data_off < (uint64_t)n_tensors * MMCF_REC_SIZE) { cerr << "mmcf: bad section offsets\n"; return false; }
+
+        bool have_model = false, have_rope = false, have_quant = false;
+        int scheme = 1, group = 0, split = 0;
+        const uint64_t table_off = data_off - (uint64_t)n_tensors * MMCF_REC_SIZE;
+        for (uint64_t p = meta_off; p + 8 <= (uint64_t)meta_off + meta_size; ) {
+                const uint16_t key = rd16(fbase_ + p), type = rd16(fbase_ + p + 2);
+                const uint32_t len = rd32(fbase_ + p + 4);
+                const uint8_t* payload = fbase_ + p + 8;
+                if (p + 8 + len > (uint64_t)meta_off + meta_size) { cerr << "mmcf: TLV overruns the block\n"; return false; }
+                if (key == 1 && type == 1 && len >= 28) {
+                        dim = (int)rd32(payload); hidden = (int)rd32(payload + 4);
+                        layers = (int)rd32(payload + 8); heads = (int)rd32(payload + 12);
+                        kv_heads = (int)rd32(payload + 16); vocab = (int)rd32(payload + 20);
+                        seq = (int)rd32(payload + 24);
+                        have_model = true;
+                } else if (key == 2 && type == 1 && len >= 8) {
+                        rope_theta = rdf(payload);
+                        rope_half = payload[4] != 0;
+                        qk_norm = payload[5] != 0;
+                        have_rope = true;
+                } else if (key == 3 && type == 1 && len >= 4) {
+                        scheme = payload[0]; group = payload[1]; split = payload[3];
+                        have_quant = true;
+                }
+                p += 8 + len;
+        }
+        if (!have_model) { cerr << "mmcf: no model metadata\n"; return false; }
+        if (!have_rope) rope_theta = 10000.0f;
+        if (!have_quant) { cerr << "mmcf: no quant metadata\n"; return false; }
+        if (getenv("SEQ")) seq = atoi(getenv("SEQ"));
+        head_dim = dim / heads;
+        kv_dim = kv_heads * head_dim;
+        (void)caps;
+
+        // One pass over the table, creating whatever the model needs.  Unknown
+        // ids are ignored: that is what lets a future writer add tensors.
+        vector<MmcfRec> recs;
+        recs.reserve(n_tensors);
+        for (uint32_t i = 0; i < n_tensors; ++i) {
+                const uint8_t* r = fbase_ + table_off + (uint64_t)i * MMCF_REC_SIZE;
+                MmcfRec m;
+                m.id = rd16(r); m.dtype = r[2]; m.flags = r[3]; m.group = r[4];
+                m.rows = rd32(r + 6); m.cols = rd32(r + 10);
+                m.off = rd64(r + 14); m.bytes = rd64(r + 22);
+                m.crc = rd32(r + 30); m.scale = rdf(r + 34);
+                if (data_off + m.off + m.bytes > fsize_) { cerr << "mmcf: tensor " << i << " overruns the file\n"; return false; }
+                recs.push_back(m);
+        }
+
+        auto as_f32 = [&](const MmcfRec& r, vector<float>& v) {
+                v.resize((size_t)r.rows * r.cols);
+                memcpy(v.data(), fbase_ + data_off + r.off, v.size() * 4);
+        };
+        auto as_q8 = [&](const MmcfRec& r, Mat& m) {
+                m.rows = (int)r.rows; m.cols = (int)r.cols;
+                m.type = WeightType::INT8;
+                m.scale = r.scale;
+                m.prebiased = (r.dtype == 2);
+                const int8_t* p = (const int8_t*)(fbase_ + data_off + r.off);
+                if (borrow_) m.ext8 = p;
+                else { m.q8.assign(p, p + (size_t)r.rows * r.cols); }
+        };
+
+        vector<Mat> layers_qkv, layers_wo, layers_w1, layers_w3, layers_w13, layers_w2;
+        layers_qkv.resize(layers); layers_wo.resize(layers); layers_w2.resize(layers);
+        if (split) { layers_w1.resize(layers); layers_w3.resize(layers); }
+        else layers_w13.resize(layers);
+
+        for (const MmcfRec& r : recs) {
+                const int base = r.id & 0xFF, layer = r.id >> 8;
+                switch (base) {
+                case 1: {  // embedding (stays signed: the CPU reads it)
+                        emb_q8.resize((size_t)r.rows * r.cols);
+                        memcpy(emb_q8.data(), fbase_ + data_off + r.off, emb_q8.size());
+                        has_q8_emb = true;
+                        break;
+                }
+                case 2: as_f32(r, emb_scale); break;
+                case 3: as_f32(r, rms_att); break;
+                case 4: as_f32(r, rms_ffn); break;
+                case 5: as_f32(r, rms_final); break;
+                case 6: as_f32(r, q_norm); break;
+                case 7: as_f32(r, k_norm); break;
+                case 0x10: if (layer < layers) as_q8(r, layers_qkv[layer]); break;
+                case 0x11: if (layer < layers) as_q8(r, layers_wo[layer]); break;
+                case 0x12: if (layer < layers) as_q8(r, layers_w1[layer]); break;
+                case 0x13: if (layer < layers) as_q8(r, layers_w3[layer]); break;
+                case 0x14: if (layer < layers) as_q8(r, layers_w13[layer]); break;
+                case 0x15: if (layer < layers) as_q8(r, layers_w2[layer]); break;
+                case 0x20: { Mat m; as_q8(r, m); logits_tiles.push_back(m); break; }
+                default: break;  // tokenizer blob, template, unknown ids
+                }
+        }
+        for (int l = 0; l < layers; ++l) {
+                qkv.push_back(layers_qkv[l]);
+                wo.push_back(layers_wo[l]);
+                if (split) { w1.push_back(layers_w1[l]); w3.push_back(layers_w3[l]); }
+                else w13.push_back(layers_w13[l]);
+                w2.push_back(layers_w2[l]);
+        }
+        if (getenv("MMCF_DEBUG")) {
+                cerr << "MMCF dim=" << dim << " layers=" << layers << " hidden=" << hidden
+                     << " heads=" << heads << " kv=" << kv_heads << " vocab=" << vocab
+                     << " seq=" << seq << " theta=" << rope_theta << " half=" << rope_half
+                     << " qknorm=" << qk_norm << " split=" << split << "\n";
+                cerr << "MMCF qkv[0]=" << qkv[0].rows << "x" << qkv[0].cols << " scale=" << qkv[0].scale
+                     << " prebiased=" << qkv[0].prebiased << " w2[0]=" << w2[0].rows << "x" << w2[0].cols
+                     << " logits=" << logits_tiles.size() << " " << logits_tiles[0].rows << "x" << logits_tiles[0].cols
+                     << " emb=" << emb_q8.size() << " embs=" << emb_scale.size() << "\n";
+        }
+        if (!has_q8_emb || (int)rms_att.size() != layers * dim || logits_tiles.empty()) {
+                cerr << "mmcf: missing required tensors\n";
+                return false;
+        }
+        (void)group;
+        return true;
+    }
+
 bool Model::load_q8(const string& path){
         uint32_t magic = 0; int32_t cfg[7]; int32_t split = 0;
         read_exact(&magic, 4); read_exact(cfg, 28);
@@ -430,6 +598,7 @@ bool Model::load_i16(const string& path){
 
 Mat Model::slice_rows(const Mat& src, int r0, int r1){
         Mat m; m.rows = r1 - r0; m.cols = src.cols; m.type = src.type; m.scale = src.scale;
+        m.prebiased = src.prebiased;
         if (src.type == WeightType::INT8) {
             if (src.ext8) {
                 m.ext8 = src.ext8 + (size_t)r0 * m.cols;
@@ -464,6 +633,7 @@ Mat Model::slice_rows(const Mat& src, int r0, int r1){
 
 Mat Model::slice_cols(const Mat& src, int c0, int c1){
         Mat m; m.rows = src.rows; m.cols = c1 - c0; m.type = src.type; m.scale = src.scale;
+        m.prebiased = src.prebiased;
         if (src.type == WeightType::INT8) {
             m.q8.resize((size_t)m.rows * m.cols);
             for (int r = 0; r < m.rows; ++r)
