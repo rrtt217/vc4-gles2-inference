@@ -22,7 +22,7 @@ KINDS = {
 }
 DTYPES = {0: "f32", 1: "i16", 2: "q8u8", 3: "q8i8", 4: "q4", 5: "blob"}
 SCHEMES = {0: "i16", 1: "q8", 2: "q4"}
-TEMPLATE_KINDS = {0: "plain", 1: "chatml/qwen", 2: "minimind3"}
+TEMPLATE_KINDS = {0: "plain", 1: "chatml/qwen", 2: "minimind3", 3: "tinybrainbot"}
 CAPS = [(1, "chat"), (2, "tools"), (4, "vision"), (8, "thinking")]
 
 
