@@ -1,6 +1,7 @@
 # Checkpoint container v2 (proposal)
 
-Status: design draft, nothing implemented.  Today the engine reads four
+Status: the packer and its self-check exist (`engine/tools/mmcf_pack.py`);
+the engine reader is not written yet, so nothing loads a `.mmcf` today.  Today the engine reads four
 formats, each with its own magic and its own positional header
 (`MAGIC_Q8`/`MAGIC_Q8_V2`, `MAGIC_I16`/`MAGIC_I16_V2`, `MAGIC_Q4`, and the
 legacy loop), and the tokenizer, chat template and inference flags live
@@ -147,3 +148,80 @@ bit" per tensor without a format branch.
 - One file per precision (current `models/` layout) or one file with several
   precisions of the same model (saves the tokenizer/template duplication, but
   every load pays for the whole file's page cache)?
+
+## As built (packer)
+
+`engine/tools/mmcf_pack.py --in model.q8 --tok model.tok --out model.mmcf
+--name minimind3 --template minimind3 --system "You are a helpful assistant."
+--chat --verify` converts a legacy q8 checkpoint (q4/i16 raise "not
+implemented yet") and checks itself: the file-size field, every tensor CRC and
+a byte-for-byte search for each tensor body.  A real run:
+
+```
+wrote /tmp/minimind3.mmcf: 53 tensors, 68980491 bytes (source 68897356)
+verify: 53 tensors, caps=0x1 meta=64+154 data@2344 size=68980491 crc_bad=0
+verify: every tensor present verbatim
+```
+
+The 83 KB of overhead is the header (64), the TLV block (154), the table
+(53 * 40), alignment padding and the tokenizer blob.
+
+### Header, exactly
+
+| offset | size | field |
+|---|---|---|
+| 0 | 4 | `"MMCF"` |
+| 4 | 2 | version = 2 |
+| 6 | 2 | header_size = 64 |
+| 8 | 4 | n_tensors |
+| 12 | 4 | capability flags (1 chat, 2 tools, 4 vision) |
+| 16 | 4 | meta_offset = 64 |
+| 20 | 4 | meta_size |
+| 24 | 8 | data_offset (16-byte aligned) |
+| 32 | 8 | file_size (checked against `st_size`) |
+| 40 | 4 | crc32 of bytes 0..39 (reserved, not yet computed) |
+| 44 | 20 | reserved |
+
+### Metadata TLV
+
+Each record is `<HHI` (key, type, length) followed by the payload:
+
+| key | payload |
+|---|---|
+| 1 | `<7i` dim, hidden, layers, heads, kv_heads, vocab, seq |
+| 2 | `<fBBH` rope theta, rope_half, qk_norm, pad |
+| 3 | `<BBBB` scheme (0 i16, 1 q8, 2 q4), group, pre_biased, split |
+| 4 | `u8 kind`, `default system\0`, `template name\0` |
+| 5 | `<I` capability flags (mirror of the header) |
+| 6 | `name\0` |
+| 7 | `<i` tokenizer blob length |
+
+### Tensor record, 40 B
+
+`<HBBBBIIQQIIH`: id, dtype, flags, group, pad, rows, cols, offset, bytes,
+crc32, pad, pad.  `offset` is relative to `data_offset` and every body starts
+16-byte aligned.
+
+Tensor ids: `1` embedding, `2` embedding scale, `3` rms_att, `4` rms_ffn,
+`5` rms_final, `6` q_norm, `7` k_norm, `0x10` qkv, `0x11` wo, `0x12` w1,
+`0x13` w3, `0x14` w13, `0x15` w2, `0x20` logits tile, `0x30` tokenizer blob.
+Per-layer tensors carry the layer in the high byte (`id | layer << 8`).
+
+dtypes: `0` f32, `1` i16, `2` q8u8 (the packer's output for q8: biased, so the
+upload is a copy), `3` q8i8, `4` q4, `5` blob.
+
+### Reader checklist (not written yet)
+
+1. `Model::load()` recognises `"MMCF"` before the legacy magics and calls a new
+   `load_mmcf`.
+2. Parse the header, reject `version != 2` and `file_size != st_size`, walk the
+   TLV block into the existing `Model` fields (dim, layers, rope, qk_norm, ...).
+3. Build one `Mat` per tensor: `q8u8` points `ext8` at `map_ + data_offset +
+   offset` (no copy, no bias); `f32`/`i16` are copied into vectors as today.
+4. `Tokenizer::load_memory(blob, len)` for the embedded blob; keep
+   `TOKENIZER=` as the fallback.
+5. Chat template and `default_system` from key 4 replace the compiled default
+   and the `--template` flag, with the flag still winning.
+6. Acceptance: the converted file must print the same greedy text and the same
+   PPL as the source on both machines, and `UPLOAD_TIME=1` must show the q8
+   conversion gone.
