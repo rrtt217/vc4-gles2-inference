@@ -16,9 +16,9 @@ string head(XFormat xf) {
 
 string q24_helpers() {
     return
-        "float x_i24raw(vec4 c){return floor(c.r*255.0+0.5)*16777216.0+"
-        "floor(c.g*255.0+0.5)*65536.0+floor(c.b*255.0+0.5)*256.0+"
-        "floor(c.a*255.0+0.5)-8388608.0;}\n"
+        "float x_i24raw(vec4 c){return float(int(c.r*255.0+0.5))*16777216.0+"
+        "float(int(c.g*255.0+0.5))*65536.0+float(int(c.b*255.0+0.5))*256.0+"
+        "float(int(c.a*255.0+0.5))-8388608.0;}\n"
         "float x_i24q(vec4 c){return x_i24raw(c)/256.0;}\n"
         "vec4 x_i24enc(float v){float q=floor(v*256.0+0.5)+8388608.0;"
         "float r0=floor(q/16777216.0),g=floor(q/65536.0)-r0*256.0,"

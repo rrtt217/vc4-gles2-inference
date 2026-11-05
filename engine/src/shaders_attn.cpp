@@ -52,16 +52,16 @@ string att_defs(const AttnConfig& c) {
 string att_helpers() {
     return
         "vec4 q16(float v){float q=clamp(floor(v*256.0+0.5),-32768.0,32767.0);if(q<0.0)q+=65536.0;float hi=floor(q/256.0),lo=q-hi*256.0;return vec4(hi/255.0,lo/255.0,0.0,1.0);}\n"
-        "float dec24raw(vec4 c){return floor(c.r*255.0+0.5)*16777216.0+floor(c.g*255.0+0.5)*65536.0+floor(c.b*255.0+0.5)*256.0+floor(c.a*255.0+0.5)-8388608.0;}\n"
+        "float dec24raw(vec4 c){return float(int(c.r*255.0+0.5))*16777216.0+float(int(c.g*255.0+0.5))*65536.0+float(int(c.b*255.0+0.5))*256.0+float(int(c.a*255.0+0.5))-8388608.0;}\n"
         "float dec24q(vec4 c){float u=dec24raw(c);if(u>=32768.0)u-=65536.0;return u/256.0;}\n"
         "vec4 enc24s(float v,float s){float q=floor(v*s+0.5)+8388608.0;float r0=floor(q/16777216.0),g=floor(q/65536.0)-r0*256.0,b=floor(q/256.0)-r0*65536.0-g*256.0,a=q-r0*16777216.0-g*65536.0-b*256.0;return vec4(r0/255.0,g/255.0,b/255.0,a/255.0);}\n"
         "float dec24s(vec4 c,float s){return dec24raw(c)/s;}\n"
         "float dec16(vec2 c){float u=c.x*65280.0+c.y*255.0;if(u>=32768.0)u-=65536.0;return u/256.0;}\n"
         "vec4 encKV(float v0,float v1){if(KVPACK==16){float q0=clamp(floor(v0*KVSCALE+0.5),-32768.0,32767.0);if(q0<0.0)q0+=65536.0;float q1=clamp(floor(v1*KVSCALE+0.5),-32768.0,32767.0);if(q1<0.0)q1+=65536.0;float h0=floor(q0/256.0),l0=q0-h0*256.0,h1=floor(q1/256.0),l1=q1-h1*256.0;return vec4(h0/255.0,l0/255.0,h1/255.0,l1/255.0);}return enc24s(v0,KVSCALE);}\n"
         "vec4 encKV8(float v0,float v1,float v2,float v3){float q0=clamp(floor(v0*KVSCALE+0.5),-128.0,127.0);if(q0<0.0)q0+=256.0;float q1=clamp(floor(v1*KVSCALE+0.5),-128.0,127.0);if(q1<0.0)q1+=256.0;float q2=clamp(floor(v2*KVSCALE+0.5),-128.0,127.0);if(q2<0.0)q2+=256.0;float q3=clamp(floor(v3*KVSCALE+0.5),-128.0,127.0);if(q3<0.0)q3+=256.0;return vec4(q0/255.0,q1/255.0,q2/255.0,q3/255.0);}\n"
-        "float decKV8(vec4 c,int idx){float q=(idx==0)?c.r:(idx==1)?c.g:(idx==2)?c.b:c.a;float u=floor(q*255.0+0.5);if(u>=128.0)u-=256.0;return u/KVSCALE;}\n"
-        "float decKV(vec4 c,int odd){if(KVPACK==16){float hi=(odd==1)?c.b:c.r;float lo=(odd==1)?c.a:c.g;float u=floor(hi*255.0+0.5)*256.0+floor(lo*255.0+0.5);if(u>=32768.0)u-=65536.0;return u/KVSCALE;}if(KVPACK==8)return decKV8(c,odd);return dec24s(c,KVSCALE);}\n"
-        "float decKV8d(vec4 c,int idx,float d){float q=(idx==0)?c.r:(idx==1)?c.g:(idx==2)?c.b:c.a;float u=floor(q*255.0+0.5);if(u>=128.0)u-=256.0;return u*d;}\n"
+        "float decKV8(vec4 c,int idx){float q=(idx==0)?c.r:(idx==1)?c.g:(idx==2)?c.b:c.a;float u=float(int(q*255.0+0.5));if(u>=128.0)u-=256.0;return u/KVSCALE;}\n"
+        "float decKV(vec4 c,int odd){if(KVPACK==16){float hi=(odd==1)?c.b:c.r;float lo=(odd==1)?c.a:c.g;float u=float(int(hi*255.0+0.5)*256+int(lo*255.0+0.5));if(u>=32768.0)u-=65536.0;return u/KVSCALE;}if(KVPACK==8)return decKV8(c,odd);return dec24s(c,KVSCALE);}\n"
+        "float decKV8d(vec4 c,int idx,float d){float q=(idx==0)?c.r:(idx==1)?c.g:(idx==2)?c.b:c.a;float u=float(int(q*255.0+0.5));if(u>=128.0)u-=256.0;return u*d;}\n"
         "vec4 encKV8s(float v0,float v1,float v2,float v3,float d){float q0=clamp(floor(v0/d+0.5),-128.0,127.0);if(q0<0.0)q0+=256.0;float q1=clamp(floor(v1/d+0.5),-128.0,127.0);if(q1<0.0)q1+=256.0;float q2=clamp(floor(v2/d+0.5),-128.0,127.0);if(q2<0.0)q2+=256.0;float q3=clamp(floor(v3/d+0.5),-128.0,127.0);if(q3<0.0)q3+=256.0;return vec4(q0/255.0,q1/255.0,q2/255.0,q3/255.0);}\n";
 }
 
