@@ -3670,3 +3670,65 @@ prints the cross-path table with that caveat in its header.
 325.3751 exact.  Every probe is env-guarded (`STAGE_DUMP`, `HIDDEN_DUMP`) and
 the dump path is not in the draw path, so no number can move; the suite is the
 proof.
+
+**The kernels are not the bug: attention is exact, the full texture path is not (item 12b).**
+`ATT_DUMP=<pos>` (`GPU::dump_attention`) prints, for every layer at that
+position, the exact integers the five attention passes consumed and produced:
+the q row after rope, every K and V row 0..pos, the score texels per head, the
+stats texel and the block output - all in the grids the shaders wrote (q and
+att_out int/256, K/V int/KVSCALE, scores and stats max int/1024, stats sum
+int/32), with one `ATTD meta` line for the shape.  `engine/scripts/check_att.py`
+re-derives each stage with nothing but a dot product and a softmax:
+
+| check | identity |
+|---|---|
+| score | `round((sum_i q_i k_i) / sqrt(head_dim) * 1024)` |
+| stats max | `max_t score[t]`, exact |
+| stats sum | `round(32 * sum_t exp((score[t]-max)/1024))` |
+| att out | `round(256 * sum_t p_t v_t[i])` |
+
+TinyBrainBot q4, `Hello, who are you?` (9 tokens), KV_PACK=16, all 12 layers:
+
+| position | score dev | stats max | stats sum dev | att_out dev |
+|---|---:|---:|---:|---:|
+| 1 (prefill) | <=1 LSB | exact | <=0.016/32 | <=1 LSB |
+| 9 (first decode) | <=1 LSB | exact | <=0.015/32 | <=1 LSB |
+
+So `att_score`, `att_stats` and `att_v` - the 12-head / head_dim 64 / group-3
+mapping, the GQA index math and the score-pair packing - are right on this
+shape.  `att_qrot` and `att_kv_rope` are not covered by this check, because it
+takes q and K as given.
+
+**Bisection: every GPU kernel is correct in isolation.**  Same container, same
+prompt, `--gen 16 --greedy IGNORE_EOS=1`:
+
+| path | output |
+|---|---|
+| `GPU_LAYER=0` (CPU) | `😊 <|end|> <|end|> Hi! Great to see you` |
+| `+ GPU_FFN=1` | identical |
+| `+ GPU_ATTN=1 CPU_FFN=1` | identical |
+| `+ GPU_ATTN=1 GPU_FFN=1` (hybrid) | identical |
+| `GPU_LAYER=1` (full texture path) | `Érica Póralose's name is Maria Lopez Lgas` |
+
+`RES_PACK=0`, `QKV_PAIR=0`, `KV_PACK=0`, `RMS_SPLIT`, `RMS_FUSED`,
+`PREFILL_PAIR=0` and `ATTN_DUP=all` all leave the full path wrong (some change
+the text), so neither the residual packing nor the qkv pairing, the kv packing
+or the rmsnorm variant is the cause.
+
+**What the full path does differently.**  It is the only path that keeps the
+residual stream in a texture across layers and runs `rmsnorm` and the residual
+adds on the GPU; the CPU paths keep float32 between stages and round to q16
+only at the residual add.  Layer-0 stage dumps (q16 ints) agree between the CPU
+and the full path to 1-2 units (xb 429/431, att 51/51, x1 196/197), so no stage
+is wrong at layer 0; the difference grows with depth (layer 4 att max 114
+against 87, layer 11 att max 132 against 367) while the means stay within a
+few percent.  That is the profile of accumulated q16 rounding in a fragile
+100M chat model, not of a broken kernel.  The prefill logits say the same:
+over 32000 vocabulary entries `max|d| = 8.6`, `mean|d| = 2.3`, and every
+1536-row tile is hit equally, so the 1280-row tail tile is not a special case.
+
+Consequence: item 12 is a precision wall, not a shape bug.  The deployable
+workaround today is the hybrid path (`GPU_LAYER=0 GPU_ATTN=1 GPU_FFN=1`), which
+is correct on this prompt and still runs both hot kernels on the GPU; the full
+path costs 411 ms/token (prefill 9.27 s, 32 greedy tokens, q4) and is not.
+Hybrid timing is still to be measured.

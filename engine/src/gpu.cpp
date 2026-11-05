@@ -752,6 +752,7 @@ GLuint GPU::attention_block(const Mat& qkv, GLuint x, int layer, int pos){
         lap("probs");
         att_v(layer, pos);
         if (attn_dup("v")) att_v(layer, pos);
+        if (getenv("ATT_DUMP") && pos == atoi(getenv("ATT_DUMP"))) dump_attention(layer, pos);
         lap("v");
         return att_out_.tex;
     }
@@ -2078,3 +2079,92 @@ vector<int32_t> GPU::read_i32(Target& t, int w, int h){
         }
         return out;
     }
+
+// --- ATT_DUMP probe -----------------------------------------------------------------
+// The attention block is five dependent passes (qrot, kv_rope, score, stats, v).
+// This probe prints the exact integers each one consumed and produced for one
+// layer and position, so the whole block is checkable offline with a dot
+// product and a softmax: no second engine path and no float32 reference.
+namespace {
+vector<uint8_t> read_target_row(const Target& t, int row){
+        vector<uint8_t> b((size_t)t.w * 4);
+        glFinish();
+        glBindFramebuffer(GL_FRAMEBUFFER, t.fbo);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(0, row, t.w, 1, GL_RGBA, GL_UNSIGNED_BYTE, &b[0]);
+        gl_state_forget_bindings();
+        return b;
+}
+
+vector<uint8_t> read_target_all(const Target& t){
+        vector<uint8_t> b((size_t)t.w * t.h * 4);
+        glFinish();
+        glBindFramebuffer(GL_FRAMEBUFFER, t.fbo);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(0, 0, t.w, t.h, GL_RGBA, GL_UNSIGNED_BYTE, &b[0]);
+        gl_state_forget_bindings();
+        return b;
+}
+
+// Signed 16-bit big-endian pair component: comp 0 is rg, comp 1 is ba.
+int q16_at(const vector<uint8_t>& b, int texel, int comp){
+        const size_t o = (size_t)texel * 4 + (size_t)(comp ? 2 : 0);
+        int v = (int)b[o] * 256 + (int)b[o + 1];
+        if (v >= 32768) v -= 65536;
+        return v;
+}
+}  // namespace
+
+void GPU::dump_attention(int layer, int pos){
+        if (qrot_target_.tex == 0 || att_scores_.tex == 0 || att_stats_.tex == 0) return;
+        // One meta line pins the shape and the grids, so the checker needs no
+        // assumptions: value = int/256 for q and att_out, int/KVSCALE for K and
+        // V, int/1024 for scores and the stats max, int/32 for the stats sum.
+        static bool meta = true;
+        if (meta) {
+                fprintf(stderr, "ATTD meta %d %d %d %d %d %g %d\n", att_heads_, att_kv_heads_,
+                        att_head_dim_, att_dim_, att_kv_dim_, (double)att_kv_scale_, att_seq_);
+                meta = false;
+        }
+        {
+                const vector<uint8_t> b = read_target_row(qrot_target_, 0);
+                fprintf(stderr, "ATTD qrot %d %d %d", layer, pos, att_dim_);
+                for (int i = 0; i < att_dim_; ++i) fprintf(stderr, " %d", q16_at(b, i / 2, i & 1));
+                fprintf(stderr, "\n");
+        }
+        // Every K/V row the score and V passes read: rows 0..pos.
+        for (int t = 0; t <= pos && t < att_seq_; ++t) {
+                if (layer >= (int)kv_cache_.size() || att_kv_bits_ != 16) break;
+                const vector<uint8_t> b = read_target_row(kv_cache_[layer], t);
+                fprintf(stderr, "ATTD kv %d %d %d %d", layer, pos, t, att_kv_dim_);
+                for (int i = 0; i < att_kv_dim_; ++i) fprintf(stderr, " %d", q16_at(b, i / 2, i & 1));
+                fprintf(stderr, "\n");
+                fprintf(stderr, "ATTD kvv %d %d %d %d", layer, pos, t, att_kv_dim_);
+                for (int i = 0; i < att_kv_dim_; ++i) fprintf(stderr, " %d", q16_at(b, att_kv_dim_ / 2 + i / 2, i & 1));
+                fprintf(stderr, "\n");
+        }
+        {
+                const vector<uint8_t> b = read_target_all(att_scores_);
+                const int w = att_scores_.w;
+                for (int h = 0; h < att_heads_; ++h) {
+                        fprintf(stderr, "ATTD score %d %d %d", layer, pos, h);
+                        for (int t = 0; t <= pos; ++t) fprintf(stderr, " %d", q16_at(b, h * w + t / 2, t & 1));
+                        fprintf(stderr, "\n");
+                }
+        }
+        {
+                const vector<uint8_t> b = read_target_all(att_stats_);
+                fprintf(stderr, "ATTD statsmax %d %d %d", layer, pos, att_heads_);
+                for (int h = 0; h < att_heads_; ++h) fprintf(stderr, " %d", q16_at(b, h, 0));
+                fprintf(stderr, "\n");
+                fprintf(stderr, "ATTD statssum %d %d %d", layer, pos, att_heads_);
+                for (int h = 0; h < att_heads_; ++h) fprintf(stderr, " %d", q16_at(b, h, 1));
+                fprintf(stderr, "\n");
+        }
+        if (att_out_.tex) {
+                const vector<uint8_t> b = read_target_row(att_out_, 0);
+                fprintf(stderr, "ATTD attout %d %d %d", layer, pos, att_dim_);
+                for (int i = 0; i < att_dim_; ++i) fprintf(stderr, " %d", q16_at(b, i / 2, i & 1));
+                fprintf(stderr, "\n");
+        }
+}
