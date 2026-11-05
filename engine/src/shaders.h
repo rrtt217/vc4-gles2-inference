@@ -19,6 +19,10 @@ struct AttnConfig {
     int kv_bits = 0;
     float kv_scale = 16384.0f;
     int kv_width = 0;
+    // 8-bit KV only: V is quantised on a per-head, per-position grid derived
+    // from that head max (K keeps the global KVSCALE grid: it is qk-normed
+    // before rope, so its range is already about unit RMS).
+    bool kv_vstep = false;
 };
 
 std::string att_defs(const AttnConfig& c);
@@ -56,6 +60,7 @@ std::string rms_stats_reduce();
 std::string rms_norm(int dim, XFormat residual, XFormat out, bool fused_reduce);
 
 std::string att_kv_rope(const AttnConfig& c);
+std::string att_vscale(const AttnConfig& c);
 std::string att_qnorm_scale(const AttnConfig& c);
 std::string att_qrot(const AttnConfig& c);
 std::string att_score(const AttnConfig& c, bool hoist);

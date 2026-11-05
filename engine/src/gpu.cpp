@@ -613,6 +613,13 @@ void GPU::init_attention(int dim, int kv_dim, int heads, int kv_heads, int head_
             att_kv_bits_ = 0; att_kv_packed_ = false;
             att_kv_scale_ = 16384.0f; att_kv_width_ = 2 * kv_dim;
         }
+        // 8-bit KV: an opt-in per-head, per-position grid for V (max/127),
+        // because V head ranges differ by an order of magnitude while K is
+        // qk-normed.  Off by default: it buys q4 6% of PPL but costs q8 6%
+        // and one extra pass per layer (docs/performance.md).  K always keeps
+        // the global KVSCALE grid.
+        att_kv_vstep_ = att_kv_bits_ == 8 && getenv("KV_VSTEP") &&
+                        atoi(getenv("KV_VSTEP")) != 0;
         q_norm_tex_.clear(); k_norm_tex_.clear();
         if (qk_norm) {
             for (int l = 0; l < layers; ++l) {
@@ -632,6 +639,9 @@ void GPU::init_attention(int dim, int kv_dim, int heads, int kv_heads, int head_
         kv_cache_.clear();
         kv_cache_.reserve(layers);
         for (int l = 0; l < layers; ++l) kv_cache_.push_back(make_target(att_kv_width_, seq));
+        if (att_kv_vstep_)
+            for (int l = 0; l < layers; ++l)
+                vs_targets_.push_back(make_target(att_kv_heads_, seq));
         const int rw = 2 * half;
         vector<uint8_t> data((size_t)seq * rw * 4);
         for (int p = 0; p < seq; ++p) {
@@ -704,6 +714,7 @@ GLuint GPU::attention_block(const Mat& qkv, GLuint x, int layer, int pos){
                 cerr << "QKVD " << layer << " " << pos << " " << qkv_hash(qkv.rows) << "\n";
             }
         }
+        if (att_kv_vstep_) { kv_vscale(layer, pos); lap("vscale"); }
         kv_rope_write(layer, pos);
         if (attn_dup("rope")) kv_rope_write(layer, pos);
         lap("rope");
@@ -947,6 +958,7 @@ AttnConfig GPU::att_cfg() const{
         c.kv_heads = att_kv_heads_; c.head_dim = att_head_dim_; c.seq = att_seq_;
         c.rope_half = att_rope_half_; c.qk_norm = att_qk_norm_;
         c.kv_bits = att_kv_bits_; c.kv_scale = att_kv_scale_; c.kv_width = att_kv_width_;
+        c.kv_vstep = att_kv_vstep_;
         c.qkv_pair = att_qkv_pair_;
         return c;
     }
@@ -1503,6 +1515,8 @@ GLuint GPU::x_v(){
 
 GLuint GPU::x_kv_rope(){ return x_prog("xkv", att_kv_rope(att_cfg())); }
 
+GLuint GPU::x_vscale(){ return x_prog("xvscale", ::att_vscale(att_cfg())); }
+
 GLuint GPU::x_qnorm(){ return x_prog("xqn", att_qnorm_scale(att_cfg())); }
 
 GLuint GPU::x_qrot(){ return x_prog("xqr", att_qrot(att_cfg())); }
@@ -1769,11 +1783,33 @@ void GPU::att_finish() {
             bind_tex(2, k_norm_tex_[layer]);
             set_sampler(p, "KN", 2);
         }
+        if (att_kv_vstep_) {
+            bind_tex(3, vs_targets_[layer].tex);
+            set_sampler(p, "VS", 3);
+        }
         glUniform1f(uloc(p, "pos"), (float)pos);
         setup_attrib(p);
         glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         att_finish();
     }
+
+void GPU::kv_vscale(int layer, int pos){
+        // 8-bit KV only: one fragment per KV head, one texel per position of
+        // this layer.  The texel holds the step (head max / 127) and is read by
+        // both the V write (to quantise) and att_v (to dequantise), so the two
+        // always agree.  It is per layer: the head max is a property of this
+        // layer qkv, and one shared plane would be overwritten by the next
+        // layer before the previous layer attention is read back.
+        GLuint p = x_vscale();
+        bind_fbo(vs_targets_[layer].fbo);
+        glViewport(0, pos, att_kv_heads_, 1);
+        use_program(p);
+        bind_tex(0, qkv_target_.tex);
+        set_sampler(p, "QKV", 0);
+        setup_attrib(p);
+        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+        att_finish();
+}
 
 void GPU::att_scores(int layer, int pos){
         // The q16 score-pair layout requires the hoisted q path; ATTN_HOIST=0
@@ -1922,6 +1958,10 @@ void GPU::att_v(int layer, int pos){
         }
         bind_tex(1, kv_cache_[layer].tex);
         set_sampler(p, "KV", 1);
+        if (att_kv_vstep_) {
+            bind_tex(3, vs_targets_[layer].tex);
+            set_sampler(p, "VS", 3);
+        }
         glUniform1f(uloc(p, "pos"), (float)pos);
         setup_attrib(p);
         glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;

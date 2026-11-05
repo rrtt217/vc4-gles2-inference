@@ -161,6 +161,7 @@ private:
     GLuint x_rms_reduce();
     GLuint x_rms_norm();
     GLuint x_v();
+    GLuint x_vscale();
     GLuint x_kv_rope();
     GLuint x_qnorm();
     GLuint x_qrot();
@@ -212,6 +213,8 @@ private:
     Target ffn_a_, ffn_b_, ffn_h_, ffn_ab_;
     Target ffn_ab_a_, ffn_ab_b_, ffn_h_a_, ffn_h_b_;
     Target qkv_target_, att_scores_, att_stats_, att_probs_, att_out_, qrot_target_, qscale_target_;
+    // 8-bit KV: one per-head V step texel per position, one plane per layer.
+    vector<Target> vs_targets_;
     vector<Target> kv_cache_;
     Target hidden_a_, hidden_b_, xb_, xbf_, xf_, rms_stats_, rms_partial_, rms_partial2_, ffn_pair_a_, ffn_pair_b_;
     // Prefill pair (7c): two hidden streams, their post-attention scratch and
@@ -239,6 +242,7 @@ private:
     int att_kv_bits_ = 0;
     float att_kv_scale_ = 16384.0f;
     int att_kv_width_ = 0;
+    bool att_kv_vstep_ = false;   // 8-bit KV: per-head V grid
     int max_target_dim_ = 0;
     vector<GLuint> q_norm_tex_, k_norm_tex_;
     GLuint vbo_ = 0;
@@ -329,6 +333,8 @@ private:
 
 
     void kv_rope_write(int layer, int pos);
+
+    void kv_vscale(int layer, int pos);
 
     void att_scores(int layer, int pos);
 

@@ -45,7 +45,8 @@ string att_defs(const AttnConfig& c) {
            "#define QKEPS 0.000001\n" +
            "#define KVSCALE " + to_string(c.kv_scale) + "\n" +
            "#define KVPACK " + to_string(c.kv_bits) + "\n" +
-           "#define KVWIDTH " + to_string(c.kv_width) + "\n";
+           "#define KVWIDTH " + to_string(c.kv_width) + "\n" +
+           "#define KVSTEP " + string(c.kv_vstep ? "1" : "0") + "\n";
 }
 
 string att_helpers() {
@@ -59,12 +60,14 @@ string att_helpers() {
         "vec4 encKV(float v0,float v1){if(KVPACK==16){float q0=clamp(floor(v0*KVSCALE+0.5),-32768.0,32767.0);if(q0<0.0)q0+=65536.0;float q1=clamp(floor(v1*KVSCALE+0.5),-32768.0,32767.0);if(q1<0.0)q1+=65536.0;float h0=floor(q0/256.0),l0=q0-h0*256.0,h1=floor(q1/256.0),l1=q1-h1*256.0;return vec4(h0/255.0,l0/255.0,h1/255.0,l1/255.0);}return enc24s(v0,KVSCALE);}\n"
         "vec4 encKV8(float v0,float v1,float v2,float v3){float q0=clamp(floor(v0*KVSCALE+0.5),-128.0,127.0);if(q0<0.0)q0+=256.0;float q1=clamp(floor(v1*KVSCALE+0.5),-128.0,127.0);if(q1<0.0)q1+=256.0;float q2=clamp(floor(v2*KVSCALE+0.5),-128.0,127.0);if(q2<0.0)q2+=256.0;float q3=clamp(floor(v3*KVSCALE+0.5),-128.0,127.0);if(q3<0.0)q3+=256.0;return vec4(q0/255.0,q1/255.0,q2/255.0,q3/255.0);}\n"
         "float decKV8(vec4 c,int idx){float q=(idx==0)?c.r:(idx==1)?c.g:(idx==2)?c.b:c.a;float u=floor(q*255.0+0.5);if(u>=128.0)u-=256.0;return u/KVSCALE;}\n"
-        "float decKV(vec4 c,int odd){if(KVPACK==16){float hi=(odd==1)?c.b:c.r;float lo=(odd==1)?c.a:c.g;float u=floor(hi*255.0+0.5)*256.0+floor(lo*255.0+0.5);if(u>=32768.0)u-=65536.0;return u/KVSCALE;}if(KVPACK==8)return decKV8(c,odd);return dec24s(c,KVSCALE);}\n";
+        "float decKV(vec4 c,int odd){if(KVPACK==16){float hi=(odd==1)?c.b:c.r;float lo=(odd==1)?c.a:c.g;float u=floor(hi*255.0+0.5)*256.0+floor(lo*255.0+0.5);if(u>=32768.0)u-=65536.0;return u/KVSCALE;}if(KVPACK==8)return decKV8(c,odd);return dec24s(c,KVSCALE);}\n"
+        "float decKV8d(vec4 c,int idx,float d){float q=(idx==0)?c.r:(idx==1)?c.g:(idx==2)?c.b:c.a;float u=floor(q*255.0+0.5);if(u>=128.0)u-=256.0;return u*d;}\n"
+        "vec4 encKV8s(float v0,float v1,float v2,float v3,float d){float q0=clamp(floor(v0/d+0.5),-128.0,127.0);if(q0<0.0)q0+=256.0;float q1=clamp(floor(v1/d+0.5),-128.0,127.0);if(q1<0.0)q1+=256.0;float q2=clamp(floor(v2/d+0.5),-128.0,127.0);if(q2<0.0)q2+=256.0;float q3=clamp(floor(v3/d+0.5),-128.0,127.0);if(q3<0.0)q3+=256.0;return vec4(q0/255.0,q1/255.0,q2/255.0,q3/255.0);}\n";
 }
 
 string att_kv_rope(const AttnConfig& c) {
     return "precision highp float;\n" + att_defs(c) + att_helpers() +
-        "uniform sampler2D QKV,RT,KN;uniform float pos;" + qkv_read(c, "QKV", "QKVQ") +
+        "uniform sampler2D QKV,RT,KN,VS;uniform float pos;" + qkv_read(c, "QKV", "QKVQ") +
         "void main(){int x=int(gl_FragCoord.x);"
         "if(KVPACK==8){"
         "if(x<KVDIM/4){"
@@ -89,10 +92,13 @@ string att_kv_rope(const AttnConfig& c) {
         "float oo=first?vv*co-bb*sn:bb*sn+vv*co;if(k==0)o0=oo;else if(k==1)o1=oo;else if(k==2)o2=oo;else o3=oo;}"
         "gl_FragColor=encKV8(o0,o1,o2,o3);return;}"
         "int vb=4*(x-KVDIM/4);"
+        "int vh=vb/HEADDIM;"
         "float v0=QKVQ(DIM+KVDIM+vb);"
         "float v1=QKVQ(DIM+KVDIM+vb+1);"
         "float v2=QKVQ(DIM+KVDIM+vb+2);"
         "float v3=QKVQ(DIM+KVDIM+vb+3);"
+        "if(KVSTEP==1){float vd=dec24s(texture2D(VS,vec2((float(vh)+0.5)/float(KVHEADS),(pos+0.5)/float(SEQ))),16777216.0);"
+        "gl_FragColor=encKV8s(v0,v1,v2,v3,vd);return;}"
         "gl_FragColor=encKV8(v0,v1,v2,v3);return;}"
         "if(KVPACK==16){"
         "if(x<KVDIM/2){"
@@ -138,6 +144,22 @@ string att_kv_rope(const AttnConfig& c) {
         "float co=dec24s(rc,4096.0),sn=dec24s(rs,4096.0);"
         "bool first=(ROPEHALF==1)?(i<HALF):(even==0);"
         "float o=first?vn*co-bn*sn:bn*sn+vn*co;gl_FragColor=enc24s(o,KVSCALE);}";
+}
+
+string att_vscale(const AttnConfig& c) {
+    // Per-head V grid (8-bit KV only): the max of the head values at this
+    // position sets the step (max/127), so every V head gets the full 8-bit
+    // range.  K keeps the global KVSCALE grid, because it is qk-normed before
+    // rope and its range is already about unit RMS, while V head ranges
+    // differ by an order of magnitude.
+    return "precision highp float;\n" + att_defs(c) + att_helpers() +
+        "uniform sampler2D QKV;" + qkv_read(c, "QKV", "QKVQ") +
+        "void main(){int h=int(gl_FragCoord.x);float mx=0.0;"
+        "for(int z=0;z<HEADDIM;z++){"
+        "float v=QKVQ(DIM+KVDIM+h*HEADDIM+z);"
+        "mx=max(mx,abs(v));}"
+        "float d=max(mx,0.00001)/127.0;"
+        "gl_FragColor=enc24s(d,16777216.0);}";
 }
 
 string att_qnorm_scale(const AttnConfig& c) {
@@ -264,7 +286,7 @@ string att_prob(const AttnConfig& c) {
 string att_v(const AttnConfig& c, XFormat out) {
     // q16 score/stats layout has one packed texel per head; fused decode is mandatory.
     static const bool fuse_prob = true;
-    const string prob_bind = fuse_prob ? "S,ST,KV" : "P,KV";
+    const string prob_bind = fuse_prob ? "S,ST,KV,VS" : "P,KV,VS";
     const string prob_body = fuse_prob
         ? string("vec4 st=texture2D(ST,vec2((float(h)+0.5)/float(HEADS),0.5));"
                  "float mx=dec16(st.rg)/4.0;float sum=dec16(st.ba)*8.0;"
@@ -297,13 +319,18 @@ string att_v(const AttnConfig& c, XFormat out) {
         bodies += "a" + K + "+=p0*v0_" + K + ";";
         accs += "a" + K + (k + 1 < N ? "," : "");
     }
+    // 8-bit V carries a per-head, per-position step: one fetch per position,
+    // shared by every channel of the fragment (they all sit in one KV head).
+    const bool vstep = (c.kv_bits == 8 && c.kv_vstep);
+    const string step0 = "float d0=dec24s(texture2D(VS,vec2((float(kvh)+0.5)/float(KVHEADS),(float(t0)+0.5)/float(SEQ))),16777216.0);";
+    const string step1 = "float d1=dec24s(texture2D(VS,vec2((float(kvh)+0.5)/float(KVHEADS),(float(t1)+0.5)/float(SEQ))),16777216.0);";
     string loads0, loads1;
     for (int k = 0; k < N; ++k) {
         string K = to_string(k);
-        loads0 += "float v0_" + K + "=decKV(texture2D(KV,vec2((float(tx" + K + ")+0.5)/float(KVWIDTH),"
-                  "(float(t0)+0.5)/float(SEQ))),od" + K + ");";
-        loads1 += "float v1_" + K + "=decKV(texture2D(KV,vec2((float(tx" + K + ")+0.5)/float(KVWIDTH),"
-                  "(float(t1)+0.5)/float(SEQ))),od" + K + ");";
+        const string s0 = "texture2D(KV,vec2((float(tx" + K + ")+0.5)/float(KVWIDTH),(float(t0)+0.5)/float(SEQ)))";
+        const string s1 = "texture2D(KV,vec2((float(tx" + K + ")+0.5)/float(KVWIDTH),(float(t1)+0.5)/float(SEQ)))";
+        loads0 += "float v0_" + K + "=" + (vstep ? "decKV8d(" + s0 + ",od" + K + ",d0)" : "decKV(" + s0 + ",od" + K + ")") + ";";
+        loads1 += "float v1_" + K + "=" + (vstep ? "decKV8d(" + s1 + ",od" + K + ",d1)" : "decKV(" + s1 + ",od" + K + ")") + ";";
     }
     string init;
     for (int k = 0; k < N; ++k) init += "float a" + to_string(k) + "=0.0;";
@@ -319,9 +346,9 @@ string att_v(const AttnConfig& c, XFormat out) {
         "for(int T=0;T<SEQ/2;T++){if(T>=mxT)break;"
         "int t0=T*2;int t1=t0+1;"
         "vec4 sp=texture2D(S,vec2((float(T)+0.5)/float(SEQ/2),(float(h)+0.5)/float(HEADS)));"
-        "float p0=exp(dec16(sp.rg)/4.0-mx)*invs;" +
+        "float p0=exp(dec16(sp.rg)/4.0-mx)*invs;" + (vstep ? step0 : string("")) +
         loads0 + bodies +
-        "if(float(t1)<=pos){float p1=exp(dec16(sp.ba)/4.0-mx)*invs;" + loads1 +
+        "if(float(t1)<=pos){float p1=exp(dec16(sp.ba)/4.0-mx)*invs;" + (vstep ? step1 : string("")) + loads1 +
         "a0+=p1*v1_0;" + (N > 1 ? "a1+=p1*v1_1;" : "") + (N > 2 ? "a2+=p1*v1_2;a3+=p1*v1_3;" : "") + "}}"
         + enc;
     return fs;

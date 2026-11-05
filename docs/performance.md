@@ -3374,3 +3374,72 @@ q8 the V side alone is worth 1.95%.  It is not free, so `KV_PACK=8` stays
 opt-in until the GPU version is measured.  Next: per-head V scale in
 `att_kv_rope`/`att_v` with K on the global grid, then the q8/q4 PPL pair and
 the decode cost.
+
+## 8-bit KV step 9c: per-head V on the GPU helps q4 and costs q8 its gain (2026-11-05)
+
+The GPU version of the 9b per-head V grid, behind `KV_VSTEP=1` (default off).
+K keeps the global `KVSCALE` grid: it is qk-normed before rope, so its range
+is already about unit RMS, while V head ranges differ by an order of
+magnitude.  New `att_vscale` pass, one fragment per KV head and one texel per
+position **per layer**, scanning the head (`HEADDIM` q16 values) and writing
+`step = max/127` as a 24-bit fixed point value (scale 2^24, so the step is
+exact to ~1e-5 relative even at 0.005).  `att_kv_rope` quantises V with that
+step and `att_v` dequantises with it, one extra fetch per position in the V
+loop (all channels of a fragment share the head).  The plane is
+`kv_heads x seq` per layer; the prefix-cache header goes to version 3 only
+when the plane exists, so a default build still writes version 2 files
+(verified: `KV_PACK=8` PPL is 260.4460 / 351.2603 before and after).
+
+**PPL, `SEQ=768`, 293-token corpus, greedy gates ACCEPT:**
+
+| model | KV16 (default) | kv8 global 1/16 | kv8 + per-head V step |
+|---|---:|---:|---:|
+| q8 | 271.2855 | **260.4460** (-4.0%) | 277.2030 (+2.2% against KV16, +6.4% against kv8) |
+| q4 | 325.3751 | 351.2603 (+8.0%) | **330.3682** (+1.5% against KV16, -6.0% against kv8) |
+
+**Reading: the per-head grid is not a free win on the GPU, and q8 loses the
+most.**  The CPU sim (9b) predicted -1.95% for q8 and -1.2% for q4 against
+float KV; the GPU reproduces the q4 direction (-6.0% against the global grid,
+which is most of the sim gain) but not the q8 one: q8 goes from -4.0% to +2.2%
+against KV16.  That is the same asymmetry 9b found from the other side (GPU
+q8 kv8 gains 4.0% at that grid, the CPU gains 0.18%), so the q8 kv8 gain is
+bound to the specific global 1/16 grid on this engine, not to "8-bit KV" in
+general: moving V onto a per-head grid gives the gain back.  q4 behaves like
+the sim says it should and is now within 1.5% of KV16 while using half the
+cache.
+
+**Cost: one dependent draw per layer per token.**  `LAYER_PROFILE` with its
+per-lap `glFinish` (35 tokens x 8 layers, so sync-inflated): vscale 2.0,
+rope 4.5, qkv 4.4, scores 7.7, v 2.7 ms/layer.  End-to-end, `KV_PACK=8`,
+32 greedy tokens, `IGNORE_EOS=1`, interleaved arms:
+
+| model | `KV_VSTEP=0` median (min) | `KV_VSTEP=1` median (min) | delta |
+|---|---:|---:|---:|
+| q8 | 190.8 (184.1) | 199.4 (196.1) | +4.5% |
+| q4 | 287.9 (287.8) | 304.0 (300.6) | +5.6% |
+
+q4 pays more because its decode is ALU bound; the pass is latency bound
+(4 fragments x 96 serial fetches, the shape of `att_qnorm_scale`, which costs
+1.0 ms/layer with twice the fragments), so splitting the scan across
+partials would halve it, but nothing here is worth that while the grid loses
+on q8.
+
+**Verdict: `KV_VSTEP` stays opt-in and `KV_PACK=8` stays opt-in.**  The
+per-head grid is a real q4 improvement (-6.0%) but it still does not reach
+KV16, and it costs q8 the only thing that made 8-bit KV attractive (-4.0%).
+The GPU path is therefore: q8 keeps the global 1/16 grid and remains the one
+kv8 configuration worth deploying; q4 stays on KV16.
+
+**Two traps for the next person.**  (1) The step plane must be per layer.  A
+single `kv_heads x seq` plane is overwritten by the next layer before the
+previous layer attention reads its rows back: the first cut scored 660.2028
+on q8 and looked like a broken kernel rather than an aliasing bug.  (2) At
+position 0 the attention output is exactly V, and with GQA (8 query heads, 4
+KV heads) query heads 0-1 both print KV head 0, so an `att_out` dump at pos 0
+is a clean absolute check of encode + step + decode (it matched the qkv V to
+the last q16) but says nothing about the per-position path - the aliasing
+bug only shows up at pos >= 1.
+
+Observed greedy answers with `KV_PACK=8 KV_VSTEP=1` (unpinned, the kv8 answer
+moves with the grid): q8 `我是一个AI助手，我的存在是为了提供帮助和信息。`, q4
+`我是Ministry，一个由Oracle公司开发的高级软件工程师。我以高效、`.
