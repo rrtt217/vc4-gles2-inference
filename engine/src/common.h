@@ -18,11 +18,6 @@ using Clock = chrono::steady_clock;
 
 static constexpr float ACT_SCALE = 256.0f;  // q16 activation scale
 
-static constexpr uint32_t MAGIC_Q8 = 0x51384D31;      // Q8M1
-static constexpr uint32_t MAGIC_I16 = 0x4931364D;     // I16M1
-static constexpr uint32_t MAGIC_Q8_V2 = 0x51384D32;   // Q8M2
-static constexpr uint32_t MAGIC_I16_V2 = 0x4931364E;  // I16N
-static constexpr uint32_t MAGIC_Q4 = 0x51344D31;      // Q4M1
 
 enum class WeightType { INT8, INT16, INT4 };
 

@@ -41,12 +41,15 @@
         fpos_ = 0;
         borrow_ = !(getenv("MODEL_BORROW") && !strcmp(getenv("MODEL_BORROW"), "0"));
         uint32_t magic = 0; memcpy(&magic, fbase_, 4);
-        bool ok;
-        if (magic == 0x46434D4DU) ok = load_mmcf();  // "MMCF"
-        else if (magic == MAGIC_Q8 || magic == MAGIC_Q8_V2) ok = load_q8(path);
-        else if (magic == MAGIC_I16 || magic == MAGIC_I16_V2) ok = load_i16(path);
-        else if (magic == MAGIC_Q4) ok = load_q4(path);
-        else ok = load_legacy(path);
+        bool ok = false;
+        if (magic != 0x46434D4DU) {   // "MMCF"
+                cerr << "not an MMCF container (magic 0x" << std::hex << magic << std::dec
+                     << "); the legacy Q8M1/Q4M1/I16M1/llama2c readers are gone, convert with "
+                        "engine/tools/mmcf_pack.py\n";
+                munmap(base, (size_t)st.st_size);
+                return false;
+        }
+        ok = load_mmcf();
         fbase_ = nullptr; fsize_ = fpos_ = 0;
         if (ok && getenv("MODEL_DUMP")) {
                 auto head = [](const char* n, const Mat& m) {
@@ -255,125 +258,9 @@ void Model::read_exact(void* p, size_t n){
         fpos_ += n;
     }
 
-Mat Model::read_mat(bool int16){
-        Mat m;
-        int32_t rows = 0, cols = 0; float scale = 0;
-        read_exact(&rows, 4); read_exact(&cols, 4); read_exact(&scale, 4);
-        m.rows = rows; m.cols = cols; m.scale = scale;
-        m.type = int16 ? WeightType::INT16 : WeightType::INT8;
-        if (rows < 0 || cols <= 0) { cerr << "bad matrix header\n"; exit(1); }
-        const size_t n = (size_t)rows * cols;
-        if (int16) read_seq(m.q16, m.ext16, n);
-        else read_seq(m.q8, m.ext8, n);
-        return m;
-    }
-bool Model::load_legacy(const string& path){
-        const uint8_t* base = fbase_;
-        int32_t cfg[7]; memcpy(cfg, base, 28);
-        dim = cfg[0]; hidden = cfg[1]; layers = cfg[2]; heads = cfg[3];
-        kv_heads = cfg[4]; int vs = cfg[5]; seq = cfg[6];
-        vocab = abs(vs); shared_embeddings = vs > 0;
-        head_dim = dim / heads; kv_dim = kv_heads * head_dim;
-        const float* p = (const float*)(base + 28);
-        auto take = [&](size_t n) { const float* r = p; p += n; return r; };
-        const float* ep = take((size_t)vocab * dim);
-        emb_f32.assign(ep, ep + (size_t)vocab * dim);
-        const float* ra = take((size_t)layers * dim); rms_att.assign(ra, ra + (size_t)layers * dim);
-        const float* wq = take((size_t)layers * dim * dim);
-        const float* wk = take((size_t)layers * kv_dim * dim);
-        const float* wv = take((size_t)layers * kv_dim * dim);
-        const float* wo_p = take((size_t)layers * dim * dim);
-        const float* rf = take((size_t)layers * dim); rms_ffn.assign(rf, rf + (size_t)layers * dim);
-        const float* w1_p = take((size_t)layers * hidden * dim);
-        const float* w2_p = take((size_t)layers * dim * hidden);
-        const float* w3_p = take((size_t)layers * hidden * dim);
-        const float* rfin = take(dim); rms_final.assign(rfin, rfin + dim);
-        p += (size_t)seq * head_dim;
-        const float* wcls = shared_embeddings ? ep : p;
-        // Legacy fp32 files have no precision field.  Quantizing them to int8
-        // destroys the tiny 260K/15M TinyStories models (empirically: coherent
-        // from I16, gibberish from Q8).  Default to I16; LEGACY_Q8=1 keeps the
-        // old low-memory path for large checkpoints.
-        const bool legacy_q8 = getenv("LEGACY_Q8") && strcmp(getenv("LEGACY_Q8"), "0") != 0;
-        const WeightType qt = legacy_q8 ? WeightType::INT8 : WeightType::INT16;
 
-        for (int l = 0; l < layers; ++l) {
-            vector<float> fused((size_t)(dim + 2 * kv_dim) * dim);
-            memcpy(fused.data(), wq + (size_t)l * dim * dim, (size_t)dim * dim * 4);
-            memcpy(fused.data() + (size_t)dim * dim, wk + (size_t)l * kv_dim * dim, (size_t)kv_dim * dim * 4);
-            memcpy(fused.data() + (size_t)(dim + kv_dim) * dim, wv + (size_t)l * kv_dim * dim, (size_t)kv_dim * dim * 4);
-            qkv.push_back(quantize(fused.data(), dim + 2 * kv_dim, dim, qt));
-            wo.push_back(quantize(wo_p + (size_t)l * dim * dim, dim, dim, qt));
-            if (2 * hidden <= 2048) {
-                vector<float> fused13((size_t)2 * hidden * dim);
-                memcpy(fused13.data(), w1_p + (size_t)l * hidden * dim, (size_t)hidden * dim * 4);
-                memcpy(fused13.data() + (size_t)hidden * dim, w3_p + (size_t)l * hidden * dim, (size_t)hidden * dim * 4);
-                w13.push_back(quantize(fused13.data(), 2 * hidden, dim, qt));
-            } else {
-                w1.push_back(quantize(w1_p + (size_t)l * hidden * dim, hidden, dim, qt));
-                w3.push_back(quantize(w3_p + (size_t)l * hidden * dim, hidden, dim, qt));
-            }
-            w2.push_back(quantize(w2_p + (size_t)l * dim * hidden, dim, hidden, qt));
-        }
-        for (int st = 0; st < vocab; st += 1536)
-            logits_tiles.push_back(quantize(wcls + (size_t)st * dim, min(1536, vocab - st), dim, qt));
-
-        return true;
-    }
-
-bool Model::load_q4(const string& path){
-        uint32_t magic = 0; int32_t cfg[7]; float theta = 0; int32_t half = 0, split = 0, qk = 0;
-        read_exact(&magic, 4); read_exact(cfg, 28); read_exact(&theta, 4);
-        read_exact(&half, 4); read_exact(&split, 4); read_exact(&qk, 4);
-        dim = cfg[0]; hidden = cfg[1]; layers = cfg[2]; heads = cfg[3];
-        kv_heads = cfg[4]; vocab = cfg[5]; seq = cfg[6];
-        if (getenv("SEQ")) seq = atoi(getenv("SEQ"));
-        rope_theta = theta; rope_half = half != 0; qk_norm = qk != 0;
-        head_dim = dim / heads; kv_dim = kv_heads * head_dim;
-        has_q8_emb = true;
-        emb_q8.resize((size_t)vocab * dim); read_exact(emb_q8.data(), emb_q8.size());
-        emb_scale.resize(vocab); read_exact(emb_scale.data(), emb_scale.size() * 4);
-        rms_att.resize((size_t)layers * dim); read_exact(rms_att.data(), rms_att.size() * 4);
-        rms_ffn.resize((size_t)layers * dim); read_exact(rms_ffn.data(), rms_ffn.size() * 4);
-        rms_final.resize(dim); read_exact(rms_final.data(), rms_final.size() * 4);
-        if (qk_norm) {
-            q_norm.resize((size_t)layers * head_dim); read_exact(q_norm.data(), q_norm.size() * 4);
-            k_norm.resize((size_t)layers * head_dim); read_exact(k_norm.data(), k_norm.size() * 4);
-        }
-        auto read_q4_mat = [&]() {
-            int32_t rows = 0, cols = 0, groups = 0; float ps = 1.0f;
-            read_exact(&rows, 4); read_exact(&cols, 4);
-            read_exact(&groups, 4); read_exact(&ps, 4);
-            Mat m; m.rows = rows; m.cols = cols; m.type = WeightType::INT4;
-            m.group = 32; m.groups = groups; m.q4_param_scale = ps;
-            read_seq(m.q4, m.ext4, (size_t)rows * (cols / 2));
-            read_seq(m.q4_scale, m.ext_scale4, (size_t)rows * groups);
-            read_seq(m.q4_min, m.ext_min4, (size_t)rows * groups);
-            return m;
-        };
-        for (int l = 0; l < layers; ++l) {
-            qkv.push_back(read_q4_mat());
-            wo.push_back(read_q4_mat());
-            if (split) { w1.push_back(read_q4_mat()); w3.push_back(read_q4_mat()); }
-            else w13.push_back(read_q4_mat());
-            w2.push_back(read_q4_mat());
-        }
-        int nt = (vocab + 1535) / 1536;
-        for (int i = 0; i < nt; ++i) {
-            int32_t rows = 0, cols = 0; float sc = 1.0f;
-            read_exact(&rows, 4); read_exact(&cols, 4); read_exact(&sc, 4);
-            Mat m; m.rows = rows; m.cols = cols; m.scale = sc; m.type = WeightType::INT8;
-            read_seq(m.q8, m.ext8, (size_t)rows * cols);
-            logits_tiles.push_back(m);
-        }
-        return true;
-    }
 
 // MMCF v2 container.  Layout and field list: docs/checkpoint-container.md.
-// Only what the q8 checkpoints need is implemented here: f32 tensors (norms,
-// scales) and q8 tensors (matrices, logits tiles, embedding).  The matrices are
-// pre-biased at pack time, so they are borrowed straight out of the mapping and
-// the upload copies them without the +128 pass.
 namespace {
 struct MmcfRec {
         uint16_t id = 0;
@@ -633,81 +520,6 @@ bool Model::load_mmcf(){
                 return false;
         }
         (void)group;
-        return true;
-    }
-
-bool Model::load_q8(const string& path){
-        uint32_t magic = 0; int32_t cfg[7]; int32_t split = 0;
-        read_exact(&magic, 4); read_exact(cfg, 28);
-        dim = cfg[0]; hidden = cfg[1]; layers = cfg[2]; heads = cfg[3];
-        kv_heads = cfg[4]; vocab = cfg[5]; seq = cfg[6];
-        if (getenv("SEQ")) seq = atoi(getenv("SEQ"));
-        head_dim = dim / heads; kv_dim = kv_heads * head_dim;
-        if (magic == MAGIC_Q8_V2) {
-            int32_t half = 0, qk = 0;
-            read_exact(&rope_theta, 4); read_exact(&half, 4);
-            read_exact(&split, 4); read_exact(&qk, 4);
-            rope_half = half != 0; qk_norm = qk != 0;
-        } else {
-            read_exact(&split, 4);
-            if (getenv("ROPE_THETA")) rope_theta = atof(getenv("ROPE_THETA"));
-            rope_half = getenv("ROPE_HALF") != nullptr;
-        }
-        has_q8_emb = true;
-        emb_q8.resize((size_t)vocab * dim);
-        read_exact(emb_q8.data(), emb_q8.size());
-        emb_scale.resize(vocab); read_exact(emb_scale.data(), emb_scale.size() * 4);
-        rms_att.resize((size_t)layers * dim); read_exact(rms_att.data(), rms_att.size() * 4);
-        rms_ffn.resize((size_t)layers * dim); read_exact(rms_ffn.data(), rms_ffn.size() * 4);
-        rms_final.resize(dim); read_exact(rms_final.data(), rms_final.size() * 4);
-        if (qk_norm) {
-            q_norm.resize((size_t)layers * head_dim); read_exact(q_norm.data(), q_norm.size() * 4);
-            k_norm.resize((size_t)layers * head_dim); read_exact(k_norm.data(), k_norm.size() * 4);
-        }
-        for (int l = 0; l < layers; ++l) {
-            qkv.push_back(read_mat(false));
-            wo.push_back(read_mat(false));
-            if (split) { w1.push_back(read_mat(false)); w3.push_back(read_mat(false)); }
-            else w13.push_back(read_mat(false));
-            w2.push_back(read_mat(false));
-        }
-        int nt = (vocab + 1535) / 1536;
-        for (int i = 0; i < nt; ++i) logits_tiles.push_back(read_mat(false));
-        return true;
-    }
-
-bool Model::load_i16(const string& path){
-        uint32_t magic = 0; int32_t cfg[7]; float theta = 0; int32_t half = 0, split = 0;
-        read_exact(&magic, 4); read_exact(cfg, 28); read_exact(&theta, 4);
-        read_exact(&half, 4); read_exact(&split, 4);
-        if (magic == MAGIC_I16_V2) {
-            int32_t qk = 0; read_exact(&qk, 4); qk_norm = qk != 0;
-        }
-        dim = cfg[0]; hidden = cfg[1]; layers = cfg[2]; heads = cfg[3];
-        kv_heads = cfg[4]; vocab = cfg[5]; seq = cfg[6];
-        if (getenv("SEQ")) seq = atoi(getenv("SEQ"));
-        rope_theta = theta; rope_half = half != 0;
-        head_dim = dim / heads; kv_dim = kv_heads * head_dim;
-        has_i16_emb = true;
-        emb_i16.resize((size_t)vocab * dim);
-        read_exact(emb_i16.data(), emb_i16.size() * 2);
-        emb_scale.resize(vocab); read_exact(emb_scale.data(), emb_scale.size() * 4);
-        rms_att.resize((size_t)layers * dim); read_exact(rms_att.data(), rms_att.size() * 4);
-        rms_ffn.resize((size_t)layers * dim); read_exact(rms_ffn.data(), rms_ffn.size() * 4);
-        rms_final.resize(dim); read_exact(rms_final.data(), rms_final.size() * 4);
-        if (qk_norm) {
-            q_norm.resize((size_t)layers * head_dim); read_exact(q_norm.data(), q_norm.size() * 4);
-            k_norm.resize((size_t)layers * head_dim); read_exact(k_norm.data(), k_norm.size() * 4);
-        }
-        for (int l = 0; l < layers; ++l) {
-            qkv.push_back(read_mat(true));
-            wo.push_back(read_mat(true));
-            if (split) { w1.push_back(read_mat(true)); w3.push_back(read_mat(true)); }
-            else w13.push_back(read_mat(true));
-            w2.push_back(read_mat(true));
-        }
-        int nt = (vocab + 1535) / 1536;
-        for (int i = 0; i < nt; ++i) logits_tiles.push_back(read_mat(true));
         return true;
     }
 

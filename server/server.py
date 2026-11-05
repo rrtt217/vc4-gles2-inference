@@ -62,7 +62,10 @@ class EngineWorker:
         if kv_pack:
             env["KV_PACK"] = str(kv_pack)
         self.log = open(log_path, "ab", buffering=0)
-        cmd = [engine, "--worker", "--template", "qwen"]
+        # The container names its chat template (metadata kind 3 for
+        # TinyBrainBot, 2 for MiniMind3, 1 for chatml); the server does not
+        # choose one and does not build prompt text itself.
+        cmd = [engine, "--worker"]
         if prefix_cache:
             cmd += ["--prefix-cache", prefix_cache]
         self.prefix_cache_tokens = 0

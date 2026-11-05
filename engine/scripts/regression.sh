@@ -44,9 +44,10 @@ REBASE=0
 if [ "${1:-}" = "--rebaseline" ]; then REBASE=1; shift; fi
 
 BIN="${1:-${BIN:-./engine_mm3}}"
-TOK="${TOKENIZER:-../models/minimind3/minimind3.tok}"
-Q8="${Q8:-../models/minimind3/minimind3.q8}"
-Q4="${Q4:-../models/minimind3/minimind3.q4}"
+TOK="${TOKENIZER:-}"   # optional: the container embeds its tokenizer
+if [ -n "$TOK" ]; then export TOKENIZER="$TOK"; fi
+Q8="${Q8:-../models/minimind3/minimind3.q8.mmcf}"
+Q4="${Q4:-../models/minimind3/minimind3.q4.mmcf}"
 CORPUS="${PPL_FILE:-data/ppl_test.txt}"
 SYS="${SYS:-You are a helpful assistant.}"
 Q8_EXPECT="${Q8_EXPECT:-}"
@@ -66,12 +67,12 @@ fi
 # $1 model, $2 prompt, $3 gen, $4 system ("" = compiled default)
 answer() {
     if [ -n "$4" ]; then
-        MODEL="$1" TOKENIZER="$TOK" GPU_LAYER=1 KV_PACK=16 \
-            "$BIN" --chat --template minimind3 --system "$4" \
+        MODEL="$1" GPU_LAYER=1 KV_PACK=16 \
+            "$BIN" --chat --system "$4" \
             --prompt "$2" --gen "$3" --greedy 2>&1
     else
-        MODEL="$1" TOKENIZER="$TOK" GPU_LAYER=1 KV_PACK=16 \
-            "$BIN" --chat --template minimind3 \
+        MODEL="$1" GPU_LAYER=1 KV_PACK=16 \
+            "$BIN" --chat \
             --prompt "$2" --gen "$3" --greedy 2>&1
     fi
 }
@@ -146,8 +147,8 @@ behaviour poem "$poem"
 # $1 model, $2 ACT8 mode.  ACT8 only rewrites the all-INT8 activation feed,
 # so the q4 model is measured once, with ACT8=0.
 ppl() {
-    MODEL="$1" TOKENIZER="$TOK" GPU_LAYER=1 KV_PACK=16 SEQ="$PPL_SEQ" ACT8="$2" \
-        "$BIN" --template minimind3 --ppl "$CORPUS" 2>&1 \
+    MODEL="$1" GPU_LAYER=1 KV_PACK=16 SEQ="$PPL_SEQ" ACT8="$2" \
+        "$BIN" --ppl "$CORPUS" 2>&1 \
         | sed -n 's/^PPL \([0-9.]*\).*/\1/p' | head -1
 }
 

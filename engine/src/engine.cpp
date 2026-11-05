@@ -91,13 +91,6 @@ int main(int argc, char** argv) {
             stringstream ss; ss << tf.rdbuf(); tools_json = ss.str();
         }
         else if (!strcmp(argv[i], "--system") && i + 1 < argc) system_prompt = argv[++i];
-        else if (!strcmp(argv[i], "--template") && i + 1 < argc) {
-            const char* t = argv[++i];
-            qwen_template = !strcmp(t, "qwen");
-            minimind3_template = !strcmp(t, "minimind3");
-            tbb_template = !strcmp(t, "tinybrainbot");
-            if (minimind3_template) qwen_template = true;
-        }
         else if (!strcmp(argv[i], "--seed") && i + 1 < argc) seed = (uint32_t)strtoul(argv[++i], nullptr, 10);
         else if (!strcmp(argv[i], "--temp") && i + 1 < argc) temp = atof(argv[++i]);
         else if (!strcmp(argv[i], "--topp") && i + 1 < argc) top_p = atof(argv[++i]);

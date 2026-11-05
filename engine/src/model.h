@@ -67,8 +67,6 @@ public:
 private:
     void read_exact(void* p, size_t n);
 
-    Mat read_mat(bool int16);
-
     template <typename T> void read_seq(vector<T>& v, const T*& ext, size_t n){
         const size_t bytes = n * sizeof(T);
         if (fpos_ + bytes > fsize_) { cerr << "truncated checkpoint\n"; exit(1); }
@@ -90,14 +88,6 @@ private:
     size_t map_size_ = 0;
     bool borrow_ = true;
 
-
-    bool load_legacy(const string& path);
-
-    bool load_q4(const string& path);
-
-    bool load_q8(const string& path);
-
-    bool load_i16(const string& path);
 
     static Mat slice_rows(const Mat& src, int r0, int r1);
 
