@@ -261,13 +261,50 @@ upload is a copy), `3` q8i8, `4` q4, `5` blob.
 - ESSL 1.00 has no implicit int->float conversion: `int(x) * 1.5` does not
   compile in a shader, it needs `float(int(x)) * 1.5`.
 
-## Still open
+## What the reader enforces
 
-- The template **kind** byte in the metadata is written but the engine still
-  maps the name (`qwen`, `minimind3`) to its own template table; a file naming
-  an unknown template falls back to the flag.
-- `capabilities` is parsed into `Model::capabilities` but nothing refuses
-  `--chat` on a non-chat checkpoint yet.
-- lora/adapters, multi-precision-in-one-file and 16-byte alignment of the
-  metadata block are not implemented (the data section is aligned; the TLV
-  block is byte-packed).
+- **version** unknown -> refuse with the number printed.
+- **file_size != st_size** -> refuse (truncated download).
+- **header crc32** (bytes 0..39, stored at 40) -> refuse on mismatch; a zero
+  field means "not written" and is accepted for hand-made files.
+- **unknown dtype** -> refuse, naming the tensor id and the dtype.  Guessing
+  here would turn a future fp8 file into silent q8 arithmetic.
+- **capabilities** -> a file that does not advertise `chat` refuses `--chat`
+  (exit 2); a file that does advertise it enters chat mode on its own when the
+  caller passes neither `--chat` nor a generation length.
+- **template kind** -> 0 plain, 1 chatml/qwen, 2 minimind3; an unknown kind
+  falls back to the name string, and `--template` always wins.
+- tokenizer blob, when present and `TOKENIZER=` is unset.
+
+`engine/tools/mmcf_dump.py` prints all of it from the file alone
+(`--tensors` adds one line per tensor, `--check` verifies every CRC), so
+"self-describing" is checkable:
+
+```
+$ python3 engine/tools/mmcf_dump.py minimind3.q4.mmcf --check
+version     2   header 64 B   tensors 133
+sections    meta 64+156   data 6608   size field 46866347 (ok)
+header crc  0x535a1c69 ok
+caps        0x1 (chat)
+model       dim 768 hidden 2432 layers 8 heads 8 kv_heads 4 vocab 6400 seq 256
+rope        theta 1e+06 half True qk_norm True
+quant       q4 group 32 pre_biased True split_w13 True
+template    kind 2 (minimind3) name 'minimind3'
+system      'You are a helpful assistant.'
+tokenizer   81371 B embedded
+crc check   all 133 tensors ok
+```
+
+## Extensibility, honestly
+
+Supported without touching the layout: new metadata keys (an unknown key is
+skipped), new optional tensors (an unknown tensor id is ignored), new dtypes
+(a file that uses one is refused, not misread), per-tensor precision (the dtype
+is per tensor, so a mixed q8/q4 file is expressible today), extra header fields
+(`header_size` can grow).
+
+Not supported without a v3: a tensor dimension beyond `kind(8) | layer(6) |
+part(2)` - MoE experts and multi-adapter files need either an `expert` field or
+a string name table; structured (JSON) metadata, if human editing matters more
+than a dependency-free reader; and per-tensor compression, which would break
+the "borrow straight from the mapping" property that makes the loader free.

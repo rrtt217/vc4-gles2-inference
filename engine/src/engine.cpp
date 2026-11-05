@@ -126,15 +126,36 @@ int main(int argc, char** argv) {
     }
     if (model.seq < 16) model.seq = 16;
     if (system_prompt.empty() && !model.default_system.empty()) system_prompt = model.default_system;
-    // The checkpoint names its template, so --template is only needed to
-    // override it.  Same mapping as the flag above.
-    if (!model.template_name.empty()) {
-        const string& t = model.template_name;
+    // The checkpoint names its template (a kind byte plus a name), so --template
+    // is only needed to override it.  The kind is authoritative; the name is the
+    // fallback for a kind this build does not know.
+    if (!model.template_name.empty() || model.template_kind >= 0) {
+        const int k = model.template_kind;
+        bool want_qwen = false, want_mm3 = false;
+        if (k == 2) { want_qwen = want_mm3 = true; }
+        else if (k == 1) { want_qwen = true; }
+        else if (k == 0) { want_qwen = want_mm3 = false; }
+        else {   // unknown kind: fall back to the name
+            want_qwen = model.template_name == "qwen" || model.template_name == "minimind3";
+            want_mm3 = model.template_name == "minimind3";
+        }
         const bool was_qwen = qwen_template, was_mm3 = minimind3_template;
-        qwen_template = qwen_template || t == "qwen" || t == "minimind3";
-        minimind3_template = minimind3_template || t == "minimind3";
+        qwen_template = qwen_template || want_qwen;
+        minimind3_template = minimind3_template || want_mm3;
         if ((!was_qwen && qwen_template) || (!was_mm3 && minimind3_template))
-            cerr << "template: " << t << " (from the checkpoint)\n";
+            cerr << "template: " << (model.template_name.empty() ? "kind " + std::to_string(k) : model.template_name)
+                 << " (from the checkpoint)\n";
+    }
+    // Capabilities: a checkpoint that says it is not a chat model must not be
+    // driven through the chat template.
+    if (model.have_capabilities && chat && !(model.capabilities & 1)) {
+        cerr << "this checkpoint does not advertise chat support (capabilities 0x"
+             << std::hex << model.capabilities << std::dec << "); drop --chat\n";
+        return 2;
+    }
+    if (model.have_capabilities && !chat && (model.capabilities & 1) && !gen_set) {
+        chat = true;
+        gen = 128;
     }
     Tokenizer tokenizer;
     if (model.tok_blob && !getenv("TOKENIZER")) {

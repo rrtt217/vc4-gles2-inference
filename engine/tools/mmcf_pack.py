@@ -27,6 +27,7 @@ a re-baseline.
 import argparse
 import json
 import struct
+import zlib
 
 # tensor table record: id, dtype, flags, group, pad, rows, cols, offset, bytes,
 # crc32, pad, scale, pad  -> exactly 48 bytes, no implicit padding with "<"
@@ -248,7 +249,10 @@ def build(meta, tensors, tok_blob, args):
     quant = struct.pack("<BBBB", scheme, meta.get("group", 0),
                         1,  # q8u8 pre-biased
                         1 if meta.get("split") else 0)
-    template = (bytes([1]) + args.system.encode() + b"\0" + args.template.encode() + b"\0")
+    # kind: 0 plain (llama2c), 1 chatml/qwen, 2 minimind3.  The name is kept for
+    # humans and as a fallback for a kind an old engine does not know.
+    kind = {"plain": 0, "qwen": 1, "chatml": 1, "minimind3": 2}.get(args.template, 1)
+    template = (bytes([kind]) + args.system.encode() + b"\0" + args.template.encode() + b"\0")
     caps_val = (1 if args.chat else 0) | (2 if args.tools else 0) | (4 if args.vision else 0)
     caps = struct.pack("<I", caps_val)
     md = (tlv(1, 1, model) + tlv(2, 1, rope) + tlv(3, 1, quant) +
@@ -264,7 +268,6 @@ def build(meta, tensors, tok_blob, args):
     table = bytearray()
     data = bytearray()
     data_off = table_off + len(tensors) * REC_SIZE
-    import zlib
     for tid, dt, rows, cols, group, payload, scale in tensors:
         # +128 is a bit flip.  Texture tensors (the per-layer matrices and the
         # logits tiles) are stored biased so the upload is a copy; the embedding
@@ -280,8 +283,10 @@ def build(meta, tensors, tok_blob, args):
         table += pack_rec(tid, dt, 0, group, rows, cols, off, len(payload), crc, scale)
     data_off_final = table_off + len(tensors) * REC_SIZE
     file_size = data_off_final + len(data)
-    head = MAGIC + struct.pack("<HHIIIIQQI", VERSION, HEADER_SIZE, len(tensors),
-                               caps_val, meta_off, len(md), data_off_final, file_size, 0)
+    body = MAGIC + struct.pack("<HHIIIIQQ", VERSION, HEADER_SIZE, len(tensors),
+                               caps_val, meta_off, len(md), data_off_final, file_size)
+    assert len(body) == 40
+    head = body + struct.pack("<I", zlib.crc32(body) & 0xFFFFFFFF)
     head = head.ljust(HEADER_SIZE, b"\0")
     out = bytearray(head)
     out += md
@@ -298,9 +303,11 @@ def verify(path, tensors):
     ver, hsz, n, caps, mo, ms, doff, fsz, _crc = struct.unpack("<HHIIIIQQI", raw[4:44])
     if ver != VERSION or hsz != HEADER_SIZE:
         raise SystemExit("verify: header mismatch")
+    hcrc, = struct.unpack("<I", raw[40:44])
+    if zlib.crc32(raw[:40]) & 0xFFFFFFFF != hcrc:
+        raise SystemExit("verify: header crc mismatch")
     if fsz != len(raw):
         raise SystemExit("verify: file size field %d != %d" % (fsz, len(raw)))
-    import zlib
     bad = 0
     for i in range(n):
         rec = raw[doff - n * REC_SIZE + i * REC_SIZE: doff - n * REC_SIZE + (i + 1) * REC_SIZE]

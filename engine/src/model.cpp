@@ -402,6 +402,24 @@ bool Model::load_mmcf(){
         const uint32_t meta_off = rd32(h + 16), meta_size = rd32(h + 20);
         const uint64_t data_off = rd64(h + 24), file_size = rd64(h + 32);
         if (file_size != (uint64_t)fsize_) { cerr << "mmcf: size field " << file_size << " != file " << fsize_ << "\n"; return false; }
+        {
+                // crc32 over the first 40 bytes, stored at 40..43
+                static uint32_t table[256];
+                static bool init = false;
+                if (!init) {
+                        for (uint32_t i = 0; i < 256; ++i) {
+                                uint32_t c = i;
+                                for (int k = 0; k < 8; ++k) c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : (c >> 1);
+                                table[i] = c;
+                        }
+                        init = true;
+                }
+                uint32_t crc = 0xFFFFFFFFu;
+                for (int i = 0; i < 40; ++i) crc = table[(crc ^ h[i]) & 0xFF] ^ (crc >> 8);
+                crc ^= 0xFFFFFFFFu;
+                const uint32_t stored = rd32(h + 40);
+                if (stored && stored != crc) { cerr << "mmcf: header crc mismatch\n"; return false; }
+        }
         if ((uint64_t)meta_off + meta_size > fsize_ || data_off > fsize_ ||
             data_off < (uint64_t)n_tensors * MMCF_REC_SIZE) { cerr << "mmcf: bad section offsets\n"; return false; }
 
@@ -428,6 +446,7 @@ bool Model::load_mmcf(){
                         scheme = payload[0]; group = payload[1]; split = payload[3];
                         have_quant = true;
                 } else if (key == 4 && type == 1 && len >= 3) {
+                        template_kind = (int)payload[0];
                         const char* c = (const char*)payload + 1;
                         const char* e = (const char*)payload + len;
                         const char* nul = (const char*)memchr(c, 0, (size_t)(e - c));
@@ -439,6 +458,7 @@ bool Model::load_mmcf(){
                         }
                 } else if (key == 5 && type == 1 && len >= 4) {
                         capabilities = (int)rd32(payload);
+                        have_capabilities = true;
                 }
                 p += 8 + len;
         }
@@ -505,6 +525,12 @@ bool Model::load_mmcf(){
                         Q4Parts& q = q4map[r.id & 0x3FFF];
                         if (part == 1) q.scl = &r; else q.mn = &r;
                         continue;
+                }
+                if (r.dtype != 0 && r.dtype != 1 && r.dtype != 2 && r.dtype != 3 &&
+                    r.dtype != 4 && r.dtype != 5) {
+                        cerr << "mmcf: tensor 0x" << std::hex << r.id << std::dec
+                             << " has unknown dtype " << (int)r.dtype << "\n";
+                        return false;
                 }
                 if (r.dtype == 4) {   // q4 body: remember it, resolve after the loop
                         q4map[r.id].body = &r;

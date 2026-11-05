@@ -33,7 +33,9 @@ public:
     const void* tok_blob = nullptr;
     size_t tok_blob_bytes = 0;
     string tok_kind, default_system, template_name;
+    int template_kind = -1;   // 0 plain, 1 chatml/qwen, 2 minimind3
     int capabilities = 0;
+    bool have_capabilities = false;   // 0 alone cannot mean "absent" and "none"
     bool load(const string& path);
     // MMCF v2 container (docs/checkpoint-container.md).
     bool load_mmcf();
