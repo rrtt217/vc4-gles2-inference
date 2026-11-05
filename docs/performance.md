@@ -3729,6 +3729,67 @@ over 32000 vocabulary entries `max|d| = 8.6`, `mean|d| = 2.3`, and every
 
 Consequence: item 12 is a precision wall, not a shape bug.  The deployable
 workaround today is the hybrid path (`GPU_LAYER=0 GPU_ATTN=1 GPU_FFN=1`), which
-is correct on this prompt and still runs both hot kernels on the GPU; the full
-path costs 411 ms/token (prefill 9.27 s, 32 greedy tokens, q4) and is not.
-Hybrid timing is still to be measured.
+is correct on this prompt in chat mode and still runs both hot kernels on the
+GPU; the full path costs 411 ms/token (prefill 9.27 s, 32 greedy tokens, q4)
+and is not.  The workaround is priced in the 2026-11-06 subsection below: it
+is coherent, it is not identical to the CPU path, and on this model it is not
+faster than the CPU path either.
+
+### The workaround, priced (2026-11-06)
+
+TinyBrainBot q4 (`models/tinybrainbot/tinybrainbot.q4.mmcf`), Pi Zero.  Decode
+is plain mode, `--prompt "Once upon a time, there was a little" --gen 32
+--greedy IGNORE_EOS=1`, three interleaved passes per mode.  Warm prefill is
+`PREFILL_REPEAT=3` (the two repeats after the first, four samples per mode):
+the first prefill in a process carries the lazy program links, so it is not a
+kernel number and the cold figures (CPU 22.8/7.6 s, hybrid 9.9/13.1 s, full
+16.2/9.1 s) are link time, not prefill.
+
+| mode | decode ms/token | min | median | warm prefill s (4) | median |
+|---|---:|---:|---:|---:|---:|
+| `GPU_LAYER=0` (CPU) | 490.5 / 534.2 / 504.1 | 490.5 | 504.1 | 4.06 / 4.49 / 3.60 / 3.53 | 3.83 |
+| hybrid (`GPU_LAYER=0 GPU_ATTN=1 GPU_FFN=1`) | 608.2 / 583.8 / 521.2 | 521.2 | 583.8 | 4.54 / 4.06 / 4.07 / 4.27 | 4.17 |
+| `GPU_LAYER=1` (full) | 388.0 / 401.0 / 447.5 | 388.0 | 401.0 | 2.95 / 2.96 / 2.98 / 2.96 | 2.96 |
+
+**Hybrid is coherent on the chat path, and only there.**  Chat mode,
+`--gen 24 --greedy IGNORE_EOS=1`, three prompts: CPU and hybrid print the
+identical string, character for character, on all three; the full path
+degenerates on all three.
+
+| prompt | CPU = hybrid | `GPU_LAYER=1` |
+|---|---|---|
+| `Hello, who are you?` | `😊 <\|end\|> <\|end\|> Hi! Great to see you. How can I help?` | `Érica Póralose Pír Pír ...` |
+| `What is the capital of France?` | `Île-de-France. <\|end\|>‐aned. ...` | `�Oge�Oge ...` |
+| `Tell me a short story about a dog.` | `‘A dog walks to the park every day. ...` | `⚽ ⚽ ⚽ ...` |
+
+The second and third CPU answers are the model's own degenerate style, not a
+harness artefact; the point is that hybrid follows it exactly.
+
+**It is not an identity.**  With no template the same prompt splits them:
+plain mode, `--gen 32`, CPU prints `<|end|> <|end|> Here's a response based
+on the given information:` and hybrid prints `<|end|> <|end|> <|end|>
+nostalgia, I'm your great-grandparent.`  The first two generated tokens agree
+and the third does not, so the 12c statement "identical correct string" holds
+for the chat path and one prompt, not in general.  The honest form is "a
+coherent answer, sometimes a different one", which is exactly what item 12's
+acceptance asks of a fixed path.
+
+**Decision: no GPU default for TinyBrainBot.**  The full path is 20% faster
+in decode (401 against 504 ms/token) and 23% faster in warm prefill (2.96
+against 3.83 s) and is wrong; the hybrid is 16% slower than plain CPU at
+decode (584 against 504) and 9% slower at prefill, because at 12 layers x 768
+the per-stage q16 round trip costs more than the two GPU kernels save.  The
+deployable configuration on this board is therefore plain CPU.  On the
+server that is `--no-gpu-layer`: `server.py` sets `GPU_LAYER` from that flag,
+there is no hybrid flag, and `GPU_ATTN=1 GPU_FFN=1` would have to come from
+the parent environment.
+
+**Range is not the separator, precision is.**  The CPU-side dumps carry the
+q16 envelope: TinyBrainBot's residual reaches 30720 (120 of the +-128 range)
+in layer 0 and 0.1-0.4% of its texels clip at the ceiling from layer 1 on;
+MiniMind3 q8 does the same from layer 0 (0.1-1.2% clipped, measured with the
+same `STAGE_DUMP=1 GPU_LAYER=0` run) and still answers correctly.  The two
+models have the same headroom problem and different sensitivity to it: one
+q16 per activation is enough for MiniMind3's trajectory and not for
+TinyBrainBot's.  That rules out a range bug and sizes the real fix:
+precision, i.e. more than one int16 per activation on the full path.
