@@ -4,6 +4,8 @@ The worker keeps the token and KV prefix of the previous request.  On a new
 request it finds the longest common token prefix, reuses the KV entries before
 that point, and pre-fills only the suffix.  A fully cached prompt costs one
 token to re-seat the final logits.
+The CLI `--prefix-cache` path clamps the skip the same way; before step 10 it
+could skip every token and sample from an empty logits vector (docs/performance.md).
 
 `start` and `done` events include:
 

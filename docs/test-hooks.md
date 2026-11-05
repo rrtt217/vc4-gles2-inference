@@ -80,6 +80,10 @@ without moving the gate:
 - `--prefix-cache CACHE_FILE` — load a validated KV prefix at worker startup.
   The cache header binds the activation format, so an `ACT8` cache is not
   accepted by a non-ACT8 process (and vice versa).
+- `PREFIX_CACHE_RESAVE=path` — CLI only, with `--prefix-cache`: write the
+  just-loaded KV rows back out through the normal save path, so the load can be
+  compared byte for byte with the built file (`cmp`).  Probe, default off
+  (docs/performance.md step 10).
 - `--ppl FILE` — teacher-forced perplexity over FILE; use the same corpus for
   format comparisons.
 - `KV_SCALE=N` — KV fixed-point scale (default 16384; q16 uses 2048,

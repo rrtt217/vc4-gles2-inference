@@ -3443,3 +3443,83 @@ bug only shows up at pos >= 1.
 Observed greedy answers with `KV_PACK=8 KV_VSTEP=1` (unpinned, the kv8 answer
 moves with the grid): q8 `我是一个AI助手，我的存在是为了提供帮助和信息。`, q4
 `我是Ministry，一个由Oracle公司开发的高级软件工程师。我以高效、`.
+
+## Prefix cache step 10: the file was right, the CLI sampled from an empty logits vector (2026-11-05)
+
+Item 9d left this open: build a cache with `--build-prefix-cache`, reload it
+with `--prefix-cache`, and the answer changed in every mode, KV16 included.
+This step shows the rows and the header were never the problem: the CLI
+skipped every prompt token and then sampled from a logits vector that had
+never been filled.
+
+**Repro.**  The cache prompt is the exact rendered ChatML text for
+`用一句话介绍你自己。` (36 tokens, `SEQ=768`, `KV_PACK=16`).  Reloaded, the run
+prints `PREFIX_CACHE loaded 36 tokens` and
+`Assistant: <|endoftext|>，我叫[你的名字]。` against the plain
+`我是一个AI助手，没有自我意识，也没有身体，所以我无法`.  Two one-run probes
+split the difference: a cache built from only the first 19 of the 36 tokens
+gives the byte-identical plain answer, so the rows and the resumed position
+are right; the same 36-token cache under `--worker` reports `cached_tokens=36,
+prefill_tokens=1` and the plain answer.
+
+**Cause.**  `cache_prefix_len()` in the CLI `run_turn` and `run_tool_turn`
+returns the length of the common token prefix, and a fully covered prompt
+returns `tokens.size()`: the prefill loop then ran zero steps, `logits` stayed
+empty, and `argmax_token` is `max_element(begin, end) - begin` = index 0 =
+`<|endoftext|>`, which was printed and stepped.  The worker path has clamped
+`prefill_from` to `tokens.size() - 1` since the cache landed; the CLI never
+got the same clamp, and the server warmup sends exactly the cache prompt, so
+it sat on the same hole.
+
+**Fix.**  One clamp in `cache_prefix_len` (both CLI turns go through it): a
+fully covered prompt runs its last token at its own position.  That rewrites
+the row the cache already holds with the same bytes - the encode is a
+deterministic function of the prefix - and produces the logits.  It costs one
+step (~0.19-0.23 s) and only when the prompt is entirely cached.
+
+**Round-trip probe.**  `PREFIX_CACHE_RESAVE=<path>` (default off) writes the
+just-loaded rows back out through `save_prefix_cache()`, so a load can be
+compared with the build byte for byte:
+
+| build | file | rows | width | resave vs build |
+|---|---:|---:|---:|---|
+| q8 KV16 | 442,592 B | 36 | 384 | identical |
+| q4 KV16 | 1,204,696 B | 98 | 384 | identical |
+| q8 `KV_PACK=8` | 221,408 B | 36 | 192 | identical |
+| q8 `KV_PACK=8 KV_VSTEP=1` (header v3 + V plane) | 226,020 B | 36 | 192 | identical |
+
+Full-cover answers match plain in all four modes (q8 `我是一个AI助手…`, q4
+`我是MiniMind…`, kv8 `我是MiniMind，一个高效的小参数AI模型。`, kv8+vstep
+`我是一个AI助手，我的存在是为了提供帮助和信息。`), and the 98-token prompt
+returns `我是一个由jingyaogong创建的高效小参数AI模型` from both paths on q8
+and q4.  The v3 file is 4,612 B larger than the kv8 file on the same 36 rows:
+4,608 B of `kv_heads x seq` step plane plus the 4-byte `vsw` header field.
+
+**What it buys.**  98-token ChatML prompt, `TIMING=1`, `--gen 1`, q8, three
+interleaved pairs:
+
+| arm | prefill |
+|---|---:|
+| plain | 24.7 / 33.7 / 22.6 s (median 24.7) |
+| `--prefix-cache` | 13.5 / 13.9 / 14.3 s (median 13.9) |
+
+So ~10.8 s for the 97 tokens (~111 ms/token, the pair path paying two
+positions per weight pass).  The cached arm does not fall to zero, and the
+floor is not the prefix: a two-character prompt with `--gen 0` costs 12.1 s of
+prefill, so what is left is the first-token setup of the chat path.  In that
+token 19 programs link lazily (`SHADER_TIME`), with a link total that depends
+on the driver shader cache and board load (2.7 s in a clean run, 7.6 s in a
+cold and contended one).  Plain prefill is the noisy arm (22.6-33.7 s) because
+the board shares its single core with the Minecraft server; the cached arm is
+stable because its work is one token plus that setup.  Removing the ~12 s
+floor is the next item, not something the cache can do.
+
+**Trap, unchanged:** `--build-prefix-cache` and `--worker` force `SEQ=1024`
+when the model is smaller and `SEQ` is unset, while `--chat` keeps the model
+seq.  A cache built without `SEQ` loads in worker mode and is ignored in chat
+mode.  Pass `SEQ` on both sides.
+
+**Verdict:** item 10 closed.  The disk prefix cache round-trips byte for byte
+in all four formats and the CLI now behaves like the worker: one re-seated
+token, then generation.  The regression suite on the deployed build is ACCEPT
+(q8 PPL 271.2855, q4 PPL 325.3751, greedy strings unchanged).

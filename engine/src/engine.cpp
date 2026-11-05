@@ -319,15 +319,29 @@ int main(int argc, char** argv) {
 
     vector<int> cli_cache_tokens;
     if (!worker && !prefix_cache_path.empty()) {
-        if (session.load_prefix_cache(prefix_cache_path, cli_cache_tokens))
+        if (session.load_prefix_cache(prefix_cache_path, cli_cache_tokens)) {
             cerr << "PREFIX_CACHE loaded " << cli_cache_tokens.size() << " tokens\n";
-        else
+            // Probe: write the just-loaded rows straight back out, so a built
+            // file and a loaded file can be compared byte for byte.
+            if (getenv("PREFIX_CACHE_RESAVE")) {
+                const char* rp = getenv("PREFIX_CACHE_RESAVE");
+                if (session.save_prefix_cache(rp, cli_cache_tokens))
+                    cerr << "PREFIX_CACHE resaved " << rp << "\n";
+                else cerr << "PREFIX_CACHE resave failed\n";
+            }
+        } else
             cerr << "PREFIX_CACHE ignored " << prefix_cache_path << "\n";
     }
     auto cache_prefix_len = [&](const vector<int>& tokens) {
         size_t n = 0;
         while (n < cli_cache_tokens.size() && n < tokens.size() &&
                cli_cache_tokens[n] == tokens[n]) ++n;
+        // The cache carries KV rows, not the logits of the last cached token,
+        // so a prompt that is fully covered must still run its last token at
+        // its own position: generation would otherwise start from an empty
+        // logits vector and argmax() would return token 0.  The worker path
+        // clamps prefill_from the same way; this is the CLI equivalent.
+        if (!tokens.empty() && n == tokens.size()) n = tokens.size() - 1;
         return (int)n;
     };
 
