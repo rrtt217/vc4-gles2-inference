@@ -3305,3 +3305,72 @@ was spliced in ahead of the `kv_rope_write(layer, pos)` line and deleted it, so
 the KV cache was never written, every model answered with garbage, and nothing
 was logged - the golden strings caught it at once.  Insert debug code around
 that call, never over it, and keep the suite in the loop.
+
+## 8-bit KV step 9b: the V grid is what breaks q4, and a per-head grid fixes it (2026-11-05)
+
+Item 9a was already landed before this run: `71cc5c5` made the prefix-cache
+header version 2 and pins `KV_SCALE` (section above), so there was nothing left
+to do there.  This step prices the other half of item 9: a per-head (64-value)
+scale, so the 8-bit grid normalises each KV head instead of the whole tensor.
+
+**The tool is a probe, not a kernel.**  `KV8_SIM` (default off) quantises in the
+CPU attention path: with `GPU_LAYER=0` the cache holds float K/V and attention
+consumes dequantised values, so quantising at read time is exactly what the GPU
+does at write and read.  Modes: 1 global K+V, 2 per-head K+V, 3 global K only,
+4 global V only, 5 per-head V only, 6 per-head K only; `KV8_SIM_SCALE` is the
+global grid (16 = the `KV_PACK=8` default) and `KV8_STATS=1` prints the
+per-head maxima at position 0.
+
+**The CPU path is a fair price for the grid.**  Its float-KV PPL lands on the
+GPU KV16 gates (272.1821 against 271.2855 for q8, 327.0226 against 325.3751 for
+q4), and q4 reacts to the global 1/16 grid the way the GPU does (+10.3% here,
++8.0% there).  One caveat up front: q8 does **not** react the same way - the
+GPU gains 4.0% at that grid while the CPU gains only 0.18% - so the GPU q8 kv8
+result is not a pure grid effect (it interacts with the GPU q16 numbering).
+The numbers below price *the grid*; a GPU per-head kernel still has to be
+measured.
+
+**Full matrix, 293-token corpus, `SEQ=768`, CPU attention (percent against the
+same model float-KV line):**
+
+| model | float KV | global 1/16 K+V | global K only | global V only | per-head K+V | per-head V only |
+|---|---:|---:|---:|---:|---:|---:|
+| q8 | 272.1821 | 271.6947 (-0.18%) | 272.4584 (+0.10%) | 273.1938 (+0.37%) | 270.4710 (-0.63%) | **266.8795 (-1.95%)** |
+| q4 | 327.0226 | 360.7004 (+10.3%) | 320.8428 (-1.9%) | 352.9592 (+7.9%) | 321.1931 (-1.8%) | 322.9631 (-1.2%) |
+
+**Reading: K fits the global grid, V does not.**  `KV8_STATS` at position 0
+gives per-head maxima of 3.0-6.1 for K on both models, 1.2-2.7 for q8 V and
+0.27-3.5 for q4 V with most heads under 0.8.  At a 1/16 step a q4 V head spans
+9-26 of the 256 codes (the typical head about 16) while a K head spans 96-192;
+K is qk-normalised before rope (per-head RMS 1, max ~4-6), so the global grid
+is the right shape for it.  That is why global K is neutral-to-good (q4 -1.9%,
+q8 +0.10%) and global V is the whole disaster (q4 +7.9%): one absolute grid
+spends its range on K and starves V.  A max-derived per-head grid gives every
+head 127 levels, and V per head alone moves q4 from +7.9% to -1.2% and beats
+the float-V line on q8 by 1.95%.
+
+**Why per-head V beats float V.**  Both models prefer the quantised V to the
+exact one (q8 -1.95%, q4 -1.2%): a per-head max grid puts a step of max/127 on
+each head, so the noise is a fixed fraction of that head range (half a step =
+1/254 of its max), while the global 1/16 step is 2-20% of a typical V value and
+larger than the smallest head range.  That is regularisation, not precision:
+the global 1/16 grid on q8 is only -0.18% and on q4 is +10.3%, and the earlier
+scan showed the curve is non-monotonic in scale (q8 prefers 1/16 to both 1/8
+and 1/32).  Treat the per-head result as a measured property of this model pair,
+not as a law.
+
+**What a GPU implementation would cost.**  K keeps the global grid; only V needs
+the per-head scale.  The V write needs the max of the 64 values before the
+texels are written, so one extra pass per layer per token (4 fragments scanning
+64 q16 values, the shape of `att_qnorm_scale`) writes one scale texel per row,
+and `att_v` reads one scale per position per head: two per loop iteration
+against the four V fetches it already makes, or one if two scales share a q16
+texel.  That is a small pass plus a fetch increase in one stage, not a new
+format; the 4.5 MiB cache and the 2:1 packing are unchanged.
+
+**Verdict.**  Per-head scaling is the first thing in this campaign that makes
+8-bit KV look usable on q4 (+7.9% -> -1.2% on the grid that matters), and on
+q8 the V side alone is worth 1.95%.  It is not free, so `KV_PACK=8` stays
+opt-in until the GPU version is measured.  Next: per-head V scale in
+`att_kv_rope`/`att_v` with K on the global grid, then the q8/q4 PPL pair and
+the decode cost.

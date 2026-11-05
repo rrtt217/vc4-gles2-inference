@@ -86,6 +86,7 @@ without moving the gate:
   q8 uses 16).
 - `KV_PACK=16|8` — packed KV layout: two int16 per RGBA8 texel (width 384)
   or four int8 (width 192), instead of one 24-bit value (width 768).
+- `KV8_SIM=1..6`, `KV8_SIM_SCALE=N`, `KV8_STATS=1` - price an 8-bit KV grid on the CPU attention path (`GPU_LAYER=0`): 1 global K+V, 2 per-head K+V, 3 global K, 4 global V, 5 per-head V, 6 per-head K.  Probe only, no GPU kernel, no effect when unset (docs/performance.md step 9b).
 - `KEEP_CPU_WEIGHTS=1` — keep the CPU copies after texture upload for debugging
   (default: free them; q8 MiniMind3 RSS drops from ~119 MB to ~56 MB).
 - `Q4_WEIGHTS=1` — runtime q4 conversion for experiments.  Prefer the

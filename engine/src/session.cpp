@@ -30,6 +30,27 @@ static bool pass_dup(const char* name){
     return false;
 }
 
+
+// KV8_SIM probe (default off): quantise the CPU float KV cache to 8 bits at
+// read time.  The cache holds the same float K/V the GPU path quantises, and
+// both paths consume the dequantised value, so this prices the grid without a
+// GPU kernel.  Modes: 1 global scale on K and V, 2 per-head dynamic scale on
+// both, 3 global K only, 4 global V only, 5 per-head V only, 6 per-head K only.
+// KV8_SIM_SCALE sets the global grid (default 16, the KV_PACK=8 default).
+static int kv8_sim_mode(){
+    static const int m = getenv("KV8_SIM") ? atoi(getenv("KV8_SIM")) : 0;
+    return m;
+}
+static float kv8_sim_scale(){
+    static const float s = getenv("KV8_SIM_SCALE") ? (float)atof(getenv("KV8_SIM_SCALE")) : 16.0f;
+    return s > 0.0f ? s : 16.0f;
+}
+static inline float kv8_round(float v, float s){
+    float q = floorf(v * s + 0.5f);
+    q = q > 127.0f ? 127.0f : (q < -128.0f ? -128.0f : q);
+    return q / s;
+}
+
 Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
         gpu_layer_ = gpu_.gpu_layer_enabled();
         gpu_attn_ = gpu_layer_ || gpu_.gpu_attn_enabled();
@@ -509,10 +530,43 @@ vector<float> Session::attention(const vector<float>& q, int layer, int pos){
         int group = m_.heads / m_.kv_heads;
         vector<float> out(m_.dim);
         vector<float> scores(pos + 1);
+        const int qmode = kv8_sim_mode();
+        const float qscale = kv8_sim_scale();
+        vector<float> kbuf, vbuf;
+        if (qmode) {
+            kbuf.resize((size_t)(pos + 1) * m_.kv_dim);
+            vbuf.resize((size_t)(pos + 1) * m_.kv_dim);
+        }
         for (int h = 0; h < m_.heads; ++h) {
             int kvh = h / group;
             const float* kb = kv_cache_k_[layer].data() + (size_t)kvh * m_.head_dim;
             const float* vb = kv_cache_v_[layer].data() + (size_t)kvh * m_.head_dim;
+            if (qmode) {
+                const bool qk = qmode == 1 || qmode == 2 || qmode == 3 || qmode == 6;
+                const bool qv = qmode == 1 || qmode == 2 || qmode == 4 || qmode == 5;
+                const bool ph = qmode == 2 || qmode == 5 || qmode == 6;
+                float kmx0 = 0.0f, vmx0 = 0.0f;
+                for (int t = 0; t <= pos; ++t) {
+                    float mk = 0.0f, mv = 0.0f;
+                    for (int i = 0; i < m_.head_dim; ++i) {
+                        mk = std::max(mk, fabsf(kb[(size_t)t * m_.kv_dim + i]));
+                        mv = std::max(mv, fabsf(vb[(size_t)t * m_.kv_dim + i]));
+                    }
+                    if (t == 0) { kmx0 = mk; vmx0 = mv; }
+                    const float sk = (ph && qk && mk > 0.0f) ? 127.0f / mk : qscale;
+                    const float sv = (ph && qv && mv > 0.0f) ? 127.0f / mv : qscale;
+                    for (int i = 0; i < m_.head_dim; ++i) {
+                        const size_t o = (size_t)t * m_.kv_dim + i;
+                        kbuf[o] = qk ? kv8_round(kb[o], sk) : kb[o];
+                        vbuf[o] = qv ? kv8_round(vb[o], sv) : vb[o];
+                    }
+                }
+                if (pos == 0 && getenv("KV8_STATS"))
+                    cerr << "KV8STAT layer=" << layer << " head=" << kvh
+                         << " kmax=" << kmx0 << " vmax=" << vmx0 << "\n";
+                kb = kbuf.data();
+                vb = vbuf.data();
+            }
             float mx = -1e30f;
             for (int t = 0; t <= pos; ++t) {
                 float s = 0;
