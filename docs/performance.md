@@ -3589,3 +3589,23 @@ interleaved runs of three, min / median ms per token: A 191.8 / 196.4 and
 and none is possible from a texture upload and a link-time shader object.  The
 remaining ~6 s is vc4 code generation; the 19-program count is the only lever
 left.
+
+## First token, step 12: the q8u8 container (2026-11-05)
+
+The MMCF container stores q8 matrices pre-biased (`docs/checkpoint-container.md`),
+so `GPU::upload` memcpys them into the texture instead of running the +128 pass
+over 69 MB.  Upload on the Pi, `UPLOAD_TIME=1`, one token generated, warm page
+cache, two runs each:
+
+| model file | upload wall | inside `make_texture` |
+|---|---:|---:|
+| `minimind3.q8` (legacy, 32-bit XOR conversion) | 6.85 s / 5.90 s | 1439 / 1117 ms |
+| `minimind3.q8.mmcf` (q8u8, straight copy) | **5.44 s / 5.32 s** | 1034 / 1334 ms |
+
+The 0.5-1.4 s difference is the conversion loop plus the 69 MB temporary buffer
+that has to be allocated, filled and freed while the board is page-cache tight;
+`make_texture` itself does not move (the bytes still cross the same path).
+
+Everything else in the container is a correctness wash, verified on both
+machines: q8 270.3170 (Xe) / 271.2855 (Pi), q4 330.5302 / 325.3751, i16 280.2156
+(Xe), and the pinned greedy strings for each machine.
