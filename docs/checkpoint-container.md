@@ -275,6 +275,21 @@ upload is a copy), `3` q8i8, `4` q4, `5` blob.
 - **template kind** -> 0 plain, 1 chatml/qwen, 2 minimind3; an unknown kind
   falls back to the name string, and `--template` always wins.
 - tokenizer blob, when present and `TOKENIZER=` is unset.
+- **special token ids**: BOS/EOS/stop come from the file.  A legacy file keeps
+  the historical guess (1 = BOS, 2 = EOS); the container states them, and they
+  are derived from the embedded vocabulary (`<s>`, `<|endoftext|>`, `</s>`,
+  `<|im_end|>`; matching is on the trimmed token, because llama2.c stores
+  `<s>` as `"\n<s>\n"`).  This is not cosmetic: MiniMind3's id 0 is
+  `<|endoftext|>` and id 1 is `<|im_start|>`, so the old rule stopped on
+  `<|im_start|>` and never on `<|endoftext|>`, and with a chatml template it
+  would also prepend a duplicated `<|im_start|>` as BOS.  tinybrainbot is the
+  case where it shows: the legacy build stops on its first token and prints an
+  empty answer, the container keeps going.
+- **rope**: the container's theta/half are authoritative; `ROPE_THETA` /
+  `ROPE_HALF` only apply to legacy v1 files.  Because a `Q8M1`/`I16M1` header
+  carries no rope at all, the packer **refuses to guess**: it wants `--theta`
+  plus `--rope-half`, or `--rope-plain` for a llama2 model, or an explicit
+  `--assume-llama2-rope`.
 
 `engine/tools/mmcf_dump.py` prints all of it from the file alone
 (`--tensors` adds one line per tensor, `--check` verifies every CRC), so

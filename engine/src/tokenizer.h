@@ -10,6 +10,7 @@ public:
     bool load(const string& path, int n);
     // MMCF stores the same blob inside the container; n is the vocab size.
     bool load_memory(const void* data, size_t bytes, int n);
+    void set_bos(int id) { bos_id_ = id; }
     void set_qwen(bool q);
     void set_bytelevel(bool b);
 
@@ -24,4 +25,5 @@ private:
     vector<pair<string, int>> specials_;
     bool qwen_ = false;
     bool bytelevel_ = false;
+    int bos_id_ = 1;
 };

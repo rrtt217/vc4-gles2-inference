@@ -64,7 +64,7 @@ void Tokenizer::set_bytelevel(bool b){ bytelevel_ = b; }
 
 vector<int> Tokenizer::encode(const string& text, bool bos , bool dummy_prefix ){
         vector<int> t;
-        if (bos) t.push_back(1);
+        if (bos && bos_id_ >= 0) t.push_back(bos_id_);
         if (dummy_prefix && !text.empty()) {
             auto it = lookup_.find(" ");
             if (it != lookup_.end()) t.push_back(it->second);

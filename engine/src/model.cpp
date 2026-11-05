@@ -456,6 +456,14 @@ bool Model::load_mmcf(){
                                 const char* nul2 = (const char*)memchr(c2, 0, (size_t)(e - c2));
                                 if (nul2) template_name.assign(c2, (size_t)(nul2 - c2));
                         }
+                } else if (key == 8 && type == 1 && len >= 24) {
+                        id_bos = (int)rd32(payload);
+                        id_eos = (int)rd32(payload + 4);
+                        id_stop = (int)rd32(payload + 8);
+                        id_pad = (int)rd32(payload + 12);
+                        id_unk = (int)rd32(payload + 16);
+                        id_im_start = (int)rd32(payload + 20);
+                        have_specials = true;
                 } else if (key == 5 && type == 1 && len >= 4) {
                         capabilities = (int)rd32(payload);
                         have_capabilities = true;

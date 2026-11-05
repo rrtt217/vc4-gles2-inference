@@ -164,6 +164,10 @@ int main(int argc, char** argv) {
     } else if (!tokenizer.load(tokenizer_path, model.vocab)) {
         return 1;
     }
+    tokenizer.set_bos(model.have_specials ? model.id_bos : 1);
+    if (model.have_specials)
+        cerr << "specials: bos " << model.id_bos << " eos " << model.id_eos
+             << " stop " << model.id_stop << " (from the checkpoint)\n";
     tokenizer.set_qwen(qwen_template || minimind3_template);
     tokenizer.set_bytelevel(minimind3_template);
 
@@ -320,7 +324,10 @@ int main(int argc, char** argv) {
                 apply_sampling_penalties(logits, recent);
                 int next = greedy_req ? argmax_token(logits)
                                       : sample_token(logits, wt, wp, rng);
-                if (next == 1 || next == 2) {
+                const bool is_eos = model.have_specials
+                        ? (next == model.id_eos || (model.id_stop >= 0 && next == model.id_stop))
+                        : (next == 1 || next == 2);
+                if (is_eos) {
                     session.step(next, pos++, false);
                     all_tokens.push_back(next);
                     finish = "stop";

@@ -140,6 +140,7 @@ def parse_legacy(path):
             meta["theta"] = 10000.0
             meta["half"] = False
             meta["qk_norm"] = False
+            meta["rope_inferred"] = True   # the v1 header carries no rope
         meta["scheme"], meta["group"], meta["split"] = "q8", 0, bool(split)
         tensors.append((T_EMB, DT_Q8I8, vocab, dim, 0, r.take(vocab * dim), 0.0))  # CPU side: stay signed
         scale_bytes = r.take(vocab * 4)
@@ -235,6 +236,50 @@ def parse_legacy(path):
     return meta, tensors
 
 
+BOS_NAMES = ["<s>", "<bos>"]
+EOS_NAMES = ["<|endoftext|>", "</s>", "<eos>"]
+STOP_NAMES = ["<|im_end|>", "<end_of_turn>"]
+PAD_NAMES = ["<pad>", "<|endoftext|>"]
+UNK_NAMES = ["<unk>", "<|unk|>"]
+
+
+def vocab_of(tok_blob, n):
+    """The blob is the engine's format: u32 maxlen, then (f32 score, i32 len, bytes)."""
+    import struct as _s
+    out, p = [], 4
+    for _ in range(n):
+        if p + 8 > len(tok_blob):
+            break
+        _score, ln = _s.unpack_from("<fi", tok_blob, p)
+        p += 8
+        out.append(tok_blob[p:p + ln].decode("utf-8", "replace"))
+        p += ln
+    return out
+
+
+def specials_from(tok_blob, vocab, args):
+    """-1 means absent.  A chatml template already opens with <|im_start|>, so it
+    must not also get a BOS token in front of it."""
+    # llama2.c stores "<s>" as "\n<s>\n", so match on the trimmed form
+    stripped = [t.strip() for t in vocab]
+
+    def find(names):
+        for nm in names:
+            if nm in stripped:
+                return stripped.index(nm)
+        return -1
+    bos = -1 if args.template in ("qwen", "chatml", "minimind3") else find(BOS_NAMES)
+    eos = find(EOS_NAMES)
+    stop = find(STOP_NAMES)
+    pad = find(PAD_NAMES)
+    unk = find(UNK_NAMES)
+    im_start = stripped.index("<|im_start|>") if "<|im_start|>" in stripped else -1
+    if args.bos is not None: bos = args.bos
+    if args.eos is not None: eos = args.eos
+    if args.stop is not None: stop = args.stop
+    return bos, eos, stop, pad, unk, im_start
+
+
 def tlv(key, typ, payload):
     return struct.pack("<HHI", key, typ, len(payload)) + payload
 
@@ -257,6 +302,11 @@ def build(meta, tensors, tok_blob, args):
     caps = struct.pack("<I", caps_val)
     md = (tlv(1, 1, model) + tlv(2, 1, rope) + tlv(3, 1, quant) +
           tlv(4, 1, template) + tlv(5, 1, caps) + tlv(6, 1, args.name.encode() + b"\0"))
+    specials = (-1, -1, -1, -1, -1, -1)
+    if tok_blob is not None:
+        vocab = vocab_of(tok_blob, len(tok_blob) and 200000 or 0)
+        specials = specials_from(tok_blob, vocab, args)
+        md += tlv(8, 1, struct.pack("<6i", *specials))
     if tok_blob is not None:
         tensors = tensors + [(T_TOKENIZER, DT_BLOB, len(tok_blob), 1, 0, tok_blob, 0.0)]
         md += tlv(7, 1, struct.pack("<i", len(tok_blob)))
@@ -329,10 +379,36 @@ def main():
     ap.add_argument("--chat", action="store_true")
     ap.add_argument("--tools", action="store_true")
     ap.add_argument("--vision", action="store_true")
+    ap.add_argument("--theta", type=float, help="rope theta when the header has none (Q8M1/I16M1)")
+    ap.add_argument("--rope-half", action="store_true", help="rope rotates half the head (GPT-NeoX style)")
+    ap.add_argument("--rope-plain", action="store_true", help="llama2 rope: theta 10000, interleaved")
+    ap.add_argument("--assume-llama2-rope", action="store_true", help="accept theta=10000 half=false when the source is silent")
+    ap.add_argument("--qk-norm", action="store_true", help="the file has per-head q/k norms")
+    ap.add_argument("--bos", type=int, help="BOS id (-1 for none); default: derived from the tokenizer")
+    ap.add_argument("--eos", type=int, help="EOS id; default: derived")
+    ap.add_argument("--stop", type=int, help="extra stop id (e.g. <|im_end|>); default: derived")
     ap.add_argument("--verify", action="store_true")
     args = ap.parse_args()
 
     meta, tensors = parse_legacy(args.src)
+    # Sources without rope fields cannot state their rope, and a wrong theta or
+    # half flag silently degrades every position: refuse to guess unless the
+    # caller says so.
+    if meta.get("rope_inferred"):
+        if args.theta is None and not args.rope_plain and not args.assume_llama2_rope:
+            raise SystemExit("this source has no rope fields (Q8M1/I16M1): pass --theta and "
+                             "--rope-half, or --rope-plain for a llama2 model, or "
+                             "--assume-llama2-rope to accept theta=10000 half=false")
+    if args.theta is not None:
+        meta["theta"] = args.theta
+    if args.rope_half:
+        meta["half"] = True
+    if args.rope_plain:
+        meta["theta"], meta["half"] = 10000.0, False
+    if args.qk_norm:
+        meta["qk_norm"] = True
+    print("rope: theta=%g half=%s qk_norm=%s" % (meta.get("theta", 10000.0),
+          bool(meta.get("half")), bool(meta.get("qk_norm"))))
     tok = Path(args.tok).read_bytes() if args.tok else None
     raw = build(meta, tensors, tok, args)
     Path(args.out).write_bytes(raw)

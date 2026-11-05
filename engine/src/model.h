@@ -35,7 +35,12 @@ public:
     string tok_kind, default_system, template_name;
     int template_kind = -1;   // 0 plain, 1 chatml/qwen, 2 minimind3
     int capabilities = 0;
-    bool have_capabilities = false;   // 0 alone cannot mean "absent" and "none"
+    bool have_capabilities = false;
+    // Special token ids from the container (-1 = absent).  Legacy files have no
+    // such metadata and keep the historical 1 = BOS, 2 = EOS guess.
+    bool have_specials = false;
+    int id_bos = 1, id_eos = 2, id_stop = -1, id_pad = -1, id_unk = -1, id_im_start = -1;
+    // (these defaults reproduce the historical 1 = BOS, 2 = EOS behaviour)
     bool load(const string& path);
     // MMCF v2 container (docs/checkpoint-container.md).
     bool load_mmcf();
