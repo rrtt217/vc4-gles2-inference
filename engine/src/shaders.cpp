@@ -499,8 +499,8 @@ string rms_norm_pair2(int dim, XFormat rf) {
         "for(int p=0;p<32;p++){"
         "ssa+=x_i24raw(texture2D(S,vec2((float(p)+0.5)/64.0,0.5)))/4096.0;"
         "ssb+=x_i24raw(texture2D(S,vec2((float(p+32)+0.5)/64.0,0.5)))/4096.0;}"
-        "float inva=1.0/sqrt(ssa/float(" + D + ")+1e-5);"
-        "float invb=1.0/sqrt(ssb/float(" + D + ")+1e-5);"
+        "float inva=inversesqrt(ssa/float(" + D + ")+1e-5);"
+        "float invb=inversesqrt(ssb/float(" + D + ")+1e-5);"
         "vec4 wc=texture2D(W,vec2((float(k/2)+0.5)/float(" + DW + "),0.5));"
         "float wk=((k/2)*2==k)?x_i16(wc.rg):x_i16(wc.ba);"
         "float va=R1(XA,k," + RW + ".0)*inva*wk;"
@@ -1116,7 +1116,7 @@ string rms_norm(int dim, XFormat residual, XFormat out, bool fused_reduce) {
         body =
             "void main(){int t=int(gl_FragCoord.x);int i0=4*t;"
             + ss_read +
-            "float inv=1.0/sqrt(ss/float(" + D + ")+1e-5);"
+            "float inv=inversesqrt(ss/float(" + D + ")+1e-5);"
             "vec4 wa=texture2D(W,vec2((float(2*t)+0.5)/float(" + DW + "),0.5));"
             "vec4 wb=texture2D(W,vec2((float(2*t+1)+0.5)/float(" + DW + "),0.5));"
             "float v0=R1(X,i0," + RW + ".0)*inv*x_i16(wa.rg);"
@@ -1128,7 +1128,7 @@ string rms_norm(int dim, XFormat residual, XFormat out, bool fused_reduce) {
         body =
             "void main(){int t=int(gl_FragCoord.x);int i0=2*t;int i1=i0+1;"
             + ss_read +
-            "float inv=1.0/sqrt(ss/float(" + D + ")+1e-5);" + wsplit +
+            "float inv=inversesqrt(ss/float(" + D + ")+1e-5);" + wsplit +
             "float v0=R1(X,i0," + RW + ".0)*inv*w0;"
             "float v1=0.0;if(i1<" + D + ")v1=R1(X,i1," + RW + ".0)*inv*w1;"
             "gl_FragColor=x_st2(v0,v1);}";
