@@ -3,6 +3,7 @@
 #include <fstream>
 #include <iostream>
 #include <cstring>
+#include <map>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -466,13 +467,27 @@ bool Model::load_mmcf(){
                 else { m.q8.assign(p, p + (size_t)r.rows * r.cols); }
         };
 
+        // q4 matrices arrive as three tensors (nibbles, group scale, group min)
+        // sharing one id with `part` in the top two bits.
+        struct Q4Parts { const MmcfRec* body = nullptr; const MmcfRec* scl = nullptr; const MmcfRec* mn = nullptr; };
+        std::map<uint16_t, Q4Parts> q4map;
+
         vector<Mat> layers_qkv, layers_wo, layers_w1, layers_w3, layers_w13, layers_w2;
         layers_qkv.resize(layers); layers_wo.resize(layers); layers_w2.resize(layers);
         if (split) { layers_w1.resize(layers); layers_w3.resize(layers); }
         else layers_w13.resize(layers);
 
         for (const MmcfRec& r : recs) {
-                const int base = r.id & 0xFF, layer = r.id >> 8;
+                const int base = r.id & 0xFF, layer = (r.id >> 8) & 0x3F, part = r.id >> 14;
+                if (part != 0) {   // q4 scale/min plane
+                        Q4Parts& q = q4map[r.id & 0x3FFF];
+                        if (part == 1) q.scl = &r; else q.mn = &r;
+                        continue;
+                }
+                if (r.dtype == 4) {   // q4 body: remember it, resolve after the loop
+                        q4map[r.id].body = &r;
+                        continue;
+                }
                 switch (base) {
                 case 1: {  // embedding (stays signed: the CPU reads it)
                         emb_q8.resize((size_t)r.rows * r.cols);
@@ -495,6 +510,41 @@ bool Model::load_mmcf(){
                 case 0x20: { Mat m; as_q8(r, m); logits_tiles.push_back(m); break; }
                 default: break;  // tokenizer blob, template, unknown ids
                 }
+        }
+        for (auto& kv : q4map) {
+                const uint16_t id = kv.first;
+                Q4Parts& q = kv.second;
+                if (!q.body || !q.scl || !q.mn) {
+                        cerr << "mmcf: incomplete q4 tensor 0x" << std::hex << id << std::dec << "\n";
+                        return false;
+                }
+                Mat m;
+                m.rows = (int)q.body->rows; m.cols = (int)q.body->cols;
+                m.type = WeightType::INT4;
+                m.group = 32;
+                m.groups = (int)q.scl->cols;   // groups per row, not the plane size
+                m.q4_param_scale = q.body->scale;
+                if (!borrow_) {
+                        m.q4.assign((const uint8_t*)(fbase_ + data_off + q.body->off),
+                                    (const uint8_t*)(fbase_ + data_off + q.body->off) + q.body->bytes);
+                        m.q4_scale.assign((const int16_t*)(fbase_ + data_off + q.scl->off),
+                                          (const int16_t*)(fbase_ + data_off + q.scl->off) + m.groups);
+                        m.q4_min.assign((const int16_t*)(fbase_ + data_off + q.mn->off),
+                                        (const int16_t*)(fbase_ + data_off + q.mn->off) + m.groups);
+                } else {
+                        m.ext4 = (const uint8_t*)(fbase_ + data_off + q.body->off);
+                        m.ext_scale4 = (const int16_t*)(fbase_ + data_off + q.scl->off);
+                        m.ext_min4 = (const int16_t*)(fbase_ + data_off + q.mn->off);
+                }
+                const int kind = id & 0xFF, layer = (id >> 8) & 0x3F;
+                // only the vector that exists for this file's `split` flag is
+                // sized, so index by its own size (an empty vector would be UB)
+                if (kind == 0x10 && layer < (int)layers_qkv.size()) layers_qkv[layer] = m;
+                else if (kind == 0x11 && layer < (int)layers_wo.size()) layers_wo[layer] = m;
+                else if (kind == 0x12 && layer < (int)layers_w1.size()) layers_w1[layer] = m;
+                else if (kind == 0x13 && layer < (int)layers_w3.size()) layers_w3[layer] = m;
+                else if (kind == 0x14 && layer < (int)layers_w13.size()) layers_w13[layer] = m;
+                else if (kind == 0x15 && layer < (int)layers_w2.size()) layers_w2[layer] = m;
         }
         for (int l = 0; l < layers; ++l) {
                 qkv.push_back(layers_qkv[l]);

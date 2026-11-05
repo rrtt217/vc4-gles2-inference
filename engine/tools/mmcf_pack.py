@@ -67,7 +67,8 @@ DT_Q8I8 = 3   # q8, signed (the upload flips the sign bit)
 DT_Q4 = 4
 DT_BLOB = 5
 
-# Tensor ids.  Per-layer tensors take `base | layer << 8`.
+# Tensor ids.  kind in the low byte, layer in bits 8..13, part in bits 14..15
+# (part 0 = the tensor itself, 1/2 = the q4 group scale and min planes).
 T_EMB, T_EMB_SCALE, T_RMS_ATT, T_RMS_FFN, T_RMS_FINAL = 1, 2, 3, 4, 5
 T_Q_NORM, T_K_NORM = 6, 7
 T_QKV, T_WO, T_W1, T_W3, T_W13, T_W2 = 0x10, 0x11, 0x12, 0x13, 0x14, 0x15
@@ -161,7 +162,45 @@ def parse_legacy(path):
     elif magic in (MAGIC_I16, MAGIC_I16_V2):
         raise SystemExit("i16 packing not implemented yet")
     elif magic == MAGIC_Q4:
-        raise SystemExit("q4 packing not implemented yet")
+        theta = r.f32(); half = r.i32(); split = r.i32(); qk = r.i32()
+        meta["theta"] = theta
+        meta["half"] = half != 0
+        meta["qk_norm"] = qk != 0
+        meta["scheme"], meta["group"], meta["split"] = "q4", 32, bool(split)
+        tensors.append((T_EMB, DT_Q8I8, vocab, dim, 0, r.take(vocab * dim), 0.0))
+        tensors.append((T_EMB_SCALE, DT_F32, vocab, 1, 0, r.take(vocab * 4), 0.0))
+        tensors.append((T_RMS_ATT, DT_F32, layers, dim, 0, r.take(layers * dim * 4), 0.0))
+        tensors.append((T_RMS_FFN, DT_F32, layers, dim, 0, r.take(layers * dim * 4), 0.0))
+        tensors.append((T_RMS_FINAL, DT_F32, 1, dim, 0, r.take(dim * 4), 0.0))
+        if meta["qk_norm"]:
+            tensors.append((T_Q_NORM, DT_F32, layers, head_dim, 0, r.take(layers * head_dim * 4), 0.0))
+            tensors.append((T_K_NORM, DT_F32, layers, head_dim, 0, r.take(layers * head_dim * 4), 0.0))
+
+        def q4mat(tid, layer, part4):
+            rows, cols, groups = r.i32(), r.i32(), r.i32()
+            ps = r.f32()
+            nib = r.take(rows * cols // 2)
+            scl = r.take(rows * groups * 2)
+            mn = r.take(rows * groups * 2)
+            base = tid | (layer << 8)
+            tensors.append((base, DT_Q4, rows, cols, 0, nib, ps))
+            tensors.append((base | (1 << 14), DT_I16, rows, groups, 0, scl, 0.0))
+            tensors.append((base | (2 << 14), DT_I16, rows, groups, 0, mn, 0.0))
+            _ = part4
+
+        for l in range(layers):
+            q4mat(T_QKV, l, True)
+            q4mat(T_WO, l, True)
+            if split:
+                q4mat(T_W1, l, True)
+                q4mat(T_W3, l, True)
+            else:
+                q4mat(T_W13, l, True)
+            q4mat(T_W2, l, True)
+        for i in range((vocab + 1535) // 1536):
+            rows, cols = r.i32(), r.i32()
+            sc = r.f32()
+            tensors.append((T_LOGITS | (i << 8), DT_Q8I8, rows, cols, 0, r.take(rows * cols), sc))
     else:
         raise SystemExit("unknown magic 0x%08x" % magic)
     return meta, tensors
@@ -202,7 +241,7 @@ def build(meta, tensors, tok_blob, args):
         # +128 is a bit flip.  Texture tensors (the per-layer matrices and the
         # logits tiles) are stored biased so the upload is a copy; the embedding
         # stays signed because the CPU reads it.
-        if dt == DT_Q8I8 and tid != T_EMB:
+        if dt == DT_Q8I8 and (tid & 0xFF) != T_EMB:
             payload = bytes((b ^ 0x80) for b in payload)
             dt = DT_Q8U8
         while (data_off + len(data)) % ALIGN:
