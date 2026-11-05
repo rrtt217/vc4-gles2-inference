@@ -46,26 +46,23 @@ make -B engine_mm3 CXXFLAGS='-O2 -march=armv6 -mfpu=vfp -mfloat-abi=hard -ffast-
 最小例子：
 
 ```bash
-MODEL=$PWD/../models/llama2c/stories15M.i16 \
-TOKENIZER=../models/llama2c/tokenizer.bin \
+MODEL=$PWD/../models/llama2c/stories15M.i16.mmcf \
 ./engine_mm3 --prompt "One day, Lily" --gen 8
 ```
 
 MiniMind3 q8，GPU 层 + packed KV：
 
 ```bash
-MODEL=../models/minimind3/minimind3.q8 \
-TOKENIZER=../models/minimind3/minimind3.tok \
-GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat --template minimind3 \
+MODEL=../models/minimind3/minimind3.q8.mmcf \
+GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
   --prompt "请写一段关于春天的短文。" --gen 64 --greedy
 ```
 
 MiniMind3 离线 q4（45 MB，推荐的 q4 路径）：
 
 ```bash
-MODEL=../models/minimind3/minimind3.q4 \
-TOKENIZER=../models/minimind3/minimind3.tok \
-GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat --template minimind3 \
+MODEL=../models/minimind3/minimind3.q4.mmcf \
+GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
   --prompt "用一句话介绍你自己。" --gen 64 --greedy
 ```
 
@@ -76,10 +73,9 @@ GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat --template minimind3 \
 MiniMind2 使用 Qwen ChatML 模板。旧 Q8M1 文件头没有 RoPE 元数据，q8 必须显式补：
 
 ```bash
-ROPE_THETA=1000000 ROPE_HALF=1 \
-MODEL=../models/llama2c/minimind2-small.q8 \
-TOKENIZER=../models/llama2c/minimind2-tokenizer.bin \
-GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat --template qwen \
+\
+MODEL=../models/llama2c/minimind2-small.q8.mmcf \
+GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
   --prompt "用一句话介绍你自己。" --gen 24 --greedy
 ```
 
@@ -93,8 +89,7 @@ TinyChat15M.q8 能加载运行，但当前 tokenizer/prompt 配对下输出不�
 它们是 base completion 模型，不是 chat 模型；用普通 prompt，不要加 `--chat`：
 
 ```bash
-MODEL=../models/llama2c/stories42M.q8 \
-TOKENIZER=../models/llama2c/tokenizer.bin \
+MODEL=../models/llama2c/stories42M.q8.mmcf \
 GPU_LAYER=1 KV_PACK=16 ./engine_mm3 \
   --prompt "Once upon a time" --gen 64 --greedy
 ```
@@ -113,7 +108,7 @@ legacy fp32 默认按 I16 加载；只有内存不够时才用 `LEGACY_Q8=1`（�
 64M Qwen3 风格 dense 模型：8 层、768 hidden、2432 FFN、8 Q / 4 KV heads、
 head_dim 96、vocab 6400、RoPE theta 1e6、tied embedding、per-head Q/K RMSNorm。
 
-`--template minimind3` 使用 ChatML、空 `<think>` 块，并和其他 chat 模板共用
+`` 使用 ChatML、空 `<think>` 块，并和其他 chat 模板共用
 短英文默认系统提示（`You are a helpful assistant.`）。需要时用 `--system` 覆盖。
 加 `TIMING=1` 打印 prefill/decode 时间。
 
@@ -138,10 +133,10 @@ FFN hidden 2432 超过 VC4 2048 像素 FBO 限制。
 
 ```bash
 # 显式 thinking
-... --template minimind3 --thinking --prompt "1+1等于几？" --gen 64
+...  --thinking --prompt "1+1等于几？" --gen 64
 
 # 工具定义
-... --template minimind3 --tools-file minimind3/tools.json \
+...  --tools-file minimind3/tools.json \
   --prompt "现在几点了？" --gen 64 --greedy
 ```
 
@@ -162,7 +157,7 @@ FFN hidden 2432 超过 VC4 2048 像素 FBO 限制。
 
 | 变量 | 含义 |
 |---|---|
-| `MODEL`, `TOKENIZER` | 模型和 tokenizer 路径 |
+| `MODEL` | 模型路径（一个 MMCF 容器自带 tokenizer、模板和 rope） |
 | `SEQ` | KV cache 长度；配置 tools 时自动到 768 |
 | `GPU_ATTN=1` | GPU RoPE + KV cache + attention |
 | `GPU_LAYER=1` | hidden、attention、RMSNorm、FFN 全在 GPU |

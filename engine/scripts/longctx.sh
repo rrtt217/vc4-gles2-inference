@@ -4,10 +4,9 @@
 set -u
 cd "$(dirname "$0")/.." || exit 1
 REPEATS="${1:-45}"
-export TOKENIZER=../models/minimind3/minimind3.tok
 export GPU_LAYER=1 TIMING=1
 export SEQ="${SEQN:-768}"
-MODEL=../models/minimind3/minimind3.q8
+MODEL=../models/minimind3/minimind3.q8.mmcf
 FILLER=$(python3 -c "print('树莓派是一块很小的电脑板。' * $REPEATS + '只回答两个字：收到')")
 
 for pack in 16 8 0; do

@@ -98,6 +98,27 @@ groups = ceil(cols/32); scale/min are q16 values multiplied by
 stay q8.
 
 
+## The container is the only format (2026-11-05)
+
+`engine/src/model.cpp` no longer contains `load_q8` / `load_q4` / `load_i16` /
+`load_legacy`; `Model::load()` accepts `MMCF` and refuses anything else with a
+message that names the packer.  All 15 checkpoints in `models/` were converted
+and verified against their source (same greedy text, same PPL to 4 decimals on
+Xe and on the Pi, where the numbers are the pinned 271.2855 / 325.3751).
+
+Converting a new model is one command:
+
+```bash
+engine/tools/mmcf_pack.py --in model.q4 --tok tokenizer.tok \
+  --out model.q4.mmcf --name model --template chatml --chat \
+  --theta 1000000 [--rope-half] [--verify]
+```
+
+`--template` no longer exists as an engine flag: the kind travels in the file
+(0 plain, 1 chatml/qwen, 2 minimind3, 3 tinybrainbot), so the same checkpoint
+cannot be run with the wrong one.  `TOKENIZER=`, `ROPE_THETA=` and `ROPE_HALF=`
+are likewise historical; the container states all three.
+
 ## MMCF containers and the TinyBrainBot family (2026-11-05)
 
 `engine/tools/mmcf_pack.py` converts every legacy checkpoint in `models/`

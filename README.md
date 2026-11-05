@@ -32,9 +32,8 @@ and a disk KV prefix cache.
 cd engine
 make engine_mm3
 
-MODEL=../models/minimind3/minimind3.q8 \
-TOKENIZER=../models/minimind3/minimind3.tok \
-GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat --template minimind3 \
+MODEL=../models/minimind3/minimind3.q8.mmcf \
+GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
   --prompt "用一句话介绍你自己。" --gen 64 --greedy
 ```
 
@@ -51,9 +50,8 @@ Run:
 
 ```bash
 cd engine
-MODEL=../models/minimind3/minimind3.q8 \
-TOKENIZER=../models/minimind3/minimind3.tok \
-GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat --template minimind3 \
+MODEL=../models/minimind3/minimind3.q8.mmcf \
+GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
   --prompt "用一句话介绍你自己。" --gen 64 --greedy
 ```
 
@@ -63,9 +61,8 @@ GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat --template minimind3 \
 python3 engine/quantize/make_q4.py --input models/minimind3 --output models/minimind3/minimind3.q4 --seq 512
 
 cd engine
-MODEL=../models/minimind3/minimind3.q4 \
-TOKENIZER=../models/minimind3/minimind3.tok \
-GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat --template minimind3 \
+MODEL=../models/minimind3/minimind3.q4.mmcf \
+GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
   --prompt "用一句话介绍你自己。" --gen 64 --greedy
 ```
 
@@ -101,7 +98,7 @@ details.
 | MiniMind3 q8 | 66 MB | ~238 ms/token | default Chinese chat |
 | MiniMind3 q4 | 45 MB | ~381 ms/token | memory mode; lower quality |
 | MiniMind2 i16 | 58 MB | ~226 ms/token | reference; weak instruction following |
-| MiniMind2 q8 | 29 MB | ~140–190 ms/token | needs `ROPE_THETA=1000000 ROPE_HALF=1` |
+| MiniMind2 q8 | 29 MB | ~140–190 ms/token | rope comes from the container |
 | MiniMind2 q4 | 21 MB | ~193–212 ms/token | memory mode; identity answers unreliable |
 | TinyChat15M q8 | 24 MB | ~139–171 ms/token | runs, but output is not coherent; format probe only |
 | stories15M i16 | 49 MB | ~167 ms/token | TinyStories completion; coherent |

@@ -16,8 +16,8 @@ cd "$(dirname "$0")/.."
 
 # Works from engine/ (../models) and from the runtime root (models).
 if [ -d ../models/minimind3 ]; then _m=../models/minimind3; else _m=models/minimind3; fi
-MODEL=${MODEL:-$_m/minimind3.q8}
-export MODEL TOKENIZER=${TOKENIZER:-$_m/minimind3.tok}
+MODEL=${MODEL:-$_m/minimind3.q8.mmcf}
+export MODEL TOKENIZER=${TOKENIZER:-}
 export GPU_LAYER=${GPU_LAYER:-1} KV_PACK=${KV_PACK:-16} SEQ=${SEQ:-768}
 
 A=${1:?usage: bench_plain_ab.sh binA binB [gen] [reps]}

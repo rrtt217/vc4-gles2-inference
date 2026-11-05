@@ -30,9 +30,8 @@ OpenAI 兼容 HTTP 服务器和磁盘 KV prefix cache。
 cd engine
 make engine_mm3
 
-MODEL=../models/minimind3/minimind3.q8 \
-TOKENIZER=../models/minimind3/minimind3.tok \
-GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat --template minimind3 \
+MODEL=../models/minimind3/minimind3.q8.mmcf \
+GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
   --prompt "用一句话介绍你自己。" --gen 64 --greedy
 ```
 
@@ -49,9 +48,8 @@ make -B engine_mm3 CXXFLAGS='-O2 -march=armv6 -mfpu=vfp -mfloat-abi=hard -ffast-
 
 ```bash
 cd engine
-MODEL=../models/minimind3/minimind3.q8 \
-TOKENIZER=../models/minimind3/minimind3.tok \
-GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat --template minimind3 \
+MODEL=../models/minimind3/minimind3.q8.mmcf \
+GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
   --prompt "用一句话介绍你自己。" --gen 64 --greedy
 ```
 
@@ -61,9 +59,8 @@ GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat --template minimind3 \
 python3 engine/quantize/make_q4.py --input models/minimind3 --output models/minimind3/minimind3.q4 --seq 512
 
 cd engine
-MODEL=../models/minimind3/minimind3.q4 \
-TOKENIZER=../models/minimind3/minimind3.tok \
-GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat --template minimind3 \
+MODEL=../models/minimind3/minimind3.q4.mmcf \
+GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
   --prompt "用一句话介绍你自己。" --gen 64 --greedy
 ```
 
@@ -98,7 +95,7 @@ python3 server.py --seq 768 --kv-pack 16 \
 | MiniMind3 q8 | 66 MB | ~238 ms/token | 默认中文对话 |
 | MiniMind3 q4 | 45 MB | ~381 ms/token | 内存模式，质量略低 |
 | MiniMind2 i16 | 58 MB | ~226 ms/token | 参考模型，指令跟随较弱 |
-| MiniMind2 q8 | 29 MB | ~140–190 ms/token | 需 `ROPE_THETA=1000000 ROPE_HALF=1` |
+| MiniMind2 q8 | 29 MB | ~140–190 ms/token | rope 由容器自带 |
 | MiniMind2 q4 | 21 MB | ~193–212 ms/token | 内存模式，身份类回答不可靠 |
 | TinyChat15M q8 | 24 MB | ~139–171 ms/token | 能运行但输出不连贯，只作格式探针 |
 | stories15M i16 | 49 MB | ~167 ms/token | TinyStories 补全，连贯 |

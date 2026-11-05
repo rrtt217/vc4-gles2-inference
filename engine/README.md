@@ -62,26 +62,23 @@ only after checking `readelf -A` reports `Tag_CPU_arch: v6`.
 Smallest example:
 
 ```bash
-MODEL=$PWD/../models/llama2c/stories15M.i16 \
-TOKENIZER=../models/llama2c/tokenizer.bin \
+MODEL=$PWD/../models/llama2c/stories15M.i16.mmcf \
 ./engine_mm3 --prompt "One day, Lily" --gen 8
 ```
 
 MiniMind3 q8, GPU layers and packed KV:
 
 ```bash
-MODEL=../models/minimind3/minimind3.q8 \
-TOKENIZER=../models/minimind3/minimind3.tok \
-GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat --template minimind3 \
+MODEL=../models/minimind3/minimind3.q8.mmcf \
+GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
   --prompt "请写一段关于春天的短文。" --gen 64 --greedy
 ```
 
 MiniMind3 offline q4 (45 MB, recommended q4 path):
 
 ```bash
-MODEL=../models/minimind3/minimind3.q4 \
-TOKENIZER=../models/minimind3/minimind3.tok \
-GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat --template minimind3 \
+MODEL=../models/minimind3/minimind3.q4.mmcf \
+GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
   --prompt "用一句话介绍你自己。" --gen 64 --greedy
 ```
 
@@ -93,10 +90,9 @@ MiniMind2 uses the Qwen chat template.  The legacy Q8M1 file does **not** carry
 RoPE metadata, so q8 needs the environment override:
 
 ```bash
-ROPE_THETA=1000000 ROPE_HALF=1 \
-MODEL=../models/llama2c/minimind2-small.q8 \
-TOKENIZER=../models/llama2c/minimind2-tokenizer.bin \
-GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat --template qwen \
+\
+MODEL=../models/llama2c/minimind2-small.q8.mmcf \
+GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
   --prompt "用一句话介绍你自己。" --gen 24 --greedy
 ```
 
@@ -104,9 +100,8 @@ The I16 and Q4M1 files carry theta/half in their headers.  Q4 is a memory
 mode and is noticeably weaker on identity questions:
 
 ```bash
-MODEL=../models/llama2c/minimind2-small.q4 \
-TOKENIZER=../models/llama2c/minimind2-tokenizer.bin \
-GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat --template qwen \
+MODEL=../models/llama2c/minimind2-small.q4.mmcf \
+GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
   --prompt "用一句话介绍你自己。" --gen 24 --greedy
 ```
 
@@ -122,8 +117,7 @@ These are base completion models, not chat models.  Use a plain prompt and
 no `--chat`:
 
 ```bash
-MODEL=../models/llama2c/stories42M.q8 \
-TOKENIZER=../models/llama2c/tokenizer.bin \
+MODEL=../models/llama2c/stories42M.q8.mmcf \
 GPU_LAYER=1 KV_PACK=16 ./engine_mm3 \
   --prompt "Once upon a time" --gen 64 --greedy
 ```
@@ -146,7 +140,7 @@ TinyStories models lose coherence in that mode.
 heads, head_dim 96, vocab 6400, RoPE theta 1e6, tied embedding, per-head
 Q/K RMSNorm.
 
-`--template minimind3` uses ChatML, an empty `<think>` block, and the same
+`` uses ChatML, an empty `<think>` block, and the same
 short English default system prompt as the other chat templates
 (`You are a helpful assistant.`). Override it with `--system`. Add `TIMING=1`
 for prefill/decode timing.
@@ -174,10 +168,10 @@ the second W2 matvec adds into the first residual.
 
 ```bash
 # explicit thinking
-... --template minimind3 --thinking --prompt "1+1等于几？" --gen 64
+...  --thinking --prompt "1+1等于几？" --gen 64
 
 # tool definitions
-... --template minimind3 --tools-file minimind3/tools.json \
+...  --tools-file minimind3/tools.json \
   --prompt "现在几点了？" --gen 64 --greedy
 ```
 
@@ -201,7 +195,7 @@ model; tool calls are much more reliable.
 
 | Variable | Meaning |
 |---|---|
-| `MODEL`, `TOKENIZER` | checkpoint and tokenizer paths |
+| `MODEL` | checkpoint path (one MMCF container carries the tokenizer, template and rope) |
 | `SEQ` | KV cache length; tools auto-raise to 768 |
 | `GPU_ATTN=1` | GPU RoPE + KV cache + attention |
 | `GPU_LAYER=1` | hidden state, attention, RMSNorm, FFN on GPU |
@@ -224,8 +218,8 @@ See [test hooks](../docs/test-hooks.md) for the full list.
 Teacher-forced perplexity is the quality gate for lossy activation formats:
 
 ```bash
-MODEL=../models/minimind3/minimind3.q8 TOKENIZER=../models/minimind3/minimind3.tok \
-GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --template minimind3 --ppl data/ppl_test.txt
+MODEL=../models/minimind3/minimind3.q8.mmcf \
+GPU_LAYER=1 KV_PACK=16 ./engine_mm3  --ppl data/ppl_test.txt
 ```
 
 Use the same corpus when comparing formats; `ACT8=1` and `ACT8=2` are not

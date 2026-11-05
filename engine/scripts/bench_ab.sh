@@ -15,9 +15,9 @@
 set -eu
 cd "$(dirname "$0")/.."
 
-TOKENIZER=${TOKENIZER:-../models/minimind3/minimind3.tok}
-MODEL=${MODEL:-../models/minimind3/minimind3.q8}
-export TOKENIZER MODEL GPU_LAYER=${GPU_LAYER:-1} KV_PACK=${KV_PACK:-16} TIMING=1
+TOKENIZER=${TOKENIZER:-}
+MODEL=${MODEL:-../models/minimind3/minimind3.q8.mmcf}
+export MODEL GPU_LAYER=${GPU_LAYER:-1} KV_PACK=${KV_PACK:-16} TIMING=1
 
 REF=${REF:-/tmp/engine_base}
 NEW=${NEW:-./engine_mm3}
