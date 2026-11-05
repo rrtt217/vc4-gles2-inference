@@ -125,8 +125,24 @@ int main(int argc, char** argv) {
         model.seq = target_limit;
     }
     if (model.seq < 16) model.seq = 16;
+    if (system_prompt.empty() && !model.default_system.empty()) system_prompt = model.default_system;
+    // The checkpoint names its template, so --template is only needed to
+    // override it.  Same mapping as the flag above.
+    if (!model.template_name.empty()) {
+        const string& t = model.template_name;
+        const bool was_qwen = qwen_template, was_mm3 = minimind3_template;
+        qwen_template = qwen_template || t == "qwen" || t == "minimind3";
+        minimind3_template = minimind3_template || t == "minimind3";
+        if ((!was_qwen && qwen_template) || (!was_mm3 && minimind3_template))
+            cerr << "template: " << t << " (from the checkpoint)\n";
+    }
     Tokenizer tokenizer;
-    if (!tokenizer.load(tokenizer_path, model.vocab)) return 1;
+    if (model.tok_blob && !getenv("TOKENIZER")) {
+        if (!tokenizer.load_memory(model.tok_blob, model.tok_blob_bytes, model.vocab)) return 1;
+        cerr << "tokenizer: " << model.tok_blob_bytes << " B embedded in the checkpoint\n";
+    } else if (!tokenizer.load(tokenizer_path, model.vocab)) {
+        return 1;
+    }
     tokenizer.set_qwen(qwen_template || minimind3_template);
     tokenizer.set_bytelevel(minimind3_template);
 

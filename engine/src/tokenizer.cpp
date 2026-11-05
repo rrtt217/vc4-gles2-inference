@@ -8,6 +8,32 @@
 #include <unordered_map>
 #include <vector>
 
+bool Tokenizer::load_memory(const void* data, size_t bytes, int n){
+        const uint8_t* p = (const uint8_t*)data;
+        const uint8_t* end = p + bytes;
+        int maxlen = 0;
+        if (bytes < 4) return false;
+        memcpy(&maxlen, p, 4); p += 4;
+        auto need = [&](size_t k) { return p + k <= end; };
+        for (int i = 0; i < n; ++i) {
+            if (!need(8)) { cerr << "tokenizer blob truncated\n"; return false; }
+            float score = 0; int len = 0;
+            memcpy(&score, p, 4); memcpy(&len, p + 4, 4); p += 8;
+            if (len < 0 || !need((size_t)len)) { cerr << "tokenizer blob truncated\n"; return false; }
+            string s((const char*)p, (size_t)len); p += len;
+            vocab_.push_back(s); scores_.push_back(score); lookup_[s] = i;
+        }
+        for (int i = 0; i < (int)vocab_.size(); ++i) {
+            const string& s = vocab_[i];
+            if (s.size() > 2 && s.front() == '<' && s.back() == '>' && s.compare(0, 3, "<0x") != 0)
+                specials_.push_back({s, i});
+        }
+        sort(specials_.begin(), specials_.end(), [](const auto& a, const auto& b) {
+            return a.first.size() > b.first.size();
+        });
+        return true;
+    }
+
 bool Tokenizer::load(const string& path, int n){
         ifstream f(path, ios::binary);
         if (!f) { cerr << "cannot open tokenizer: " << path << "\n"; return false; }

@@ -427,6 +427,18 @@ bool Model::load_mmcf(){
                 } else if (key == 3 && type == 1 && len >= 4) {
                         scheme = payload[0]; group = payload[1]; split = payload[3];
                         have_quant = true;
+                } else if (key == 4 && type == 1 && len >= 3) {
+                        const char* c = (const char*)payload + 1;
+                        const char* e = (const char*)payload + len;
+                        const char* nul = (const char*)memchr(c, 0, (size_t)(e - c));
+                        if (nul) {
+                                default_system.assign(c, (size_t)(nul - c));
+                                const char* c2 = nul + 1;
+                                const char* nul2 = (const char*)memchr(c2, 0, (size_t)(e - c2));
+                                if (nul2) template_name.assign(c2, (size_t)(nul2 - c2));
+                        }
+                } else if (key == 5 && type == 1 && len >= 4) {
+                        capabilities = (int)rd32(payload);
                 }
                 p += 8 + len;
         }
@@ -457,6 +469,14 @@ bool Model::load_mmcf(){
                 v.resize((size_t)r.rows * r.cols);
                 memcpy(v.data(), fbase_ + data_off + r.off, v.size() * 4);
         };
+        auto as_i16 = [&](const MmcfRec& r, Mat& m) {
+                m.rows = (int)r.rows; m.cols = (int)r.cols;
+                m.type = WeightType::INT16;
+                m.scale = r.scale;
+                const int16_t* p = (const int16_t*)(fbase_ + data_off + r.off);
+                if (borrow_) m.ext16 = p;
+                else m.q16.assign(p, p + (size_t)r.rows * r.cols);
+        };
         auto as_q8 = [&](const MmcfRec& r, Mat& m) {
                 m.rows = (int)r.rows; m.cols = (int)r.cols;
                 m.type = WeightType::INT8;
@@ -471,6 +491,8 @@ bool Model::load_mmcf(){
         // sharing one id with `part` in the top two bits.
         struct Q4Parts { const MmcfRec* body = nullptr; const MmcfRec* scl = nullptr; const MmcfRec* mn = nullptr; };
         std::map<uint16_t, Q4Parts> q4map;
+
+        auto as_mat = [&](const MmcfRec& r, Mat& m) { if (r.dtype == 1) as_i16(r, m); else as_q8(r, m); };
 
         vector<Mat> layers_qkv, layers_wo, layers_w1, layers_w3, layers_w13, layers_w2;
         layers_qkv.resize(layers); layers_wo.resize(layers); layers_w2.resize(layers);
@@ -501,13 +523,22 @@ bool Model::load_mmcf(){
                 case 5: as_f32(r, rms_final); break;
                 case 6: as_f32(r, q_norm); break;
                 case 7: as_f32(r, k_norm); break;
-                case 0x10: if (layer < layers) as_q8(r, layers_qkv[layer]); break;
-                case 0x11: if (layer < layers) as_q8(r, layers_wo[layer]); break;
-                case 0x12: if (layer < layers) as_q8(r, layers_w1[layer]); break;
-                case 0x13: if (layer < layers) as_q8(r, layers_w3[layer]); break;
-                case 0x14: if (layer < layers) as_q8(r, layers_w13[layer]); break;
-                case 0x15: if (layer < layers) as_q8(r, layers_w2[layer]); break;
-                case 0x20: { Mat m; as_q8(r, m); logits_tiles.push_back(m); break; }
+                case 8:    // int16 embedding (the i16 containers)
+                        emb_i16.resize((size_t)r.rows * r.cols);
+                        memcpy(emb_i16.data(), fbase_ + data_off + r.off, emb_i16.size() * 2);
+                        has_i16_emb = true;
+                        break;
+                case 0x10: if (layer < layers) as_mat(r, layers_qkv[layer]); break;
+                case 0x11: if (layer < (int)layers_wo.size()) as_mat(r, layers_wo[layer]); break;
+                case 0x12: if (layer < (int)layers_w1.size()) as_mat(r, layers_w1[layer]); break;
+                case 0x13: if (layer < (int)layers_w3.size()) as_mat(r, layers_w3[layer]); break;
+                case 0x14: if (layer < (int)layers_w13.size()) as_mat(r, layers_w13[layer]); break;
+                case 0x15: if (layer < (int)layers_w2.size()) as_mat(r, layers_w2[layer]); break;
+                case 0x20: { Mat m; as_mat(r, m); logits_tiles.push_back(m); break; }
+                case 0x30:   // tokenizer blob, borrowed from the mapping
+                        tok_blob = fbase_ + data_off + r.off;
+                        tok_blob_bytes = (size_t)r.bytes;
+                        break;
                 default: break;  // tokenizer blob, template, unknown ids
                 }
         }
@@ -563,7 +594,7 @@ bool Model::load_mmcf(){
                      << " logits=" << logits_tiles.size() << " " << logits_tiles[0].rows << "x" << logits_tiles[0].cols
                      << " emb=" << emb_q8.size() << " embs=" << emb_scale.size() << "\n";
         }
-        if (!has_q8_emb || (int)rms_att.size() != layers * dim || logits_tiles.empty()) {
+        if ((!has_q8_emb && !has_i16_emb) || (int)rms_att.size() != layers * dim || logits_tiles.empty()) {
                 cerr << "mmcf: missing required tensors\n";
                 return false;
         }

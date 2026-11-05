@@ -74,6 +74,7 @@ T_Q_NORM, T_K_NORM = 6, 7
 T_QKV, T_WO, T_W1, T_W3, T_W13, T_W2 = 0x10, 0x11, 0x12, 0x13, 0x14, 0x15
 T_LOGITS = 0x20
 T_TOKENIZER = 0x30
+T_EMB_I16 = 8
 
 # from engine/src/common.h
 MAGIC_Q8 = 0x51384D31      # Q8M1
@@ -160,7 +161,34 @@ def parse_legacy(path):
         for i in range((vocab + 1535) // 1536):
             mat(T_LOGITS, i)
     elif magic in (MAGIC_I16, MAGIC_I16_V2):
-        raise SystemExit("i16 packing not implemented yet")
+        theta = r.f32(); half = r.i32(); split = r.i32()
+        qk = 0
+        if magic == MAGIC_I16_V2:
+            qk = r.i32()
+        meta["theta"] = theta
+        meta["half"] = half != 0
+        meta["qk_norm"] = qk != 0
+        meta["scheme"], meta["group"], meta["split"] = "i16", 0, bool(split)
+        # the i16 container starts with an int16 embedding, not q8
+        tensors.append((T_EMB_I16, DT_I16, vocab, dim, 0, r.take(vocab * dim * 2), 0.0))
+        tensors.append((T_EMB_SCALE, DT_F32, vocab, 1, 0, r.take(vocab * 4), 0.0))
+        tensors.append((T_RMS_ATT, DT_F32, layers, dim, 0, r.take(layers * dim * 4), 0.0))
+        tensors.append((T_RMS_FFN, DT_F32, layers, dim, 0, r.take(layers * dim * 4), 0.0))
+        tensors.append((T_RMS_FINAL, DT_F32, 1, dim, 0, r.take(dim * 4), 0.0))
+        if meta["qk_norm"]:
+            tensors.append((T_Q_NORM, DT_F32, layers, head_dim, 0, r.take(layers * head_dim * 4), 0.0))
+            tensors.append((T_K_NORM, DT_F32, layers, head_dim, 0, r.take(layers * head_dim * 4), 0.0))
+        for l in range(layers):
+            mat(T_QKV, l, q8=False)
+            mat(T_WO, l, q8=False)
+            if split:
+                mat(T_W1, l, q8=False)
+                mat(T_W3, l, q8=False)
+            else:
+                mat(T_W13, l, q8=False)
+            mat(T_W2, l, q8=False)
+        for i in range((vocab + 1535) // 1536):
+            mat(T_LOGITS, i, q8=False)
     elif magic == MAGIC_Q4:
         theta = r.f32(); half = r.i32(); split = r.i32(); qk = r.i32()
         meta["theta"] = theta
@@ -202,7 +230,7 @@ def parse_legacy(path):
             sc = r.f32()
             tensors.append((T_LOGITS | (i << 8), DT_Q8I8, rows, cols, 0, r.take(rows * cols), sc))
     else:
-        raise SystemExit("unknown magic 0x%08x" % magic)
+        raise SystemExit("unknown magic 0x%08x (supported: Q8M1/Q8M2/I16M1/I16N/Q4M1)" % magic)
     return meta, tensors
 
 

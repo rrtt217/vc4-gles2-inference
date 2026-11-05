@@ -8,6 +8,8 @@
 class Tokenizer {
 public:
     bool load(const string& path, int n);
+    // MMCF stores the same blob inside the container; n is the vocab size.
+    bool load_memory(const void* data, size_t bytes, int n);
     void set_qwen(bool q);
     void set_bytelevel(bool b);
 

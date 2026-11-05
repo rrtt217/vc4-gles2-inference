@@ -1,7 +1,24 @@
 # Checkpoint container v2 (proposal)
 
-Status: the packer and its self-check exist (`engine/tools/mmcf_pack.py`);
-the engine reader is not written yet, so nothing loads a `.mmcf` today.  Today the engine reads four
+Status: **implemented**.  `engine/tools/mmcf_pack.py` converts q8, q4 and i16
+checkpoints, and `Model::load_mmcf()` loads them.  All three print the same
+greedy text and the same PPL as their legacy source on Xe:
+
+| model | legacy | `.mmcf` |
+|---|---:|---:|
+| minimind3 q8  | 270.3170 | **270.3170** |
+| minimind3 q4  | 330.5302 | **330.5302** |
+| minimind3 i16 | 280.2156 | **280.2156** |
+
+With only `MODEL=` set, the container supplies the tokenizer (81,371 B
+embedded), the template name and the default system prompt:
+
+```
+$ MODEL=/tmp/minimind3.mmcf ./engine_mm3 --chat --prompt "用一句话介绍你自己。" --gen 16 --greedy
+template: minimind3 (from the checkpoint)
+tokenizer: 81371 B embedded in the checkpoint
+Assistant: 我是一个AI助手，我的存在是为了提供帮助和信息。
+```  Today the engine reads four
 formats, each with its own magic and its own positional header
 (`MAGIC_Q8`/`MAGIC_Q8_V2`, `MAGIC_I16`/`MAGIC_I16_V2`, `MAGIC_Q4`, and the
 legacy loop), and the tokenizer, chat template and inference flags live
@@ -210,7 +227,7 @@ Per-layer tensors carry the layer in the high byte (`id | layer << 8`).
 dtypes: `0` f32, `1` i16, `2` q8u8 (the packer's output for q8: biased, so the
 upload is a copy), `3` q8i8, `4` q4, `5` blob.
 
-### Reader checklist (not written yet)
+### Reader checklist (all done)
 
 1. `Model::load()` recognises `"MMCF"` before the legacy magics and calls a new
    `load_mmcf`.
@@ -225,3 +242,32 @@ upload is a copy), `3` q8i8, `4` q4, `5` blob.
 6. Acceptance: the converted file must print the same greedy text and the same
    PPL as the source on both machines, and `UPLOAD_TIME=1` must show the q8
    conversion gone.
+
+## Implementation notes (what actually broke)
+
+- The per-matrix scale (the `ws` uniform) is a field of the tensor record.  The
+  first draft dropped it and every dot product ran with scale 0.
+- A `"<HBBBBIIQQIIf"` record is **42 bytes**, not 40 or 48; every later offset
+  shifted by 6 bytes per tensor.  Records are now built by explicit
+  concatenation and padded to 48.
+- `slice_rows`/`slice_cols` did not copy the new `prebiased` flag, so the split
+  FFN weights (hidden 2432 splits every layer) were biased a second time at
+  upload and the model answered garbage.
+- q4 needs three tensors per matrix (nibbles, group scale, group min) sharing
+  one id; `m.groups` must be the per-row group count (`scl->cols`), not the
+  plane size, or `slice_cols` walks the scale plane out of bounds.
+- The layer vectors are sized by the file's `split` flag, so indexing
+  `layers_w13` on a split file is UB - index each vector by its own size.
+- ESSL 1.00 has no implicit int->float conversion: `int(x) * 1.5` does not
+  compile in a shader, it needs `float(int(x)) * 1.5`.
+
+## Still open
+
+- The template **kind** byte in the metadata is written but the engine still
+  maps the name (`qwen`, `minimind3`) to its own template table; a file naming
+  an unknown template falls back to the flag.
+- `capabilities` is parsed into `Model::capabilities` but nothing refuses
+  `--chat` on a non-chat checkpoint yet.
+- lora/adapters, multi-precision-in-one-file and 16-byte alignment of the
+  metadata block are not implemented (the data section is aligned; the TLV
+  block is byte-packed).

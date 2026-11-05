@@ -28,6 +28,12 @@ public:
     bool ffn_chunked = false;
     int ffn_chunk = 0; // first hidden chunk; second is hidden - ffn_chunk
 
+    // Filled by the MMCF reader: the tokenizer blob lives inside the file and
+    // the chat template / default system prompt come from its metadata.
+    const void* tok_blob = nullptr;
+    size_t tok_blob_bytes = 0;
+    string tok_kind, default_system, template_name;
+    int capabilities = 0;
     bool load(const string& path);
     // MMCF v2 container (docs/checkpoint-container.md).
     bool load_mmcf();
