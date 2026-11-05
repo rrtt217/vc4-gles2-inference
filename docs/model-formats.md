@@ -97,3 +97,45 @@ groups = ceil(cols/32); scale/min are q16 values multiplied by
 `param_scale`. Q4 matrices require `cols % 32 == 0`. Embeddings and logits
 stay q8.
 
+
+## MMCF containers and the TinyBrainBot family (2026-11-05)
+
+`engine/tools/mmcf_pack.py` converts every legacy checkpoint in `models/`
+(Q8M1/Q8M2, Q4M1, I16M1/I16N) into the self-describing container described in
+[`checkpoint-container.md`](checkpoint-container.md).  Two implicit conventions
+that used to live in shell history are now in the file:
+
+| convention | where it lives now |
+|---|---|
+| `rope_theta` / rotate-half | metadata key 2; a `Q8M1`/`I16M1` source has no rope at all, so the packer **refuses to guess** and wants `--theta`/`--rope-half`, `--rope-plain` (llama2) or `--assume-llama2-rope` |
+| BOS / EOS / stop ids | metadata key 8, derived from the embedded vocabulary; llama2.c stores `"<s>"` as `"\n<s>\n"`, so matching is on the trimmed token |
+| chat template | metadata key 4 (kind + default system + name); `--template` still overrides |
+| tokenizer | the `.tok` blob is inside the container, so `TOKENIZER=` is optional |
+
+`engine/quantize/make_i16.py` also stopped hardcoding the rope: `rope_of(cfg)`
+reads `rope_theta` (and `rope_scaling.rope_theta`) and treats the layout as
+rotate-half unless the config says otherwise, and the safetensors loader picks
+F16/F32 from the tensor header instead of assuming F16.
+
+### TinyBrainBot-100M-v5.1-Instruct
+
+A HF Llama-shaped model with `rope_theta = 10000`, rotate-half, no qk-norm,
+tied embeddings and a SentencePiece BPE tokenizer (32000 entries, `▁` for
+space, byte fallback).  Its special tokens are `<s>`=0, `</s>`=1, `<unk>`=3,
+`<|user|>`=4, `<|assistant|>`=5, `<|system|>`=6, `<|end|>`=7.  The prompt has
+no system turn and no BOS:
+
+```
+<|user|> {question}<|assistant|> {answer}<|end|>
+```
+
+`--template tinybrainbot` (or template kind 3 in a container) emits
+`"<|user|> " + q + "<|assistant|> "` and disables the tokenizer's dummy prefix;
+the stop set is `{7}` (EOS 7), not `</s>`.
+
+**Precision matters more here than on MiniMind.**  `Q8M1` stores one scale per
+matrix (`make_q8_from_i16.py: q8mat` takes `max(|w|)` over the whole matrix), and
+for this checkpoint that scale is too coarse: the q8 build answers with a bare
+`<|end|>` while the q4 build (block-32 scale *and* min) answers
+`Hello! What can I do for you`.  Use **q4 or i16** for this model; the q8 file is
+kept only for the size comparison.

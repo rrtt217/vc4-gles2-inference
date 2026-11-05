@@ -49,6 +49,28 @@ def load_llama2c(path):
                 wq=wq, wk=wk, wv=wv, wo=wo, w1=w1, w2=w2, w3=w3, wcls=wcls,
                 theta=10000.0, half=0)
 
+def rope_of(cfg):
+    """(theta, half) from a HF config.
+
+    theta comes from config.json (rope_theta); half means "rotate half the head"
+    (GPT-NeoX style, what Llama/HF does) as opposed to the interleaved llama2
+    layout.  A model whose config says nothing gets the Llama default 10000 and
+    rotate-half, which is what every HF Llama-shaped model does.
+    """
+    theta = float(cfg.get("rope_theta", 10000.0))
+    rs = cfg.get("rope_scaling") or {}
+    if isinstance(rs, dict) and "rope_theta" in rs:
+        theta = float(rs["rope_theta"])
+    # interleaved only if the config explicitly asks for the llama2 layout
+    half = 0 if cfg.get("rope_interleaved") or cfg.get("rope_layout") == "interleaved" else 1
+    return theta, half
+
+
+def st_dtype(e):
+    """safetensors dtype -> numpy, so an F32 checkpoint is not read as F16."""
+    return {"F16": "<f2", "F32": "<f4", "BF16": None}.get(e.get("dtype", "F16"))
+
+
 def load_minimind(model_dir, seq=512):
     with open(model_dir + '/config.json') as f: cfg = json.load(f)
     with open(model_dir + '/model.safetensors', 'rb') as f:
@@ -56,7 +78,10 @@ def load_minimind(model_dir, seq=512):
         hdr = json.loads(f.read(n)); data = f.read()
     def get(name):
         e = hdr[name]; a, b = e['data_offsets']
-        return np.frombuffer(data[a:b], dtype='<f2').astype(np.float32).reshape(e['shape'])
+        dt = st_dtype(e)
+        if dt is None:
+            raise SystemExit(f"{name}: bf16 safetensors are not supported, convert to F16/F32 first")
+        return np.frombuffer(data[a:b], dtype=dt).astype(np.float32).reshape(e['shape'])
     emb = get('model.embed_tokens.weight')
     vocab, dim = emb.shape
     layers = cfg['num_hidden_layers']; heads = cfg['num_attention_heads']; kv = cfg['num_key_value_heads']
@@ -77,7 +102,8 @@ def load_minimind(model_dir, seq=512):
     return dict(dim=dim, hidden=hidden, layers=layers, heads=heads, kv=kv, vocab=vocab, seq=seq,
                 emb=emb, rms_att=rms_att, rms_ffn=rms_ffn, rms_final=rms_final,
                 wq=wq, wk=wk, wv=wv, wo=wo, w1=w1, w2=w2, w3=w3, wcls=emb,
-                theta=1000000.0, half=1, qk_norm=1 if qk else 0, q_norm=q_norm, k_norm=k_norm)
+                theta=rope_of(cfg)[0], half=rope_of(cfg)[1],
+                qk_norm=1 if qk else 0, q_norm=q_norm, k_norm=k_norm)
 
 def write_i16(m, dst):
     dim=m['dim']; hidden=m['hidden']; layers=m['layers']; heads=m['heads']; kv=m['kv']; vocab=m['vocab']; seq=m['seq']

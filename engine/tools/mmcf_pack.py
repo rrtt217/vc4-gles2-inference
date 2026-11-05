@@ -238,7 +238,7 @@ def parse_legacy(path):
 
 BOS_NAMES = ["<s>", "<bos>"]
 EOS_NAMES = ["<|endoftext|>", "</s>", "<eos>"]
-STOP_NAMES = ["<|im_end|>", "<end_of_turn>"]
+STOP_NAMES = ["<|im_end|>", "<|end|>", "<end_of_turn>"]
 PAD_NAMES = ["<pad>", "<|endoftext|>"]
 UNK_NAMES = ["<unk>", "<|unk|>"]
 
@@ -268,12 +268,16 @@ def specials_from(tok_blob, vocab, args):
             if nm in stripped:
                 return stripped.index(nm)
         return -1
-    bos = -1 if args.template in ("qwen", "chatml", "minimind3") else find(BOS_NAMES)
+    bos = -1 if args.template in ("qwen", "chatml", "minimind3", "tinybrainbot") else find(BOS_NAMES)
     eos = find(EOS_NAMES)
     stop = find(STOP_NAMES)
     pad = find(PAD_NAMES)
     unk = find(UNK_NAMES)
     im_start = stripped.index("<|im_start|>") if "<|im_start|>" in stripped else -1
+    # A <|...|>-style end marker is this model's terminator; </s> is the
+    # SentencePiece default it does not use to end a turn.
+    if stop >= 0 and args.template == "tinybrainbot":
+        eos = stop
     if args.bos is not None: bos = args.bos
     if args.eos is not None: eos = args.eos
     if args.stop is not None: stop = args.stop
@@ -296,7 +300,7 @@ def build(meta, tensors, tok_blob, args):
                         1 if meta.get("split") else 0)
     # kind: 0 plain (llama2c), 1 chatml/qwen, 2 minimind3.  The name is kept for
     # humans and as a fallback for a kind an old engine does not know.
-    kind = {"plain": 0, "qwen": 1, "chatml": 1, "minimind3": 2}.get(args.template, 1)
+    kind = {"plain": 0, "qwen": 1, "chatml": 1, "minimind3": 2, "tinybrainbot": 3}.get(args.template, 1)
     template = (bytes([kind]) + args.system.encode() + b"\0" + args.template.encode() + b"\0")
     caps_val = (1 if args.chat else 0) | (2 if args.tools else 0) | (4 if args.vision else 0)
     caps = struct.pack("<I", caps_val)

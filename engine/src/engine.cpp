@@ -59,6 +59,7 @@ int main(int argc, char** argv) {
     int gen = 8;
     bool prompt_set = false, gen_set = false;
     bool chat = false, qwen_template = false, minimind3_template = false, greedy = false, worker = false;
+    bool tbb_template = false;   // <|user|>/<|assistant|>/<|end|>, no system turn, no BOS
     bool open_thinking = false;
     string tools_json;
     string build_cache_prompt, build_cache_out, prefix_cache_path, ppl_path;
@@ -94,6 +95,7 @@ int main(int argc, char** argv) {
             const char* t = argv[++i];
             qwen_template = !strcmp(t, "qwen");
             minimind3_template = !strcmp(t, "minimind3");
+            tbb_template = !strcmp(t, "tinybrainbot");
             if (minimind3_template) qwen_template = true;
         }
         else if (!strcmp(argv[i], "--seed") && i + 1 < argc) seed = (uint32_t)strtoul(argv[++i], nullptr, 10);
@@ -131,17 +133,21 @@ int main(int argc, char** argv) {
     // fallback for a kind this build does not know.
     if (!model.template_name.empty() || model.template_kind >= 0) {
         const int k = model.template_kind;
-        bool want_qwen = false, want_mm3 = false;
-        if (k == 2) { want_qwen = want_mm3 = true; }
+        bool want_qwen = false, want_mm3 = false, want_tbb = false;
+        if (k == 3) { want_tbb = true; }
+        else if (k == 2) { want_qwen = want_mm3 = true; }
         else if (k == 1) { want_qwen = true; }
         else if (k == 0) { want_qwen = want_mm3 = false; }
         else {   // unknown kind: fall back to the name
+            want_tbb = model.template_name == "tinybrainbot";
             want_qwen = model.template_name == "qwen" || model.template_name == "minimind3";
             want_mm3 = model.template_name == "minimind3";
         }
         const bool was_qwen = qwen_template, was_mm3 = minimind3_template;
         qwen_template = qwen_template || want_qwen;
         minimind3_template = minimind3_template || want_mm3;
+        tbb_template = tbb_template || want_tbb;
+        if (tbb_template) qwen_template = false;   // its own markers, not chatml
         if ((!was_qwen && qwen_template) || (!was_mm3 && minimind3_template))
             cerr << "template: " << (model.template_name.empty() ? "kind " + std::to_string(k) : model.template_name)
                  << " (from the checkpoint)\n";
@@ -411,6 +417,14 @@ int main(int argc, char** argv) {
             text += "<|im_start|>user\n" + user + "<|im_end|>\n"
                     "<|im_start|>assistant\n";
             text += open_thinking ? "<think>\n" : "<think>\n\n</think>\n\n";
+        } else if (tbb_template) {
+            // No system turn and no BOS: the markers carry the roles, and the
+            // first user turn opens with a space (the model was trained so).
+            // "<|user|> {q}<|assistant|> " with a trailing space: the model
+            // was trained with a space after the assistant marker, and without
+            // it the first token is <|end|> (measured on the q4 and i16 files,
+            // where the other four wrappers I tried collapse to one token).
+            text = string("<|user|> ") + user + "<|assistant|> ";
         } else if (qwen_template) {
             if (first)
                 text = "<|im_start|>system\n" + (system_prompt.empty() ? string(kDefaultSystem) : system_prompt) +
@@ -424,7 +438,7 @@ int main(int argc, char** argv) {
             else
                 text = "[INST] " + user + " [/INST]";
         }
-        auto tokens = tokenizer.encode(text, !qwen_template, !qwen_template);
+        auto tokens = tokenizer.encode(text, !qwen_template && !tbb_template, !qwen_template && !tbb_template);
         int skip = (first && !cli_cache_tokens.empty()) ? cache_prefix_len(tokens) : 0;
         for (int i = 0; i < skip; ++i) pos = i + 1;
         vector<float> logits;
