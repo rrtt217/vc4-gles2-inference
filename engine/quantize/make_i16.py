@@ -67,8 +67,8 @@ def rope_of(cfg):
 
 
 def st_dtype(e):
-    """safetensors dtype -> numpy, so an F32 checkpoint is not read as F16."""
-    return {"F16": "<f2", "F32": "<f4", "BF16": None}.get(e.get("dtype", "F16"))
+    """safetensors dtype -> numpy, so an F32 or BF16 checkpoint is not read as F16."""
+    return {"F16": "<f2", "F32": "<f4", "BF16": "<u2"}.get(e.get("dtype", "F16"))
 
 
 def load_minimind(model_dir, seq=512):
@@ -80,7 +80,12 @@ def load_minimind(model_dir, seq=512):
         e = hdr[name]; a, b = e['data_offsets']
         dt = st_dtype(e)
         if dt is None:
-            raise SystemExit(f"{name}: bf16 safetensors are not supported, convert to F16/F32 first")
+            raise SystemExit(f"{name}: unsupported safetensors dtype {e.get('dtype')}")
+        if e.get("dtype") == "BF16":
+            # bf16 is the top half of an f32; widening is exact and needs no
+            # rounding, so a bf16 checkpoint converts losslessly.
+            bits = np.frombuffer(data[a:b], dtype="<u2").astype(np.uint32) << 16
+            return bits.view(np.float32).reshape(e['shape'])
         return np.frombuffer(data[a:b], dtype=dt).astype(np.float32).reshape(e['shape'])
     emb = get('model.embed_tokens.weight')
     vocab, dim = emb.shape
