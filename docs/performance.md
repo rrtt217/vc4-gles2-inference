@@ -3609,3 +3609,242 @@ that has to be allocated, filled and freed while the board is page-cache tight;
 Everything else in the container is a correctness wash, verified on both
 machines: q8 270.3170 (Xe) / 271.2855 (Pi), q4 330.5302 / 325.3751, i16 280.2156
 (Xe), and the pinned greedy strings for each machine.
+
+## TinyBrainBot on VC4 (item 12, first look)
+
+Same binary, same container (`models/tinybrainbot/tinybrainbot.q4.mmcf`),
+prompt `Hello, who are you?`, `--gen 16 --greedy`: the CPU path
+(`GPU_LAYER=0`) answers `<|end|>Here is a response based on the given
+information:` style text, the GPU path (`GPU_LAYER=1`) answers
+`<|end|>:belive` / `<|end|>:belive:belive, the truth`.  TinyBrainBot q8 is not
+a usable correctness signal: both paths degenerate to `future future ...` on
+this prompt (the single global q8 scale, item 15), so the correctness work
+here is q4.  The shape table that differs from MiniMind3:
+dim 768, hidden 2048 (chunk 1024), 12 layers, heads 12 / kv 4 / head_dim 64,
+vocab 32000, qk_norm 0, seq 512, theta 10000.
+
+**The layer probes now work on both paths.**  `HIDDEN_DUMP=1` printed only on
+the GPU path.  `GPU::dump_cpu_row` packs the CPU activation vector with
+`x_pack` into the same RGBA8 q16 bytes a GPU target returns and prints it
+through the same `dump_row`, so the CPU path emits the same
+`DUMP hidA w=384 h=<hash>` lines.  A new `STAGE_DUMP=1` dumps the five stages
+of every layer, in order: `xb` (rms_att out), `att` (attention block out),
+`x1` (after the wo residual), `xbf` (rms_ffn out), `hidA` (layer out).  Every
+dump line now carries an FNV-1a hash of the whole row, so two runs are compared
+on hashes and only the interesting rows are decoded.
+
+**Where it breaks.**  Both paths emit the same first generated token
+(`<|end|>`) and part company on the second (`Here` against `:belive`).  At
+position 0 the softmax has one key, so `att` is exactly V and the qk-score
+path is not exercised at all; from position 1 it is.  That is the current lead:
+the score/softmax path, not the embedding, the rmsnorm, the qkv matvec, the wo
+residual or the FFN.  Position 0 agreeing is weak evidence, not proof, but it
+is the only split the run gives.
+
+**Negative results from the same run.**  `KV_PACK=0` (24-bit cache) and
+`QKV_PAIR=0` produce the identical wrong text, so neither the KV packing nor
+the paired qkv kernel is the cause.  `--prompt Hello` (one token) gives the
+same split, so it is not the prompt length.
+
+**The CPU path is not a numerical oracle, which changes item 13.**  The CPU
+path keeps float32 activations; the GPU path round-trips q16 at every stage.
+Per-layer cosine between the two paths, same prompt, same container:
+
+| layer | MiniMind3 q8 (works) | TinyBrainBot q4 (broken) |
+|---|---:|---:|
+| 0 | 0.9998 | 0.980 |
+| 3 | 0.973 | 0.937 |
+| 7 | 0.458 | 0.356 |
+| 11 | - | -0.03 |
+
+MiniMind3 answers correctly with cos 0.458 at layer 7, so a cross-path delta of
+this size is normal (the residual stream saturates at the q16 clamp and the two
+numerics part company).  A CPU-vs-GPU dump diff can therefore point at a stage,
+but it cannot decide whether a kernel is wrong; the deciding test has to be a
+same-path A/B, one flag against one kernel.  `engine/scripts/diff_paths.sh`
+prints the cross-path table with that caveat in its header.
+
+**Suite on the deployed build:** ACCEPT - determinism, q8
+`我是一个AI助手，没有自我意识，也没有身体，所以我无法`, q4
+`我是MiniMind，一个高效的小参数AI模型，专注于`, poem OK, PPL 271.2855 /
+325.3751 exact.  Every probe is env-guarded (`STAGE_DUMP`, `HIDDEN_DUMP`) and
+the dump path is not in the draw path, so no number can move; the suite is the
+proof.
+
+**The kernels are not the bug: attention is exact, the full texture path is not (item 12b).**
+`ATT_DUMP=<pos>` (`GPU::dump_attention`) prints, for every layer at that
+position, the exact integers the five attention passes consumed and produced:
+the q row after rope, every K and V row 0..pos, the score texels per head, the
+stats texel and the block output - all in the grids the shaders wrote (q and
+att_out int/256, K/V int/KVSCALE, scores and stats max int/1024, stats sum
+int/32), with one `ATTD meta` line for the shape.  `engine/scripts/check_att.py`
+re-derives each stage with nothing but a dot product and a softmax:
+
+| check | identity |
+|---|---|
+| score | `round((sum_i q_i k_i) / sqrt(head_dim) * 1024)` |
+| stats max | `max_t score[t]`, exact |
+| stats sum | `round(32 * sum_t exp((score[t]-max)/1024))` |
+| att out | `round(256 * sum_t p_t v_t[i])` |
+
+TinyBrainBot q4, `Hello, who are you?` (9 tokens), KV_PACK=16, all 12 layers:
+
+| position | score dev | stats max | stats sum dev | att_out dev |
+|---|---:|---:|---:|---:|
+| 1 (prefill) | <=1 LSB | exact | <=0.016/32 | <=1 LSB |
+| 9 (first decode) | <=1 LSB | exact | <=0.015/32 | <=1 LSB |
+
+So `att_score`, `att_stats` and `att_v` - the 12-head / head_dim 64 / group-3
+mapping, the GQA index math and the score-pair packing - are right on this
+shape.  `att_qrot` and `att_kv_rope` are not covered by this check, because it
+takes q and K as given.
+
+**Bisection: every GPU kernel is correct in isolation.**  Same container, same
+prompt, `--gen 16 --greedy IGNORE_EOS=1`:
+
+| path | output |
+|---|---|
+| `GPU_LAYER=0` (CPU) | `😊 <|end|> <|end|> Hi! Great to see you` |
+| `+ GPU_FFN=1` | identical |
+| `+ GPU_ATTN=1 CPU_FFN=1` | identical |
+| `+ GPU_ATTN=1 GPU_FFN=1` (hybrid) | identical |
+| `GPU_LAYER=1` (full texture path) | `Érica Póralose's name is Maria Lopez Lgas` |
+
+`RES_PACK=0`, `QKV_PAIR=0`, `KV_PACK=0`, `RMS_SPLIT`, `RMS_FUSED`,
+`PREFILL_PAIR=0` and `ATTN_DUP=all` all leave the full path wrong (some change
+the text), so neither the residual packing nor the qkv pairing, the kv packing
+or the rmsnorm variant is the cause.
+
+**What the full path does differently.**  It is the only path that keeps the
+residual stream in a texture across layers and runs `rmsnorm` and the residual
+adds on the GPU; the CPU paths keep float32 between stages and round to q16
+only at the residual add.  Layer-0 stage dumps (q16 ints) agree between the CPU
+and the full path to 1-2 units (xb 429/431, att 51/51, x1 196/197), so no stage
+is wrong at layer 0; the difference grows with depth (layer 4 att max 114
+against 87, layer 11 att max 132 against 367) while the means stay within a
+few percent.  That is the profile of accumulated q16 rounding in a fragile
+100M chat model, not of a broken kernel.  The prefill logits say the same:
+over 32000 vocabulary entries `max|d| = 8.6`, `mean|d| = 2.3`, and every
+1536-row tile is hit equally, so the 1280-row tail tile is not a special case.
+
+Consequence: item 12 is a precision wall, not a shape bug.  The deployable
+workaround today is the hybrid path (`GPU_LAYER=0 GPU_ATTN=1 GPU_FFN=1`), which
+is correct on this prompt in chat mode and still runs both hot kernels on the
+GPU; the full path costs 411 ms/token (prefill 9.27 s, 32 greedy tokens, q4)
+and is not.  The workaround is priced in the 2026-11-06 subsection below: it
+is coherent, it is not identical to the CPU path, and on this model it is not
+faster than the CPU path either.
+
+### The workaround, priced (2026-11-06)
+
+TinyBrainBot q4 (`models/tinybrainbot/tinybrainbot.q4.mmcf`), Pi Zero.  Decode
+is plain mode, `--prompt "Once upon a time, there was a little" --gen 32
+--greedy IGNORE_EOS=1`, three interleaved passes per mode.  Warm prefill is
+`PREFILL_REPEAT=3` (the two repeats after the first, four samples per mode):
+the first prefill in a process carries the lazy program links, so it is not a
+kernel number and the cold figures (CPU 22.8/7.6 s, hybrid 9.9/13.1 s, full
+16.2/9.1 s) are link time, not prefill.
+
+| mode | decode ms/token | min | median | warm prefill s (4) | median |
+|---|---:|---:|---:|---:|---:|
+| `GPU_LAYER=0` (CPU) | 490.5 / 534.2 / 504.1 | 490.5 | 504.1 | 4.06 / 4.49 / 3.60 / 3.53 | 3.83 |
+| hybrid (`GPU_LAYER=0 GPU_ATTN=1 GPU_FFN=1`) | 608.2 / 583.8 / 521.2 | 521.2 | 583.8 | 4.54 / 4.06 / 4.07 / 4.27 | 4.17 |
+| `GPU_LAYER=1` (full) | 388.0 / 401.0 / 447.5 | 388.0 | 401.0 | 2.95 / 2.96 / 2.98 / 2.96 | 2.96 |
+
+**Hybrid is coherent on the chat path, and only there.**  Chat mode,
+`--gen 24 --greedy IGNORE_EOS=1`, three prompts: CPU and hybrid print the
+identical string, character for character, on all three; the full path
+degenerates on all three.
+
+| prompt | CPU = hybrid | `GPU_LAYER=1` |
+|---|---|---|
+| `Hello, who are you?` | `😊 <\|end\|> <\|end\|> Hi! Great to see you. How can I help?` | `Érica Póralose Pír Pír ...` |
+| `What is the capital of France?` | `Île-de-France. <\|end\|>‐aned. ...` | `�Oge�Oge ...` |
+| `Tell me a short story about a dog.` | `‘A dog walks to the park every day. ...` | `⚽ ⚽ ⚽ ...` |
+
+The second and third CPU answers are the model's own degenerate style, not a
+harness artefact; the point is that hybrid follows it exactly.
+
+**It is not an identity.**  With no template the same prompt splits them:
+plain mode, `--gen 32`, CPU prints `<|end|> <|end|> Here's a response based
+on the given information:` and hybrid prints `<|end|> <|end|> <|end|>
+nostalgia, I'm your great-grandparent.`  The first two generated tokens agree
+and the third does not, so the 12c statement "identical correct string" holds
+for the chat path and one prompt, not in general.  The honest form is "a
+coherent answer, sometimes a different one", which is exactly what item 12's
+acceptance asks of a fixed path.
+
+**Decision: no GPU default for TinyBrainBot.**  The full path is 20% faster
+in decode (401 against 504 ms/token) and 23% faster in warm prefill (2.96
+against 3.83 s) and is wrong; the hybrid is 16% slower than plain CPU at
+decode (584 against 504) and 9% slower at prefill, because at 12 layers x 768
+the per-stage q16 round trip costs more than the two GPU kernels save.  The
+deployable configuration on this board is therefore plain CPU.  On the
+server that is `--no-gpu-layer`: `server.py` sets `GPU_LAYER` from that flag,
+there is no hybrid flag, and `GPU_ATTN=1 GPU_FFN=1` would have to come from
+the parent environment.
+
+**Range is not the separator, precision is.**  The CPU-side dumps carry the
+q16 envelope: TinyBrainBot's residual reaches 30720 (120 of the +-128 range)
+in layer 0 and 0.1-0.4% of its texels clip at the ceiling from layer 1 on;
+MiniMind3 q8 does the same from layer 0 (0.1-1.2% clipped, measured with the
+same `STAGE_DUMP=1 GPU_LAYER=0` run) and still answers correctly.  The two
+models have the same headroom problem and different sensitivity to it: one
+q16 per activation is enough for MiniMind3's trajectory and not for
+TinyBrainBot's.  That rules out a range bug and sizes the real fix:
+precision, i.e. more than one int16 per activation on the full path.
+
+### q8 precision is not why TinyBrainBot degrades (item 15, 2026-11-06)
+
+Item 15 said TinyBrainBot's q8 is bad because `Q8M1` stores one scale per
+matrix.  The q8 file was measured against its own i16 sibling before changing
+any format, and the premise does not hold.
+
+**The file is a faithful quantization.**  For every matrix, `w = i16 * scale`
+from `tinybrainbot.i16.mmcf` is the exact source; the shipped q8 tensor is
+compared against it row by row (`||w_q8_r - w_r|| / ||w_r||`, 128 rows per
+chunk).  The stored scale equals `max|w|/127` to the last digit on all 81
+matrices (ratio 1.000), and the whole-tensor cosine is 0.998-0.9999.
+
+| model / file | per-row error p50 (median over matrices) | worst matrix p50 | Frobenius |
+|---|---:|---:|---:|
+| TinyBrainBot q8 (shipped) | 2.14% | 7.59% (layer 7 w2) | 1.3-6.8% |
+| TinyBrainBot q8, scale clipped at p99.9 | **0.92%** | 2.13% | 1.5-3.9% |
+| MiniMind3 q8 (works) | 1.10% | 1.56% | 1.2-1.6% |
+| TinyBrainBot q4 (works) | **7.83%** | 7.92% | 7.9-8.0% |
+
+**And the text does not follow the error.**  Same binary, same prompt, chat
+template from the container, `GPU_LAYER=0` (CPU attention; the matvecs are the
+GPU q8 kernels either way), greedy 24 tokens:
+
+| file | `Hello, who are you?` |
+|---|---|
+| q8 shipped | `contacting contacting contacting ...` |
+| q8 clipped at p99.9 (0.92% error) | `RetRetRetRetRetRet ...`; `safely safely ...` on two other prompts |
+| q4 (7.83% error) | `Hi! Great to see you. How can I help?` |
+
+A q4 file with **eight times** the weight error answers and a q8 file with
+better error than MiniMind3's does not, so the failure is not the scale and
+per-row scales (item 15's proposal) would not have fixed it.  It is the q8
+*path* at TinyBrainBot's shapes or magnitudes.  The first suspect is the q16
+envelope on the matvec output rather than the weights: item 12's `STAGE_DUMP`
+already showed this model's residual reaching 30720 of the +-32768 range, and
+a fragment writes `s*ws` into that same q16 grid, so a matvec whose output
+saturates loses the information regardless of how fine its weights are.  That
+is item 15a.
+
+**The tool that made the measurement is kept**:
+`engine/tools/mmcf_requant_q8.py --in model.i16.mmcf --out model.q8.mmcf
+[--clip P] [--emb keep|q8]` rebuilds every i16 matrix as the pre-biased q8u8
+texture dtype, preserving the tokenizer, template and metadata (only the
+scheme byte is rewritten; `split` is preserved).  Validation: rebuilding
+`stories15M` from its i16 container with the default `max|w|/127` rule gives
+the shipped `stories15M.q8.mmcf` **byte-identical greedy text**
+(`, there was a little girl named Lily. She loved to play outside in the
+sunshine. One day, she saw a big, red ball in`), so the re-quantizer agrees
+with the packer that produced the deployed files.
+
+One operational note: the first pass ran numpy over the 250 MB i16 mmap with
+whole-tensor `float32` temporaries and rebooted the Pi Zero (426 MB, no swap)
+mid-run.  Every analysis script in this section chunks at 128 rows; 250 MB of
+mmap plus one 98 MB array is enough to take the board down.

@@ -247,7 +247,15 @@ int main(int argc, char** argv) {
             else
                 cerr << "PREFIX_CACHE ignored " << prefix_cache_path << "\n";
         }
-        emit("{\"event\":\"ready\",\"prefix_cache_tokens\":" + to_string(cache_tokens.size()) + "}");
+        // The HTTP layer renders the prompt text itself, so it has to know which
+        // template this checkpoint wants.  The container states it (kind + name)
+        // and the resolution above already turned it into these three flags, so
+        // report the effective one: the server must not guess from a file name.
+        const char* effective_template = tbb_template ? "tinybrainbot"
+                                        : minimind3_template ? "minimind3"
+                                        : qwen_template ? "chatml" : "plain";
+        emit("{\"event\":\"ready\",\"prefix_cache_tokens\":" + to_string(cache_tokens.size()) +
+             ",\"template\":\"" + json_escape(effective_template) + "\"}");
         string line;
         while (getline(cin, line)) {
             if (g_stop) break;

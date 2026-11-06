@@ -752,6 +752,7 @@ GLuint GPU::attention_block(const Mat& qkv, GLuint x, int layer, int pos){
         lap("probs");
         att_v(layer, pos);
         if (attn_dup("v")) att_v(layer, pos);
+        if (getenv("ATT_DUMP") && pos == atoi(getenv("ATT_DUMP"))) dump_attention(layer, pos);
         lap("v");
         return att_out_.tex;
     }
@@ -909,20 +910,45 @@ vector<uint8_t> GPU::read_bytes(Target& t, int w, int h){
 void GPU::sync(){ glFinish(); }
 
 void GPU::forget_state(){ gl_state_forget_bindings(); }
+// One row of an activation target, in the exact bytes a GL read-back returns,
+// plus a hash of the whole row.  The GPU probe (dump_target) and the CPU probe
+// (dump_cpu_row) both print through here, so a GPU_LAYER=0 dump and a
+// GPU_LAYER=1 dump of the same model are diffable byte for byte.
+// The hash covers the row, not the printed prefix: n may be shorter than w.
+static unsigned long long fnv_row(const uint8_t* p, size_t n){
+        unsigned long long h = 1469598103934665603ull;
+        for (size_t i = 0; i < n; ++i) { h ^= p[i]; h *= 1099511628211ull; }
+        return h;
+}
+
+static void dump_row(const uint8_t* p, int w, const char* name, int n){
+        if (n > w) n = w;
+        fprintf(stderr, "DUMP %s w=%d h=%016llx", name, w, fnv_row(p, (size_t)w * 4));
+        for (int i = 0; i < n; i++) fprintf(stderr, " %02x%02x%02x%02x", p[i*4], p[i*4+1], p[i*4+2], p[i*4+3]);
+        fprintf(stderr, "\n");
+}
 
 void GPU::dump_target(const Target& t, const char* name, int n){
         if (t.tex == 0) return;
-        if (n > t.w) n = t.w;
         vector<uint8_t> b((size_t)t.w * 4);
         glFinish();
         glBindFramebuffer(GL_FRAMEBUFFER, t.fbo);
         glPixelStorei(GL_PACK_ALIGNMENT, 1);
         glReadPixels(0, 0, t.w, 1, GL_RGBA, GL_UNSIGNED_BYTE, &b[0]);
         gl_state_forget_bindings();
-        fprintf(stderr, "DUMP %s w=%d", name, t.w);
-        for (int i = 0; i < n; i++) fprintf(stderr, " %02x%02x%02x%02x", b[i*4], b[i*4+1], b[i*4+2], b[i*4+3]);
-        fprintf(stderr, "\n");
+        dump_row(&b[0], t.w, name, n);
 }
+
+// The CPU path has no target to read back: the activation is a plain float
+// vector.  Pack it exactly as a GPU producer would (x_pack applies the same
+// q16 quantisation and the same layout) and print it with the same printer.
+void GPU::dump_cpu_row(const vector<float>& v, XFormat f, const char* name, int n){
+        const int w = x_texels((int)v.size(), f);
+        vector<uint8_t> b = x_pack(v, f);
+        if ((int)b.size() < w * 4) b.resize((size_t)w * 4, 0);
+        dump_row(&b[0], w, name, n);
+}
+
 
 // Decode the qkv target to per-row q16 integers.  The decode is over the
 // integers, not the texels, so the one-row (24-bit) and the paired (packed q16)
@@ -2053,3 +2079,92 @@ vector<int32_t> GPU::read_i32(Target& t, int w, int h){
         }
         return out;
     }
+
+// --- ATT_DUMP probe -----------------------------------------------------------------
+// The attention block is five dependent passes (qrot, kv_rope, score, stats, v).
+// This probe prints the exact integers each one consumed and produced for one
+// layer and position, so the whole block is checkable offline with a dot
+// product and a softmax: no second engine path and no float32 reference.
+namespace {
+vector<uint8_t> read_target_row(const Target& t, int row){
+        vector<uint8_t> b((size_t)t.w * 4);
+        glFinish();
+        glBindFramebuffer(GL_FRAMEBUFFER, t.fbo);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(0, row, t.w, 1, GL_RGBA, GL_UNSIGNED_BYTE, &b[0]);
+        gl_state_forget_bindings();
+        return b;
+}
+
+vector<uint8_t> read_target_all(const Target& t){
+        vector<uint8_t> b((size_t)t.w * t.h * 4);
+        glFinish();
+        glBindFramebuffer(GL_FRAMEBUFFER, t.fbo);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(0, 0, t.w, t.h, GL_RGBA, GL_UNSIGNED_BYTE, &b[0]);
+        gl_state_forget_bindings();
+        return b;
+}
+
+// Signed 16-bit big-endian pair component: comp 0 is rg, comp 1 is ba.
+int q16_at(const vector<uint8_t>& b, int texel, int comp){
+        const size_t o = (size_t)texel * 4 + (size_t)(comp ? 2 : 0);
+        int v = (int)b[o] * 256 + (int)b[o + 1];
+        if (v >= 32768) v -= 65536;
+        return v;
+}
+}  // namespace
+
+void GPU::dump_attention(int layer, int pos){
+        if (qrot_target_.tex == 0 || att_scores_.tex == 0 || att_stats_.tex == 0) return;
+        // One meta line pins the shape and the grids, so the checker needs no
+        // assumptions: value = int/256 for q and att_out, int/KVSCALE for K and
+        // V, int/1024 for scores and the stats max, int/32 for the stats sum.
+        static bool meta = true;
+        if (meta) {
+                fprintf(stderr, "ATTD meta %d %d %d %d %d %g %d\n", att_heads_, att_kv_heads_,
+                        att_head_dim_, att_dim_, att_kv_dim_, (double)att_kv_scale_, att_seq_);
+                meta = false;
+        }
+        {
+                const vector<uint8_t> b = read_target_row(qrot_target_, 0);
+                fprintf(stderr, "ATTD qrot %d %d %d", layer, pos, att_dim_);
+                for (int i = 0; i < att_dim_; ++i) fprintf(stderr, " %d", q16_at(b, i / 2, i & 1));
+                fprintf(stderr, "\n");
+        }
+        // Every K/V row the score and V passes read: rows 0..pos.
+        for (int t = 0; t <= pos && t < att_seq_; ++t) {
+                if (layer >= (int)kv_cache_.size() || att_kv_bits_ != 16) break;
+                const vector<uint8_t> b = read_target_row(kv_cache_[layer], t);
+                fprintf(stderr, "ATTD kv %d %d %d %d", layer, pos, t, att_kv_dim_);
+                for (int i = 0; i < att_kv_dim_; ++i) fprintf(stderr, " %d", q16_at(b, i / 2, i & 1));
+                fprintf(stderr, "\n");
+                fprintf(stderr, "ATTD kvv %d %d %d %d", layer, pos, t, att_kv_dim_);
+                for (int i = 0; i < att_kv_dim_; ++i) fprintf(stderr, " %d", q16_at(b, att_kv_dim_ / 2 + i / 2, i & 1));
+                fprintf(stderr, "\n");
+        }
+        {
+                const vector<uint8_t> b = read_target_all(att_scores_);
+                const int w = att_scores_.w;
+                for (int h = 0; h < att_heads_; ++h) {
+                        fprintf(stderr, "ATTD score %d %d %d", layer, pos, h);
+                        for (int t = 0; t <= pos; ++t) fprintf(stderr, " %d", q16_at(b, h * w + t / 2, t & 1));
+                        fprintf(stderr, "\n");
+                }
+        }
+        {
+                const vector<uint8_t> b = read_target_all(att_stats_);
+                fprintf(stderr, "ATTD statsmax %d %d %d", layer, pos, att_heads_);
+                for (int h = 0; h < att_heads_; ++h) fprintf(stderr, " %d", q16_at(b, h, 0));
+                fprintf(stderr, "\n");
+                fprintf(stderr, "ATTD statssum %d %d %d", layer, pos, att_heads_);
+                for (int h = 0; h < att_heads_; ++h) fprintf(stderr, " %d", q16_at(b, h, 1));
+                fprintf(stderr, "\n");
+        }
+        if (att_out_.tex) {
+                const vector<uint8_t> b = read_target_row(att_out_, 0);
+                fprintf(stderr, "ATTD attout %d %d %d", layer, pos, att_dim_);
+                for (int i = 0; i < att_dim_; ++i) fprintf(stderr, " %d", q16_at(b, i / 2, i & 1));
+                fprintf(stderr, "\n");
+        }
+}

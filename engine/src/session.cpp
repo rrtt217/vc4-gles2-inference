@@ -237,6 +237,7 @@ vector<float> Session::forward(int token, int pos){
         for (int l = 0; l < m_.layers; ++l) {
             if (g_stop) return x;
             vector<float> xb = rms_norm(x, m_.rms_att.data() + (size_t)l * m_.dim);
+            if (getenv("STAGE_DUMP")) gpu_.dump_cpu_row(xb, gpu_.act_fmt_, "xb", 4096);
             vector<float> wo;
             if (gpu_attn_) {
                 GLuint xtex = gpu_.upload_input(xb);
@@ -258,10 +259,13 @@ vector<float> Session::forward(int token, int pos){
                 vector<float> att = attention(q, l, pos);
                 vector<float> att_q16(att.size());
                 for (size_t i = 0; i < att.size(); ++i) att_q16[i] = quantize_act_f(att[i]);
+                if (getenv("STAGE_DUMP")) gpu_.dump_cpu_row(att_q16, gpu_.act_fmt_, "att", 4096);
                 wo = gpu_.matvec(m_.wo[l], att_q16);
             }
             vector<float> x1 = add_q16(x, wo);
+            if (getenv("STAGE_DUMP")) gpu_.dump_cpu_row(x1, gpu_.act_fmt_, "x1", 4096);
             vector<float> xbf = rms_norm(x1, m_.rms_ffn.data() + (size_t)l * m_.dim);
+            if (getenv("STAGE_DUMP")) gpu_.dump_cpu_row(xbf, gpu_.act_fmt_, "xbf", 4096);
             vector<float> o2;
             bool gpu_ffn = !m_.w1.empty();
             if (getenv("CPU_FFN")) gpu_ffn = false;
@@ -308,6 +312,7 @@ vector<float> Session::forward(int token, int pos){
                 if (!m_.ffn_chunked) o2 = gpu_.matvec_from(m_.w2[l], htex);
             }
             x = add_q16(x1, o2);
+            if (getenv("HIDDEN_DUMP")) gpu_.dump_cpu_row(x, gpu_.act_fmt_, "hidA", 4096);
         }
         return x;
     }
@@ -331,12 +336,16 @@ GLuint Session::forward_gpu_hidden(int token, int pos, bool want_logits){
             GLuint xb = gpu_.rmsnorm(h, gpu_.rms_att_tex_[l], gpu_.xb_);
             if (pass_dup("rms_att")) xb = gpu_.rmsnorm(h, gpu_.rms_att_tex_[l], gpu_.xb_);
             mark("rms_att", l);
+            if (getenv("STAGE_DUMP")) gpu_.dump_target(gpu_.xb_, "xb", 4096);
             GLuint att_tex = gpu_.attention_block(m_.qkv[l], xb, l, pos);
+            if (getenv("STAGE_DUMP")) gpu_.dump_target(gpu_.att_out_, "att", 4096);
             mark("attn", l);
             gpu_.matvec_add(m_.wo[l], att_tex, h, gpu_.hidden_b_, gpu_.act_fmt_);
+            if (getenv("STAGE_DUMP")) gpu_.dump_target(gpu_.hidden_b_, "x1", 4096);
             mark("wo", l);
             GLuint x1 = gpu_.hidden_b_.tex;
             GLuint xbf = gpu_.rmsnorm(x1, gpu_.rms_ffn_tex_[l], gpu_.xbf_);
+            if (getenv("STAGE_DUMP")) gpu_.dump_target(gpu_.xbf_, "xbf", 4096);
             if (pass_dup("rms_ffn")) xbf = gpu_.rmsnorm(x1, gpu_.rms_ffn_tex_[l], gpu_.xbf_);
             mark("rms_ffn", l);
             if (m_.ffn_chunked) {

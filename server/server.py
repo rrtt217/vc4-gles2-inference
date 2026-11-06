@@ -7,6 +7,10 @@ this process owns HTTP/JSON/SSE and (later) tool execution.
 Protocol to engine --worker, one request at a time:
   stdin : base64(prompt) \t max_tokens \t temperature \t top_p \t seed
   stdout: JSONL events: ready/start/token/done/error
+
+The worker does not render chat: the server builds the prompt text, and it
+picks the renderer from the template the checkpoint reports in the ready event
+(chatml / minimind3 keep the renderer below; tinybrainbot has its own).
 """
 from __future__ import annotations
 
@@ -56,15 +60,22 @@ class EngineWorker:
     def _open(self, engine, model, tokenizer, seq, gpu_layer, log_path, prefix_cache, kv_pack):
         env = os.environ.copy()
         env["MODEL"] = model
-        env["TOKENIZER"] = tokenizer
+        if tokenizer:
+            # Optional: a legacy .tok beside the model.  A container carries its
+            # own tokenizer blob, and setting this to a path that does not exist
+            # makes the engine load that file instead of the embedded one.
+            env["TOKENIZER"] = tokenizer
         env["SEQ"] = str(seq)
         env["GPU_LAYER"] = "1" if gpu_layer else "0"
         if kv_pack:
             env["KV_PACK"] = str(kv_pack)
         self.log = open(log_path, "ab", buffering=0)
-        # The container names its chat template (metadata kind 3 for
-        # TinyBrainBot, 2 for MiniMind3, 1 for chatml); the server does not
-        # choose one and does not build prompt text itself.
+        # The container names its chat template (kind 3 TinyBrainBot, 2
+        # MiniMind3, 1 chatml, 0 plain) and the worker reports the effective one
+        # in its ready event.  The server still renders the text - the worker
+        # protocol carries a prompt string - but it picks the renderer from that
+        # report, never from a flag or from the file name.
+        self.template = "chatml"   # pre-ready default: the historical renderer
         cmd = [engine, "--worker"]
         if prefix_cache:
             cmd += ["--prefix-cache", prefix_cache]
@@ -104,6 +115,9 @@ class EngineWorker:
                 continue
             if ev.get("event") == "ready":
                 self.prefix_cache_tokens = int(ev.get("prefix_cache_tokens", 0))
+                # The checkpoint names its template; the server renders the
+                # prompt, so this is the only place that choice is made.
+                self.template = str(ev.get("template") or "chatml")
                 return True
             if ev.get("event") == "error":
                 raise WorkerError(ev.get("message", "worker startup error"))
@@ -443,7 +457,52 @@ def normalize_system_prompt(system: str) -> str:
     return text
 
 
-def build_prompt(body: dict) -> tuple[str, bool]:
+# One warning per unknown template name, not one per request.
+_TEMPLATE_WARNED: set[str] = set()
+
+
+def build_prompt_tinybrainbot(body: dict) -> tuple[str, bool]:
+    """TinyBrainBot own prompt: ``<|user|> ...<|assistant|> ``, no system turn.
+
+    The model was trained on ``<|user|> {q}<|assistant|> {a}<|end|>`` with no
+    BOS and no system turn (docs/model-formats.md), so the chatml text this
+    server used to build for every container was a prompt it had never seen.
+    Assistant turns already in the history are closed with ``<|end|>``, the
+    token the model emits itself; a tool message has no representation in this
+    template and arrives as a plain user turn.  There is no ``<think>`` block.
+    """
+    messages = body.get("messages")
+    if not isinstance(messages, list) or not messages:
+        raise ValueError("messages must be a non-empty array")
+    text = ""
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        role = msg.get("role")
+        if role == "system":
+            continue        # no system turn here; the engine CLI drops it too
+        if role == "assistant":
+            text += "<|assistant|> " + content_text(msg) + "<|end|>"
+        else:
+            text += "<|user|> " + content_text(msg)
+    text += "<|assistant|> "
+    return text, False
+
+
+def build_prompt(body: dict, template: str = "chatml") -> tuple[str, bool]:
+    """Render the chat for the template the checkpoint reported.
+
+    Only tinybrainbot has its own renderer; the chatml/minimind3 path below is
+    unchanged, so a MiniMind3 prompt stays byte-identical to what it was.
+    """
+    if template not in ("chatml", "minimind3", "tinybrainbot"):
+        # A container that says "plain" (or names a template this build does not
+        # know) has no renderer here; keep the historical text and say so once.
+        if template not in _TEMPLATE_WARNED:
+            _TEMPLATE_WARNED.add(template)
+            print(f"note: no renderer for template {template!r}; using chatml", file=sys.stderr)
+    if template == "tinybrainbot":
+        return build_prompt_tinybrainbot(body)
     messages = body.get("messages")
     if not isinstance(messages, list) or not messages:
         raise ValueError("messages must be a non-empty array")
@@ -822,6 +881,7 @@ class Handler(BaseHTTPRequestHandler):
                 "worker_alive": alive,
                 "restarts": int(getattr(worker, "restarts", 0)),
                 "prefix_cache_tokens": worker.prefix_cache_tokens,
+                "template": getattr(worker, "template", "chatml"),
             }, 200 if alive else 503)
         elif path == "/v1/models":
             now = int(time.time())
@@ -864,6 +924,9 @@ class Handler(BaseHTTPRequestHandler):
             self._error("not found", 404, "not_found")
             return
         self._rec = {"ts": time.time()}
+        # The renderer follows the checkpoint (the worker reports its template
+        # in the ready event), not a server flag and not a file name.
+        template = getattr(self.server.worker, "template", "chatml")
         try:
             n = int(self.headers.get("Content-Length", "0"))
             body = json.loads(self.rfile.read(n).decode("utf-8"))
@@ -877,7 +940,7 @@ class Handler(BaseHTTPRequestHandler):
                         if isinstance(t, dict)
                         and (t.get("function") or {}).get("name") == only_tool]
                 body["tools"] = kept or body["tools"]
-            prompt, thinking = build_prompt(body)
+            prompt, thinking = build_prompt(body, template)
             max_tokens = int(body.get("max_tokens", body.get("max_completion_tokens", 64)) or 64)
             if max_tokens < 1:
                 max_tokens = 1
@@ -939,7 +1002,7 @@ class Handler(BaseHTTPRequestHandler):
                 if trimmed is None:
                     break
                 body["messages"] = trimmed
-                prompt, _thinking = build_prompt(body)
+                prompt, _thinking = build_prompt(body, template)
 
         if not stream:
             # A long chat must not fail outright: if the engine says the prompt
@@ -956,7 +1019,7 @@ class Handler(BaseHTTPRequestHandler):
                                     "context_length_exceeded")
                         return
                     body["messages"] = trimmed
-                    prompt, _thinking = build_prompt(body)
+                    prompt, _thinking = build_prompt(body, template)
                 except WorkerError as e:
                     self._error(str(e), 500, "server_error")
                     return
@@ -1079,8 +1142,9 @@ def main():
     ap.add_argument("--port", type=int, default=8000)
     repo = Path(__file__).resolve().parent.parent
     ap.add_argument("--engine", default=str(repo / "engine/engine_mm3"))
-    ap.add_argument("--model", default=str(repo / "models/minimind3/minimind3.q8"))
-    ap.add_argument("--tokenizer", default=str(repo / "models/minimind3/minimind3.tok"))
+    ap.add_argument("--model", default=str(repo / "models/minimind3/minimind3.q8.mmcf"))
+    ap.add_argument("--tokenizer", default="",
+                    help="Legacy .tok (empty = the container blob)")
     ap.add_argument("--model-id", default="minimind3-64m")
     ap.add_argument("--seq", type=int, default=1024)
     ap.add_argument("--no-gpu-layer", action="store_true")
@@ -1127,7 +1191,12 @@ def main():
             if prompt_path.exists():
                 text = prompt_path.read_text(encoding="utf-8")
         if not text:
-            text = "<|im_start|>system\n" + DEFAULT_SYSTEM + "<|im_end|>\n"
+            # The warmup prompt has to use the same template as a real request,
+            # or the KV chain starts from text the checkpoint never saw.
+            if getattr(worker, "template", "chatml") == "tinybrainbot":
+                text = "<|user|> Hello<|assistant|> "
+            else:
+                text = "<|im_start|>system\n" + DEFAULT_SYSTEM + "<|im_end|>\n"
         t0 = time.time()
         try:
             worker.generate(text, 1, 0.0, 0.9, 1234)

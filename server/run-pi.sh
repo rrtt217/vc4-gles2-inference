@@ -12,7 +12,7 @@ PORT="${PORT:-8014}"
 SEQ="${SEQ:-768}"
 KV_PACK="${KV_PACK:-16}"
 CACHE="${CACHE:-pfx_sys_status_768.kv}"
-MODEL="${MODEL:-../models/minimind3/minimind3.q8}"
+MODEL="${MODEL:-../models/minimind3/minimind3.q8.mmcf}"
 
 STATS="${STATS:-stats.jsonl}"
 set -- --port "$PORT" --seq "$SEQ" --kv-pack "$KV_PACK" --warmup --model "$MODEL" --stats-file "$STATS"

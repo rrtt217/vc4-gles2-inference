@@ -28,12 +28,29 @@ On the Pi the short form is `sh server/run-pi.sh`, which adds `--kv-pack 16`,
 Defaults:
 
 - engine: `../engine/engine_mm3`
-- model: `../models/minimind3/minimind3.q8`
-- tokenizer: `../models/minimind3/minimind3.tok`
+- model: `../models/minimind3/minimind3.q8.mmcf`
+- tokenizer: the blob inside the container (`--tokenizer` only for a legacy `.tok`)
 - model id: `minimind3-64m`
 - cache: 1024 tokens
 - KV packing: off (24-bit); use `--kv-pack 16` or `8`
 - worker log: `worker.log`
+
+## Chat template
+
+The checkpoint states its own template (MMCF metadata kind 3 TinyBrainBot, 2
+MiniMind3, 1 chatml, 0 plain) and the worker reports it in its `ready` event,
+so this process renders the prompt with that template instead of always
+building ChatML.  `GET /health` prints the name under `template`.
+
+| template | prompt |
+|---|---|
+| `minimind3` / `chatml` | `<|im_start|>system ...` plus a `<think>` block, exactly as before |
+| `tinybrainbot` | `<|user|> {q}<|assistant|> `, no system turn, no `<think>`; history turns end with `<|end|>` |
+| `plain` / unknown | falls back to chatml and prints one warning |
+
+TinyBrainBot also needs `--no-gpu-layer`: its full texture-resident GPU layer
+path is not correct on VC4 yet (docs/performance.md, item 12), so the CPU path
+is the deployable one.
 
 ## Endpoints
 

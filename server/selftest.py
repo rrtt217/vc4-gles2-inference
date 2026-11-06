@@ -403,6 +403,37 @@ worker.alive = True
 code, body = http("GET", "/health")
 check("/health 200 after recovery", code == 200 and body.get("worker_alive") is True, str(body))
 
+
+print("== chat template comes from the checkpoint ==")
+chatml, _ = srv.build_prompt({"messages": [{"role": "user", "content": "hi"}]})
+WANT_CHATML = ("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+               "<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n"
+               "<think>\n\n</think>\n\n")
+check("chatml renderer unchanged", chatml == WANT_CHATML, repr(chatml))
+mm3, _ = srv.build_prompt({"messages": [{"role": "user", "content": "hi"}]}, "minimind3")
+check("minimind3 name keeps the chatml renderer", mm3 == chatml, repr(mm3))
+
+tbb_body = {"messages": [{"role": "system", "content": "be terse"},
+                         {"role": "user", "content": "hi"},
+                         {"role": "assistant", "content": "Hello!"},
+                         {"role": "user", "content": "who are you?"}]}
+tbb, tbb_thinking = srv.build_prompt(tbb_body, "tinybrainbot")
+WANT_TBB = "<|user|> hi<|assistant|> Hello!<|end|><|user|> who are you?<|assistant|> "
+check("tinybrainbot prompt is its own template", tbb == WANT_TBB, repr(tbb))
+check("tinybrainbot drops the chatml markers and the system turn",
+      "<|im_start|>" not in tbb and "be terse" not in tbb, repr(tbb))
+check("tinybrainbot has no thinking block", tbb_thinking is False and "<think>" not in tbb, repr(tbb))
+
+# The worker reports the template in its ready event; the HTTP path must follow.
+worker.template = "tinybrainbot"
+httpd.worker = worker
+code, body = http("GET", "/health")
+check("/health reports the template", body.get("template") == "tinybrainbot", str(body))
+code, resp = http("POST", "/v1/chat/completions",
+                  {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 4})
+check("HTTP request is rendered with the checkpoint template",
+      worker.last_prompt == "<|user|> hi<|assistant|> ", repr(worker.last_prompt))
+worker.template = "chatml"
 httpd.shutdown()
 httpd.server_close()
 
