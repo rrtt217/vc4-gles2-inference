@@ -3793,3 +3793,58 @@ models have the same headroom problem and different sensitivity to it: one
 q16 per activation is enough for MiniMind3's trajectory and not for
 TinyBrainBot's.  That rules out a range bug and sizes the real fix:
 precision, i.e. more than one int16 per activation on the full path.
+
+### q8 precision is not why TinyBrainBot degrades (item 15, 2026-11-06)
+
+Item 15 said TinyBrainBot's q8 is bad because `Q8M1` stores one scale per
+matrix.  The q8 file was measured against its own i16 sibling before changing
+any format, and the premise does not hold.
+
+**The file is a faithful quantization.**  For every matrix, `w = i16 * scale`
+from `tinybrainbot.i16.mmcf` is the exact source; the shipped q8 tensor is
+compared against it row by row (`||w_q8_r - w_r|| / ||w_r||`, 128 rows per
+chunk).  The stored scale equals `max|w|/127` to the last digit on all 81
+matrices (ratio 1.000), and the whole-tensor cosine is 0.998-0.9999.
+
+| model / file | per-row error p50 (median over matrices) | worst matrix p50 | Frobenius |
+|---|---:|---:|---:|
+| TinyBrainBot q8 (shipped) | 2.14% | 7.59% (layer 7 w2) | 1.3-6.8% |
+| TinyBrainBot q8, scale clipped at p99.9 | **0.92%** | 2.13% | 1.5-3.9% |
+| MiniMind3 q8 (works) | 1.10% | 1.56% | 1.2-1.6% |
+| TinyBrainBot q4 (works) | **7.83%** | 7.92% | 7.9-8.0% |
+
+**And the text does not follow the error.**  Same binary, same prompt, chat
+template from the container, `GPU_LAYER=0` (CPU attention; the matvecs are the
+GPU q8 kernels either way), greedy 24 tokens:
+
+| file | `Hello, who are you?` |
+|---|---|
+| q8 shipped | `contacting contacting contacting ...` |
+| q8 clipped at p99.9 (0.92% error) | `RetRetRetRetRetRet ...`; `safely safely ...` on two other prompts |
+| q4 (7.83% error) | `Hi! Great to see you. How can I help?` |
+
+A q4 file with **eight times** the weight error answers and a q8 file with
+better error than MiniMind3's does not, so the failure is not the scale and
+per-row scales (item 15's proposal) would not have fixed it.  It is the q8
+*path* at TinyBrainBot's shapes or magnitudes.  The first suspect is the q16
+envelope on the matvec output rather than the weights: item 12's `STAGE_DUMP`
+already showed this model's residual reaching 30720 of the +-32768 range, and
+a fragment writes `s*ws` into that same q16 grid, so a matvec whose output
+saturates loses the information regardless of how fine its weights are.  That
+is item 15a.
+
+**The tool that made the measurement is kept**:
+`engine/tools/mmcf_requant_q8.py --in model.i16.mmcf --out model.q8.mmcf
+[--clip P] [--emb keep|q8]` rebuilds every i16 matrix as the pre-biased q8u8
+texture dtype, preserving the tokenizer, template and metadata (only the
+scheme byte is rewritten; `split` is preserved).  Validation: rebuilding
+`stories15M` from its i16 container with the default `max|w|/127` rule gives
+the shipped `stories15M.q8.mmcf` **byte-identical greedy text**
+(`, there was a little girl named Lily. She loved to play outside in the
+sunshine. One day, she saw a big, red ball in`), so the re-quantizer agrees
+with the packer that produced the deployed files.
+
+One operational note: the first pass ran numpy over the 250 MB i16 mmap with
+whole-tensor `float32` temporaries and rebooted the Pi Zero (426 MB, no swap)
+mid-run.  Every analysis script in this section chunks at 128 rows; 250 MB of
+mmap plus one 98 MB array is enough to take the board down.

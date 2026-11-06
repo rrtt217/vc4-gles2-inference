@@ -154,9 +154,13 @@ no system turn and no BOS:
 `"<|user|> " + q + "<|assistant|> "` and disables the tokenizer's dummy prefix;
 the stop set is `{7}` (EOS 7), not `</s>`.
 
-**Precision matters more here than on MiniMind.**  `Q8M1` stores one scale per
-matrix (`make_q8_from_i16.py: q8mat` takes `max(|w|)` over the whole matrix), and
-for this checkpoint that scale is too coarse: the q8 build answers with a bare
-`<|end|>` while the q4 build (block-32 scale *and* min) answers
-`Hello! What can I do for you`.  Use **q4 or i16** for this model; the q8 file is
-kept only for the size comparison.
+**q8 is not usable for this model, and the scale is not why.**  `Q8M1` stores
+one scale per matrix (`make_q8_from_i16.py: q8mat` takes `max(|w|)` over the
+whole matrix), which used to be blamed for the q8 build's degenerate output.
+The measurement says otherwise: the file is a faithful `max|w|/127`
+quantization (cosine 0.998-0.9999, per-row median error 2.14% against 1.10% for
+the MiniMind3 q8 that works), and a re-quantization at a clipped p99.9 scale
+(0.92%) still degenerates while this model's q4, at 7.83% weight error, answers
+normally.  The break is in the q8 runtime path, not the weights; see
+docs/performance.md, "q8 precision is not why TinyBrainBot degrades", and
+WORKLOG item 15a.  Use **q4 or i16** for this model.
