@@ -834,10 +834,11 @@ GLuint GPU::rmsnorm(GLuint x, GLuint w, Target& out){
         }
         layer_finish("NF_RMS");
 
-        GLuint pn = x_rms_norm();
+        GLuint pn = x_rms_norm(rms_eps_stated_);
         bind_fbo(out.fbo);
         glViewport(0, 0, aw, 1);
         use_program(pn);
+        if (rms_eps_stated_) glUniform1f(uloc(pn, "eps"), rms_eps_);
         bind_tex(0, x);
         set_sampler(pn, "X", 0);
         bind_tex(1, w);
@@ -1212,9 +1213,10 @@ GLuint GPU::x_rms_stats2(){
                       ::rms_stats2(att_dim_, res_fmt_));
     }
 
-GLuint GPU::x_rms_norm_pair2(){
-        return x_prog("xrms2n_" + to_string(att_dim_) + "_" + x_format_name(res_fmt_),
-                      ::rms_norm_pair2(att_dim_, res_fmt_));
+GLuint GPU::x_rms_norm_pair2(bool use_eps_uniform){
+        return x_prog("xrms2n_" + to_string(att_dim_) + "_" + x_format_name(res_fmt_) +
+                          (use_eps_uniform ? "_e" : ""),
+                      ::rms_norm_pair2(att_dim_, res_fmt_, use_eps_uniform));
     }
 
 GLuint GPU::x_q8_gate2_p2(int rows, int cols){
@@ -1252,10 +1254,11 @@ GLuint GPU::rmsnorm_pair2(GLuint xa, GLuint xb, GLuint w, Target& out){
         setup_attrib(ps);
         glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         layer_finish("NF_RMS");
-        GLuint pn = x_rms_norm_pair2();
+        GLuint pn = x_rms_norm_pair2(rms_eps_stated_);
         bind_fbo(out.fbo);
         glViewport(0, 0, aw, 1);
         use_program(pn);
+        if (rms_eps_stated_) glUniform1f(uloc(pn, "eps"), rms_eps_);
         bind_tex(0, xa); set_sampler(pn, "XA", 0);
         bind_tex(1, xb); set_sampler(pn, "XB", 1);
         bind_tex(2, w); set_sampler(pn, "W", 2);
@@ -1551,11 +1554,12 @@ GLuint GPU::x_rms_split(){
 
 GLuint GPU::x_rms_reduce(){ return x_prog("xrmsr", rms_stats_reduce()); }
 
-GLuint GPU::x_rms_norm(){
+GLuint GPU::x_rms_norm(bool use_eps_uniform){
         const bool fused = rms_fused() && act_fmt_ != XFormat::I8_4;
         return x_prog("xrmsn_" + to_string(att_dim_) + "_" + x_format_name(res_fmt_) + "_" +
-                          x_format_name(act_fmt_) + (fused ? "_f" : ""),
-                      rms_norm(att_dim_, res_fmt_, act_fmt_, fused));
+                          x_format_name(act_fmt_) + (fused ? "_f" : "") +
+                          (use_eps_uniform ? "_e" : ""),
+                      rms_norm(att_dim_, res_fmt_, act_fmt_, fused, use_eps_uniform));
     }
 
 GLuint GPU::x_v(){

@@ -202,6 +202,10 @@ int main(int argc, char** argv) {
         return id == 1 || id == 2;
     };
 
+    gpu.set_rms_eps(model.rms_eps, model.rms_eps_stated);
+    if (getenv("SHADER_TIME"))
+        cerr << "rmsnorm eps: " << model.rms_eps << " (container"
+             << (model.rms_eps == 1e-5f ? "" : "-stated") << ")\n";
     const auto up_t0 = Clock::now();
     for (auto& m : model.qkv) gpu.upload(m);
     for (auto& m : model.wo) gpu.upload(m);

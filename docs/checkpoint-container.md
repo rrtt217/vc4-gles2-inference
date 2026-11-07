@@ -109,6 +109,7 @@ Each record is `<HHI>` (key, type, length) followed by the payload; `type` is 1
 | 8 | `<6i` bos, eos, stop, pad, unk, im_start (all `-1` = absent) |
 | 9 | `u8 n`, then n × (`name\0`, `u32 len`, **Jinja template text**).  The default variant is stored with an empty name and read as `default` |
 | 10 | `<BB` add_bos, add_eos (`255` = not stated; `-1` in memory) |
+| 11 | `<f` `rms_norm_eps`.  Absent = the engine's historical 1e-5, compiled as a literal.  A file that states one switches the norm shader to a uniform, which is **not** numerically neutral on this driver (MiniMind3 PPL 270.3170 -> 269.9303 with the same value), so the default path stays literal |
 
 Key 9 is the model's own `chat_template` from HuggingFace, stored **verbatim**:
 the same text a GGUF file carries in `tokenizer.chat_template`.  A reader that

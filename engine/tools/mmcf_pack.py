@@ -322,6 +322,8 @@ def build(meta, tensors, tok_blob, args):
             vb = vtext.encode("utf-8") if isinstance(vtext, str) else vtext
             body += vname.encode() + b"\0" + struct.pack("<I", len(vb)) + vb
         md += tlv(9, 1, body)
+    if args.rms_eps is not None:
+        md += tlv(11, 1, struct.pack("<f", args.rms_eps))
     if args.add_bos is not None or args.add_eos is not None:
         md += tlv(10, 1, struct.pack("<BB", 255 if args.add_bos is None else args.add_bos,
                                      255 if args.add_eos is None else args.add_eos))
@@ -413,6 +415,9 @@ def main():
                          "chat_template).  Default: read it from tokenizer_config.json next to --in")
     ap.add_argument("--chat-template-variant", metavar="NAME=FILE", action="append", default=[],
                     help="additional named template variant (repeatable)")
+    ap.add_argument("--rms-eps", type=float, default=None,
+                    help="RMSNorm epsilon to record (key 11).  The engine defaults to 1e-5; "
+                         "a HF config usually says 1e-6 and the packer warns when they differ")
     ap.add_argument("--add-bos", type=int, choices=[0, 1], default=None,
                     help="whether the engine should put BOS in front of the prompt")
     ap.add_argument("--add-eos", type=int, choices=[0, 1], default=None)
@@ -431,6 +436,12 @@ def main():
         # Straight from HuggingFace: no intermediate checkpoint, and the rope
         # comes from config.json rather than a flag.
         print("source: %s (quant %s, seq %d)" % (args.src, args.quant, args.seq))
+        import json as _json
+        _cfg = _json.load(open(os.path.join(args.src, "config.json")))
+        _want = float(_cfg.get("rms_norm_eps") or 0.0)
+        if _want and args.rms_eps is None and abs(_want - 1e-5) > 1e-12:
+            print("note: config says rms_norm_eps %g, the engine default is 1e-05; "
+                  "pass --rms-eps %g to use the model's value" % (_want, _want))
         meta, tensors = tensors_from_hf(args.src, args.quant, args.seq)
     elif is_llama2c(args.src):
         # llama2.c fp32, also straight to a container; its rope is the llama2

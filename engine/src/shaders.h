@@ -34,7 +34,7 @@ std::string matvec_q8_pair_swiglu(int rows, int cols, XFormat xf, bool inl = tru
 std::string matvec_q8_gate2(int rows, int cols);
 std::string matvec_q8_p2(int rows, int cols);
 std::string rms_stats2(int dim, XFormat rf);
-std::string rms_norm_pair2(int dim, XFormat rf);
+std::string rms_norm_pair2(int dim, XFormat rf, bool use_eps_uniform);
 std::string matvec_q8_gate2_p2(int rows, int cols);
 std::string matvec_q8_p2_add_p2(int rows, int cols);
 std::string matvec_q8_p2_add(int rows, int cols, XFormat rf);
@@ -57,7 +57,8 @@ std::string swiglu(int hidden, bool fused, XFormat out);
 
 std::string rms_stats_split(int dim, XFormat residual);
 std::string rms_stats_reduce();
-std::string rms_norm(int dim, XFormat residual, XFormat out, bool fused_reduce);
+std::string rms_norm(int dim, XFormat residual, XFormat out, bool fused_reduce,
+                     bool use_eps_uniform);
 
 std::string att_kv_rope(const AttnConfig& c);
 std::string att_vscale(const AttnConfig& c);

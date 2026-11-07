@@ -43,6 +43,11 @@ public:
     // Metadata key 10: whether the template expects a BOS/EOS around the
     // prompt.  -1 = not stated (derive from template_kind, the historical rule).
     int add_bos = -1, add_eos = -1;
+    // Metadata key 11: the model's own RMSNorm epsilon.  The shaders used to
+    // hardcode 1e-5, which is 10x MiniMind3's (and feng30m's, and supra2's)
+    // 1e-6; that was invisible until a model turned out to be sensitive to it.
+    float rms_eps = 1e-5f;
+    bool rms_eps_stated = false;   // false = use the shader's literal 1e-5
     int capabilities = 0;
     bool have_capabilities = false;
     // Special token ids from the container (-1 = absent).  Legacy files have no

@@ -221,6 +221,10 @@ These were paid for; do not relearn them.
   that round-trips q16 only at the dump; `diff_paths.sh` says so in its own
   header, and on a *correct* model the per-layer cosine still falls to 0.46 by
   layer 7.  Only a **same-path** A/B (one flag, one kernel) decides.
+- **A constant is not a uniform.** Replacing a GLSL literal with a uniform of
+  the same value moved MiniMind3's PPL 270.3170 -> 269.9303 on Xe: the driver
+  folds the literal differently.  Keep the literal unless the value really has
+  to travel (metadata key 11 is the one place this was allowed to happen).
 - **Verify a revert by hash, not by reading the diff.**  Keeping the shader
   uniforms and setting them to the old constant *looked* equivalent and
   reproduced the regressed numbers exactly; only the literal form restored the

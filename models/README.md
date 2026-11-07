@@ -109,7 +109,7 @@ independent float32 forward over the same weights.
 | `hidden_act` | silu | SwiGLU gate |
 | `tie_word_embeddings` | true | `wcls` = embedding |
 | `vocab_size` | 32768 | 22 logits tiles, last one 512 rows |
-| `rms_norm_eps` | **1e-06** | **the engine hardcodes 1e-5** in the rmsnorm shaders (all three models use 1e-6) |
+| `rms_norm_eps` | 1e-06 | now metadata key 11 (`--rms-eps`), defaulting to the historical 1e-5; measured below to make **no** difference |
 | `rope_parameters` | `{theta: 10000, rope_type: default}` | transformers 5 form: `rope_of()` used to read only top-level `rope_theta` and silently produced 10000/10000 — now handled |
 | `bos_token_id` / `eos_token_id` / `pad` | 0 / 2 / 1 | container: bos -1 (chat templates add no BOS), eos 2, stop 6 (`<|im_end|>`), pad 1 |
 | `generation_config` | eos 2, no sampling knobs | matches |
@@ -149,6 +149,8 @@ Ruled out by measurement, each one a single change:
 | interleaved rope | reference then says `\n`, not `Introdu` |
 | no qk-norm | reference then says `st`, not `Introdu` |
 | `eps 1e-6` | reference still says `I` |
+| `eps 1e-6` **in the engine** (key 11, repacked) | engine reports `rmsnorm eps: 1e-06 (container-stated)` and its logits are **bit-identical** to the 1e-5 run: the sum of squares is computed in fixed point, so a 1e-5-vs-1e-6 epsilon is below its resolution |
+| the epsilon as a *uniform* instead of a literal | moves MiniMind3's PPL 270.3170 -> 269.9303 with the same numeric value, so the shader keeps the literal unless the container states an epsilon |
 
 So the divergence is inside the engine's maths for this checkpoint shape, and
 none of the config fields above explains it.  What is left is a stage-level

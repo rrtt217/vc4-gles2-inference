@@ -140,6 +140,10 @@ public:
     bool needs_finish() const;
     bool rms_fused() const;
     int max_target_dim() const { return max_target_dim_; }
+    // RMSNorm epsilon: the container's `rms_norm_eps` when it states one, else
+    // the historical 1e-5 the shaders used to hardcode.
+    void set_rms_eps(float e, bool stated) { rms_eps_ = e > 0.0f ? e : 1e-5f; rms_eps_stated_ = stated; }
+    float rms_eps() const { return rms_eps_; }
 
 private:
     AttnConfig att_cfg() const;
@@ -150,7 +154,7 @@ private:
     GLuint x_q8_gate2(int rows, int cols);
     GLuint x_q8_p2(int rows, int cols);
     GLuint x_rms_stats2();
-    GLuint x_rms_norm_pair2();
+    GLuint x_rms_norm_pair2(bool use_eps_uniform);
     GLuint x_q8_gate2_p2(int rows, int cols);
     GLuint x_q8_p2_add_p2(int rows, int cols);
     GLuint x_q8_p2_add(int rows, int cols);
@@ -170,7 +174,7 @@ private:
     GLuint x_swiglu(int hidden, bool fused);
     GLuint x_rms_split();
     GLuint x_rms_reduce();
-    GLuint x_rms_norm();
+    GLuint x_rms_norm(bool use_eps_uniform);
     GLuint x_v();
     GLuint x_vscale();
     GLuint x_kv_rope();
@@ -251,6 +255,12 @@ private:
     bool att_qkv_pair_ = false;  // qkv target holds two q16 per texel
     bool att_kv_packed_ = false;
     int att_kv_bits_ = 0;
+    float rms_eps_ = 1e-5f;
+    // A container that states an epsilon makes the shader read a uniform; one
+    // that does not keeps the literal 1e-5, because turning a constant into a
+    // uniform is *not* a no-op on this driver (measured: PPL 270.3170 ->
+    // 269.9303 with eps numerically identical).
+    bool rms_eps_stated_ = false;
     float att_kv_scale_ = 16384.0f;
     int att_kv_width_ = 0;
     bool att_kv_vstep_ = false;   // 8-bit KV: per-head V grid

@@ -488,19 +488,21 @@ string rms_stats2(int dim, XFormat rf) {
         "gl_FragColor=encs(s);}";
 }
 
-string rms_norm_pair2(int dim, XFormat rf) {
+string rms_norm_pair2(int dim, XFormat rf, bool use_eps_uniform) {
+    const string eps_src = use_eps_uniform ? "eps" : "1e-5";
     const string D = to_string(dim);
     const string RW = to_string(x_texels(dim, rf));
     const string DW = to_string(x_texels(dim, XFormat::I16_2));
     return head(XFormat::I16_2) + x_residual_glsl(rf) + x_pair2_glsl() + q24_helpers() +
-        "uniform sampler2D XA,XB,W,S;"
+        (use_eps_uniform ? "uniform sampler2D XA,XB,W,S;uniform float eps;"
+                         : "uniform sampler2D XA,XB,W,S;") +
         "void main(){int k=int(gl_FragCoord.x);"
         "float ssa=0.0,ssb=0.0;"
         "for(int p=0;p<32;p++){"
         "ssa+=x_i24raw(texture2D(S,vec2((float(p)+0.5)/64.0,0.5)))/4096.0;"
         "ssb+=x_i24raw(texture2D(S,vec2((float(p+32)+0.5)/64.0,0.5)))/4096.0;}"
-        "float inva=inversesqrt(ssa/float(" + D + ")+1e-5);"
-        "float invb=inversesqrt(ssb/float(" + D + ")+1e-5);"
+        "float inva=inversesqrt(ssa/float(" + D + ")+" + eps_src + ");"
+        "float invb=inversesqrt(ssb/float(" + D + ")+" + eps_src + ");"
         "vec4 wc=texture2D(W,vec2((float(k/2)+0.5)/float(" + DW + "),0.5));"
         "float wk=((k/2)*2==k)?x_i16(wc.rg):x_i16(wc.ba);"
         "float va=R1(XA,k," + RW + ".0)*inva*wk;"
@@ -1096,7 +1098,9 @@ string rms_stats_reduce() {
         "gl_FragColor=encs(s);}";
 }
 
-string rms_norm(int dim, XFormat residual, XFormat out, bool fused_reduce) {
+string rms_norm(int dim, XFormat residual, XFormat out, bool fused_reduce,
+                bool use_eps_uniform) {
+    const string eps_src = use_eps_uniform ? "eps" : "1e-5";
     // Fusing the 32-way reduce into every normalising fragment keeps the exact
     // summation order, so the result is bit-identical to the separate pass; it
     // trades one draw for 32 texture reads per output fragment.
@@ -1116,7 +1120,7 @@ string rms_norm(int dim, XFormat residual, XFormat out, bool fused_reduce) {
         body =
             "void main(){int t=int(gl_FragCoord.x);int i0=4*t;"
             + ss_read +
-            "float inv=inversesqrt(ss/float(" + D + ")+1e-5);"
+            "float inv=inversesqrt(ss/float(" + D + ")+" + eps_src + ");"
             "vec4 wa=texture2D(W,vec2((float(2*t)+0.5)/float(" + DW + "),0.5));"
             "vec4 wb=texture2D(W,vec2((float(2*t+1)+0.5)/float(" + DW + "),0.5));"
             "float v0=R1(X,i0," + RW + ".0)*inv*x_i16(wa.rg);"
@@ -1128,11 +1132,11 @@ string rms_norm(int dim, XFormat residual, XFormat out, bool fused_reduce) {
         body =
             "void main(){int t=int(gl_FragCoord.x);int i0=2*t;int i1=i0+1;"
             + ss_read +
-            "float inv=inversesqrt(ss/float(" + D + ")+1e-5);" + wsplit +
+            "float inv=inversesqrt(ss/float(" + D + ")+" + eps_src + ");" + wsplit +
             "float v0=R1(X,i0," + RW + ".0)*inv*w0;"
             "float v1=0.0;if(i1<" + D + ")v1=R1(X,i1," + RW + ".0)*inv*w1;"
             "gl_FragColor=x_st2(v0,v1);}";
     }
     return head(residual) + x_residual_glsl(residual) + q24_helpers() +
-        "uniform sampler2D X,W,S;uniform float dummy;" + body;
+        "uniform sampler2D X,W,S;uniform float dummy;" + (use_eps_uniform ? "uniform float eps;" : string()) + body;
 }

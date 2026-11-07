@@ -59,7 +59,8 @@ without moving the gate:
 - `PAIR_PROFILE=1` — the same for the two-position prefill pair.
 - `TIMING=1` — chat prefill and decode to stderr.
 - `SHADER_TIME=1` — `STARTUP <ms>` phase marks and one line per fragment
-  program link (`link <ms>`, source bytes, key, cumulative).
+  program link (`link <ms>`, source bytes, key, cumulative).  It also prints
+  `rmsnorm eps: <v> (container-stated)` when the container carries key 11.
 - `UPLOAD_TIME=1` — `UPLOAD <s> wall, <n> textures, texture time <ms>` after
   the weight upload (also implied by `SHADER_TIME=1`).
 
