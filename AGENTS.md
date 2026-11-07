@@ -25,7 +25,6 @@ replace working paths with demos or cosmetic rewrites.
 | `engine/tools/` | container packer, container inspector, numpy reference forward passes |
 | `engine/third_party/jinja/` | vendored llama.cpp Jinja engine (MIT) — renders the container's chat template |
 | `templates/` | the chat templates this repository ships, for `mmcf_pack.py --chat-template` |
-| `engine/quantize/` | F16/llama2.c → I16 → Q8/Q4 converters (legacy layouts; `mmcf_pack.py` wraps them) |
 | `engine/scripts/` | the regression gate **and** the diagnostic tools |
 | `engine/probes/` | standalone VC4 feature/throughput probes (not linked into the engine) |
 | `server/` | OpenAI-compatible HTTP server, deterministic tools, self-test, eval suite |
@@ -107,16 +106,20 @@ anything else and names the packer.  A `.q8` / `.q4` / `.i16` / `.bin` file in
 `models/` is an *input to the packer*, never a model the engine can run:
 
 ```bash
-# The store keeps sources, not derived checkpoints: regenerate the legacy file
-# from model.safetensors first (also rebuilds q4 and the tokenizer).
-minimind3/convert.sh
-
-python3 engine/tools/mmcf_pack.py --in models/minimind3/minimind3.q8 \
+# Straight from the source: the packer quantizes, so no intermediate .i16/.q8/
+# .q4 file is written.  --quant is the precision, --seq the KV length.
+python3 engine/tools/mmcf_pack.py --in models/minimind3 \
+  --quant q8 --seq 256 \
   --tok models/minimind3/minimind3.tok \
   --out models/minimind3/minimind3.q8.mmcf \
   --name minimind3 --template minimind3 --chat \
   --chat-template minimind3/chat_template.jinja --verify
 ```
+
+A legacy checkpoint (`Q8M1/Q8M2`, `Q4M1`, `I16M1/I16M2`) or a llama2.c `.bin`
+is still accepted by `--in`; `--quant` then has no effect and the source's own
+precision is kept.  The old `engine/quantize/*.py` converters are gone: they
+only produced formats the engine cannot read.
 
 The container carries the tokenizer, the chat template **text** (metadata
 key 9, the same Jinja string a GGUF file holds in `tokenizer.chat_template`),

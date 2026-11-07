@@ -24,7 +24,6 @@ This README is the quick start. Deep notes are in [../docs/](../docs/):
 | `src/shaders*.cpp` | GLSL source builders |
 | `tools/` | MMCF packer/inspector and numpy reference forwards (host python) |
 | `third_party/jinja/` | vendored llama.cpp Jinja engine (MIT), renders the container's chat template |
-| `quantize/` | F16/I16/q8/q4 converters (legacy layouts; the packer wraps them) |
 | `scripts/` | regression gate, CPU-vs-GPU diff, attention/logits oracles, benchmarks |
 | `probes/` | standalone VC4 probes, not linked into the engine |
 | `Makefile` | local, Pi and probe build flags |
@@ -132,8 +131,8 @@ use the i16 container.  stories42M i16 is too large for the current CMA budget.
 The 260K model is a floor probe: ~85 ms/token, but 5.4 s prefill, because the
 attention passes walk the full 512-position grid.
 
-These came from llama2.c fp32 `.bin` sources, which the packer converts to I16
-by default (`make_i16.py --kind llama2c`).  There is no `LEGACY_Q8=1` path
+These come from llama2.c fp32 `.bin` sources, which the packer accepts
+directly (`--in .../stories15M.bin --quant i16`).  There is no `LEGACY_Q8=1` path
 anymore: the engine has no legacy reader.
 
 ## Converting a checkpoint
@@ -142,27 +141,26 @@ The engine loads only `.mmcf`.  A `.bin`, `.i16`, `.q8` or `.q4` file is an
 input to the packer:
 
 ```bash
-# HF safetensors -> I16 (reads BF16/F16/F32 and HF Llama tensor names)
-python3 quantize/make_i16.py --kind minimind \
-  --input ../models/<model> --output ../models/<model>/<model>.i16
-
-# legacy layout -> container, verified byte for byte against the source.
+# One step from safetensors: the packer quantizes, so no .i16/.q8/.q4 file is
+# written.  --quant picks the precision, --seq the KV length.
 # --chat-template stores the model's own Jinja template (metadata key 9), so the
 # prompt stops being a C++ build option; without it the container falls back to
 # --template's kind.
-python3 tools/mmcf_pack.py --in ../models/<model>/<model>.i16 \
+python3 tools/mmcf_pack.py --in ../models/<model> --quant q4 --seq 512 \
   --tok ../models/<model>/<model>.tok \
-  --out ../models/<model>/<model>.i16.mmcf \
+  --out ../models/<model>/<model>.q4.mmcf \
   --name <model> --template chatml --chat \
-  --theta 100000 --rope-half \
   --chat-template ../models/<model>/tokenizer_config.json --verify
 
 # what does the engine actually read from it?
-python3 tools/mmcf_dump.py ../models/<model>/<model>.i16.mmcf --check
+python3 tools/mmcf_dump.py ../models/<model>/<model>.q4.mmcf --check
 ```
 
-`--theta` and `--rope-half` are required for a `Q8M1`/`I16M1` source, because
-that header carries no rope at all and the packer refuses to guess.  Templates:
+A llama2.c `.bin` works the same way (`--in ../models/llama2c/stories15M.bin
+--quant i16 --tok ... --template plain --chat`).  A legacy checkpoint is still
+accepted, and then `--theta` and `--rope-half` are required for a `Q8M1`/`I16M1`
+source, because that header carries no rope at all and the packer refuses to
+guess.  Templates:
 `plain` (0), `chatml`/`qwen` (1), `minimind3` (2), `tinybrainbot` (3).  The
 tokenizer is embedded, and the special-token ids are derived from it.
 

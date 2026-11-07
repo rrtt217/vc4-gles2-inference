@@ -63,6 +63,13 @@ weight encoding differ.
 
 ### I16M1
 
+> The layouts below are **packer inputs only**.  `engine/quantize/*.py` (the
+> scripts that wrote them) is gone: `mmcf_pack.py --in <hf dir> --quant i16|q8|q4`
+> quantizes straight from safetensors, and `--in <legacy file>` still reads an
+> old file produced elsewhere.  Nothing in this repository writes these formats
+> any more.
+
+
 ```
 u32 magic = 0x4931364D ("I16M")
 i32 dim, hidden, layers, heads, kv_heads, vocab, seq
@@ -93,7 +100,7 @@ Q8M1 uses the same layout with int8 data and no rope metadata.  MiniMind q8
 needs theta 1e6 and rotate-half; I16M1 stores these fields, Q8M1 does not — the
 packer therefore **refuses to guess** (see `checkpoint-container.md`).
 
-`make_q8_from_i16.py` writes `split=1` by default and splits a fused W13 into
+The packer's q8 output always writes `split=1`, splitting a fused W13 into
 W1/W3.  The split layout keeps separate q8 scales and takes the paired q16
 W1/W3 path.  The runtime also supports fused q8 W13 through
 `matvec_q8_pair_fused`, so old fused files remain convertible.
@@ -117,8 +124,9 @@ Q8M2 stores theta/half itself; no environment override is needed.
 
 ### Q4M1
 
-Q4M1 is generated from F16 safetensors by `make_q4.py`, or from an I16
-checkpoint by `make_q4_from_i16.py` (I16 is an allowed source; q8 is not):
+Q4M1 is written by `mmcf_pack.py --quant q4`, always from the float weights
+(q8 is never a q4 source; I16 is an allowed one when a legacy file is the
+input):
 
 ```text
 u32 magic = 0x51344D31 ("Q4M1")
@@ -148,27 +156,31 @@ stay q8.
 ## Converting a model
 
 ```bash
-# 1. HF safetensors -> I16 (reads BF16/F16/F32, HF Llama tensor names)
-python3 engine/quantize/make_i16.py --kind minimind \
-  --input models/<model> --output /tmp/<model>.i16
+# One command per precision, straight from safetensors.  --seq is the KV length
+# recorded in the container; the rope configuration comes from config.json.
+for q in i16 q8 q4; do
+  python3 engine/tools/mmcf_pack.py --in models/<model> --quant $q --seq 512 \
+    --tok models/<model>/<model>.tok \
+    --out models/<model>/<model>.$q.mmcf \
+    --name <model> --template chatml --chat \
+    --chat-template models/<model>/tokenizer_config.json --verify
+done
 
-# 2. I16 -> Q8 and/or Q4, when you want those precisions
-python3 engine/quantize/make_q8_from_i16.py /tmp/<model>.i16 /tmp/<model>.q8
-python3 engine/quantize/make_q4_from_i16.py /tmp/<model>.i16 /tmp/<model>.q4
-
-# 3. legacy layout -> container
-python3 engine/tools/mmcf_pack.py --in /tmp/<model>.q4 --tok models/<model>/<model>.tok \
-  --out models/<model>/<model>.q4.mmcf --name <model> --template chatml --chat \
-  --theta 100000 [--rope-half] [--qk-norm] \
-  --chat-template models/<model>/tokenizer_config.json --verify
-
-# 4. confirm what the engine will read
+# confirm what the engine will read
 python3 engine/tools/mmcf_dump.py models/<model>/<model>.q4.mmcf --check
 ```
 
-`make_i16.py --kind` selects the tensor naming: `llama2c` for the stories
-family, `minimind` for HF Llama/Qwen-shaped checkpoints.  Both read the
-dtype from the safetensors header rather than assuming F16.
+A llama2.c fp32 `.bin` is the other accepted source: `--in models/llama2c/
+stories15M.bin --quant i16 --tok .../tokenizer.bin --template plain --chat`.
+
+The arithmetic is the same as the converters that used to exist, which is why a
+container packed from safetensors is **byte-identical** to one packed from the
+legacy file it replaces — measured on minimind3 i16/q8/q4 and on stories15M.
+
+The source type is detected from `--in`: a directory is an HF checkpoint
+(`config.json` + `model.safetensors`, BF16/F16/F32 read from the header), a file
+whose first word is a legacy magic is a legacy checkpoint, anything else is
+assumed to be llama2.c.
 
 `mmcf_requant_q8.py` is the shorter route when only q8 is wanted: it rebuilds
 the q8 matrices inside a container from the same model's i16 container, so the
@@ -201,8 +213,8 @@ Template kind 3 emits `"<|user|> " + q + "<|assistant|> "` and disables the
 tokenizer's dummy prefix; the stop set is `{7}` (EOS 7), not `</s>`.
 
 **q8 is not usable for this model, and the scale is not why.**  `Q8M1` stores
-one scale per matrix (`make_q8_from_i16.py: q8mat` takes `max(|w|)` over the
-whole matrix), which used to be blamed for the q8 build's degenerate output.
+one scale per matrix (`q8mat` in `engine/tools/mmcf_hf.py` takes `max(|w|)`
+over the whole matrix), which used to be blamed for the q8 build's degenerate output.
 The measurement says otherwise: the file is a faithful `max|w|/127`
 quantization (cosine 0.998-0.9999, per-row median error 2.14% against 1.10% for
 the MiniMind3 q8 that works), and a re-quantization at a clipped p99.9 scale

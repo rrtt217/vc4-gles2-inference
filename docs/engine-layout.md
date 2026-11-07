@@ -24,7 +24,6 @@ The sibling directories are **not** linked into `engine_mm3`:
 |---|---|---|
 | `engine/third_party/jinja/` | engine | vendored llama.cpp Jinja engine (MIT); see its README for the three local edits |
 | `engine/tools/` | host python | container packer/inspector, numpy reference forwards |
-| `engine/quantize/` | host python | F16/llama2.c → I16 → Q8/Q4 converters |
 | `engine/scripts/` | host shell | regression gate, CPU-vs-GPU diff, attention/logits oracles, benchmarks |
 | `engine/probes/` | target GLES2 | standalone VC4 feature and throughput probes |
 

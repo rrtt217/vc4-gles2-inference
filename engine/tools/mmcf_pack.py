@@ -26,8 +26,13 @@ a re-baseline.
 
 import argparse
 import json
+import os
 import struct
+import sys
 import zlib
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from mmcf_hf import is_llama2c, load_llama2c, tensors_from_hf
 
 # tensor table record: id, dtype, flags, group, pad, rows, cols, offset, bytes,
 # crc32, pad, scale, pad  -> exactly 48 bytes, no implicit padding with "<"
@@ -388,7 +393,9 @@ def verify(path, tensors):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--in", dest="src", required=True)
+    ap.add_argument("--in", dest="src", required=True,
+                    help="a legacy checkpoint, or a HuggingFace directory (config.json + "
+                         "model.safetensors) to quantize directly; see --quant")
     ap.add_argument("--tok")
     ap.add_argument("--out", required=True)
     ap.add_argument("--name", default="model")
@@ -413,10 +420,27 @@ def main():
     ap.add_argument("--bos", type=int, help="BOS id (-1 for none); default: derived from the tokenizer")
     ap.add_argument("--eos", type=int, help="EOS id; default: derived")
     ap.add_argument("--stop", type=int, help="extra stop id (e.g. <|im_end|>); default: derived")
+    ap.add_argument("--quant", choices=["i16", "q8", "q4"], default="i16",
+                    help="precision to build when --in is a HuggingFace directory (default i16)")
+    ap.add_argument("--seq", type=int, default=512,
+                    help="KV length to record for a HuggingFace source (default 512)")
     ap.add_argument("--verify", action="store_true")
     args = ap.parse_args()
 
-    meta, tensors = parse_legacy(args.src)
+    if os.path.isdir(args.src):
+        # Straight from HuggingFace: no intermediate checkpoint, and the rope
+        # comes from config.json rather than a flag.
+        print("source: %s (quant %s, seq %d)" % (args.src, args.quant, args.seq))
+        meta, tensors = tensors_from_hf(args.src, args.quant, args.seq)
+    elif is_llama2c(args.src):
+        # llama2.c fp32, also straight to a container; its rope is the llama2
+        # layout by construction, so nothing has to be declared.
+        print("source: %s (llama2c, quant %s)" % (args.src, args.quant))
+        meta, tensors = tensors_from_hf(args.src, args.quant,
+                                        load_llama2c(args.src)['seq'],
+                                        m=load_llama2c(args.src))
+    else:
+        meta, tensors = parse_legacy(args.src)
     # Sources without rope fields cannot state their rope, and a wrong theta or
     # half flag silently degrades every position: refuse to guess unless the
     # caller says so.

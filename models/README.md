@@ -9,7 +9,7 @@ needed to build a container: a *source* (safetensors, a llama2.c `.bin`, a
 `.gguf` reference, or one legacy checkpoint that has no other source) next to
 the container(s) built from it.  Derived `.i16` / `.q8` / `.q4` checkpoints are
 deleted once their container exists — they are byte-for-byte inside it, and
-`convert.sh` / `make_q4.py` rebuild them from the source.
+`mmcf_pack.py --quant` rebuilds them from the source in one step.
 
 ```text
 models/
@@ -53,17 +53,11 @@ Rebuild MiniMind3 artifacts from the repository root:
 minimind3/convert.sh
 ```
 
-`convert.sh` stops at the legacy layouts; pack them afterwards, otherwise the
-artifacts it produces are not loadable by the engine (and it deletes none of
-them, so remove them again once the containers exist):
+It packs all three precisions from safetensors in one step each, so there is
+nothing left over:
 
 ```bash
-for p in i16 q8 q4; do
-  python3 engine/tools/mmcf_pack.py --in models/minimind3/minimind3.$p \
-    --tok models/minimind3/minimind3.tok \
-    --out models/minimind3/minimind3.$p.mmcf \
-    --name minimind3 --template minimind3 --chat --verify
-done
+minimind3/convert.sh
 ```
 
 Notes:
@@ -71,8 +65,9 @@ Notes:
 - `minimind2-small.q8` is a legacy Q8M1 header with **no rope fields**; packing
   it requires `--theta 1000000 --rope-half`, because the packer refuses to
   guess.  The container then states the rope, so nothing is passed at run time.
-- `minimind2-small.q4` is generated directly from I16 with
-  `engine/quantize/make_q4_from_i16.py`; q8 is never a source for q4.
+- `minimind2-small` is the one model whose local source is an I16 checkpoint
+  rather than safetensors, so it is packed with `--in minimind2-small.i16`;
+  q8 is never a source for q4.
 - q8 is not usable for `tinybrainbot` (the break is in the q8 runtime path, not
   the weights); use q4 or i16.
 - **SmolLM2-135M is not supported.**  The directories hold source weights and
@@ -82,7 +77,7 @@ Notes:
   path is not correct on VC4.  Deleting or ignoring them is fine.
 - `stories260K.bin` needs `tok512.bin` (not the 32k `tokenizer.bin`) when a
   legacy tool needs a tokenizer; the container embeds it.
-- The llama2.c sources default to I16 (`make_i16.py --kind llama2c`).  Small
+- The llama2.c `.bin` sources are packed directly (`--quant i16`); small
   TinyStories models lose coherence in q8.
 
 Model files, tokenizers, KV caches and logs are ignored by `.gitignore`.

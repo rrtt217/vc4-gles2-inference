@@ -1,0 +1,285 @@
+#!/usr/bin/env python3
+"""HuggingFace safetensors -> the tensor list an MMCF container is built from.
+
+This is the only quantizer left in the repository.  The old
+`engine/quantize/make_{i16,q8_from_i16,q4,q4_from_i16}.py` scripts wrote the
+legacy checkpoint layouts (I16M1, Q8M1, Q4M1) that the engine no longer reads,
+so they are gone; `mmcf_pack.py` builds the container directly and never writes
+an intermediate file.
+
+The arithmetic is unchanged, which is what lets a container packed from
+safetensors be byte-identical to one packed from the legacy file it replaces:
+
+  i16  per-matrix symmetric scale, `max|w|/32767`, rounded
+  q8   i16 first, dequantised, then `max|w|/127` -- that two-step order is why
+       the shipped q8 containers look the way they do
+  q4   block-32 asymmetric (min/scale) from the float weights; embeddings and
+       logits stay q8
+"""
+import json
+import struct
+
+import numpy as np
+
+DT_F32, DT_I16, DT_Q8I8, DT_Q4 = 0, 1, 3, 4
+T_EMB, T_EMB_SCALE, T_RMS_ATT, T_RMS_FFN, T_RMS_FINAL = 1, 2, 3, 4, 5
+T_Q_NORM, T_K_NORM = 6, 7
+T_QKV, T_WO, T_W1, T_W3, T_W13, T_W2 = 0x10, 0x11, 0x12, 0x13, 0x14, 0x15
+T_LOGITS = 0x20
+T_EMB_I16 = 8
+
+
+def qmat(w):
+    mx = float(np.abs(w).max())
+    if mx == 0:
+        mx = 1.0
+    s = mx / 32767.0
+    q = np.clip(np.rint(w / s), -32767, 32767).astype(np.int16)
+    return q, float(s)
+
+
+def q8mat(w):
+    mx = float(np.abs(w).max())
+    if mx == 0:
+        mx = 1.0
+    s = mx / 127.0
+    q = np.clip(np.rint(w / s), -127, 127).astype(np.int8)
+    return q, float(s)
+
+
+def q4mat(w):
+    w = np.asarray(w, dtype=np.float32)
+    rows, cols = w.shape
+    if cols % 32:
+        raise SystemExit(f"q4 cols must be divisible by 32: {rows}x{cols}")
+    group = 32
+    groups = (cols + group - 1) // group
+    pad = groups * group - cols
+    x = np.pad(w, ((0, 0), (0, pad))) if pad else w
+    z = x.reshape(rows, groups, group)
+    lo = z.min(axis=2, keepdims=True)
+    hi = z.max(axis=2, keepdims=True)
+    sc = (hi - lo) / 15.0
+    sc[sc == 0] = 1.0
+    q = np.clip(np.rint((z - lo) / sc), 0, 15).astype(np.uint8)
+    q = q.reshape(rows, groups * group)[:, :cols]
+    packed = (q[:, 0::2] | (q[:, 1::2] << 4)).astype(np.uint8)
+    flat_sc = sc[:, :, 0]
+    flat_lo = lo[:, :, 0]
+    ps = float(max(np.abs(flat_sc).max(), np.abs(flat_lo).max(), 1e-12) / 32767.0)
+    s16 = np.clip(np.rint(flat_sc / ps), -32767, 32767).astype('<i2')
+    m16 = np.clip(np.rint(flat_lo / ps), -32767, 32767).astype('<i2')
+    return packed, s16, m16, ps, groups
+
+
+def rope_of(cfg):
+    """(theta, half) from a HF config; half means "rotate half the head"."""
+    theta = float(cfg.get("rope_theta", 10000.0))
+    rs = cfg.get("rope_scaling") or {}
+    if isinstance(rs, dict) and "rope_theta" in rs:
+        theta = float(rs["rope_theta"])
+    half = 0 if cfg.get("rope_interleaved") or cfg.get("rope_layout") == "interleaved" else 1
+    return theta, half
+
+
+def st_dtype(e):
+    """safetensors dtype -> numpy, so F32 and BF16 are not read as F16."""
+    return {"F16": "<f2", "F32": "<f4", "BF16": "<u2"}.get(e.get("dtype", "F16"))
+
+
+def load_minimind(model_dir, seq=512):
+    """Read a HF Llama/Qwen-shaped directory into float arrays."""
+    with open(model_dir + '/config.json') as f:
+        cfg = json.load(f)
+    with open(model_dir + '/model.safetensors', 'rb') as f:
+        n = struct.unpack('<Q', f.read(8))[0]
+        hdr = json.loads(f.read(n))
+        data = f.read()
+
+    def get(name):
+        e = hdr[name]
+        a, b = e['data_offsets']
+        dt = st_dtype(e)
+        if dt is None:
+            raise SystemExit(f"{name}: unsupported safetensors dtype {e.get('dtype')}")
+        if e.get("dtype") == "BF16":
+            # bf16 is the top half of an f32; widening is exact.
+            bits = np.frombuffer(data[a:b], dtype="<u2").astype(np.uint32) << 16
+            return bits.view(np.float32).reshape(e['shape'])
+        return np.frombuffer(data[a:b], dtype=dt).astype(np.float32).reshape(e['shape'])
+
+    emb = get('model.embed_tokens.weight')
+    vocab, dim = emb.shape
+    layers = cfg['num_hidden_layers']
+    heads = cfg['num_attention_heads']
+    kv = cfg['num_key_value_heads']
+    hidden = cfg['intermediate_size']
+    wq = np.stack([get(f'model.layers.{l}.self_attn.q_proj.weight') for l in range(layers)])
+    wk = np.stack([get(f'model.layers.{l}.self_attn.k_proj.weight') for l in range(layers)])
+    wv = np.stack([get(f'model.layers.{l}.self_attn.v_proj.weight') for l in range(layers)])
+    wo = np.stack([get(f'model.layers.{l}.self_attn.o_proj.weight') for l in range(layers)])
+    w1 = np.stack([get(f'model.layers.{l}.mlp.gate_proj.weight') for l in range(layers)])
+    w2 = np.stack([get(f'model.layers.{l}.mlp.down_proj.weight') for l in range(layers)])
+    w3 = np.stack([get(f'model.layers.{l}.mlp.up_proj.weight') for l in range(layers)])
+    rms_att = np.stack([get(f'model.layers.{l}.input_layernorm.weight') for l in range(layers)])
+    rms_ffn = np.stack([get(f'model.layers.{l}.post_attention_layernorm.weight') for l in range(layers)])
+    rms_final = get('model.norm.weight')
+    qk = 'model.layers.0.self_attn.q_norm.weight' in hdr
+    q_norm = np.stack([get(f'model.layers.{l}.self_attn.q_norm.weight') for l in range(layers)]) if qk else None
+    k_norm = np.stack([get(f'model.layers.{l}.self_attn.k_norm.weight') for l in range(layers)]) if qk else None
+    theta, half = rope_of(cfg)
+    return dict(dim=dim, hidden=hidden, layers=layers, heads=heads, kv=kv, vocab=vocab, seq=seq,
+                emb=emb, rms_att=rms_att, rms_ffn=rms_ffn, rms_final=rms_final,
+                wq=wq, wk=wk, wv=wv, wo=wo, w1=w1, w2=w2, w3=w3, wcls=emb,
+                theta=theta, half=half, qk_norm=1 if qk else 0,
+                q_norm=q_norm, k_norm=k_norm)
+
+
+def load_llama2c(path):
+    """Read a llama2.c fp32 checkpoint (stories15M/42M, TinyChat, 260K)."""
+    b = np.fromfile(path, dtype=np.uint8)
+    cfg = np.frombuffer(b[:28], dtype=np.int32).tolist()
+    dim, hidden, layers, heads, kv, vsigned, seq = cfg
+    vocab = abs(vsigned)
+    shared = vsigned > 0
+    kv_dim = kv * (dim // heads)
+    off = 28
+
+    def take(shape):
+        nonlocal off
+        n = int(np.prod(shape))
+        a = np.frombuffer(b, dtype=np.float32, count=n, offset=off).reshape(shape)
+        off += 4 * n
+        return a
+
+    emb = take((vocab, dim))
+    rms_att = take((layers, dim))
+    wq = take((layers, dim, dim))
+    wk = take((layers, kv_dim, dim))
+    wv = take((layers, kv_dim, dim))
+    wo = take((layers, dim, dim))
+    rms_ffn = take((layers, dim))
+    w1 = take((layers, hidden, dim))
+    w2 = take((layers, dim, hidden))
+    w3 = take((layers, hidden, dim))
+    rms_final = take((dim,))
+    off += 4 * seq * (dim // heads)
+    wcls = emb if shared else take((vocab, dim))
+    return dict(dim=dim, hidden=hidden, layers=layers, heads=heads, kv=kv, vocab=vocab, seq=seq,
+                emb=emb, rms_att=rms_att, rms_ffn=rms_ffn, rms_final=rms_final,
+                wq=wq, wk=wk, wv=wv, wo=wo, w1=w1, w2=w2, w3=w3, wcls=wcls,
+                theta=10000.0, half=0, qk_norm=0, q_norm=None, k_norm=None)
+
+
+def is_llama2c(path):
+    """A llama2.c file has no magic: its first int32 is `dim`, a positive small
+    number, where every legacy checkpoint starts with a 'Q8M1'-style magic."""
+    import os
+    if os.path.getsize(path) < 28:
+        return False
+    with open(path, 'rb') as f:
+        head = f.read(4)
+    import struct as _s
+    v = _s.unpack('<I', head)[0]
+    if v in (0x4931364D, 0x4931364E, 0x51384D31, 0x51384D32, 0x51364D31):
+        return False
+    d = _s.unpack('<i', head)[0]
+    return 0 < d <= 4096 and d % 8 == 0
+
+
+def tensors_from_hf(model_dir, scheme, seq, m=None):
+    """Build the tensor list directly from an HF safetensors directory.
+
+    Same list shape the legacy reader produces, so build() cannot tell them
+    apart: i16 quantizes to int16 with a per-matrix scale, q8 is i16 then q8
+    (that is what make_q8_from_i16 does, and the two-step order is why the
+    shipped q8 containers look the way they do), q4 quantizes the float
+    weights directly with block-32 min/scale and keeps embeddings and logits q8.
+    """
+    import numpy as np
+    if m is None:
+        m = load_minimind(model_dir, seq)
+    (dim, hidden, layers, heads, kv, vocab, seq) = (
+        m['dim'], m['hidden'], m['layers'], m['heads'], m['kv'], m['vocab'], m['seq'])
+    head_dim = dim // heads
+    qk = int(m.get('qk_norm', 0))
+    split = 1 if 2 * hidden > 2048 else 0
+    meta = dict(dim=dim, hidden=hidden, layers=layers, heads=heads, kv_heads=kv,
+                vocab=vocab, seq=seq, head_dim=head_dim,
+                theta=float(m['theta']), half=bool(m['half']), qk_norm=bool(qk),
+                scheme=scheme, group=(32 if scheme == 'q4' else 0), split=bool(split))
+    T = []
+
+    def f32(a):
+        return np.asarray(a, np.float32).tobytes()
+
+    def i16_pair(w):
+        q, s = qmat(np.asarray(w, np.float32))
+        return q, float(s)
+
+    def q8_from_i16(w):
+        q, s = i16_pair(w)
+        return q8mat(q.astype(np.float32) * s)
+
+    if scheme == 'i16':
+        er = np.empty((vocab, dim), np.int16)
+        es = np.empty(vocab, np.float32)
+        for i in range(vocab):
+            er[i], es[i] = i16_pair(m['emb'][i])
+        T.append((T_EMB_I16, DT_I16, vocab, dim, 0, er.astype('<i2').tobytes(), 0.0))
+        T.append((T_EMB_SCALE, DT_F32, vocab, 1, 0, es.tobytes(), 0.0))
+    else:
+        er = np.empty((vocab, dim), np.int8)
+        es = np.empty(vocab, np.float32)
+        for i in range(vocab):
+            if scheme == 'q8':
+                er[i], es[i] = q8_from_i16(m['emb'][i])
+            else:
+                er[i], es[i] = q8mat(np.asarray(m['emb'][i], np.float32))
+        T.append((T_EMB, DT_Q8I8, vocab, dim, 0, er.tobytes(), 0.0))
+        T.append((T_EMB_SCALE, DT_F32, vocab, 1, 0, es.tobytes(), 0.0))
+    T.append((T_RMS_ATT, DT_F32, layers, dim, 0, f32(m['rms_att']), 0.0))
+    T.append((T_RMS_FFN, DT_F32, layers, dim, 0, f32(m['rms_ffn']), 0.0))
+    T.append((T_RMS_FINAL, DT_F32, 1, dim, 0, f32(m['rms_final']), 0.0))
+    if qk:
+        T.append((T_Q_NORM, DT_F32, layers, head_dim, 0, f32(m['q_norm']), 0.0))
+        T.append((T_K_NORM, DT_F32, layers, head_dim, 0, f32(m['k_norm']), 0.0))
+
+    def mat(tid, layer, w):
+        rows, cols = int(w.shape[0]), int(w.shape[1])
+        base = tid | (layer << 8)
+        if scheme == 'i16':
+            q, s = i16_pair(w)
+            T.append((base, DT_I16, rows, cols, 0, q.astype('<i2').tobytes(), float(s)))
+        elif scheme == 'q8':
+            q, s = q8_from_i16(w)
+            T.append((base, DT_Q8I8, rows, cols, 0, q.tobytes(), float(s)))
+        else:
+            packed, s16, mn, ps, groups = q4mat(np.asarray(w, np.float32))
+            T.append((base, DT_Q4, rows, cols, 0, packed.tobytes(), float(ps)))
+            T.append((base | (1 << 14), DT_I16, rows, groups, 0, s16.tobytes(), 0.0))
+            T.append((base | (2 << 14), DT_I16, rows, groups, 0, mn.tobytes(), 0.0))
+
+    for l in range(layers):
+        mat(T_QKV, l, np.concatenate([m['wq'][l], m['wk'][l], m['wv'][l]], axis=0))
+        mat(T_WO, l, m['wo'][l])
+        if split:
+            mat(T_W1, l, m['w1'][l])
+            mat(T_W3, l, m['w3'][l])
+        else:
+            mat(T_W13, l, np.concatenate([m['w1'][l], m['w3'][l]], axis=0))
+        mat(T_W2, l, m['w2'][l])
+    # Logits: q8 from the float weights in a q4 container (the vocabulary head
+    # stays 8-bit there), but i16-then-q8 in a q8 container -- the two-step order
+    # again, and it is visible in the shipped files.
+    for i, st in enumerate(range(0, vocab, 1536)):
+        w = m['wcls'][st:st + 1536]
+        if scheme != 'q4':
+            mat(T_LOGITS, i, w)
+        else:
+            q, sc = q8mat(np.asarray(w, np.float32))
+            T.append((T_LOGITS | (i << 8), DT_Q8I8, int(w.shape[0]), int(w.shape[1]),
+                      0, q.tobytes(), float(sc)))
+    return meta, T
+
+

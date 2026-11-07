@@ -104,27 +104,26 @@ Pi 上 stories15M i16 约 167 ms/token、stories42M q8 约 190 ms/token，均连
 当前 CMA 预算。260K 是下限探针：约 85 ms/token，但 prefill 要 5.4 s，因为
 attention 仍然走完整的 512 位置网格。
 
-这些模型来自 llama2.c fp32 `.bin` 源，打包器默认转成 I16
-（`make_i16.py --kind llama2c`）。`LEGACY_Q8=1` 已经不存在：引擎没有 legacy 读取器。
+这些模型来自 llama2.c fp32 `.bin` 源，打包器可以直接接受
+（`--in .../stories15M.bin --quant i16`）。`LEGACY_Q8=1` 已经不存在：
+引擎没有 legacy 读取器。
 
 ## 打包一个 checkpoint
 
 引擎只加载 `.mmcf`。`.bin`、`.i16`、`.q8`、`.q4` 都只是打包器的输入：
 
 ```bash
-# HF safetensors -> I16（自动识别 BF16/F16/F32 和 HF Llama 张量命名）
-python3 quantize/make_i16.py --kind minimind \
-  --input ../models/<model> --output ../models/<model>/<model>.i16
-
-# legacy 布局 -> 容器，并逐字节对照源文件自检
-python3 tools/mmcf_pack.py --in ../models/<model>/<model>.i16 \
+# 一步到位：打包器直接从 safetensors 量化，不写 .i16/.q8/.q4 中间文件。
+# --quant 选精度，--seq 是 KV 长度；--chat-template 把模型自己的 Jinja 模板
+# 写进容器（metadata key 9），prompt 不再是 C++ 的编译选项。
+python3 tools/mmcf_pack.py --in ../models/<model> --quant q4 --seq 512 \
   --tok ../models/<model>/<model>.tok \
-  --out ../models/<model>/<model>.i16.mmcf \
+  --out ../models/<model>/<model>.q4.mmcf \
   --name <model> --template chatml --chat \
-  --theta 100000 --rope-half --verify
+  --chat-template ../models/<model>/tokenizer_config.json --verify
 
 # 引擎到底从这个文件里读到了什么？
-python3 tools/mmcf_dump.py ../models/<model>/<model>.i16.mmcf --check
+python3 tools/mmcf_dump.py ../models/<model>/<model>.q4.mmcf --check
 ```
 
 `Q8M1`/`I16M1` 源必须给 `--theta` 和 `--rope-half`，因为那种文件头完全没有

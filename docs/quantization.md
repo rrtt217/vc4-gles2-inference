@@ -6,11 +6,16 @@ KV packed variants. The model format itself is in
 
 ## Q8 conversion
 
-Convert an I16 checkpoint with `make_q8_from_i16.py`; q8 is a terminal format,
-not a source for q4.  The converter writes `split=1` (separate W1/W3) by
-default, even when the I16 source has a fused W13, so each half keeps its own
-q8 scale and uses the paired q16 FFN path.  The runtime also handles fused q8
-W13 with `matvec_q8_pair_fused`, so existing fused files still load.
+q8 is produced by `mmcf_pack.py --quant q8`, and it is a terminal precision:
+never a source for q4.  Two things about the arithmetic are worth knowing
+because they are visible in the output:
+
+- the packer quantizes **i16 first, then q8** from the dequantised values, which
+  is what the old two-step converter did.  Quantizing the float weights directly
+  would differ by a few LSB and would not reproduce the shipped containers.
+- it always writes `split=1` (separate W1/W3), even from a fused source, so each
+  half keeps its own q8 scale and takes the paired q16 FFN path.  The runtime
+  still handles fused q8 W13 through `matvec_q8_pair_fused`.
 
 ## Weight quantization experiments
 
@@ -44,18 +49,17 @@ drops from ~119 MB to ~56 MB.  This is system RAM, not CMA.
 
 ### Offline Q4M1
 
-`make_q4.py` quantizes directly from `model.safetensors` (F16), not from q8:
+q4 is quantized directly from the float safetensors, not from q8:
 
 ```bash
-python3 engine/quantize/make_q4.py --input models/minimind3 --output models/minimind3/minimind3.q4 --seq 512
+python3 engine/tools/mmcf_pack.py --in models/minimind3 --quant q4 --seq 512 \
+  --tok models/minimind3/minimind3.tok --out models/minimind3/minimind3.q4.mmcf \
+  --name minimind3 --template minimind3 --chat \
+  --chat-template minimind3/chat_template.jinja --verify
 ```
 
-For an I16 checkpoint, convert directly without going through q8:
-
-```bash
-python3 engine/quantize/make_q4_from_i16.py \
-  models/llama2c/minimind2-small.i16 models/llama2c/minimind2-small.q4
-```
+Embeddings and logits stay **q8** in a q4 container, which is why a q4 file is
+not simply "everything at 4 bits".
 
 The Q4M1 file stores q4 block32 asymmetric linear weights (qkv/wo/W1/W3/W2),
 q8 embeddings and q8 logits tiles.  It is a *packer input*, so wrap it in a

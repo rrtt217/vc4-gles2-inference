@@ -62,12 +62,11 @@ GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
 ### Offline q4
 
 ```bash
-python3 engine/quantize/make_q4.py --input models/minimind3 --output models/minimind3/minimind3.q4 --seq 512
-python3 engine/tools/mmcf_pack.py --in models/minimind3/minimind3.q4 \
+# One step: the packer quantizes from safetensors, no intermediate file.
+python3 engine/tools/mmcf_pack.py --in models/minimind3 --quant q4 --seq 512 \
   --tok models/minimind3/minimind3.tok --out models/minimind3/minimind3.q4.mmcf \
   --name minimind3 --template minimind3 --chat \
   --chat-template minimind3/chat_template.jinja --verify
-rm models/minimind3/minimind3.q4      # the store keeps sources and containers only
 
 cd engine
 MODEL=../models/minimind3/minimind3.q4.mmcf \
