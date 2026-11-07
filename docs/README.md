@@ -13,6 +13,7 @@ Deep dives:
 
 | Document | Contents |
 |---|---|
+| [model-formats.md](model-formats.md) | includes the `templates/` inventory: which template each shipped model carries |
 | [checkpoint-container.md](checkpoint-container.md) | **the MMCF v2 container**: header, metadata TLV, tensor table, loader rules, what it enforces |
 | [model-formats.md](model-formats.md) | the legacy layouts the packer consumes, and the models this repo runs |
 | [engine-internals.md](engine-internals.md) | VC4 findings, FFN split, GPU attention, persistent layers, Top-K |

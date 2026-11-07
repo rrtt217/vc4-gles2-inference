@@ -36,8 +36,8 @@ models/
     (q4 and i16 are the usable precisions; q8 degenerates — see
      docs/model-formats.md)
 
-  smollm2-135m/                  SmolLM2-135M base (not adapted): source
-  smollm2-135m-instruct/         weights only, kept for a future conversion
+  smollm2-135m/                  SmolLM2-135M base — NOT SUPPORTED, source
+  smollm2-135m-instruct/         weights only (see the note below)
     model.safetensors, tokenizer.json, vocab.json, merges.txt
     <name>.i16 / .q8 / .q4 + .mmcf, <name>.tok
 
@@ -76,9 +76,11 @@ Notes:
   `engine/quantize/make_q4_from_i16.py`; q8 is never a source for q4.
 - q8 is not usable for `tinybrainbot` (the break is in the q8 runtime path, not
   the weights); use q4 or i16.
-- The `smollm2-*` directories hold source weights only.  They are not adapted:
-  nothing here has been validated for them, and the containers sitting in the
-  directory were built outside this line.
+- **SmolLM2-135M is not supported.**  The directories hold source weights and
+  containers that were built outside this line; nothing here validates them,
+  and the containers in them are not a claim that the model runs.  Its
+  embedding needs a grid this engine does not implement, and its `GPU_LAYER=1`
+  path is not correct on VC4.  Deleting or ignoring them is fine.
 - `stories260K.bin` needs `tok512.bin` (not the 32k `tokenizer.bin`) when a
   legacy tool needs a tokenizer; the container embeds it.
 - The llama2.c sources default to I16 (`make_i16.py --kind llama2c`).  Small

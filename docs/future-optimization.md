@@ -210,19 +210,24 @@ A thin local HTTP API may be more useful than full compatibility.
 
 ## P2: model and platform experiments
 
-### SmolLM2-135M-Instruct / MobileLLM-125M
+### SmolLM2-135M / -Instruct — **not supported**
 
-Worth testing on the laptop first:
+Deliberately out of scope, not "worth testing later":
 
-- Llama-style, GQA, 30 layers, vocab 49152, theta 1e5, English instruct;
-- q4 weights are about 124 MB, q8 about 164 MB — both fit on the laptop, not
-  comfortably on the Pi alongside MiniMind3;
-- likely better English instruction following than TinyChat15M;
-- unlikely to provide Chinese or tools.
+- its residual stream needs an embedding grid this engine does not implement;
+  without it the first layers diverge and the argmax is wrong;
+- `GPU_LAYER=1` is additionally broken on VC4 for it, so even a checkpoint that
+  loads would run on the slow path;
+- the Pi Zero cost is ~1 s/token against MiniMind3's ~0.25 s.
 
-Only port after a laptop quality/speed check.  Do not assume the engine handles
-every Llama variant without conversion tests: GQA (`GROUP = heads/kv_heads`) is
-supported, but the rope layout and the tokenizer are per-model.
+The weights stay in `models/smollm2-*` as source material.  Nothing in this
+repository validates them; do not treat a container in that directory as
+support.  MobileLLM-125M was not pursued either.
+
+What the engine *does* handle generically: GQA (`GROUP = heads/kv_heads`),
+rotate-half and interleaved rope, BF16/F16/F32 safetensors, and now the model's
+own Jinja chat template.  The rope theta, the tokenizer and the template are
+still per-checkpoint, so a new model is a conversion investigation.
 
 ### MiniMind2-Small
 

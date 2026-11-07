@@ -36,6 +36,26 @@ tokenizer, the rope layout, the template and the embedding grid are all
 per-checkpoint, so a new architecture is a conversion investigation, not a
 config change.
 
+## Templates in the store
+
+`templates/` holds the chat templates this repository ships, so a container can
+be re-packed without going back to HuggingFace:
+
+| file | used by | provenance |
+|---|---|---|
+| `minimind3/chat_template.jinja` | MiniMind3 | upstream MiniMind3, kept with its model source |
+| `templates/chatml.jinja` | MiniMind2 / Qwen-family | written here to be byte-identical to the renderer it replaces |
+| `templates/tinybrainbot.jinja` | TinyBrainBot-100M | verbatim from the model's `tokenizer_config.json` |
+
+The packer also accepts a `tokenizer_config.json` directly
+(`--chat-template models/<m>/tokenizer_config.json`), which is what most HF
+checkpoints will want.
+
+Two of the three are verified by token equality against the C++ renderer they
+replace: MiniMind3 q8 and MiniMind2 q8 produce **identical `TOKENS_OUT`** through
+the kind path and the template path.  TinyBrainBot is the exception, because its
+hand-written kind-3 renderer was never the model's trained format — see below.
+
 ## Legacy layouts (packer input)
 
 All are little-endian and use the same tensor order; only the header and the
@@ -162,6 +182,7 @@ tokenizer, template and rope metadata are not re-derived.
 | BOS / EOS / stop ids | metadata key 8, derived from the embedded vocabulary.  llama2.c stores `"<s>"` as `"\n<s>\n"`, so matching is on the trimmed token |
 | chat template | metadata key 9 (the Jinja text, verbatim); key 4 keeps the kind + default system + name as the fallback |
 | BOS policy | metadata key 10 (`add_bos` / `add_eos`) |
+| BOS policy | metadata key 10 (`add_bos` / `add_eos`) |
 | tokenizer | the `.tok` blob is inside the container |
 
 ## TinyBrainBot-100M-v5.1-Instruct
@@ -192,3 +213,27 @@ docs/performance.md, "q8 precision is not why TinyBrainBot degrades".  Use
 
 It also needs the CPU layer: its `GPU_LAYER=1` path is not correct on VC4
 (docs/performance.md, item 12), so `--no-gpu-layer` is the deployable setting.
+
+### With its real template (2026-11-07)
+
+The hand-written renderer above was an approximation: `<|user|> {q}<|assistant|> `
+with no `<|end|>` after the user turn.  With the model's own template
+(`templates/tinybrainbot.jinja`: a leading space, `<|user|>\n{q}\n<|end|>\n`,
+then `<|assistant|>\n`) and the container's stop id, the output changes
+qualitatively.  q4 and i16, `GPU_LAYER=0`, greedy:
+
+| prompt | q4, old renderer | q4, real template | i16, real template |
+|---|---|---|---|
+| `Hello!` | `<\|end\|>: '2+2 = 4''2`-class garbage | `Hi there! How can I help you today?` | `Hi! I'm doing well — how can I help?` |
+| `Name three colors.` | — | `<\|user\|>` (degenerate) | `Red, Green, and Blue.` |
+| `What is 2+2?` | mangled | `The answer is 2.` (wrong) | `2+2 is equal to 4.` |
+
+So: **i16 is the usable precision for this model**, q4 answers fluently but is
+unreliable, and the earlier "the repo picker is wrong" conclusion was partly a
+renderer problem, not only a precision one.
+
+The same run turned up an engine bug worth recording: the CLI stopped
+generation on the literal token ids 1 and 2, which is MiniMind3's coincidence.
+TinyBrainBot's EOS is 7, so it never stopped and emitted `<|end|>` until the
+length limit.  The CLI now uses the container's EOS/stop ids everywhere, like
+the worker already did.

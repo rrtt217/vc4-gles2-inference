@@ -1,0 +1,18 @@
+{# ChatML as MiniMind2 and the Qwen-family chat models use it.  This is the
+   template the engine used to build in C++ (`qwen_template`), written out so a
+   checkpoint can carry it instead: no <think> block, an optional open one when
+   the request asks for thinking. #}
+{%- if messages and messages[0].role == 'system' -%}
+{{- '<|im_start|>system\n' + messages[0].content + '<|im_end|>\n' -}}
+{%- endif -%}
+{%- for m in messages -%}
+{%- if m.role != 'system' -%}
+{{- '<|im_start|>' + m.role + '\n' + m.content + '<|im_end|>\n' -}}
+{%- endif -%}
+{%- endfor -%}
+{%- if add_generation_prompt -%}
+{{- '<|im_start|>assistant\n' -}}
+{%- if open_thinking is defined and open_thinking -%}
+{{- '<think>\n' -}}
+{%- endif -%}
+{%- endif -%}

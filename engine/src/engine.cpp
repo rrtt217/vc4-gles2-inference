@@ -193,6 +193,14 @@ int main(int argc, char** argv) {
     // CHAT_DUMP=1 prints the rendered prompt with its input marking, which is
     // what the byte-for-byte template comparisons are run against.
     const bool chat_dump = getenv("CHAT_DUMP") != nullptr;
+    // Stop-token test.  The container states EOS and the extra stop id (key 8).
+    // The CLI used to test the literal ids 1 and 2, which is MiniMind3's
+    // coincidence; a model whose EOS is 7 never stopped.
+    auto is_stop_token = [&](int id) {
+        if (model.have_specials)
+            return id == model.id_eos || (model.id_stop >= 0 && id == model.id_stop);
+        return id == 1 || id == 2;
+    };
 
     const auto up_t0 = Clock::now();
     for (auto& m : model.qkv) gpu.upload(m);
@@ -539,7 +547,7 @@ int main(int argc, char** argv) {
             int next = greedy ? argmax_token(logits)
                               : (cand_mode ? sample_candidate_result(cand, temp, top_p, rng)
                                            : sample_token(logits, temp, top_p, rng));
-            if (!getenv("IGNORE_EOS") && (next == 1 || next == 2)) {
+            if (!getenv("IGNORE_EOS") && is_stop_token(next)) {
                 session.step(next, pos++, false);
                 break;
             }
@@ -664,7 +672,7 @@ int main(int argc, char** argv) {
                 int next = greedy ? argmax_token(logits)
                                   : (cand_mode ? sample_candidate_result(cand, temp, top_p, rng)
                                                : sample_token(logits, temp, top_p, rng));
-                if (next == 1 || next == 2) {
+                if (is_stop_token(next)) {
                     session.step(next, pos++, false);
                     break;
                 }
@@ -792,7 +800,7 @@ int main(int argc, char** argv) {
         int next = greedy ? argmax_token(logits)
                           : (cand_mode ? sample_candidate_result(cand, temp, top_p, rng)
                                        : sample_token(logits, temp, top_p, rng));
-        if (!getenv("IGNORE_EOS") && (next == 1 || next == 2)) break;
+        if (!getenv("IGNORE_EOS") && is_stop_token(next)) break;
         cout << tokenizer.decode({next}, tokens.empty() ? 1 : tokens.back()); cout.flush();
         tokens.push_back(next);
         recent.push_back(next);

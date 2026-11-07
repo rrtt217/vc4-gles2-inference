@@ -146,6 +146,8 @@ not covered by this repository license; see the credits above.
 
 ## Known caveats
 
+- **SmolLM2-135M is not supported.**  The weights in `models/smollm2-*` are
+  source material, not a validated checkpoint; do not read them as support.
 - **The engine loads MMCF containers only.**  A `.bin`/`.q8`/`.q4`/`.i16` file
   is a packer input; `engine/tools/mmcf_pack.py` converts it.
 - Pi and laptop KV caches are **not byte-identical**; build the disk cache on

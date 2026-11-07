@@ -24,6 +24,7 @@ replace working paths with demos or cosmetic rewrites.
 | `engine/src/` | EGL/GLES2 engine: X-format layouts, shader builders, GPU, model, session, tokenizer, CLI |
 | `engine/tools/` | container packer, container inspector, numpy reference forward passes |
 | `engine/third_party/jinja/` | vendored llama.cpp Jinja engine (MIT) — renders the container's chat template |
+| `templates/` | the chat templates this repository ships, for `mmcf_pack.py --chat-template` |
 | `engine/quantize/` | F16/llama2.c → I16 → Q8/Q4 converters (legacy layouts; `mmcf_pack.py` wraps them) |
 | `engine/scripts/` | the regression gate **and** the diagnostic tools |
 | `engine/probes/` | standalone VC4 feature/throughput probes (not linked into the engine) |
@@ -32,6 +33,9 @@ replace working paths with demos or cosmetic rewrites.
 | `minimind3/` | MiniMind3 source config/tokenizer/reference; artifacts live in `models/` |
 | `refs/` | untracked upstream reference material for MiniMind3 (gitignored) |
 | `docs/` | deep dives; keep READMEs short and link here |
+
+**SmolLM2-135M is not supported.**  The `models/smollm2-*` directories are
+source material; no container in them is a validated checkpoint.
 
 Engine modules are described in [`docs/engine-layout.md`](docs/engine-layout.md);
 the file format in [`docs/model-formats.md`](docs/model-formats.md) and
