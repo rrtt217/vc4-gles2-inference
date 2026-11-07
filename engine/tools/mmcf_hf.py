@@ -274,7 +274,24 @@ def residual_peaks(m, seq=8):
     return peaks
 
 
-def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True):
+def tok_entry_count(path):
+    """How many tokens a llama2.c-style .tok blob holds (i32 maxlen, then entries)."""
+    import struct as _s
+    raw = open(path, 'rb').read()
+    if len(raw) < 4:
+        return 0
+    i, n = 4, 0
+    while i + 8 <= len(raw):
+        _score, ln = _s.unpack_from('<fi', raw, i)
+        i += 8
+        if ln < 0 or i + ln > len(raw):
+            break
+        i += ln
+        n += 1
+    return n
+
+
+def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit=None):
     """Build the tensor list directly from an HF safetensors directory.
 
     Same list shape the legacy reader produces, so build() cannot tell them
@@ -286,6 +303,19 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True):
     import numpy as np
     if m is None:
         m = load_minimind(model_dir, seq)
+    # HF pads the embedding to a multiple of its own choosing (16408 for a
+    # 16384-token tokenizer), so the *tokenizer* decides how many rows the
+    # container may claim: a row the tokenizer cannot produce is dead weight,
+    # and claiming more rows than the .tok holds makes the engine read past the
+    # end of the blob.
+    if vocab_limit and vocab_limit != m['vocab']:
+        if vocab_limit > m['vocab']:
+            raise SystemExit("tokenizer has %d entries but the embedding only %d rows"
+                             % (vocab_limit, m['vocab']))
+        for k in ('emb', 'wcls'):
+            if k in m and m[k] is not None:
+                m[k] = m[k][:vocab_limit]
+        m['vocab'] = vocab_limit
     (dim, hidden, layers, heads, kv, vocab, seq) = (
         m['dim'], m['hidden'], m['layers'], m['heads'], m['kv'], m['vocab'], m['seq'])
     head_dim = dim // heads

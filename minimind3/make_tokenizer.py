@@ -31,8 +31,27 @@ def main():
         items = list(enumerate(vocab))
     else:
         items = sorted(vocab.items(), key=lambda kv: kv[1])
+
+    # Added tokens (the chat markers) live *above* the BPE vocabulary in some
+    # tokenizers - supra2-medium puts <|im_start|> at 16384 with a 16384-token
+    # BPE, so a blob built from model["vocab"] alone leaves the engine unable to
+    # recognise them and it splits them into characters instead.  Lay the added
+    # tokens onto their ids and fill any hole with a placeholder, so the blob's
+    # index stays equal to the token id.
+    bpe_ids = {i for _, i in items}
+    added = {t["id"]: t["content"] for t in j.get("added_tokens", [])}
+    top = max([i for _, i in items] + list(added)) if added else len(items) - 1
+    table = {i: None for i in range(top + 1)}
+    for tok, i in items:
+        table[i] = tok
+    for i, tok in added.items():
+        table[i] = tok
+    for i in range(top + 1):
+        if table[i] is None:
+            table[i] = "<|unused_%d|>" % i
+    items = [(table[i], i) for i in range(top + 1)]
     n = len(items)
-    assert [i for _, i in items] == list(range(n)), "vocab ids are not contiguous"
+    added_ids = sorted(i for i in added if i not in bpe_ids)
 
     b2u = bytes_to_unicode()
     u2b = {v: k for k, v in b2u.items()}
@@ -52,7 +71,10 @@ def main():
             left, right = pair
         merge_rank[left + right] = rank
 
-    raw_tokens = [raw(t) for t, _ in items]
+    # A token above the BPE range is an added token: its text is literal, not
+    # byte-level alphabet text.  (Some tokenizers list *every* entry in
+    # added_tokens; those ids are in bpe_ids and stay byte-level.)
+    raw_tokens = [t.encode("utf-8") if i not in bpe_ids else raw(t) for t, i in items]
     maxlen = max(len(x) for x in raw_tokens)
     with open(a.output, "wb") as f:
         f.write(struct.pack("<i", maxlen))
@@ -61,7 +83,8 @@ def main():
             score = 1.0e6 - float(rank) if rank is not None else 0.0
             f.write(struct.pack("<fi", score, len(rb)))
             f.write(rb)
-    print(f"wrote {a.output}: vocab={n} merges={len(merge_rank)} maxlen={maxlen}")
+    print(f"wrote {a.output}: vocab={n} merges={len(merge_rank)} maxlen={maxlen}"
+          f" added={len(added_ids)}" + (f" (ids {added_ids[0]}..{added_ids[-1]})" if added_ids else ""))
 
 if __name__ == "__main__":
     main()

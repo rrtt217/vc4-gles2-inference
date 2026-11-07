@@ -33,7 +33,7 @@ import zlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from mmcf_hf import (RESIDUAL_RAIL, RESIDUAL_WARN, is_llama2c, load_llama2c,
-                     tensors_from_hf)
+                     tensors_from_hf, tok_entry_count)
 
 # tensor table record: id, dtype, flags, group, pad, rows, cols, offset, bytes,
 # crc32, pad, scale, pad  -> exactly 48 bytes, no implicit padding with "<"
@@ -453,8 +453,14 @@ def main():
         if _want and args.rms_eps is None and abs(_want - 1e-5) > 1e-12:
             print("note: config says rms_norm_eps %g, the engine default is 1e-05; "
                   "pass --rms-eps %g to use the model's value" % (_want, _want))
+        _ntok = tok_entry_count(args.tok) if args.tok else 0
         meta, tensors = tensors_from_hf(args.src, args.quant, args.seq,
-                                        rail_check=not args.no_rail_check)
+                                        rail_check=not args.no_rail_check,
+                                        vocab_limit=_ntok or None)
+        _vs = meta['vocab']
+        if _ntok and _ntok != _vs:
+            print("note: tokenizer has %d entries, container uses %d (embedding padded)"
+                  % (_ntok, _vs))
     elif is_llama2c(args.src):
         # llama2.c fp32, also straight to a container; its rope is the llama2
         # layout by construction, so nothing has to be declared.

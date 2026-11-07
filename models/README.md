@@ -305,6 +305,41 @@ residual width.
 So: q24 residual - done, and it is what makes the model usable on Xe.  VC4
 still blurs this model, at either residual width.
 
+### Supra2-Medium-Instruct: the same architecture, and VC4 reproduces f32 exactly
+
+`SupraLabs/Supra2-Medium-Instruct` is the 25M sibling (7 layers, 512 hidden,
+8/8 heads - **no GQA** - 16,384-token tokenizer, same `chat_template.jinja`
+shape).  It rails too, and harder relative to its size:
+
+```
+residual: peak 677.5 at layer 5 (rail 128.0), per layer 10 24 443 677 677 678 76
+this model's residual reaches 678, 5x the engine's q16 rail (128.0).
+```
+
+so the residual explosion is a family trait, not one odd checkpoint.  Packed
+q8 + q24 (34 MB), the same prompt on all three:
+
+| | "What is the capital of France?" |
+|---|---|
+| f32 oracle (numpy) | `The capital of France is Bordeaux, which is located in the heart of the country. It is located in` |
+| engine, Xe, GPU | identical |
+| **engine, Pi Zero, GPU** | **identical** |
+
+Character for character, on the board.  Two toolchain bugs had to be fixed
+before it could run at all:
+
+- its tokenizer puts `<|im_start|>` at **16384**, above a 16384-token BPE, and
+  `make_tokenizer.py` only wrote `model["vocab"]`, so the engine split the chat
+  markers into characters;
+- its embedding is **16408** rows (HF padding) against a 16384-token tokenizer,
+  and the packer claimed the embedding's count, so the engine read past the end
+  of the blob ("tokenizer blob truncated").  The tokenizer now decides.
+
+**This changes the reading of the 100M model.**  VC4 is not what blurs it: a
+same-architecture model on the same board reproduces f32 exactly, with the same
+q24 residual.  The 100M's blurred distribution is specific to that checkpoint,
+which makes it a model at the edge of what a 100M can do, not an engine defect.
+
 **What a wider residual would still need.**  A single global factor does not work: it has to buy 18x
 of range for the late layers without spending the early layers' resolution
 (their values are ~0.05), and one q16 grid cannot span both.  A *per-layer*
