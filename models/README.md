@@ -153,5 +153,30 @@ Ruled out by measurement, each one a single change:
 | the epsilon as a *uniform* instead of a literal | moves MiniMind3's PPL 270.3170 -> 269.9303 with the same numeric value, so the shader keeps the literal unless the container states an epsilon |
 
 So the divergence is inside the engine's maths for this checkpoint shape, and
-none of the config fields above explains it.  What is left is a stage-level
-diff on this model alone (the `STAGE_DUMP` route), which has not been done.
+none of the config fields above explains it.
+
+### Stage-level measurement (2026-11-07, in progress)
+
+`engine/tools/ref_stages.py` (new) prints the same per-stage `DUMP` lines as
+`STAGE_DUMP=1` from a float32 forward, so `dump_diff.awk` can compare the
+engine against a reference instead of against itself.  First results, prompt
+"hi" → token 22727, `GPU_LAYER=0`, one position:
+
+- the engine's dump is **not in the reference's units** for this model: most
+  values are exactly 256x the reference's q16, i.e. the activation factor is
+  applied before packing.  MiniMind3's factor is 1, which is why the same tool
+  always looked directly comparable.  Divide the engine's values by 256 before
+  comparing.
+- with that undone, layer 0 `xb` agrees to 1-2 LSB at **746 of 768**
+  coordinates, and the 22 that do not agree are the same coordinates for a
+  different token (31, 32, 69, 81, 112, 177, 204 ... both times) - so this is
+  not noise and not token-specific.
+- at those coordinates the engine is near zero while the reference is not:
+  `idx 204`: weight 1.0288, embedding -0.136, reference xb -2.99, engine ~0.
+  The container's embedding row 22727 and its `input_layernorm` row both match
+  the safetensors to 3e-6, so the values are in the file; what disagrees is
+  what the engine computes from them.
+
+Open lead for the next round: those 22 fixed coordinates in layer 0, before
+attention.  Everything downstream is therefore measured against an input that
+is already wrong.
