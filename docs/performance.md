@@ -3911,3 +3911,39 @@ matrix at the top of this file, i.e. no regression from the new code path.
 Template compile is one-off and invisible next to shader linking: the
 `SHADER_TIME` marks put "model loaded" at 472 ms and "session ready" at
 5.6 s, and the 3.9 KB template compiles between them without moving the mark.
+
+## 2026-11-07 — Supra2-Medium q8 + q24 residual (Pi Zero)
+
+First measurement of a model with the 24-bit residual stream (metadata key 12).
+Container `medium.q8.q24.mmcf`, 34 MB, 25M parameters, 7 layers, hidden 512,
+8/8 heads, vocab 16408, `SEQ=512 GPU_LAYER=1 KV_PACK=16`.
+
+Decode, "Write a long paragraph about cats and dogs", 50 tokens:
+**84 ms/token** (11.2 s wall including ~7.0 s of startup).  Shorter runs land at
+110-150 ms/token; the board's noise is the usual one.  That is the fastest
+model measured here - stories15M q8 is 138 ms and MiniMind3 q8 is 252 ms - and
+it is within ~25% of the board's best observed rate (~180 MMAC/s against 228
+for MiniMind3, which processes four weight rows per fragment instead of one).
+
+**The q24 residual costs nothing measurable.**  Same container, same run,
+`RES_FMT=i16_1` (the q16 grid): 156 ms/token against 147 ms/token, i.e. inside
+the noise.  The 24-bit decode is three byte conversions plus two multiplies per
+value and the residual is a small fraction of the fetch traffic.
+
+Startup is where the time goes, and none of it is the model:
+
+| mark | at |
+|---|---:|
+| model loaded (34 MB container) | 163 ms |
+| EGL ready | 1889 ms |
+| weights uploaded | 2757 ms |
+| session ready | 2936 ms |
+| first token (shaders linked, prefill) | rest, ~3.5 s |
+
+`SHADER_TIME` puts 14 programs at ~1.8 s of link time, the largest single one
+being the logits tile (`xq8pl_1048_512`, a 512-wide unrolled loop).  Mesa's
+disk shader cache does not help on this driver: `MESA_SHADER_CACHE_ENABLE=true`
+gives 6.9 s and 7.2 s on two consecutive runs, so every start pays the link.
+
+So the decode has no headroom worth chasing on this model; startup would need
+fewer or smaller programs, which is a project rather than a tweak.
