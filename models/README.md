@@ -202,6 +202,20 @@ same model + q16 clamp, no scaling  -> Introdu  I      Welcome     <- the engine
 looked like from outside.  The clamped simulation puts it first; the f32
 reference does not.
 
+**The packer now refuses it.**  `mmcf_pack.py` calibrates before writing and
+aborts above 4x the rail, so this cannot be re-discovered by accident:
+
+```
+$ python3 engine/tools/mmcf_pack.py --in models/supra2 ... 
+residual: peak 2324.1 at layer 6 (rail 128.0), per layer 15 23 21 43 2323 ...
+this model's residual reaches 2324, 18x the engine's q16 rail (128.0).
+The forward pass will saturate and answer from a truncated state; see
+models/README.md (supra2-100M).  Pack it anyway with --allow-over-rail.
+```
+
+feng30m (peak 212, 1.65x the rail) is warned about and packed, because it does
+answer correctly; 4x is where the measurement says the truncation wins.
+
 **What a fix needs.**  A single global factor does not work: it has to buy 18x
 of range for the late layers without spending the early layers' resolution
 (their values are ~0.05), and one q16 grid cannot span both.  A *per-layer*

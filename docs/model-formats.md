@@ -173,6 +173,31 @@ python3 engine/tools/mmcf_dump.py models/<model>/<model>.q4.mmcf --check
 A llama2.c fp32 `.bin` is the other accepted source: `--in models/llama2c/
 stories15M.bin --quant i16 --tok .../tokenizer.bin --template plain --chat`.
 
+### The packer checks the residual rail
+
+The engine's residual stream is q16 at 1/256, so it clamps at **127.996**.
+A model whose residual is larger still packs and still runs, but from a
+truncated state — supra2-100M reaches 2300 and echoes the prompt, feng30m
+reaches 212 and answers correctly.  Because that is the only cheap place to
+notice, `mmcf_pack.py` runs a short float32 calibration (three 8-token samples,
+~2 s) before writing, prints
+
+```
+residual: peak 46.1 at layer 7 (rail 128.0), per layer 1 8 23 40 42 43 43 46
+```
+
+and then:
+
+| peak | behaviour |
+|---|---|
+| < 96 | silent |
+| 96 – 512 | warning, packs |
+| > 512 (4x the rail) | **refuses**, exit 1, names the ratio and points at `models/README.md` |
+
+`--allow-over-rail` packs anyway; `--no-rail-check` skips the calibration.  A
+legacy source has no float weights to run, so the packer prints a note instead
+of guessing.
+
 The arithmetic is the same as the converters that used to exist, which is why a
 container packed from safetensors is **byte-identical** to one packed from the
 legacy file it replaces — measured on minimind3 i16/q8/q4 and on stories15M.

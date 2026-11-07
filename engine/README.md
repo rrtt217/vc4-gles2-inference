@@ -156,6 +156,11 @@ python3 tools/mmcf_pack.py --in ../models/<model> --quant q4 --seq 512 \
 python3 tools/mmcf_dump.py ../models/<model>/<model>.q4.mmcf --check
 ```
 
+The packer prints the residual peak per layer and refuses a model that reaches
+more than 4x the engine's q16 rail (128); `--allow-over-rail` overrides,
+`--no-rail-check` skips the 2 s calibration.  See the residual-rail note in
+[model-formats.md](../docs/model-formats.md).
+
 A llama2.c `.bin` works the same way (`--in ../models/llama2c/stories15M.bin
 --quant i16 --tok ... --template plain --chat`).  A legacy checkpoint is still
 accepted, and then `--theta` and `--rope-half` are required for a `Q8M1`/`I16M1`

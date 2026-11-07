@@ -194,7 +194,87 @@ def is_llama2c(path):
     return 0 < d <= 4096 and d % 8 == 0
 
 
-def tensors_from_hf(model_dir, scheme, seq, m=None):
+# The engine's residual stream is q16 fixed point at 1/256, so it cannot hold a
+# value beyond 32767/256 = 127.996; `add_q16` clamps there.  MiniMind3 peaks
+# around 40, but a model whose residual is larger saturates silently and answers
+# from a truncated state (supra2-100M reaches 2300 at layer 4, see
+# models/README.md).  Detecting that at pack time is the only place it can be
+# caught cheaply.
+RESIDUAL_RAIL = 32767.0 / 256.0   # 127.996
+RESIDUAL_WARN = 96.0             # 75% of the rail
+
+
+def residual_peaks(m, seq=8):
+    """max|x| of the residual stream per layer, for a few token samples.
+
+    A float32 forward from a deterministic sample of vocabulary ids: three runs
+    of `seq` consecutive ids (the start of the vocabulary, the middle and the
+    end), taking the maximum over both the samples and the positions.  It needs
+    no tokenizer, so it works for every source the packer accepts.
+    """
+    dim, hidden, layers = m['dim'], m['hidden'], m['layers']
+    heads, kv, vocab = m['heads'], m['kv'], m['vocab']
+    hd = dim // heads
+    theta = float(m['theta'])
+    half = bool(m['half'])
+    eps = float(m.get('rms_eps') or 1e-5)
+    qk = bool(m.get('qk_norm'))
+    emb = m['emb']
+    peaks = [0.0] * layers
+    seq = max(1, min(seq, vocab))
+
+    def rotate(a, pos):          # a: (T, H, hd)
+        T = a.shape[0]
+        o = np.empty_like(a)
+        for i in range(hd // 2 if half else hd // 2):
+            if half:
+                ang = np.arange(T)[:, None] / (theta ** (2.0 * i / hd))
+                c, s = np.cos(ang), np.sin(ang)
+                o[:, :, i] = a[:, :, i] * c - a[:, :, i + hd // 2] * s
+                o[:, :, i + hd // 2] = a[:, :, i + hd // 2] * c + a[:, :, i] * s
+            else:
+                ang = np.arange(T)[:, None] / (theta ** (i / hd))
+                c, s = np.cos(ang), np.sin(ang)
+                o[:, :, i] = a[:, :, i] * c - a[:, :, i + 1] * s
+                o[:, :, i + 1] = a[:, :, i + 1] * c + a[:, :, i] * s
+        return o
+
+    rep = heads // kv
+    starts = [0, max(0, vocab // 2 - seq // 2), max(0, vocab - seq)]
+    for st in starts:
+        ids = list(range(st, st + seq))
+        x = emb[ids].astype(np.float32)
+        T = len(ids)
+        for l in range(layers):
+            an = m['rms_att'][l]
+            fn = m['rms_ffn'][l]
+            h = x / np.sqrt((x * x).mean(-1, keepdims=True) + eps) * an
+            q = (h @ m['wq'][l].T).reshape(T, heads, hd)
+            k = (h @ m['wk'][l].T).reshape(T, kv, hd)
+            v = (h @ m['wv'][l].T).reshape(T, kv, hd)
+            if qk:
+                q = q / np.sqrt((q * q).mean(-1, keepdims=True) + eps) * m['q_norm'][l]
+                k = k / np.sqrt((k * k).mean(-1, keepdims=True) + eps) * m['k_norm'][l]
+            q = rotate(q, 0)
+            k = rotate(k, 0)
+            out = np.zeros((T, heads, hd), np.float32)
+            for t in range(T):
+                for hh in range(heads):
+                    kh = hh // rep
+                    sc = (q[t, hh] @ k[: t + 1, kh].T) / np.sqrt(hd)
+                    pr = np.exp(sc - sc.max())
+                    pr /= pr.sum()
+                    out[t, hh] = pr @ v[: t + 1, kh]
+            x1 = x + out.reshape(T, dim) @ m['wo'][l].T
+            h2 = x1 / np.sqrt((x1 * x1).mean(-1, keepdims=True) + eps) * fn
+            g = h2 @ m['w1'][l].T
+            u = h2 @ m['w3'][l].T
+            x = x1 + ((g / (1 + np.exp(-g))) * u) @ m['w2'][l].T
+            peaks[l] = max(peaks[l], float(np.abs(x).max()))
+    return peaks
+
+
+def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True):
     """Build the tensor list directly from an HF safetensors directory.
 
     Same list shape the legacy reader produces, so build() cannot tell them
@@ -215,6 +295,8 @@ def tensors_from_hf(model_dir, scheme, seq, m=None):
                 vocab=vocab, seq=seq, head_dim=head_dim,
                 theta=float(m['theta']), half=bool(m['half']), qk_norm=bool(qk),
                 scheme=scheme, group=(32 if scheme == 'q4' else 0), split=bool(split))
+    if rail_check:
+        meta['res_peaks'] = residual_peaks(m)
     T = []
 
     def f32(a):

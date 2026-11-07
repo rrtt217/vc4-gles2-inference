@@ -32,7 +32,8 @@ import sys
 import zlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from mmcf_hf import is_llama2c, load_llama2c, tensors_from_hf
+from mmcf_hf import (RESIDUAL_RAIL, RESIDUAL_WARN, is_llama2c, load_llama2c,
+                     tensors_from_hf)
 
 # tensor table record: id, dtype, flags, group, pad, rows, cols, offset, bytes,
 # crc32, pad, scale, pad  -> exactly 48 bytes, no implicit padding with "<"
@@ -415,6 +416,10 @@ def main():
                          "chat_template).  Default: read it from tokenizer_config.json next to --in")
     ap.add_argument("--chat-template-variant", metavar="NAME=FILE", action="append", default=[],
                     help="additional named template variant (repeatable)")
+    ap.add_argument("--allow-over-rail", action="store_true",
+                    help="pack even when the residual stream exceeds the engine's q16 rail")
+    ap.add_argument("--no-rail-check", action="store_true",
+                    help="skip the residual calibration (it costs ~2 s per model)")
     ap.add_argument("--rms-eps", type=float, default=None,
                     help="RMSNorm epsilon to record (key 11).  The engine defaults to 1e-5; "
                          "a HF config usually says 1e-6 and the packer warns when they differ")
@@ -442,16 +447,41 @@ def main():
         if _want and args.rms_eps is None and abs(_want - 1e-5) > 1e-12:
             print("note: config says rms_norm_eps %g, the engine default is 1e-05; "
                   "pass --rms-eps %g to use the model's value" % (_want, _want))
-        meta, tensors = tensors_from_hf(args.src, args.quant, args.seq)
+        meta, tensors = tensors_from_hf(args.src, args.quant, args.seq,
+                                        rail_check=not args.no_rail_check)
     elif is_llama2c(args.src):
         # llama2.c fp32, also straight to a container; its rope is the llama2
         # layout by construction, so nothing has to be declared.
         print("source: %s (llama2c, quant %s)" % (args.src, args.quant))
-        meta, tensors = tensors_from_hf(args.src, args.quant,
-                                        load_llama2c(args.src)['seq'],
-                                        m=load_llama2c(args.src))
+        _m = load_llama2c(args.src)
+        meta, tensors = tensors_from_hf(args.src, args.quant, _m['seq'], m=_m,
+                                        rail_check=not args.no_rail_check)
     else:
         meta, tensors = parse_legacy(args.src)
+        if not args.no_rail_check:
+            print("note: no residual calibration for a legacy source (no float weights to "
+                  "run); a model that rails at 128 will pack and then answer from a "
+                  "truncated residual")
+    # The residual stream is q16 at 1/256, so it clamps at 127.996.  A model
+    # whose residual is larger still runs, but from a truncated state: supra2
+    # reaches 2300 and echoes the prompt, feng30m reaches 212 and answers.  This
+    # is the only cheap place to notice, so the packer says so and refuses well
+    # past the rail unless told otherwise.
+    peaks = meta.get("res_peaks")
+    if peaks:
+        rail = RESIDUAL_RAIL
+        worst = max(peaks)
+        print("residual: peak %.1f at layer %d (rail %.1f), per layer %s"
+              % (worst, peaks.index(worst), rail, " ".join("%.0f" % v for v in peaks)))
+        if worst > 4 * rail and not args.allow_over_rail:
+            raise SystemExit(
+                "this model's residual reaches %.0f, %.0fx the engine's q16 rail (%.1f).\n"
+                "The forward pass will saturate and answer from a truncated state; see\n"
+                "models/README.md (supra2-100M).  Pack it anyway with --allow-over-rail."
+                % (worst, worst / rail, rail))
+        if worst > RESIDUAL_WARN:
+            print("warning: residual peak %.1f is at or over the %.1f rail; expect degraded "
+                  "answers" % (worst, rail))
     # Sources without rope fields cannot state their rope, and a wrong theta or
     # half flag silently degrades every position: refuse to guess unless the
     # caller says so.
