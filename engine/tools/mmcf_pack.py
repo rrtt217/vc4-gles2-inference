@@ -309,6 +309,14 @@ def build(meta, tensors, tok_blob, args):
     # not know.
     kind = {"plain": 0, "qwen": 1, "chatml": 1, "minimind3": 2, "tinybrainbot": 3}.get(args.template, 1)
     template = (bytes([kind]) + args.system.encode() + b"\0" + args.template.encode() + b"\0")
+    # A plain container is a completion model: advertising chat lets the engine
+    # wrap a story prompt in the built-in [INST] template and answer with noise.
+    # That combination shipped once (stories42M.q8) and cost a debugging round.
+    if args.chat and args.template == "plain":
+        raise SystemExit(
+            "--chat with --template plain: this is a completion model, it has no chat\n"
+            "template to render.  Drop --chat (use --prompt), or give the model's own\n"
+            "template with --chat-template FILE and a template kind that has one.")
     caps_val = (1 if args.chat else 0) | (2 if args.tools else 0) | (4 if args.vision else 0)
     caps = struct.pack("<I", caps_val)
     md = (tlv(1, 1, model) + tlv(2, 1, rope) + tlv(3, 1, quant) +

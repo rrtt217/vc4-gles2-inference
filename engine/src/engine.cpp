@@ -224,6 +224,13 @@ int main(int argc, char** argv) {
     // The checkpoint names its template (a kind byte plus a name), so --template
     // is only needed to override it.  The kind is authoritative; the name is the
     // fallback for a kind this build does not know.
+    // Chat mode with no chat template falls back to the built-in [INST] wrapper,
+    // which is right for a Llama-2 chat model and nonsense for a completion
+    // model.  Say which one is happening instead of letting the output explain.
+    if (chat && model.template_kind == 0 && model.chat_template.empty() && !g_quiet)
+        fprintf(stderr, "chat: this checkpoint has no chat template (kind 0, plain); "
+                        "using the built-in [INST] wrapper.  For a completion model drop "
+                        "--chat and use --prompt.\n");
     if (!model.template_name.empty() || model.template_kind >= 0) {
         const int k = model.template_kind;
         bool want_qwen = false, want_mm3 = false, want_tbb = false;
