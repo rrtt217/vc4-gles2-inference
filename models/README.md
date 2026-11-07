@@ -202,21 +202,38 @@ same model + q16 clamp, no scaling  -> Introdu  I      Welcome     <- the engine
 looked like from outside.  The clamped simulation puts it first; the f32
 reference does not.
 
-**The packer now refuses it.**  `mmcf_pack.py` calibrates before writing and
-aborts above 4x the rail, so this cannot be re-discovered by accident:
+**The packer refuses it, and `--res q24` is the fix.**  `mmcf_pack.py`
+calibrates before writing and aborts above 4x the rail, so this cannot be
+re-discovered by accident:
 
 ```
-$ python3 engine/tools/mmcf_pack.py --in models/supra2 ... 
+$ python3 engine/tools/mmcf_pack.py --in models/supra2 ...
 residual: peak 2324.1 at layer 6 (rail 128.0), per layer 15 23 21 43 2323 ...
 this model's residual reaches 2324, 18x the engine's q16 rail (128.0).
 The forward pass will saturate and answer from a truncated state; see
 models/README.md (supra2-100M).  Pack it anyway with --allow-over-rail.
 ```
 
-feng30m (peak 212, 1.65x the rail) is warned about and packed, because it does
-answer correctly; 4x is where the measurement says the truncation wins.
+With `--res q24 --allow-over-rail` the container declares a 24-bit residual
+(metadata key 12): the same 1/256 step with 256x the range.  On the CPU path
+(`GPU_LAYER=0`) that turns the model from an echo machine into a working
+one, and it agrees with the float32 reference:
 
-**What a fix needs.**  A single global factor does not work: it has to buy 18x
+| prompt | q16 | q24 (CPU) | float32 reference |
+|---|---|---|---|
+| "Introduce yourself in two sentences." | `Introduce yourself in two sentences.` | `I'm a professional assistant.` | ` I` -> same sentence |
+| "What can you do?" | `I can do a lot of things. I can help you. I can help you. ...` | `I can help you with a wide range of tasks. I can assist you with tasks like:` | ` I` -> same sentence |
+
+`engine/scripts/supra2-battery.sh` is the rest of the evidence: determinism
+(each case runs twice), identity, instruction following, factuality, a long
+generation, termination and sampling.  It also shows what q24 does **not**
+fix - a 100M model still answers "2+2" with "2+2!" and "capital of France"
+with "the capital of France" - which is the model card's warning, not a bug.
+
+The GPU path is not converted yet: the residual-consuming kernels still store
+q16, so a q24 container exits 2 there rather than answering from garbage.
+
+**What a wider residual would still need.**  A single global factor does not work: it has to buy 18x
 of range for the late layers without spending the early layers' resolution
 (their values are ~0.05), and one q16 grid cannot span both.  A *per-layer*
 power-of-two scale does work — the row above shows 2^5 from layer 4 on removes
