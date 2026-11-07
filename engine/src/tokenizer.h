@@ -1,5 +1,6 @@
 #pragma once
 
+#include "chattmpl.h"
 #include "common.h"
 #include <string>
 #include <unordered_map>
@@ -15,10 +16,19 @@ public:
     void set_bytelevel(bool b);
 
     vector<int> encode(const string& text, bool bos = true, bool dummy_prefix = true);
+    // Encode a rendered prompt.  Special-token matching is enabled only for
+    // template text: a user message that contains "<|im_end|>" is tokenised as
+    // ordinary text, so it cannot forge a turn boundary.  The BPE merge pass
+    // still runs once over the whole sequence, which is why a single template
+    // part tokenises exactly like encode().
+    vector<int> encode_parts(const vector<PromptPart>& parts, bool bos = true,
+                             bool dummy_prefix = true);
 
     string decode(const vector<int>& toks, int prev = 0);
 
 private:
+    void encode_into(const string& text, bool allow_specials, vector<int>& out) const;
+    void bpe_merge(vector<int>& t) const;
     vector<string> vocab_;
     vector<float> scores_;
     unordered_map<string, int> lookup_;

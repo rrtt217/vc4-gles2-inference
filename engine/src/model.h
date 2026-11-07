@@ -33,7 +33,16 @@ public:
     const void* tok_blob = nullptr;
     size_t tok_blob_bytes = 0;
     string tok_kind, default_system, template_name;
-    int template_kind = -1;   // 0 plain, 1 chatml/qwen, 2 minimind3
+    int template_kind = -1;   // 0 plain, 1 chatml/qwen, 2 minimind3, 3 tinybrainbot
+    // Metadata key 9: the model's own chat template (HuggingFace Jinja text).
+    // Empty means "this container predates the key": the reader falls back to
+    // template_kind.  `chat_templates` keeps every variant; `chat_template` is
+    // the default one.
+    string chat_template;
+    vector<pair<string, string>> chat_templates;
+    // Metadata key 10: whether the template expects a BOS/EOS around the
+    // prompt.  -1 = not stated (derive from template_kind, the historical rule).
+    int add_bos = -1, add_eos = -1;
     int capabilities = 0;
     bool have_capabilities = false;
     // Special token ids from the container (-1 = absent).  Legacy files have no

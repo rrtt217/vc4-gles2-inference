@@ -14,6 +14,7 @@ responsibility, not by line count:
 | `src/session.h/.cpp` | KV cache, RoPE, attention, transformer forward, prefix cache |
 | `src/tokenizer.h/.cpp` | llama2.c tokenizer and byte-level BPE, embedded-blob loader |
 | `src/sampling.h/.cpp` | sampling, penalties, top-p/min-p |
+| `src/chattmpl.h/.cpp` | renders the container's Jinja chat template; returns the prompt split into template text and caller text |
 | `src/tools.h/.cpp` | tool JSON, restricted arithmetic, built-in handlers |
 | `src/engine.cpp` | CLI, worker protocol, chat loop, capability/template handling |
 
@@ -21,6 +22,7 @@ The sibling directories are **not** linked into `engine_mm3`:
 
 | Path | Runs on | Contents |
 |---|---|---|
+| `engine/third_party/jinja/` | engine | vendored llama.cpp Jinja engine (MIT); see its README for the three local edits |
 | `engine/tools/` | host python | container packer/inspector, numpy reference forwards |
 | `engine/quantize/` | host python | F16/llama2.c → I16 → Q8/Q4 converters |
 | `engine/scripts/` | host shell | regression gate, CPU-vs-GPU diff, attention/logits oracles, benchmarks |
@@ -50,6 +52,11 @@ macros and is never assumed to have the activation layout.
 This is the fix for the previous ACT8 failures: adding a format changes
 `xformat.cpp`, not seven shader strings. `ACT8=1` selects `I8_4` for all
 matvec inputs, `ACT8=2` only for the FFN hidden state; both are opt-in.
+
+The prompt is a separate matter from the activation layouts: `chattmpl.cpp`
+renders the template and hands back `PromptPart`s that carry an `is_input`
+flag, and `Tokenizer::encode_parts` matches special tokens only outside those
+parts.  Template text may produce `<|im_end|>`; a user message may not.
 
 The **P2** layout is a target layout, not an `XFormat`: in the two-position
 prefill pair, one texel holds value *k* of position A in `.rg` and value *k* of

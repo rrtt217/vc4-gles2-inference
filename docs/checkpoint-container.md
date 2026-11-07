@@ -107,6 +107,13 @@ Each record is `<HHI>` (key, type, length) followed by the payload; `type` is 1
 | 6 | `name\0` |
 | 7 | `<i` tokenizer blob length |
 | 8 | `<6i` bos, eos, stop, pad, unk, im_start (all `-1` = absent) |
+| 9 | `u8 n`, then n × (`name\0`, `u32 len`, **Jinja template text**).  The default variant is stored with an empty name and read as `default` |
+| 10 | `<BB` add_bos, add_eos (`255` = not stated; `-1` in memory) |
+
+Key 9 is the model's own `chat_template` from HuggingFace, stored **verbatim**:
+the same text a GGUF file carries in `tokenizer.chat_template`.  A reader that
+does not know the key skips it and falls back to key 4's kind, which is why
+adding it did not need a version bump.
 
 Template kinds: 0 plain, 1 chatml/qwen, 2 minimind3, 3 tinybrainbot.  The kind
 is authoritative; the name string is kept for humans and as the fallback for a
@@ -267,7 +274,12 @@ stated by the file:
   or an explicit `--assume-llama2-rope`.
 - **template kind**: 0 plain, 1 chatml/qwen, 2 minimind3, 3 tinybrainbot.  An
   unknown kind falls back to the name string; there is no `--template` flag to
-  override it with.
+  override it with.  Since key 9 exists, the kind is the *fallback* for
+  containers written before it: a file that carries a template renders that
+  template, and refuses to load if the engine cannot parse it.
+- **BOS policy** comes from key 10 when present.  Without it the reader keeps
+  the historical rule, which derived "no BOS" from the template kind — that
+  coupling is exactly what key 10 removes.
 
 `engine/tools/mmcf_dump.py` prints all of it from the file alone
 (`--tensors` adds one line per tensor, `--check` verifies every CRC), so

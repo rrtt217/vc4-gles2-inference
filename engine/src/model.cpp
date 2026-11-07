@@ -354,6 +354,33 @@ bool Model::load_mmcf(){
                 } else if (key == 5 && type == 1 && len >= 4) {
                         capabilities = (int)rd32(payload);
                         have_capabilities = true;
+                } else if (key == 9 && type == 1 && len >= 1) {
+                        // n variants of (name\0, u32 len, Jinja text)
+                        const uint8_t* q = payload;
+                        const uint8_t* qe = payload + len;
+                        const uint8_t* name = q;
+                        q += 1;   // the count byte; the records follow
+                        while (q < qe) {
+                                const uint8_t* nul = (const uint8_t*)memchr(name, 0, (size_t)(qe - name));
+                                if (!nul) break;
+                                string vname((const char*)name, (size_t)(nul - name));
+                                q = nul + 1;
+                                if (q + 4 > qe) break;
+                                const uint32_t tlen = rd32(q);
+                                q += 4;
+                                if (q + tlen > qe) break;
+                                string body((const char*)q, tlen);
+                                q += tlen;
+                                if (vname.empty()) vname = "default";
+                                chat_templates.emplace_back(vname, body);
+                                if (vname == "default") chat_template = body;
+                                name = q;
+                        }
+                        if (chat_template.empty() && !chat_templates.empty())
+                                chat_template = chat_templates.front().second;
+                } else if (key == 10 && type == 1 && len >= 2) {
+                        add_bos = payload[0] == 255 ? -1 : (int)payload[0];
+                        add_eos = payload[1] == 255 ? -1 : (int)payload[1];
                 }
                 p += 8 + len;
         }

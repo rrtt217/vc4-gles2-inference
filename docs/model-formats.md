@@ -139,7 +139,8 @@ python3 engine/quantize/make_q4_from_i16.py /tmp/<model>.i16 /tmp/<model>.q4
 # 3. legacy layout -> container
 python3 engine/tools/mmcf_pack.py --in /tmp/<model>.q4 --tok models/<model>/<model>.tok \
   --out models/<model>/<model>.q4.mmcf --name <model> --template chatml --chat \
-  --theta 100000 [--rope-half] [--qk-norm] --verify
+  --theta 100000 [--rope-half] [--qk-norm] \
+  --chat-template models/<model>/tokenizer_config.json --verify
 
 # 4. confirm what the engine will read
 python3 engine/tools/mmcf_dump.py models/<model>/<model>.q4.mmcf --check
@@ -159,7 +160,8 @@ tokenizer, template and rope metadata are not re-derived.
 |---|---|
 | `rope_theta` / rotate-half | metadata key 2.  A `Q8M1`/`I16M1` source has no rope at all, so the packer refuses to guess: `--theta` plus `--rope-half`, `--rope-plain` (llama2) or `--assume-llama2-rope` |
 | BOS / EOS / stop ids | metadata key 8, derived from the embedded vocabulary.  llama2.c stores `"<s>"` as `"\n<s>\n"`, so matching is on the trimmed token |
-| chat template | metadata key 4 (kind + default system + name) |
+| chat template | metadata key 9 (the Jinja text, verbatim); key 4 keeps the kind + default system + name as the fallback |
+| BOS policy | metadata key 10 (`add_bos` / `add_eos`) |
 | tokenizer | the `.tok` blob is inside the container |
 
 ## TinyBrainBot-100M-v5.1-Instruct

@@ -38,6 +38,7 @@
 #include "xformat.h"
 #include "gpu.h"
 #include "model.h"
+#include "chattmpl.h"
 #include "session.h"
 #include "tokenizer.h"
 #include "sampling.h"
@@ -145,6 +146,20 @@ int main(int argc, char** argv) {
             cerr << "template: " << (model.template_name.empty() ? "kind " + std::to_string(k) : model.template_name)
                  << " (from the checkpoint)\n";
     }
+    // Metadata key 9: the model's own Jinja template.  When it is present it is
+    // the prompt builder; template_kind stays as the fallback for containers
+    // written before the key existed.  A template the vendored engine cannot
+    // parse is refused here, not silently swapped for a built-in one.
+    std::unique_ptr<ChatTemplate> chat_tmpl;
+    if (!model.chat_template.empty()) {
+        chat_tmpl.reset(new ChatTemplate(model.chat_template));
+        if (!chat_tmpl->ok()) {
+            cerr << "chat template rejected: " << chat_tmpl->error() << "\n";
+            return 2;
+        }
+        cerr << "chat template: " << model.chat_template.size() << " B from the checkpoint ("
+             << model.chat_templates.size() << " variant(s))\n";
+    }
     // Capabilities: a checkpoint that says it is not a chat model must not be
     // driven through the chat template.
     if (model.have_capabilities && chat && !(model.capabilities & 1)) {
@@ -169,6 +184,15 @@ int main(int argc, char** argv) {
              << " stop " << model.id_stop << " (from the checkpoint)\n";
     tokenizer.set_qwen(qwen_template || minimind3_template);
     tokenizer.set_bytelevel(minimind3_template);
+    // Tool definitions, normalised to one JSON array for the template context.
+    const string tools_array = chat_tools_array(tools_json);
+    // BOS policy: the container states it when it can (key 10); otherwise the
+    // historical rule is kept, which is derived from the template kind.
+    const bool enc_bos = model.add_bos >= 0 ? (model.add_bos != 0)
+                                            : (!qwen_template && !tbb_template);
+    // CHAT_DUMP=1 prints the rendered prompt with its input marking, which is
+    // what the byte-for-byte template comparisons are run against.
+    const bool chat_dump = getenv("CHAT_DUMP") != nullptr;
 
     const auto up_t0 = Clock::now();
     for (auto& m : model.qkv) gpu.upload(m);
@@ -404,7 +428,15 @@ int main(int argc, char** argv) {
     auto run_turn = [&](const string& user, bool first, int pos) {
         auto turn_start = Clock::now();
         string text;
-        if (minimind3_template) {
+        vector<PromptPart> parts;
+        if (chat_tmpl) {
+            string sys = system_prompt.empty() ? string(kDefaultSystem) : system_prompt;
+            vector<ChatMsg> msgs;
+            if (first) msgs.push_back(ChatMsg{"system", sys, "", ""});
+            msgs.push_back(ChatMsg{"user", user, "", ""});
+            parts = chat_tmpl->render(msgs, tools_array, /*add_generation_prompt=*/true,
+                                      open_thinking, "", "");
+        } else if (minimind3_template) {
             string sys = system_prompt.empty() ? string(kDefaultSystem) : system_prompt;
             if (!tools_json.empty()) {
                 sys += "\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\n"
@@ -439,7 +471,11 @@ int main(int argc, char** argv) {
             else
                 text = "[INST] " + user + " [/INST]";
         }
-        auto tokens = tokenizer.encode(text, !qwen_template && !tbb_template, !qwen_template && !tbb_template);
+        if (chat_dump) {
+            for (auto& p : parts) fprintf(stderr, "PROMPT[%s]%s\n", p.is_input ? "in" : "tmpl", p.text.c_str());
+        }
+        auto tokens = parts.empty() ? tokenizer.encode(text, enc_bos, enc_bos)
+                                    : tokenizer.encode_parts(parts, enc_bos, enc_bos);
         int skip = (first && !cli_cache_tokens.empty()) ? cache_prefix_len(tokens) : 0;
         for (int i = 0; i < skip; ++i) pos = i + 1;
         vector<float> logits;

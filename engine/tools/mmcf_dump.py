@@ -88,6 +88,23 @@ def main():
         elif key == 7 and ln >= 4:
             tok_bytes, = struct.unpack_from("<i", payload)
             print(f"tokenizer   {tok_bytes} B embedded")
+        elif key == 9 and ln >= 1:
+            # the model's own chat template(s), Jinja text
+            q, nvar = 1, payload[0]
+            for _ in range(nvar):
+                nul = payload.index(0, q)
+                vname = payload[q:nul].decode("utf-8", "replace") or "default"
+                q = nul + 1
+                vlen, = struct.unpack_from("<I", payload, q)
+                q += 4
+                body = payload[q:q + vlen]
+                q += vlen
+                first = body.split(b"\n", 1)[0].decode("utf-8", "replace")
+                print(f"chat tmpl   '{vname}' {vlen} B  {first[:64]}")
+        elif key == 10 and ln >= 2:
+            ab, ae = payload[0], payload[1]
+            fmt = lambda v: "unset" if v == 255 else str(v)
+            print(f"bos/eos     add_bos {fmt(ab)} add_eos {fmt(ae)}")
         p += 8 + ln
 
     # tensors

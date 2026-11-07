@@ -62,18 +62,14 @@ void Tokenizer::set_qwen(bool q){ qwen_ = q; }
 
 void Tokenizer::set_bytelevel(bool b){ bytelevel_ = b; }
 
-vector<int> Tokenizer::encode(const string& text, bool bos , bool dummy_prefix ){
-        vector<int> t;
-        if (bos && bos_id_ >= 0) t.push_back(bos_id_);
-        if (dummy_prefix && !text.empty()) {
-            auto it = lookup_.find(" ");
-            if (it != lookup_.end()) t.push_back(it->second);
-        }
+void Tokenizer::encode_into(const string& text, bool allow_specials, vector<int>& t) const {
         for (size_t i = 0; i < text.size();) {
             bool matched = false;
-            for (auto& sp : specials_) {
-                if (text.compare(i, sp.first.size(), sp.first) == 0) {
-                    t.push_back(sp.second); i += sp.first.size(); matched = true; break;
+            if (allow_specials) {
+                for (auto& sp : specials_) {
+                    if (text.compare(i, sp.first.size(), sp.first) == 0) {
+                        t.push_back(sp.second); i += sp.first.size(); matched = true; break;
+                    }
                 }
             }
             if (matched) continue;
@@ -101,6 +97,9 @@ vector<int> Tokenizer::encode(const string& text, bool bos , bool dummy_prefix )
                 }
             }
         }
+}
+
+void Tokenizer::bpe_merge(vector<int>& t) const {
         while (true) {
             float best = -1e30f; int bid = -1, ba = -1, bb = -1;
             for (size_t i = 0; i + 1 < t.size(); ++i) {
@@ -123,6 +122,35 @@ vector<int> Tokenizer::encode(const string& text, bool bos , bool dummy_prefix )
                 }
             }
         }
+}
+
+vector<int> Tokenizer::encode(const string& text, bool bos , bool dummy_prefix ){
+        vector<int> t;
+        if (bos && bos_id_ >= 0) t.push_back(bos_id_);
+        if (dummy_prefix && !text.empty()) {
+            auto it = lookup_.find(" ");
+            if (it != lookup_.end()) t.push_back(it->second);
+        }
+        encode_into(text, /*allow_specials=*/true, t);
+        bpe_merge(t);
+        return t;
+    }
+
+vector<int> Tokenizer::encode_parts(const vector<PromptPart>& parts, bool bos, bool dummy_prefix) {
+        vector<int> t;
+        if (bos && bos_id_ >= 0) t.push_back(bos_id_);
+        bool nonempty = false;
+        for (auto& p : parts) if (!p.text.empty()) { nonempty = true; break; }
+        if (dummy_prefix && nonempty) {
+            auto it = lookup_.find(" ");
+            if (it != lookup_.end()) t.push_back(it->second);
+        }
+        for (auto& p : parts) {
+            if (p.text.empty()) continue;
+            // Caller text never becomes a special token.
+            encode_into(p.text, /*allow_specials=*/!p.is_input, t);
+        }
+        bpe_merge(t);
         return t;
     }
 

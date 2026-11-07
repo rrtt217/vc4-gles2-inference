@@ -3,17 +3,29 @@ CXXFLAGS ?= -O2 -std=c++17
 LDLIBS ?= -lEGL -lGLESv2 -lm
 
 SRC := src
+TP  := third_party
+# Jinja chat templates (vendored from llama.cpp; see third_party/jinja/README.md).
+# json.cpp is the only translation unit that includes nlohmann, so the compile
+# cost stays in one place.
+JINJA := $(TP)/jinja/lexer.cpp $(TP)/jinja/parser.cpp $(TP)/jinja/runtime.cpp \
+         $(TP)/jinja/string.cpp $(TP)/jinja/value.cpp $(TP)/jinja/json.cpp \
+         $(TP)/jinja/unicode.cpp
 CORE := $(SRC)/engine.cpp $(SRC)/common.cpp $(SRC)/xformat.cpp \
         $(SRC)/shaders.cpp $(SRC)/shaders_attn.cpp $(SRC)/gpu.cpp \
         $(SRC)/tokenizer.cpp $(SRC)/model.cpp $(SRC)/session.cpp \
-        $(SRC)/sampling.cpp $(SRC)/tools.cpp
+        $(SRC)/sampling.cpp $(SRC)/tools.cpp $(SRC)/chattmpl.cpp $(JINJA)
 HEADERS := $(wildcard $(SRC)/*.h)
+INCS := -I$(SRC) -I$(TP)
+# The Jinja engine is large and only one path uses it; let the linker drop what
+# this build never reaches (-947 KB -> -1.19 MB stripped, measured on Xe).
+SECTIONS := -ffunction-sections -fdata-sections
+LDFLAGS ?= -Wl,--gc-sections
 
 engine: $(CORE) $(HEADERS)
-	$(CXX) $(CXXFLAGS) -o $@ $(CORE) $(LDLIBS)
+	$(CXX) $(CXXFLAGS) $(SECTIONS) $(INCS) -o $@ $(CORE) $(LDLIBS) $(LDFLAGS)
 
 engine_mm3: $(CORE) $(HEADERS)
-	$(CXX) $(CXXFLAGS) -o $@ $(CORE) $(LDLIBS)
+	$(CXX) $(CXXFLAGS) $(SECTIONS) $(INCS) -o $@ $(CORE) $(LDLIBS) $(LDFLAGS)
 
 
 # Raspbian/ARMv6 cross build for Pi Zero.  CROSS_SYSROOT must be a full
@@ -34,7 +46,7 @@ pi: engine_mm3_pi
 
 engine_mm3_pi: $(CORE) $(HEADERS)
 	@test -d "$(CROSS_SYSROOT)" || { echo "missing CROSS_SYSROOT=$(CROSS_SYSROOT)" >&2; exit 2; }
-	$(CROSS_CXX) $(CROSS_CXXFLAGS) -o $@ $(CORE) $(CROSS_LDLIBS)
+	$(CROSS_CXX) $(CROSS_CXXFLAGS) $(SECTIONS) $(INCS) -o $@ $(CORE) $(CROSS_LDLIBS) $(LDFLAGS)
 
 probes/vc4_probe: probes/vc4_probe.cpp
 	$(CXX) $(CXXFLAGS) -o $@ $< $(LDLIBS)

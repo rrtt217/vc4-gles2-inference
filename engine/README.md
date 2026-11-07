@@ -23,6 +23,7 @@ This README is the quick start. Deep notes are in [../docs/](../docs/):
 | `src/xformat.*` | activation layout and GLSL X macros |
 | `src/shaders*.cpp` | GLSL source builders |
 | `tools/` | MMCF packer/inspector and numpy reference forwards (host python) |
+| `third_party/jinja/` | vendored llama.cpp Jinja engine (MIT), renders the container's chat template |
 | `quantize/` | F16/I16/q8/q4 converters (legacy layouts; the packer wraps them) |
 | `scripts/` | regression gate, CPU-vs-GPU diff, attention/logits oracles, benchmarks |
 | `probes/` | standalone VC4 probes, not linked into the engine |
@@ -145,12 +146,16 @@ input to the packer:
 python3 quantize/make_i16.py --kind minimind \
   --input ../models/<model> --output ../models/<model>/<model>.i16
 
-# legacy layout -> container, verified byte for byte against the source
+# legacy layout -> container, verified byte for byte against the source.
+# --chat-template stores the model's own Jinja template (metadata key 9), so the
+# prompt stops being a C++ build option; without it the container falls back to
+# --template's kind.
 python3 tools/mmcf_pack.py --in ../models/<model>/<model>.i16 \
   --tok ../models/<model>/<model>.tok \
   --out ../models/<model>/<model>.i16.mmcf \
   --name <model> --template chatml --chat \
-  --theta 100000 --rope-half --verify
+  --theta 100000 --rope-half \
+  --chat-template ../models/<model>/tokenizer_config.json --verify
 
 # what does the engine actually read from it?
 python3 tools/mmcf_dump.py ../models/<model>/<model>.i16.mmcf --check
@@ -160,6 +165,30 @@ python3 tools/mmcf_dump.py ../models/<model>/<model>.i16.mmcf --check
 that header carries no rope at all and the packer refuses to guess.  Templates:
 `plain` (0), `chatml`/`qwen` (1), `minimind3` (2), `tinybrainbot` (3).  The
 tokenizer is embedded, and the special-token ids are derived from it.
+
+## Chat templates
+
+A container may carry the model's own `chat_template` (the HuggingFace Jinja
+text, metadata key 9 — the same string a GGUF file holds).  When it does, that
+template is the prompt builder; `--template`'s kind is only the fallback for
+containers written before the key existed.  A template the engine cannot parse
+is refused at load with the parser's message, never silently replaced.
+
+```bash
+python3 tools/mmcf_dump.py ../models/minimind3/minimind3.q8.mmcf | grep -i 'chat tmpl'
+CHAT_DUMP=1 ./engine_mm3 --chat --prompt hi --gen 1 --greedy 2>&1 | grep PROMPT
+```
+
+`CHAT_DUMP=1` prints the rendered prompt one segment per line, tagged
+`PROMPT[tmpl]` or `PROMPT[in]`.  The `[in]` segments are text that came from a
+message, and the tokenizer matches special tokens only **outside** them: a user
+message containing `<|im_end|>` is tokenised as ordinary text, so it cannot
+forge a turn boundary.  That is a behaviour change from the kind-based path,
+which built one string and matched specials everywhere.
+
+Tools still take the legacy path (`run_tool_turn`), so `--tools` remains
+MiniMind3-only until that loop is message-based; a template that renders `tools`
+is already able to describe them, but the loop's continuation is still ChatML.
 
 ## MiniMind3 64M
 

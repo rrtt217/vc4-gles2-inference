@@ -23,6 +23,7 @@ replace working paths with demos or cosmetic rewrites.
 |---|---|
 | `engine/src/` | EGL/GLES2 engine: X-format layouts, shader builders, GPU, model, session, tokenizer, CLI |
 | `engine/tools/` | container packer, container inspector, numpy reference forward passes |
+| `engine/third_party/jinja/` | vendored llama.cpp Jinja engine (MIT) — renders the container's chat template |
 | `engine/quantize/` | F16/llama2.c → I16 → Q8/Q4 converters (legacy layouts; `mmcf_pack.py` wraps them) |
 | `engine/scripts/` | the regression gate **and** the diagnostic tools |
 | `engine/probes/` | standalone VC4 feature/throughput probes (not linked into the engine) |
@@ -105,11 +106,14 @@ anything else and names the packer.  A `.q8` / `.q4` / `.i16` / `.bin` file in
 python3 engine/tools/mmcf_pack.py --in models/minimind3/minimind3.q8 \
   --tok models/minimind3/minimind3.tok \
   --out models/minimind3/minimind3.q8.mmcf \
-  --name minimind3 --template minimind3 --chat --verify
+  --name minimind3 --template minimind3 --chat \
+  --chat-template minimind3/chat_template.jinja --verify
 ```
 
-The container carries the tokenizer, the chat template, the default system
-prompt, the rope configuration and the special-token ids, so `TOKENIZER=`,
+The container carries the tokenizer, the chat template **text** (metadata
+key 9, the same Jinja string a GGUF file holds in `tokenizer.chat_template`),
+the default system prompt, the rope configuration, the BOS policy and the
+special-token ids, so `TOKENIZER=`,
 `ROPE_THETA=`, `ROPE_HALF=` and `--template` are **gone**.  Setting them is
 silently ignored, which is worse than an error: a command copied from an old
 note still "works" and quietly tests something else.  Check a file with

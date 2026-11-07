@@ -307,6 +307,19 @@ def build(meta, tensors, tok_blob, args):
     caps = struct.pack("<I", caps_val)
     md = (tlv(1, 1, model) + tlv(2, 1, rope) + tlv(3, 1, quant) +
           tlv(4, 1, template) + tlv(5, 1, caps) + tlv(6, 1, args.name.encode() + b"\0"))
+    # key 9: the model's own chat template(s), HuggingFace Jinja text, stored
+    # verbatim.  The default variant is named "" on disk ("default" in memory);
+    # extra name=file arguments become variants for other prompt shapes.
+    variants = list(getattr(args, "_chat_templates", []))
+    if variants:
+        body = bytes([len(variants)])
+        for vname, vtext in variants:
+            vb = vtext.encode("utf-8") if isinstance(vtext, str) else vtext
+            body += vname.encode() + b"\0" + struct.pack("<I", len(vb)) + vb
+        md += tlv(9, 1, body)
+    if args.add_bos is not None or args.add_eos is not None:
+        md += tlv(10, 1, struct.pack("<BB", 255 if args.add_bos is None else args.add_bos,
+                                     255 if args.add_eos is None else args.add_eos))
     specials = (-1, -1, -1, -1, -1, -1)
     if tok_blob is not None:
         vocab = vocab_of(tok_blob, len(tok_blob) and 200000 or 0)
@@ -388,6 +401,14 @@ def main():
     ap.add_argument("--rope-half", action="store_true", help="rope rotates half the head (GPT-NeoX style)")
     ap.add_argument("--rope-plain", action="store_true", help="llama2 rope: theta 10000, interleaved")
     ap.add_argument("--assume-llama2-rope", action="store_true", help="accept theta=10000 half=false when the source is silent")
+    ap.add_argument("--chat-template", metavar="FILE",
+                    help="the model's chat template (Jinja text, e.g. tokenizer_config.json's "
+                         "chat_template).  Default: read it from tokenizer_config.json next to --in")
+    ap.add_argument("--chat-template-variant", metavar="NAME=FILE", action="append", default=[],
+                    help="additional named template variant (repeatable)")
+    ap.add_argument("--add-bos", type=int, choices=[0, 1], default=None,
+                    help="whether the engine should put BOS in front of the prompt")
+    ap.add_argument("--add-eos", type=int, choices=[0, 1], default=None)
     ap.add_argument("--qk-norm", action="store_true", help="the file has per-head q/k norms")
     ap.add_argument("--bos", type=int, help="BOS id (-1 for none); default: derived from the tokenizer")
     ap.add_argument("--eos", type=int, help="EOS id; default: derived")
@@ -414,6 +435,42 @@ def main():
         meta["qk_norm"] = True
     print("rope: theta=%g half=%s qk_norm=%s" % (meta.get("theta", 10000.0),
           bool(meta.get("half")), bool(meta.get("qk_norm"))))
+    # Chat templates: explicit flag, else the HF source next to the checkpoint.
+    templates = []
+    tpath = args.chat_template
+    if not tpath:
+        cand = Path(args.src).parent / "tokenizer_config.json"
+        if cand.exists():
+            try:
+                cfg = json.loads(cand.read_text(encoding="utf-8"))
+                if cfg.get("chat_template"):
+                    tpath = str(cand)
+            except Exception:
+                tpath = None
+    if tpath:
+        if tpath.endswith(".json"):
+            cfg = json.loads(Path(tpath).read_text(encoding="utf-8"))
+            text = cfg.get("chat_template")
+            if isinstance(text, list):      # named variants in one field
+                for entry in text:
+                    if entry.get("name") == "default":
+                        text = entry.get("template")
+                        break
+                else:
+                    text = text[0].get("template") if text else None
+            if not text:
+                raise SystemExit(f"{tpath}: no chat_template field")
+        else:
+            text = Path(tpath).read_text(encoding="utf-8")
+        templates.append(("", text))
+        print("chat template: %d B from %s" % (len(text), tpath))
+    for spec in args.chat_template_variant:
+        if "=" not in spec:
+            raise SystemExit("--chat-template-variant wants NAME=FILE")
+        vname, vfile = spec.split("=", 1)
+        templates.append((vname, Path(vfile).read_text(encoding="utf-8")))
+    args._chat_templates = templates
+
     tok = Path(args.tok).read_bytes() if args.tok else None
     raw = build(meta, tensors, tok, args)
     Path(args.out).write_bytes(raw)
