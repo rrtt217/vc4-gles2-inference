@@ -602,7 +602,7 @@ string matvec_q8_p2_add(int rows, int cols, XFormat rf) {
 string p2_split(int rows, XFormat rf) {
     const string ROWS = to_string(rows), RW = to_string(x_texels(rows, rf));
     const string H = head(XFormat::I16_2) + x_pair2_glsl() + x_residual_glsl(rf);
-    if (rf == XFormat::I16_1)
+    if (rf != XFormat::I16_2)
         return H +
             "uniform sampler2D X;uniform float which;"
             "void main(){int i=int(gl_FragCoord.x);"
@@ -704,7 +704,7 @@ string matvec_q8_add(int rows, int cols, XFormat xf, XFormat rf) {
         "vec4 x=X4Q(X,q*4," + AXW + ".0);"
         "s+=w.x*x.x+w.y*x.y+w.z*x.z+w.w*x.w;}"
         "float res=R1Q(R,r," + to_string(x_texels(rows, rf)) + ".0);"
-        "gl_FragColor=x_st1q(s*ws+res);}";
+        "gl_FragColor=XST1Q(s*ws+res);}";
 }
 
 string matvec_q8_add_pair(int rows, int cols, XFormat xf, bool inl) {
@@ -789,7 +789,7 @@ string matvec_i16_add(int rows, int cols, XFormat xf, XFormat rf) {
         "vec2 x=X2Q(X,2*q," + to_string(axw) + ".0);"
         "s+=u0*x.x;if(2*q+1<" + to_string(cols) + ")s+=u1*x.y;}"
         "float res=R1Q(R,r," + to_string(x_texels(rows, rf)) + ".0);"
-        "gl_FragColor=x_st1q(s*ws+res);}";
+        "gl_FragColor=XST1Q(s*ws+res);}";
 }
 
 string matvec_i4(int rows, int cols, XFormat xf, bool inl) {
@@ -998,7 +998,7 @@ string matvec_i4_add(int rows, int cols, XFormat xf, XFormat rf) {
         "float d3=l3*xb.z+h3*xb.w;"
         "s+=sc*(d0+d1+d2+d3)" + q4_mint() + ";}}"
         "float res=R1Q(R,r," + to_string(x_texels(rows, rf)) + ".0);"
-        "gl_FragColor=x_st1q(s+res);}";
+        "gl_FragColor=XST1Q(s+res);}";
 }
 
 

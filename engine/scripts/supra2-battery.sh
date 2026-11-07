@@ -7,8 +7,8 @@
 #
 #   MODEL=../models/supra2/supra2.q24.mmcf sh supra2-battery.sh
 #
-# The engine needs GPU_LAYER=0 for a q24 container until the GPU kernels are
-# converted; SEQ defaults to 512 to cover the longest prompt here.
+# SEQ defaults to 512 to cover the longest prompt here.  LAYER=1 runs the same
+# battery on the GPU path, which is what a Pi deployment uses.
 set -u
 BIN="${BIN:-./engine_mm3}"
 MODEL="${MODEL:?set MODEL to a supra2 container}"
@@ -17,7 +17,7 @@ GEN="${GEN:-24}"
 
 run() { # prompt, gen, extra...
     p="$1"; shift
-    MODEL="$MODEL" GPU_LAYER=0 KV_PACK=16 SEQ=512 "$BIN" --chat --system "$SYS" \
+    MODEL="$MODEL" GPU_LAYER="${LAYER:-0}" KV_PACK=16 SEQ=512 "$BIN" --chat --system "$SYS" \
         --prompt "$p" --gen "$1" --greedy 2>/dev/null | sed -n 's/^Assistant: //p' | tr '\n' ' '
 }
 
@@ -29,7 +29,7 @@ case_n() { # label, prompt, gen
     echo
 }
 
-echo "model: $MODEL   greedy, gen $GEN, GPU_LAYER=0"
+echo "model: $MODEL   greedy, gen $GEN, GPU_LAYER=${LAYER:-0} (LAYER=1 for the GPU path)"
 echo
 echo "--- identity / chat ---"
 case_n "two sentences about you" "Introduce yourself in two sentences." 24
@@ -55,10 +55,10 @@ echo "$out (${#out} chars)"
 echo
 echo "--- sampling (temp 0.8) ---"
 printf '%-26s | ' "temp 0.8 seed 1"
-MODEL="$MODEL" GPU_LAYER=0 KV_PACK=16 SEQ=512 "$BIN" --chat --system "$SYS" \
+MODEL="$MODEL" GPU_LAYER="${LAYER:-0}" KV_PACK=16 SEQ=512 "$BIN" --chat --system "$SYS" \
     --prompt "Tell me a joke." --gen 24 --temp 0.8 --seed 1 2>/dev/null |
     sed -n 's/^Assistant: //p' | tr '\n' ' '; echo
 printf '%-26s | ' "temp 0.8 seed 2"
-MODEL="$MODEL" GPU_LAYER=0 KV_PACK=16 SEQ=512 "$BIN" --chat --system "$SYS" \
+MODEL="$MODEL" GPU_LAYER="${LAYER:-0}" KV_PACK=16 SEQ=512 "$BIN" --chat --system "$SYS" \
     --prompt "Tell me a joke." --gen 24 --temp 0.8 --seed 2 2>/dev/null |
     sed -n 's/^Assistant: //p' | tr '\n' ' '; echo

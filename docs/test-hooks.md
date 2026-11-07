@@ -160,6 +160,12 @@ binary.  They are measurement hooks, not production settings.
   just-loaded KV rows back out through the normal save path, so the load can be
   compared byte for byte with the built file (`cmp`).
 
+- `RES_FMT=i16_1|i24_1` — overrides the container's residual width, so a
+  format can be A/B'd on one file.
+- `SHADER_SRC=<substr>` — prints the generated GLSL for program keys containing
+  the substring.  The builder branches on the activation and residual formats,
+  and reading the generated text is the only way to be sure which branch ran.
+
 ## Set by the environment, not by the engine
 
 - `MESA_GLES_VERSION_OVERRIDE=3.0|3.1|3.2` — the only knob that raises the

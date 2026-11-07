@@ -133,6 +133,7 @@ std::string x_glsl(XFormat f) {
                 "#define X4(T,BASE,TW) vec4(X1(T,(BASE),TW),X1(T,(BASE)+1,TW),"
                 "X1(T,(BASE)+2,TW),X1(T,(BASE)+3,TW))\n"
                 "#define XST1(V) x_q24enc(V)\n"
+                
                 "#define XST2(A,B) vec4(0.0)\n"
                 "#define XST4(A,B,C,D) vec4(0.0)\n"
                 "#define X1Q(T,I,TW) x_q24raw(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)))\n"
@@ -146,6 +147,7 @@ std::string x_glsl(XFormat f) {
                 "#define X4(T,BASE,TW) vec4(X1(T,(BASE),TW),X1(T,(BASE)+1,TW),"
                 "X1(T,(BASE)+2,TW),X1(T,(BASE)+3,TW))\n"
                 "#define XST1(V) x_st1(V)\n"
+                
                 "#define X1Q(T,I,TW) x_i16raw(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)).rg)\n"
                 "#define X2Q(T,B,TW) vec2(X1Q(T,(B),TW),X1Q(T,(B)+1,TW))\n"
                 "#define X4Q(T,B,TW) vec4(X1Q(T,(B),TW),X1Q(T,(B)+1,TW),X1Q(T,(B)+2,TW),X1Q(T,(B)+3,TW))\n";
@@ -157,6 +159,7 @@ std::string x_glsl(XFormat f) {
                 "#define X2(T,BASE,TW) x_i16pair(texture2D(T,vec2((float((BASE)/2)+0.5)/(TW),0.5)))\n"
                 "#define X4(T,BASE,TW) vec4(X2(T,(BASE),TW),X2(T,(BASE)+2,TW))\n"
                 "#define XST2(A,B) x_st2(A,B)\n"
+                
                 "#define X1Q(T,I,TW) ((((I)/2)*2)==(I) ? x_i16raw(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).rg) "
                 ": x_i16raw(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).ba))\n"
                 "#define X2Q(T,B,TW) x_i16pairq(texture2D(T,vec2((float((B)/2)+0.5)/(TW),0.5)))\n"
@@ -169,6 +172,7 @@ std::string x_glsl(XFormat f) {
                 "#define X2(T,BASE,TW) vec2(X1(T,(BASE),TW),X1(T,(BASE)+1,TW))\n"
                 "#define X4(T,BASE,TW) ((texture2D(T,vec2((float((BASE)/4)+0.5)/(TW),0.5))*255.0-128.0)/16.0)\n"
                 "#define XST4(A,B,C,D) x_i8enc4(A,B,C,D)\n"
+                
                 "#define X1Q(T,I,TW) x_i8cq(texture2D(T,vec2((float((I)/4)+0.5)/(TW),0.5)),int((I)-(I)/4*4))\n"
                 "#define X2Q(T,B,TW) vec2(X1Q(T,(B),TW),X1Q(T,(B)+1,TW))\n"
                 "#define X4Q(T,B,TW) ((texture2D(T,vec2((float((B)/4)+0.5)/(TW),0.5))*255.0-128.0)*16.0)\n";
@@ -183,19 +187,22 @@ std::string x_residual_glsl(XFormat f) {
             return
                 "#define R1(T,I,TW) x_q24(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)))\n"
                 "#define R2(T,BASE,TW) vec2(R1(T,(BASE),TW),R1(T,(BASE)+1,TW))\n"
-                "#define R1Q(T,I,TW) x_q24raw(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)))\n";
+                "#define R1Q(T,I,TW) x_q24raw(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)))\n"
+                "#define XST1Q(Q) x_q24encq(Q)\n";
         case XFormat::I16_1:
             return
                 "#define R1(T,I,TW) x_i16(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)).rg)\n"
                 "#define R2(T,BASE,TW) vec2(R1(T,(BASE),TW),R1(T,(BASE)+1,TW))\n"
-                "#define R1Q(T,I,TW) x_i16raw(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)).rg)\n";
+                "#define R1Q(T,I,TW) x_i16raw(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)).rg)\n"
+                "#define XST1Q(Q) x_st1q(Q)\n";
         case XFormat::I16_2:
             return
                 "#define R1(T,I,TW) ((((I)/2)*2)==(I) ? x_i16(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).rg) "
                 ": x_i16(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).ba))\n"
                 "#define R2(T,BASE,TW) x_i16pair(texture2D(T,vec2((float((BASE)/2)+0.5)/(TW),0.5)))\n"
                 "#define R1Q(T,I,TW) ((((I)/2)*2)==(I) ? x_i16raw(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).rg) "
-                ": x_i16raw(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).ba))\n";
+                ": x_i16raw(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).ba))\n"
+                "#define XST1Q(Q) x_st1q(Q)\n";
         case XFormat::I8_4:
             return {};
     }

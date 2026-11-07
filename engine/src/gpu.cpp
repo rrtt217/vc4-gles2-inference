@@ -1065,6 +1065,13 @@ void GPU::check_program_runs(GLuint p, const string& key){
     }
 
 GLuint GPU::x_prog(const string& key, const string& src){
+        // SHADER_SRC=<substr> prints the generated GLSL for matching program
+        // keys.  The alternative is reading the builder and guessing which
+        // branch a format took, which is how a wrong decode survives a review.
+        if (const char* f = getenv("SHADER_SRC"))
+                if (key.find(f) != string::npos)
+                        fprintf(stderr, "==== %s ====\n%s==== end %s ====\n",
+                                key.c_str(), src.c_str(), key.c_str());
         auto it = programs_.find(key);
         if (it != programs_.end()) return it->second;
         // Two keys can build byte-identical text (xq8pl and xqkvp both do): a

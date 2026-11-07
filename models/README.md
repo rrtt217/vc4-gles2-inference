@@ -263,8 +263,21 @@ What that says:
   consequence of the coarser grid, not of the stop-token logic (which is
   verified separately by the battery's termination case).
 
-The GPU path is not converted yet: the residual-consuming kernels still store
-q16, so a q24 container exits 2 there rather than answering from garbage.
+The GPU path works too.  The residual stores were the problem: the store macro
+was emitted by `x_glsl(<activation format>)`, so every kernel silently wrote
+q16 no matter what the residual was declared as.  With it moved to
+`x_residual_glsl()`, one container runs on either path:
+
+| prompt | CPU (q24) | GPU (q24) |
+|---|---|---|
+| What is the capital of France? | `the capital of France` | **`Paris`** |
+| What is 2+2? | `2+2!` | **`2+2 = 4`** |
+| Tell me a short story about a cat. | `A cat.` | a paragraph (with a repetition loop) |
+| Introduce yourself in two sentences. | `I'm a professional assistant.` | `You're a helpful assistant.` |
+
+The GPU path is the better of the two on the fact cases and is what a Pi
+deployment uses; the CPU path is the fallback and the reference for the
+format's arithmetic.
 
 **What a wider residual would still need.**  A single global factor does not work: it has to buy 18x
 of range for the late layers without spending the early layers' resolution

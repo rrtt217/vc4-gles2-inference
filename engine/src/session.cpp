@@ -94,16 +94,18 @@ Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
             // A container that declares a 24-bit residual gets one value per
             // texel; packing two values into a texel is a q16-only idea, so it
             // is switched off rather than reinterpreted.
-            if (m_.res_q24) {
+            // RES_FMT=i16_1|i24_1 overrides the container's choice, so a
+            // format can be A/B'd on the same file.
+            if (const char* rf = getenv("RES_FMT")) {
+                gpu_.res_pack_ = false;
+                gpu_.res_fmt_ = strcmp(rf, "i24_1") == 0 ? XFormat::I24_1 : XFormat::I16_1;
+                if (m_.res_q24 && gpu_.res_fmt_ != XFormat::I24_1)
+                    cerr << "RES_FMT overrides the container's q24 residual\n";
+            } else if (m_.res_q24) {
                 // The residual-consuming kernels still store q16 (x_st1q), so
                 // the GPU path would read a 24-bit texel holding a 16-bit
                 // encode.  Refuse instead of answering from garbage; the CPU
                 // path implements the format and is what this declares.
-                if (getenv("Q24_GPU")) {
-                    cerr << "q24 residual: the GPU kernels are not converted yet "
-                            "(the add stores are still q16).  Run GPU_LAYER=0.\n";
-                    exit(2);
-                }
                 gpu_.res_pack_ = false;
                 gpu_.res_fmt_ = XFormat::I24_1;
             } else {
@@ -422,6 +424,9 @@ bool Session::pair_ok() const {
         if (e && strcmp(e, "0") == 0) return false;
         // The packed kernels are INT8-only and read and write I16_2 activations.
         if (gpu_.act_fmt_ != XFormat::I16_2 || gpu_.ffn_fmt_ != XFormat::I16_2) return false;
+        // The pair-prefill path stores two positions into one texel; a 24-bit
+        // residual is one value per texel, so it cannot take part.
+        if (x_is_int24(gpu_.res_fmt_)) return false;
         if ((m_.dim & 1) || (m_.hidden & 1)) return false;
         const vector<Mat>& w1 = !m_.w1a.empty() ? m_.w1a : m_.w1;
         const vector<Mat>& w3 = !m_.w3a.empty() ? m_.w3a : m_.w3;
