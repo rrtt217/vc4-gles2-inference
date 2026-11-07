@@ -60,13 +60,19 @@ struct Case {
 // constant-only shader says nothing about the GPU.  Same body either way.
 static string wrap(const string& body, const string& ver, bool dyn) {
     string s = "#version " + ver + " es\nprecision highp float;\nprecision highp int;\n";
-    s += "out vec4 o;\nuniform highp sampler2D T;\n";
+    s += "out vec4 o;\nuniform highp sampler2D T;\nuniform highp sampler2D T2;\n";
     s += "vec4 fromUint(highp uint u){return vec4(float((u>>24)&255u),float((u>>16)&255u),"
          "float((u>>8)&255u),float(u&255u))/255.0;}\n";
     s += "vec4 fromInt(highp int v){return fromUint(uint(v));}\n";
     s += "void main(){\nvec4 R=vec4(0.0);\n";
-    s += dyn ? "vec4 c = texture(T, vec2(0.5, 0.5));\n"
-             : "vec4 c = vec4(0.235294, 0.0, 0.752941, 0.0);\n";
+    s += dyn ? "vec4 c = texture(T, vec2(0.5, 0.5));\nvec4 d = texture(T2, vec2(0.5, 0.5));\n"
+             : "vec4 c = vec4(0.235294, 0.0, 0.752941, 0.0);\n"
+               "vec4 d = vec4(0.247059, 0.752941, 0.0, 0.0);\n";
+    // u32 built from four dynamic bytes: 0x3fc00000 = 1.5f, the operand the
+    // bit-cast and bitfield cases check against.
+    s += "highp uint U = uint(d.r*255.0)<<24 | uint(d.g*255.0)<<16 | "
+         "uint(d.b*255.0)<<8 | uint(d.a*255.0);\n";
+    s += "float F = uintBitsToFloat(U);\n";
     s += body;
     s += "\no=R;}\n";
     return s;
@@ -94,49 +100,37 @@ static string vs_src(const string& ver) {
 
 static const Case CASES[] = {
     {"shift/and (Q4_SHIFT baseline)",
-     "highp uint u = uint(c.r*255.0)*256u + uint(c.b*255.0);"
-     "R = fromUint(((u>>4)&255u) | ((u&15u)<<8));",
-     "u = (r*255)*256 + b*255, then (u>>4)&255 | (u&15)<<8"},
-    {"floatBitsToInt",
-     "highp int v = floatBitsToInt(c.r*100.0); R = fromInt(v);",
-     "bits of c.r*100"},
+     "highp uint u = U; R = fromUint(((u>>8)&255u) | ((u&255u)<<8));",
+     "bytes of 0x3fc00000 swapped"},
+    {"floatBitsToInt(F, dynamic)",
+     "R = fromInt(floatBitsToInt(F));", "0x3fc00000"},
+    {"floatBitsToInt(literal)",
+     "R = fromInt(floatBitsToInt(1.5));", "0x3fc00000, folded by the compiler"},
     {"intBitsToFloat",
-     "float f = intBitsToFloat(int(c.r*255.0)*4096 + int(c.b*255.0));"
-     "R = vec4(f,f,f,1.0)/64.0;",
-     "float from those bits /64"},
+     "float f = intBitsToFloat(int(U)); R = vec4(f,f,f,1.0)/4.0;", "1.5/4 -> 96"},
     {"uintBitsToFloat",
-     "float f = uintBitsToFloat(uint(c.r*255.0)*4096u + uint(c.b*255.0));"
-     "R = vec4(f,f,f,1.0)/64.0;",
-     "same, unsigned"},
+     "float f = uintBitsToFloat(U); R = vec4(f,f,f,1.0)/4.0;", "1.5/4 -> 96"},
     {"packUnorm2x16",
-     "highp uint u = packUnorm2x16(c.rg); R = fromUint(u);",
-     "expected 0x0000ffff style: first comp in the low half"},
+     "highp uint u = packUnorm2x16(vec2(c.r,c.b)); R = fromUint(u);",
+     "first component in the low half"},
     {"unpackUnorm2x16",
-     "vec2 v = unpackUnorm2x16(uint(c.r*255.0)*256u + uint(c.b*255.0));"
-     "R = vec4(v, 0.0, 1.0);",
-     "v from those bytes"},
+     "vec2 v = unpackUnorm2x16(U); R = vec4(v,c.rg);", "0.9980, 0.7519"},
     {"packSnorm2x16",
-     "highp uint u = packSnorm2x16(c.rg*2.0-1.0); R = fromUint(u);",
+     "highp uint u = packSnorm2x16(vec2(c.r,c.b)*2.0-1.0); R = fromUint(u);",
      "signed pack of c.rg*2-1"},
     {"unpackSnorm2x16",
-     "vec2 v = unpackSnorm2x16(uint(c.r*255.0)*256u + uint(c.b*255.0));"
-     "R = vec4(v*0.5+0.5, 0.0, 1.0);",
-     "signed unpack, remapped"},
+     "vec2 v = unpackSnorm2x16(U); R = vec4(v*0.5+0.5,c.rg);", "remapped"},
     {"packHalf2x16",
-     "highp uint u = packHalf2x16(c.rg*4.0-2.0); R = fromUint(u);",
-     "half pack of c.rg*4-2"},
+     "highp uint u = packHalf2x16(vec2(F,-F)); R = fromUint(u);", "1.5, -1.5"},
     {"unpackHalf2x16",
-     "vec2 v = unpackHalf2x16(uint(c.r*255.0)*256u + uint(c.b*255.0)*65536u);"
-     "R = vec4(v*0.25+0.5, 0.0, 1.0);",
-     "half unpack, remapped"},
-    {"bitfieldExtract",
-     "highp uint u = uint(bitfieldExtract(int(c.r*255.0)*256 + int(c.b*255.0), 4, 8));"
-     "R = fromUint(u);",
-     "needs 310"},
+     "vec2 v = unpackHalf2x16(U); R = vec4(v*0.25+0.5,c.rg);", "1.5 -> 0.875"},
+    {"bitfieldExtract(24,8)",
+     "int e = bitfieldExtract(int(U), 24, 8); R = fromUint(uint(e));", "0x3f = 63"},
+    {"bitfieldExtract(0,16)",
+     "int e = bitfieldExtract(int(U), 0, 16); R = fromUint(uint(e));", "0x0000"},
     {"roundEven",
-     "float f = roundEven(c.r*10.0); R = vec4(f,f,f,1.0)/16.0;",
-     "c.r*10 rounded to even, /16"},
-    {"floor (control)", "R = vec4(floor(c.r*10.0),c.g,c.b,1.0)/16.0;", "control case"},
+     "float f = roundEven(c.r*10.0); R = vec4(f,f,f,1.0)/16.0;", "2.0/16"},
+    {"floor (control)", "R = vec4(floor(c.r*10.0),c.g,c.b,1.0)/16.0;", "control"},
 };
 
 int main(int argc, char** argv) {
@@ -191,6 +185,16 @@ int main(int argc, char** argv) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
+    GLuint bits_tex = 0;
+    glGenTextures(1, &bits_tex);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, bits_tex);
+    const unsigned char bits_px[4] = { 0x3f, 0xc0, 0x00, 0x00 };
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, bits_px);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glActiveTexture(GL_TEXTURE0);
+
     GLuint vbo = 0;
     glGenBuffers(1, &vbo);
     glBindBuffer(GL_ARRAY_BUFFER, vbo);
@@ -225,6 +229,10 @@ int main(int argc, char** argv) {
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, src_tex);
         glUniform1i(glGetUniformLocation(p, "T"), 0);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, bits_tex);
+        glUniform1i(glGetUniformLocation(p, "T2"), 1);
+        glActiveTexture(GL_TEXTURE0);
         glViewport(0, 0, 1, 1);
         glClearColor(0, 0, 0, 0);
         glClear(GL_COLOR_BUFFER_BIT);
