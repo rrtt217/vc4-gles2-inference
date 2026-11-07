@@ -104,6 +104,43 @@ proof).  A per-layer power-of-two residual scale is the fix that fits
 factor does not work: the early layers need ~1e-2 resolution while the late
 ones need ~1e3 of range.
 
+### 4c. Which GLSL ES builtins actually run (measured on VC4 and Xe)
+
+`engine/probes/packunpack_probe.cpp` renders each function into a 1x1 FBO and
+reads the bytes back, because a shader can compile, link, and then fall over at
+draw time (`roundEven` is the cautionary tale).  Same table on the Pi Zero and
+on Iris Xe, over the three shader languages Mesa will give:
+
+| builtin | ESSL | Pi Zero | Iris Xe | usable |
+|---|---|---|---|---|
+| `packUnorm2x16` / `unpackUnorm2x16` | 300 | ok | ok | yes |
+| `packSnorm2x16` / `unpackSnorm2x16` | 300 | ok | ok | yes |
+| **`packHalf2x16` / `unpackHalf2x16`** | 300 | ok | ok | **yes** |
+| `floatBitsToInt` / `intBitsToFloat` / `uintBitsToFloat` | 300 | ok | ok | yes |
+| `>>`, `&`, `\|` on `highp uint` | 300 | ok | ok | yes (what `Q4_SHIFT` uses) |
+| `bitfieldExtract` | **310** | fails at 300, ok at 310 | same | only at 310 |
+| `roundEven` | 300 | ok *in this probe* | ok | see below |
+
+Two things to take from it:
+
+- **Half precision is available inside RGBA8 even though half-float textures are
+  not.**  `packHalf2x16` puts two fp16 values in one texel — the same four bytes
+  as the two q16 values the residual uses today, with an exponent instead of a
+  fixed grid.  For a residual that spans 0.05 to 2300 that is strictly better
+  behaved than q16, and it needs no new texture format.  The convention the
+  driver implements is *first component in the low 16 bits* (measured:
+  `packHalf2x16(vec2(1,-2)) = 0xc0003c00`), so a decoder must match that.
+- `bitfieldExtract` is the one that needs 3.10; a 3.00 shader that uses it does
+  not compile on either driver.
+
+`roundEven` runs correctly here at 300/310/320, which contradicts the older note
+elsewhere in this file.  It was measured in a single full-screen triangle, not
+in a 1216-fragment matvec, so the honest reading is "not reproduced in this
+probe" rather than "works": retest in the real kernel before relying on it.
+
+All of this needs Mesa's GLES override (`MESA_GLES_VERSION_OVERRIDE=3.0`), which
+the engine sets only for the q4 shift path.
+
 ### 5. Texture limits: 2048 per side, no half-float, so every weight is decoded
 
 Probed with `engine/probes/texsize_probe.cpp` on this board (Mesa 26.2.2, VC4 V3D 2.1):
