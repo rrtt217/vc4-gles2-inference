@@ -198,6 +198,7 @@ Pick the tool that answers the question before writing a new probe:
 | is the conversion faithful? | `mmcf_pack.py --verify`, `LOGITS_OUT` + `cmp_logits.py` |
 | is the source model sane? | `ref_forward.py` (safetensors) |
 | which stage differs between CPU and GPU? | `diff_paths.sh` + `dump_diff.awk` |
+| what does this GLSL function cost, or does it work at all? | `docs/vc4-glsl-costs.md`, then `probes/packunpack_probe` on the target |
 | is a row saturating / clamping? | `dump_stats.py` on a `STAGE_DUMP` file |
 | is one pass expensive? | `ATTN_DUP`, `PASS_DUP`, `DRAWCOUNT`, `LAYER_PROFILE` |
 | is the attention block internally consistent? | `ATT_DUMP` + `check_att.py` |

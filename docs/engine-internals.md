@@ -104,57 +104,37 @@ proof).  A per-layer power-of-two residual scale is the fix that fits
 factor does not work: the early layers need ~1e-2 resolution while the late
 ones need ~1e3 of range.
 
-### 4c. Which GLSL ES builtins actually run (measured on VC4 and Xe)
+### 4c. Which GLSL ES builtins actually run
 
-`engine/probes/packunpack_probe.cpp` renders each function into a 1x1 FBO and
-reads the bytes back, because a shader can compile, link, and then fall over at
-draw time (`roundEven` is the cautionary tale).  Same table on the Pi Zero and
-on Iris Xe, over the three shader languages Mesa will give:
+Measured with `engine/probes/packunpack_probe.cpp` on the Pi Zero (Mesa 26.2.2)
+and on Iris Xe, ESSL 3.0 and 3.1, **with dynamic operands** — a literal is
+folded on the CPU and proves nothing:
 
-| builtin | ESSL | Pi Zero | Iris Xe | usable |
-|---|---|---|---|---|
-| `packUnorm2x16` / `unpackUnorm2x16` | 300 | ok | ok | yes |
-| `packSnorm2x16` / `unpackSnorm2x16` | 300 | ok | ok | yes |
-| **`packHalf2x16` / `unpackHalf2x16`** | 300 | ok | ok | **yes** |
-| `floatBitsToInt` / `intBitsToFloat` / `uintBitsToFloat` | 300 | ok | ok | yes |
-| `>>`, `&`, `\|` on `highp uint` | 300 | ok | ok | yes (what `Q4_SHIFT` uses) |
-| `bitfieldExtract` | **310** | fails at 300, ok at 310 | same | only at 310 |
-| `roundEven` | 300 | ok *in this probe* | ok | see below |
-
-Two things to take from it:
-
-- **Half precision is available inside RGBA8 even though half-float textures are
-  not.**  `packHalf2x16` puts two fp16 values in one texel — the same four bytes
-  as the two q16 values the residual uses today, with an exponent instead of a
-  fixed grid.  For a residual that spans 0.05 to 2300 that is strictly better
-  behaved than q16, and it needs no new texture format.  The convention the
-  driver implements is *first component in the low 16 bits* (measured:
-  `packHalf2x16(vec2(1,-2)) = 0xc0003c00`), so a decoder must match that.
-- `bitfieldExtract` is the one that needs 3.10; a 3.00 shader that uses it does
-  not compile on either driver.
-
-`roundEven` runs correctly here at 300/310/320, which contradicts the older note
-elsewhere in this file.  It was measured in a single full-screen triangle, not
-in a 1216-fragment matvec, so the honest reading is "not reproduced in this
-probe" rather than "works": retest in the real kernel before relying on it.
-
-**Which override actually does it.**  `MESA_GLES_VERSION_OVERRIDE` is the only
-knob that matters; `MESA_GLSL_VERSION_OVERRIDE` is inert on this driver.  Measured
-on both boards:
-
-| environment | Pi Zero | Iris Xe |
+| builtin | Pi Zero | Iris Xe |
 |---|---|---|
-| nothing, client-3 context | `context failed (client 3)` — VC4 only offers ES 2.0 contexts | GLSL 3.20, 310 shaders compile |
-| nothing, client-2 context | GLSL 1.0.16; any `#version 300 es` shader fails | — |
-| `MESA_GLSL_VERSION_OVERRIDE=310` alone | still `context failed (client 3)` | no visible change (already 3.20) |
-| `MESA_GLES_VERSION_OVERRIDE=3.0` | 3.00, 310 shaders fail | **3.00, 310 shaders fail** — it is a ceiling, not a floor |
-| `MESA_GLES_VERSION_OVERRIDE=3.1` | 3.10, everything above works | same |
-| `MESA_GLES_VERSION_OVERRIDE=3.2` | 3.20 | same |
+| shifts, `&`, `\|` on `highp uint` | ok | ok |
+| `floatBitsToInt`, `intBitsToFloat`, `uintBitsToFloat` | ok | ok |
+| `bitfieldExtract` | ok at 310 only, and only for 8/16-bit fields at uniform offsets | ok |
+| `packUnorm2x16`, `unpackUnorm2x16` | **aborts the process** | ok |
+| `packSnorm2x16`, `unpackSnorm2x16` | **aborts** | ok |
+| `packHalf2x16`, `unpackHalf2x16` | **aborts** | ok |
+| `roundEven` | **aborts** | ok |
+| `floor` | ok | ok |
 
-Two consequences.  It has to be set **before `eglInitialize`**, which is why the
-engine can use ESSL 3.00 from a plain client-2 context when the q4 shift path
-asks for it; and a deployment that pins it to `3.0` (the value the older notes
-suggest) silently loses everything that needs 3.10, `bitfieldExtract` included.
+The abort is the VC4 backend admitting it has no lowering for the NIR op:
+`MESA: error: unknown NIR ALU inst: 32 %2 = pack_unorm_2x16`, then `abort()`
+from `vc4_program.c`'s `emit_alu()` default case.  Consequences:
+
+- **half precision is not reachable** on VC4 — neither as a texture format
+  (`OES_texture_half_float` is absent) nor as `packHalf2x16` (aborts).  A
+  wider or floating-point residual would have to be assembled from float
+  operations by hand.
+- `roundEven` is likewise unavailable, which is worth knowing before rewriting a
+  decode that wanted it.
+
+Per-function instruction costs, the latency model and what Mesa lowers away are
+in [`docs/vc4-glsl-costs.md`](vc4-glsl-costs.md), read from the same Mesa
+version the board runs.
 
 ### 5. Texture limits: 2048 per side, no half-float, so every weight is decoded
 
