@@ -89,23 +89,67 @@ place it in `minimind3/tokenizer.json` if you need to rebuild `minimind3.tok`.
 ## supra2 status (2026-11-07)
 
 Converted from `model.safetensors` with `templates/supra2.jinja` (the model's
-own template, fetched from HuggingFace — it is plain ChatML, **no** `<think>`
-block; opening an empty think block makes this model stop on its first token).
+own template, fetched from HuggingFace).  **Not supported**: it loads and
+tokenizes exactly, but the engine's forward pass does not reproduce an
+independent float32 forward over the same weights.
 
-What is verified:
+### Config audit
 
-- the weights in `models/supra2` **are** the Instruct checkpoint: a
-  byte-for-byte range comparison against both HF repos matches
-  `SupraLabs/Supra2-100M-Instruct` at offsets 0 and 200 MB, and differs from
-  `SupraLabs/Supra2-100M` (the base repo) in both;
-- the tokenizer is exact: the engine's prompt ids and `tokenizers.encode()` on
-  the same rendered text are **identical, 27/27**;
-- the model is English-only and 100M, so it is weak by design.
+`config.json` (all of it), `generation_config.json` and
+`tokenizer_config.json`, and what this stack does with each field:
 
-What is not: with those exact 27 ids the engine's first generated token is a
-byte-fallback token, while an independent float32 forward pass over the same
-safetensors predicts `'I'` (`I'm a professional assistant.`).  Feeding the
-engine one extra leading space produces that sensible answer, which points at a
-position/prefix-dependent discrepancy rather than broken weights.  Do not call
-this model supported until that is resolved; the next step is a stage-by-stage
-engine-vs-numpy diff (the `STAGE_DUMP` route) on this checkpoint alone.
+| field | value | engine |
+|---|---|---|
+| `architectures` | `Qwen3ForCausalLM` | dense Qwen3 block, supported |
+| `hidden_size` / `intermediate_size` | 768 / 2048 | `split_ffn()` returns early at `hidden <= 2048`, so no chunking — fine, but this is the first model at exactly the limit |
+| `num_attention_heads` / `num_key_value_heads` | 12 / 4 | `GROUP = 3`, baked into the attention shader |
+| `head_dim` | 64 | equals `dim/heads`, so the derived value agrees |
+| `layer_types` / `sliding_window` / `use_sliding_window` | all full / null / false | no sliding window to model |
+| `attention_bias` | false | no bias tensors |
+| `hidden_act` | silu | SwiGLU gate |
+| `tie_word_embeddings` | true | `wcls` = embedding |
+| `vocab_size` | 32768 | 22 logits tiles, last one 512 rows |
+| `rms_norm_eps` | **1e-06** | **the engine hardcodes 1e-5** in the rmsnorm shaders (all three models use 1e-6) |
+| `rope_parameters` | `{theta: 10000, rope_type: default}` | transformers 5 form: `rope_of()` used to read only top-level `rope_theta` and silently produced 10000/10000 — now handled |
+| `bos_token_id` / `eos_token_id` / `pad` | 0 / 2 / 1 | container: bos -1 (chat templates add no BOS), eos 2, stop 6 (`<|im_end|>`), pad 1 |
+| `generation_config` | eos 2, no sampling knobs | matches |
+| `tokenizer_config.extra_special_tokens` | 24 markers | all present in the blob; `<|reserved_*|>` are unused |
+
+Verified separately: the weights are the **Instruct** checkpoint (byte ranges at
+offset 0 and 200 MB match `SupraLabs/Supra2-100M-Instruct` and differ from the
+base repo), the tokenizer blob is id-exact against `tokenizer.json`
+(32768 entries, ids 0-39 and the prompt's ids identical), and the template
+renders identically under real Jinja2.
+
+### What the engine does instead
+
+Same 27 prompt ids, `GPU_LAYER=0`, greedy.  Engine logits vs the float32
+reference: **cosine 0.977**, max |diff| 9.6.
+
+```
+reference top-5   I      You    Welcome   Please   My
+engine    top-5   Introdu  Welcome  I     You    immer
+```
+
+`Introdu` is the user's own word — the model picks up the echo, which is what
+"it repeats the question" looked like from the outside.
+
+Ruled out by measurement, each one a single change:
+
+| hypothesis | result |
+|---|---|
+| base instead of instruct weights | byte-range match says instruct |
+| tokenizer / prompt mismatch | engine prompt ids == HF ids, 27/27 |
+| template rendering | identical under Jinja2 |
+| q16 activation grid | q16-simulated reference still says `I` |
+| i16 weight quantization | i16-simulated reference still says `I` |
+| FFN placement / chunking | `CPU_FFN=1`, `GPU_FFN=1` unchanged; `split_ffn()` no-ops at 2048 |
+| prefill pair path | `PREFILL_PAIR=0` unchanged |
+| GQA mapping `h % kv` | reference then says `s`, not `Introdu` |
+| interleaved rope | reference then says `\n`, not `Introdu` |
+| no qk-norm | reference then says `st`, not `Introdu` |
+| `eps 1e-6` | reference still says `I` |
+
+So the divergence is inside the engine's maths for this checkpoint shape, and
+none of the config fields above explains it.  What is left is a stage-level
+diff on this model alone (the `STAGE_DUMP` route), which has not been done.
