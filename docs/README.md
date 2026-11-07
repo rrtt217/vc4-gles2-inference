@@ -13,16 +13,22 @@ Deep dives:
 
 | Document | Contents |
 |---|---|
-| [model-formats.md](model-formats.md) | legacy, Q8M1, I16M1, Q8M2/I16M2, Q4M1 |
+| [checkpoint-container.md](checkpoint-container.md) | **the MMCF v2 container**: header, metadata TLV, tensor table, loader rules, what it enforces |
+| [model-formats.md](model-formats.md) | the legacy layouts the packer consumes, and the models this repo runs |
 | [engine-internals.md](engine-internals.md) | VC4 findings, FFN split, GPU attention, persistent layers, Top-K |
-| [quantization.md](quantization.md) | q4/q6 experiments, offline Q4M1, packed KV, quality caveats |
-| [performance.md](performance.md) | Pi/laptop timing tables and regression baselines |
-| [test-hooks.md](test-hooks.md) | environment switches for A/B tests |
-| [prefix-cache.md](prefix-cache.md) | in-memory and disk KV prefix cache, packed cache |
 | [engine-layout.md](engine-layout.md) | source layout, X formats, regression rule |
-| [future-optimization.md](future-optimization.md) | prioritized future work and explicit non-goals |
+| [quantization.md](quantization.md) | q4/q6 experiments, offline Q4M1, packed KV, quality caveats |
+| [performance.md](performance.md) | Pi/laptop timing tables, the chronological lab notebook, regression baselines |
+| [test-hooks.md](test-hooks.md) | environment switches: probes, dumps, A/B hooks |
+| [prefix-cache.md](prefix-cache.md) | in-memory and disk KV prefix cache, packed cache |
 | [deterministic-tools.md](deterministic-tools.md) | model-free tool routing, argument validation, cache interaction |
+| [future-optimization.md](future-optimization.md) | prioritized future work, measured dead ends, explicit non-goals |
 | [translation-decision-model-fit.zh-CN.md](translation-decision-model-fit.zh-CN.md) | 20–150M translation/decision model fit, Jev-like decisions, adaptation plan (中文) |
+
+Working on a numerics question?  `AGENTS.md` has the "Debugging protocol"
+table that maps a question to the tool that answers it — `mmcf_dump.py`,
+`ref_forward.py`, `diff_paths.sh` / `dump_diff.awk`, `check_att.py`,
+`cmp_logits.py`.
 
 Conventions:
 

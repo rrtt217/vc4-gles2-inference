@@ -1,8 +1,10 @@
-# Checkpoint container v2 (proposal)
+# Checkpoint container v2 (MMCF)
 
-Status: **implemented**.  `engine/tools/mmcf_pack.py` converts q8, q4 and i16
-checkpoints, and `Model::load_mmcf()` loads them.  All three print the same
-greedy text and the same PPL as their legacy source on Xe:
+Status: **implemented, and it is the only format**.  `engine/tools/mmcf_pack.py`
+converts q8, q4 and i16 checkpoints, `Model::load_mmcf()` loads them, and since
+`fcc4095` the engine has no other reader — `Model::load()` refuses anything that
+is not `"MMCF"` and names the packer in the message.  All three precisions print
+the same greedy text and the same PPL as their legacy source on Xe:
 
 | model | legacy | `.mmcf` |
 |---|---:|---:|
@@ -18,14 +20,22 @@ $ MODEL=/tmp/minimind3.mmcf ./engine_mm3 --chat --prompt "用一句话介绍你�
 template: minimind3 (from the checkpoint)
 tokenizer: 81371 B embedded in the checkpoint
 Assistant: 我是一个AI助手，我的存在是为了提供帮助和信息。
-```  Today the engine reads four
-formats, each with its own magic and its own positional header
-(`MAGIC_Q8`/`MAGIC_Q8_V2`, `MAGIC_I16`/`MAGIC_I16_V2`, `MAGIC_Q4`, and the
-legacy loop), and the tokenizer, chat template and inference flags live
-outside the file in environment variables and command-line flags.  That is why
-a checkpoint can be loaded with the wrong tokenizer, why `rope_half` had to be
-passed by hand for MiniMind2, and why adding one flag (the `+128` pre-bias)
-would need a fifth magic.
+```
+
+Read "Layout", "Header", "Metadata" and "Tensor record" as the specification.
+"Goals" and "Why it exists" are the history behind it, and the sections after
+"Loader rules" keep the migration and the implementation notes — the mistakes
+that cost time and are worth not repeating.
+
+## Why it exists (the problem it replaced)
+
+Before the container the engine read four formats, each with its own magic and
+its own positional header (`MAGIC_Q8`/`MAGIC_Q8_V2`, `MAGIC_I16`/`MAGIC_I16_V2`,
+`MAGIC_Q4`, and the legacy loop), and the tokenizer, chat template and inference
+flags lived outside the file in environment variables and command-line flags.
+That is why a checkpoint could be loaded with the wrong tokenizer, why
+`rope_half` had to be passed by hand for MiniMind2, and why adding one flag (the
+`+128` pre-bias) would have needed a fifth magic.
 
 ## Goals
 
@@ -38,8 +48,8 @@ would need a fifth magic.
    unaligned `int16` loads worth relying on).
 4. **Extensible without a new magic.**  Version, section sizes and a
    skip-unknown rule.
-5. **Integrity on demand.**  A per-tensor CRC in the table, verified only when
-   asked (`--verify` or fused into the upload pass), not on every load.
+5. **Integrity on demand.**  A per-tensor CRC in the table, checked by the
+   packer (`--verify`) and the inspector (`--check`), not on every load.
 6. **A pre-biased q8 dtype** so the runtime `+128` conversion (69 MB of
    per-byte or XOR work and a 69 MB temporary buffer) disappears.
 
@@ -49,90 +59,112 @@ would need a fifth magic.
 +---------------------------------------------------------------+ 0
 | header, 64 B, little endian                                   |
 +---------------------------------------------------------------+
-| metadata: one JSON document, NUL padded to 4-byte alignment   |
+| metadata: TLV records, 4-byte aligned                         |
 +---------------------------------------------------------------+
-| tensor table: n_tensors * 40 B                                |
+| tensor table: n_tensors * 48 B                                |
 +---------------------------------------------------------------+
 | data: each tensor 16-byte aligned, in the layout the texture  |
 |       wants (rows * cols/4 * 4 B for q8, etc.)                |
 +---------------------------------------------------------------+
 ```
 
+(The proposal said 40 B per record.  The record as built is 48 B — it carries a
+per-tensor `scale`.  See "Tensor record" below.)
+
 ### Header (fixed, 64 B)
 
-| field | type | notes |
-|---|---|---|
-| `magic` | `u32` | `"MMCF"` |
-| `version` | `u16` | 2 |
-| `header_size` | `u16` | 64, so a future header can grow |
-| `n_tensors` | `u32` | |
-| `flags` | `u32` | bit 0 chat, bit 1 tools, bit 2 vision, bit 3 thinking |
-| `meta_offset` / `meta_size` | `u32` / `u32` | JSON block |
-| `data_offset` | `u64` | tensor data base |
-| `file_size` | `u64` | must equal `stat().st_size`; catches truncation |
-| `crc32_header` | `u32` | of the first 60 bytes |
-| reserved | `u8[8]` | zero |
+| offset | size | field | notes |
+|---:|---:|---|---|
+| 0 | 4 | `magic` | `"MMCF"` |
+| 4 | 2 | `version` | 2 |
+| 6 | 2 | `header_size` | 64, so a future header can grow |
+| 8 | 4 | `n_tensors` | |
+| 12 | 4 | `capability flags` | bit 0 chat, bit 1 tools, bit 2 vision, bit 3 reserved |
+| 16 | 4 | `meta_offset` | 64 |
+| 20 | 4 | `meta_size` | |
+| 24 | 8 | `data_offset` | 16-byte aligned |
+| 32 | 8 | `file_size` | must equal `stat().st_size`; catches truncation |
+| 40 | 4 | `crc32` | of bytes 0..39.  A zero field means "not written" and is accepted for hand-made files |
+| 44 | 20 | reserved | zero |
 
-### Metadata (JSON, ~1-3 KB)
+Bit 3 is reserved.  The packer never sets it and the reader reads the caps word
+only for bit 0 (chat).  The inspector used to print it as "thinking", which was
+never implemented either; do not attach meaning to a bit without adding both the
+writer and the reader.
 
-```json
-{
-  "name": "minimind3",
-  "arch": "qwen3-dense",
-  "model": {
-    "dim": 768, "layers": 8, "heads": 8, "kv_heads": 4, "head_dim": 96,
-    "hidden": 2432, "vocab": 6400, "seq": 768,
-    "rope": {"theta": 1000000.0, "half": true},
-    "qk_norm": false, "tied_embeddings": true
-  },
-  "quant": {"scheme": "q8", "group": 0, "pre_biased": true},
-  "tokenizer": {
-    "kind": "bytelevel-bpe",
-    "blob": "tokenizer",          // tensor name, stored verbatim
-    "special": {"eos": 0, "pad": 0, "im_start": 6400, "im_end": 6401}
-  },
-  "template": {
-    "kind": "chatml",
-    "default_system": "You are a helpful assistant.",
-    "roles": {"system": "<|im_start|>system\n", "user": "<|im_start|>user\n",
-              "assistant": "<|im_start|>assistant\n"},
-    "stop": ["<|im_end|>", "<|endoftext|>"]
-  },
-  "capabilities": {"chat": true, "tools": false, "vision": false}
-}
-```
+### Metadata (TLV, ~150-250 B)
 
-JSON is deliberate: the block is small, human-readable in `strings`, and a
-missing key is a defined fallback rather than a silent misparse.  The old
-positional `cfg[7]` cannot express "absent".
+Each record is `<HHI>` (key, type, length) followed by the payload; `type` is 1
+(bytes/struct) and an unknown key is skipped.
 
-### Tensor table (n_tensors x 40 B)
+| key | payload |
+|---|---|
+| 1 | `<7i` dim, hidden, layers, heads, kv_heads, vocab, seq |
+| 2 | `<fBBH` rope theta, rope_half, qk_norm, pad |
+| 3 | `<BBBB` scheme (0 i16, 1 q8, 2 q4), group, pre_biased, split |
+| 4 | `u8 kind`, `default system\0`, `template name\0` |
+| 5 | `<I` capability flags (mirror of the header) |
+| 6 | `name\0` |
+| 7 | `<i` tokenizer blob length |
+| 8 | `<6i` bos, eos, stop, pad, unk, im_start (all `-1` = absent) |
 
-| field | type | notes |
-|---|---|---|
-| `name` | `u16` | index into a name table in the metadata |
-| `dtype` | `u8` | 0 F32, 1 I16, 2 Q8_U8 (pre-biased), 3 Q8_I8, 4 Q4, 5 Q4_PARAM |
-| `group` | `u8` | q4 group size (32), 0 otherwise |
-| `flags` | `u16` | reserved |
-| `rows` / `cols` | `u32` / `u32` | |
-| `offset` / `bytes` | `u64` / `u64` | relative to `data_offset` |
-| `crc32` | `u32` | of the tensor bytes |
+Template kinds: 0 plain, 1 chatml/qwen, 2 minimind3, 3 tinybrainbot.  The kind
+is authoritative; the name string is kept for humans and as the fallback for a
+kind an older engine does not know.
 
-`dtype` replaces the magic: q8 pre-biased and q8 signed are two values of one
-enum, so the upload path picks "copy straight from the map" or "flip the sign
-bit" per tensor without a format branch.
+The original proposal used one JSON document here.  The TLV block replaced it:
+same "absent is expressible" property, no parser, and 154 bytes for MiniMind3.
+The full block is printed by `engine/tools/mmcf_dump.py` from the file alone.
+
+### Tensor record (48 B)
+
+Built by explicit concatenation, not a struct format — an earlier
+`"<HBBBBIIQQIIf"` layout is **42 bytes**, not 40 or 48, and shifted every later
+offset by 6 bytes per tensor.
+
+| offset | size | field |
+|---:|---:|---|
+| 0 | 2 | id (`kind(8) | layer(6) | part(2)`) |
+| 2 | 1 | dtype |
+| 3 | 1 | flags |
+| 4 | 1 | group (q4 group size, else 0) |
+| 5 | 1 | pad |
+| 6 | 4 | rows |
+| 10 | 4 | cols |
+| 14 | 8 | offset (relative to `data_offset`, 16-byte aligned) |
+| 22 | 8 | bytes |
+| 30 | 4 | crc32 of the tensor body |
+| 34 | 4 | `f32` scale (the per-matrix `ws`; the first draft dropped it and every dot product ran with scale 0) |
+| 38 | 10 | pad to 48 |
+
+Tensor ids: `1` embedding, `2` embedding scale, `3` rms_att, `4` rms_ffn,
+`5` rms_final, `6` q_norm, `7` k_norm, `8` embedding_i16, `0x10` qkv, `0x11`
+wo, `0x12` w1, `0x13` w3, `0x14` w13, `0x15` w2, `0x20` logits tile, `0x30`
+tokenizer blob.  Per-layer tensors carry the layer in the high byte
+(`id | layer << 8`).  q4 needs three tensors per matrix (nibbles, group scale,
+group min) sharing one id.
+
+dtypes: `0` f32, `1` i16, `2` q8u8 (biased, so the upload is a copy), `3` q8i8,
+`4` q4, `5` blob.  `dtype` replaces the magic: q8 pre-biased and q8 signed are
+two values of one enum, so the upload path picks "copy straight from the map" or
+"flip the sign bit" per tensor without a format branch.
 
 ## Loader rules
 
 - `version` unknown -> refuse with the version number in the message.
 - `file_size != st_size` -> refuse (truncated download).
-- Unknown `dtype` -> refuse; unknown *tensor names* -> ignore (forward compat).
-- Missing `tokenizer` -> fall back to `TOKENIZER=`, warn once.
-- Missing `template` -> fall back to `--template`, warn once.
-- `capabilities.chat == false` and `--chat` -> refuse with a clear message.
-- CRC verified when `--verify` is passed, or fused into the upload pass when
-  `UPLOAD_VERIFY=1`; never on the default path (a full pass costs 0.1-0.3 s
-  warm and would force the 6 s SD read on a cold start).
+- header `crc32` mismatch -> refuse.
+- Unknown `dtype` -> refuse, naming the tensor id and the dtype.  Guessing here
+  would turn a future fp8 file into silent q8 arithmetic.
+- Unknown *tensor id* -> ignore (forward compat).
+- Missing tokenizer blob -> fall back to `TOKENIZER=`, warn once.
+- Missing template -> the compiled default; there is no `--template` flag.
+- `capabilities & 1 == 0` and `--chat` -> refuse with a clear message (exit 2).
+  A file that *does* advertise chat enters chat mode on its own when the caller
+  passes neither `--chat` nor a generation length.
+- Per-tensor CRC is verified by `mmcf_pack.py --verify` and by
+  `mmcf_dump.py --check`, never on the load path: a full pass costs 0.1-0.3 s
+  warm and would force the 6 s SD read on a cold start.
 
 ## What this buys, in project terms
 
@@ -145,34 +177,33 @@ bit" per tensor without a format branch.
 | a flag bump needing a new magic + loader | `dtype`/`flags`/version |
 | stale `bin/ref/*.base` measured against the wrong build | `name`/`arch`/checksum in metadata |
 
-## Migration
+## Migration (as it happened)
 
-1. `tools/convert_container --in model.q8 --tokenizer model.tok --template
-   minimind3 --out model.mmcf` writes v2; the engine gains a v2 reader next to
-   the existing ones.
+1. `mmcf_pack.py --in model.q8 --tok model.tok --template minimind3
+   --out model.mmcf` writes v2; the engine gained a v2 reader next to the
+   existing ones.
 2. Acceptance: the converted file must produce **byte-identical** weights, the
    same greedy text and the same PPL as the source.  A conversion that changes
-   one nibble is a bug, not a re-baseline.
-3. Only after every checkpoint in `models/` is converted do the old readers go
-   away.
+   one nibble is a bug, not a re-baseline.  All 15 checkpoints in `models/` were
+   converted and verified this way, on Xe and on the Pi.
+3. Only after every checkpoint in `models/` was converted did the old readers go
+   away — `fcc4095`, which also deleted `--template`.
 
-## Open questions
+## Open questions (answered, kept for the record)
 
-- Tensor **names**: a string table (richer, +bytes) or fixed ids (`qkv.3`,
-  `w2.7`)?  Fixed ids keep the table at 40 B and the loader simple.
-- Tokenizer blob: store the existing `.tok` bytes verbatim (simplest, no
-  re-encoding risk) or normalise to a JSON vocab (portable, bigger)?
-- One file per precision (current `models/` layout) or one file with several
-  precisions of the same model (saves the tokenizer/template duplication, but
-  every load pays for the whole file's page cache)?
+- Tensor **names**: fixed ids won.  The table is 48 B either way, but the loader
+  stays a switch instead of a string lookup.
+- Tokenizer blob: the existing `.tok` bytes verbatim.  No re-encoding risk, and
+  the packer derives the special-token ids from it.
+- One file per precision: kept.  The tokenizer/template duplication is ~80 KB
+  against a 45-326 MB file.
 
 ## As built (packer)
 
-`engine/tools/mmcf_pack.py --in model.q8 --tok model.tok --out model.mmcf
---name minimind3 --template minimind3 --system "You are a helpful assistant."
---chat --verify` converts a legacy q8 checkpoint (q4/i16 raise "not
-implemented yet") and checks itself: the file-size field, every tensor CRC and
-a byte-for-byte search for each tensor body.  A real run:
+`engine/tools/mmcf_pack.py` converts every legacy layout this repo produces —
+`Q8M1`, `Q8M2`, `Q4M1`, `I16M1`, `I16M2` and llama2.c fp32 — and checks itself:
+the header CRC, the file-size field, every tensor CRC and a byte-for-byte search
+for each tensor body.  A real run:
 
 ```
 wrote /tmp/minimind3.mmcf: 53 tensors, 68980491 bytes (source 68897356)
@@ -181,51 +212,7 @@ verify: every tensor present verbatim
 ```
 
 The 83 KB of overhead is the header (64), the TLV block (154), the table
-(53 * 40), alignment padding and the tokenizer blob.
-
-### Header, exactly
-
-| offset | size | field |
-|---|---|---|
-| 0 | 4 | `"MMCF"` |
-| 4 | 2 | version = 2 |
-| 6 | 2 | header_size = 64 |
-| 8 | 4 | n_tensors |
-| 12 | 4 | capability flags (1 chat, 2 tools, 4 vision) |
-| 16 | 4 | meta_offset = 64 |
-| 20 | 4 | meta_size |
-| 24 | 8 | data_offset (16-byte aligned) |
-| 32 | 8 | file_size (checked against `st_size`) |
-| 40 | 4 | crc32 of bytes 0..39 (reserved, not yet computed) |
-| 44 | 20 | reserved |
-
-### Metadata TLV
-
-Each record is `<HHI` (key, type, length) followed by the payload:
-
-| key | payload |
-|---|---|
-| 1 | `<7i` dim, hidden, layers, heads, kv_heads, vocab, seq |
-| 2 | `<fBBH` rope theta, rope_half, qk_norm, pad |
-| 3 | `<BBBB` scheme (0 i16, 1 q8, 2 q4), group, pre_biased, split |
-| 4 | `u8 kind`, `default system\0`, `template name\0` |
-| 5 | `<I` capability flags (mirror of the header) |
-| 6 | `name\0` |
-| 7 | `<i` tokenizer blob length |
-
-### Tensor record, 40 B
-
-`<HBBBBIIQQIIH`: id, dtype, flags, group, pad, rows, cols, offset, bytes,
-crc32, pad, pad.  `offset` is relative to `data_offset` and every body starts
-16-byte aligned.
-
-Tensor ids: `1` embedding, `2` embedding scale, `3` rms_att, `4` rms_ffn,
-`5` rms_final, `6` q_norm, `7` k_norm, `0x10` qkv, `0x11` wo, `0x12` w1,
-`0x13` w3, `0x14` w13, `0x15` w2, `0x20` logits tile, `0x30` tokenizer blob.
-Per-layer tensors carry the layer in the high byte (`id | layer << 8`).
-
-dtypes: `0` f32, `1` i16, `2` q8u8 (the packer's output for q8: biased, so the
-upload is a copy), `3` q8i8, `4` q4, `5` blob.
+(53 * 48), alignment padding and the tokenizer blob.
 
 ### Reader checklist (all done)
 
@@ -234,11 +221,10 @@ upload is a copy), `3` q8i8, `4` q4, `5` blob.
 2. Parse the header, reject `version != 2` and `file_size != st_size`, walk the
    TLV block into the existing `Model` fields (dim, layers, rope, qk_norm, ...).
 3. Build one `Mat` per tensor: `q8u8` points `ext8` at `map_ + data_offset +
-   offset` (no copy, no bias); `f32`/`i16` are copied into vectors as today.
+   offset` (no copy, no bias); `f32`/`i16` are borrowed the same way.
 4. `Tokenizer::load_memory(blob, len)` for the embedded blob; keep
    `TOKENIZER=` as the fallback.
-5. Chat template and `default_system` from key 4 replace the compiled default
-   and the `--template` flag, with the flag still winning.
+5. Chat template and `default_system` from key 4 replace the compiled default.
 6. Acceptance: the converted file must print the same greedy text and the same
    PPL as the source on both machines, and `UPLOAD_TIME=1` must show the q8
    conversion gone.
@@ -261,35 +247,27 @@ upload is a copy), `3` q8i8, `4` q4, `5` blob.
 - ESSL 1.00 has no implicit int->float conversion: `int(x) * 1.5` does not
   compile in a shader, it needs `float(int(x)) * 1.5`.
 
-## What the reader enforces
+## What the reader derives from the file
 
-- **version** unknown -> refuse with the number printed.
-- **file_size != st_size** -> refuse (truncated download).
-- **header crc32** (bytes 0..39, stored at 40) -> refuse on mismatch; a zero
-  field means "not written" and is accepted for hand-made files.
-- **unknown dtype** -> refuse, naming the tensor id and the dtype.  Guessing
-  here would turn a future fp8 file into silent q8 arithmetic.
-- **capabilities** -> a file that does not advertise `chat` refuses `--chat`
-  (exit 2); a file that does advertise it enters chat mode on its own when the
-  caller passes neither `--chat` nor a generation length.
-- **template kind** -> 0 plain, 1 chatml/qwen, 2 minimind3; an unknown kind
-  falls back to the name string, and `--template` always wins.
-- tokenizer blob, when present and `TOKENIZER=` is unset.
-- **special token ids**: BOS/EOS/stop come from the file.  A legacy file keeps
-  the historical guess (1 = BOS, 2 = EOS); the container states them, and they
-  are derived from the embedded vocabulary (`<s>`, `<|endoftext|>`, `</s>`,
-  `<|im_end|>`; matching is on the trimmed token, because llama2.c stores
-  `<s>` as `"\n<s>\n"`).  This is not cosmetic: MiniMind3's id 0 is
-  `<|endoftext|>` and id 1 is `<|im_start|>`, so the old rule stopped on
-  `<|im_start|>` and never on `<|endoftext|>`, and with a chatml template it
-  would also prepend a duplicated `<|im_start|>` as BOS.  tinybrainbot is the
-  case where it shows: the legacy build stops on its first token and prints an
-  empty answer, the container keeps going.
-- **rope**: the container's theta/half are authoritative; `ROPE_THETA` /
-  `ROPE_HALF` only apply to legacy v1 files.  Because a `Q8M1`/`I16M1` header
-  carries no rope at all, the packer **refuses to guess**: it wants `--theta`
-  plus `--rope-half`, or `--rope-plain` for a llama2 model, or an explicit
-  `--assume-llama2-rope`.
+Beyond the refuse-rules above, three things that used to be guesses are now
+stated by the file:
+
+- **special token ids**: BOS/EOS/stop come from the file (key 8).  A legacy file
+  keeps the historical guess (1 = BOS, 2 = EOS); the container derives them from
+  the embedded vocabulary (`<s>`, `<|endoftext|>`, `</s>`, `<|im_end|>`; matching
+  is on the trimmed token, because llama2.c stores `<s>` as `"\n<s>\n"`).  This
+  is not cosmetic: MiniMind3's id 0 is `<|endoftext|>` and id 1 is
+  `<|im_start|>`, so the old rule stopped on `<|im_start|>` and never on
+  `<|endoftext|>`, and with a chatml template it would also prepend a duplicated
+  `<|im_start|>` as BOS.  tinybrainbot is where it shows: the legacy build stops
+  on its first token and prints an empty answer, the container keeps going.
+- **rope**: the container's theta/half are authoritative.  Because a
+  `Q8M1`/`I16M1` header carries no rope at all, the packer **refuses to guess**:
+  it wants `--theta` plus `--rope-half`, or `--rope-plain` for a llama2 model,
+  or an explicit `--assume-llama2-rope`.
+- **template kind**: 0 plain, 1 chatml/qwen, 2 minimind3, 3 tinybrainbot.  An
+  unknown kind falls back to the name string; there is no `--template` flag to
+  override it with.
 
 `engine/tools/mmcf_dump.py` prints all of it from the file alone
 (`--tensors` adds one line per tensor, `--check` verifies every CRC), so

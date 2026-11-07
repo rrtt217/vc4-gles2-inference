@@ -1,10 +1,13 @@
 # GLES2 推理引擎
 
-面向 llama2.c 系列和 Qwen3 风格 checkpoint 的小型 GLES2/EGL 推理引擎。
-可以在树莓派 Zero（VC4 V3D 2.1）上无头运行，也能在桌面 GLES2 驱动上运行。
+面向 llama2.c 系列、Llama 结构和 Qwen3 风格 checkpoint 的小型 GLES2/EGL 推理
+引擎。可以在树莓派 Zero（VC4 V3D 2.1）上无头运行，也能在桌面 GLES2 驱动上
+运行；它只读一种文件格式：自描述的
+[MMCF 容器](../docs/checkpoint-container.md)。
 
 这是快速开始文档。深入内容在 [../docs/](../docs/)：
 
+- [检查点容器](../docs/checkpoint-container.md)
 - [模型格式](../docs/model-formats.md)
 - [VC4 / 引擎内部](../docs/engine-internals.md)
 - [量化与 Q4M1](../docs/quantization.md)
@@ -19,10 +22,11 @@
 | `src/` | EGL/GLES2 引擎、模型、session、tokenizer、CLI |
 | `src/xformat.*` | 激活纹理布局和 GLSL X 宏 |
 | `src/shaders*.cpp` | GLSL 源码构建 |
+| `tools/` | MMCF 打包器/查看器和 numpy 参考前向（host python） |
+| `quantize/` | F16/I16/q8/q4 转换脚本（legacy 布局，由打包器串起来） |
+| `scripts/` | 回归门禁、CPU-vs-GPU 逐段对比、attention/logits oracle、基准 |
 | `probes/` | 独立 VC4 探针，不链接进引擎 |
-| `quantize/` | F16/I16/q8/q4 转换脚本 |
-| `scripts/` | 基准和回归脚本 |
-| `Makefile` | 本地和 Pi 构建参数 |
+| `Makefile` | 本地、Pi 和探针构建参数 |
 
 ## 构建
 
@@ -70,16 +74,17 @@ GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
 
 ### MiniMind2 Small
 
-MiniMind2 使用 Qwen ChatML 模板。旧 Q8M1 文件头没有 RoPE 元数据，q8 必须显式补：
+MiniMind2 使用 Qwen ChatML 模板（容器里的 template kind 1）。源 `Q8M1` 文件头
+没有 RoPE 元数据，打包时一次性给出 `--theta 1000000 --rope-half` 即可；之后
+容器自己声明 rope，运行时不需要任何额外环境变量：
 
 ```bash
-\
 MODEL=../models/llama2c/minimind2-small.q8.mmcf \
 GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
   --prompt "用一句话介绍你自己。" --gen 24 --greedy
 ```
 
-I16/Q4M1 文件头自带 theta/half。q4 是内存模式，身份类回答明显更弱。
+q4 是内存模式，身份类回答明显更弱。
 
 TinyChat15M.q8 能加载运行，但当前 tokenizer/prompt 配对下输出不连贯，
 只能当格式探针，不要当对话模型使用。
@@ -94,21 +99,44 @@ GPU_LAYER=1 KV_PACK=16 ./engine_mm3 \
   --prompt "Once upon a time" --gen 64 --greedy
 ```
 
-Pi 上 stories15M i16 约 167 ms/token，legacy `stories15M.bin` 约 161 ms/token，
-stories42M q8 约 190 ms/token，均连贯。`stories15M.q8` 当前转换输出乱码，
-改用 `.bin` 或 i16；stories42M i16 超出当前 CMA 预算。260K legacy
-（`stories260K.bin` + `tok512.bin`）在 legacy-I16 修复后约 85 ms/token，
-但仍要 5.4 s prefill，只能当 floor 探针。
+Pi 上 stories15M i16 约 167 ms/token、stories42M q8 约 190 ms/token，均连贯。
+`stories15M.q8` 在本仓库的转换下输出乱码，改用 i16 容器；stories42M i16 超出
+当前 CMA 预算。260K 是下限探针：约 85 ms/token，但 prefill 要 5.4 s，因为
+attention 仍然走完整的 512 位置网格。
 
-legacy fp32 默认按 I16 加载；只有内存不够时才用 `LEGACY_Q8=1`（例如 42M `.bin`）。
-小 TinyStories 模型在 q8 模式下会失去连贯性。
+这些模型来自 llama2.c fp32 `.bin` 源，打包器默认转成 I16
+（`make_i16.py --kind llama2c`）。`LEGACY_Q8=1` 已经不存在：引擎没有 legacy 读取器。
+
+## 打包一个 checkpoint
+
+引擎只加载 `.mmcf`。`.bin`、`.i16`、`.q8`、`.q4` 都只是打包器的输入：
+
+```bash
+# HF safetensors -> I16（自动识别 BF16/F16/F32 和 HF Llama 张量命名）
+python3 quantize/make_i16.py --kind minimind \
+  --input ../models/<model> --output ../models/<model>/<model>.i16
+
+# legacy 布局 -> 容器，并逐字节对照源文件自检
+python3 tools/mmcf_pack.py --in ../models/<model>/<model>.i16 \
+  --tok ../models/<model>/<model>.tok \
+  --out ../models/<model>/<model>.i16.mmcf \
+  --name <model> --template chatml --chat \
+  --theta 100000 --rope-half --verify
+
+# 引擎到底从这个文件里读到了什么？
+python3 tools/mmcf_dump.py ../models/<model>/<model>.i16.mmcf --check
+```
+
+`Q8M1`/`I16M1` 源必须给 `--theta` 和 `--rope-half`，因为那种文件头完全没有
+rope，打包器拒绝猜测。模板取值：`plain`(0)、`chatml`/`qwen`(1)、
+`minimind3`(2)、`tinybrainbot`(3)。tokenizer 会被内嵌，特殊 token id 从词表推导。
 
 ## MiniMind3 64M
 
 64M Qwen3 风格 dense 模型：8 层、768 hidden、2432 FFN、8 Q / 4 KV heads、
 head_dim 96、vocab 6400、RoPE theta 1e6、tied embedding、per-head Q/K RMSNorm。
 
-`` 使用 ChatML、空 `<think>` 块，并和其他 chat 模板共用
+它的容器带 template kind 2：ChatML、空 `<think>` 块，并和其他 chat 模板共用
 短英文默认系统提示（`You are a helpful assistant.`）。需要时用 `--system` 覆盖。
 加 `TIMING=1` 打印 prefill/decode 时间。
 
@@ -172,13 +200,35 @@ FFN hidden 2432 超过 VC4 2048 像素 FBO 限制。
 | `RES_PACK=0` | 关闭默认的 packed residual（q8/q4） |
 | `ACT8=1/2` | int8 activation 实验，需 q8 权重，默认关闭 |
 
-完整列表见 [测试开关](../docs/test-hooks.md)。
+完整列表见 [测试开关](../docs/test-hooks.md)，包括 dump 和探针开关
+（`STAGE_DUMP`、`RAW_DUMP`、`QKV_DUMP`、`ATT_DUMP`、`ATTN_DUP`、
+`PASS_DUP`、`DRAWCOUNT` 等）。
+
+## 排查一个错误答案
+
+问题决定工具，这些工具都在本仓库里：
+
+| 问题 | 工具 |
+|---|---|
+| 文件内容是我以为的吗？ | `tools/mmcf_dump.py <file>` |
+| 转换是否忠实？ | `tools/mmcf_pack.py --verify`，或 `LOGITS_OUT=` + `scripts/cmp_logits.py` |
+| 源模型本身对吗？ | `tools/ref_forward.py <hf-dir> "<prompt>"` |
+| CPU 和 GPU 在哪个 stage 不同？ | `scripts/diff_paths.sh <file.mmcf>` + `scripts/dump_diff.awk` |
+| 某一行是不是饱和了？ | `STAGE_DUMP=1` + `scripts/dump_stats.py` |
+| attention 块自身是否自洽？ | `ATT_DUMP=<pos>` + `scripts/check_att.py` |
+| 是不是某一次 pass 的开销？ | `ATTN_DUP`、`PASS_DUP`、`DRAWCOUNT`、`LAYER_PROFILE` |
+| 数值有没有被我改坏？ | `scripts/regression.sh`（看 PPL，不要只看一个字符串） |
+
+`GPU_LAYER=0` 不是 matvec 的 CPU 参考：attention 和 FFN 走 CPU，但所有 matvec
+仍在 GPU 上。所以逐段 CPU-vs-GPU 差异只是线索而不是缺陷，下结论前先读
+`scripts/diff_paths.sh` 的文件头。
 
 ## 文档地图
 
 | 文档 | 内容 |
 |---|---|
-| [model-formats.md](../docs/model-formats.md) | 字节布局 |
+| [checkpoint-container.md](../docs/checkpoint-container.md) | MMCF 布局、元数据键、能力位 |
+| [model-formats.md](../docs/model-formats.md) | 打包器消费的 legacy 布局 |
 | [quantization.md](../docs/quantization.md) | q4/q6、Q4M1、packed KV、质量 |
 | [engine-internals.md](../docs/engine-internals.md) | VC4 shader/FBO 细节 |
 | [performance.md](../docs/performance.md) | Pi/笔记本数据 |

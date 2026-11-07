@@ -58,11 +58,16 @@ python3 engine/quantize/make_q4_from_i16.py \
 ```
 
 The Q4M1 file stores q4 block32 asymmetric linear weights (qkv/wo/W1/W3/W2),
-q8 embeddings and q8 logits tiles.  Load it directly; do **not** set
-`Q4_WEIGHTS`:
+q8 embeddings and q8 logits tiles.  It is a *packer input*, so wrap it in a
+container first, then load that; do **not** set `Q4_WEIGHTS`:
 
 ```bash
-MODEL=../models/minimind3/minimind3.q4 \
+python3 engine/tools/mmcf_pack.py --in models/minimind3/minimind3.q4 \
+  --tok models/minimind3/minimind3.tok \
+  --out models/minimind3/minimind3.q4.mmcf \
+  --name minimind3 --template minimind3 --chat --verify
+
+MODEL=../models/minimind3/minimind3.q4.mmcf \
   KV_PACK=16 GPU_LAYER=1 ./engine_mm3 ...
 ```
 

@@ -15,7 +15,11 @@ and a disk KV prefix cache.
   head_dim 96, vocab 6400, RoPE theta 1e6, per-head Q/K RMSNorm.
 - **MiniMind2 Small** — i16/q8/q4; Qwen-style chat, weaker instruction
   following than MiniMind3.
-- **Formats** — legacy llama2.c, Q8M1, I16M1, Q8M2/I16M2, and offline **Q4M1**.
+- **One file format** — the self-describing **MMCF** container.  Weights carry
+  their tokenizer, chat template, rope configuration and capability flags, so
+  one `MODEL=` path is the whole configuration.  The legacy layouts
+  (llama2.c fp32, Q8M1, I16M1, Q8M2/I16M2, Q4M1) are conversion *inputs* to
+  `engine/tools/mmcf_pack.py`; the engine reads only `MMCF`.
 - **KV cache** — 24-bit baseline, packed q16 (default recommendation), and
   packed q8 (quality caveat).
 - **Server** — Python stdlib OpenAI-compatible chat completions, SSE,
@@ -59,6 +63,9 @@ GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
 
 ```bash
 python3 engine/quantize/make_q4.py --input models/minimind3 --output models/minimind3/minimind3.q4 --seq 512
+python3 engine/tools/mmcf_pack.py --in models/minimind3/minimind3.q4 \
+  --tok models/minimind3/minimind3.tok --out models/minimind3/minimind3.q4.mmcf \
+  --name minimind3 --template minimind3 --chat --verify
 
 cd engine
 MODEL=../models/minimind3/minimind3.q4.mmcf \
@@ -85,13 +92,16 @@ details.
 
 | Path | Contents |
 |---|---|
-| [engine/](engine/) | GLES2 engine, converters, probes |
+| [engine/](engine/) | GLES2 engine, the container toolchain, converters, probes, scripts |
 | [models/](models/) | central model store (gitignored) |
 | [minimind3/](minimind3/) | MiniMind3 source config, tokenizer source, reference |
 | [server/](server/) | OpenAI-compatible Python server |
-| [docs/](docs/) | deep dives: formats, internals, quantization, performance |
+| [docs/](docs/) | deep dives: container, formats, internals, quantization, performance |
 
 ## Model sizes and speed
+
+Every row is an `.mmcf` container; the legacy file it was packed from stays
+next to it in `models/` as a re-pack source.
 
 | Model | Size | Pi decode | Notes |
 |---|---:|---:|---|
@@ -102,18 +112,18 @@ details.
 | MiniMind2 q4 | 21 MB | ~193–212 ms/token | memory mode; identity answers unreliable |
 | TinyChat15M q8 | 24 MB | ~139–171 ms/token | runs, but output is not coherent; format probe only |
 | stories15M i16 | 49 MB | ~167 ms/token | TinyStories completion; coherent |
-| stories15M `.bin` | 60 MB | ~161 ms/token | coherent after legacy-I16 default |
 | stories42M q8 | 58 MB | ~190 ms/token | TinyStories completion; coherent |
-| stories15M q8 | 24 MB | ~148 ms/token | q8 conversion currently produces gibberish; use `.bin`/i16 |
-| stories260K `.bin` | 1 MB | ~85 ms/token | coherent after legacy-I16 default; prefill 5.4 s |
+| stories15M q8 | 24 MB | ~148 ms/token | q8 conversion produces gibberish; use i16 |
+| stories260K | 1 MB | ~85 ms/token | floor probe; prefill 5.4 s |
 
 Pi numbers are single-run and noisy; see [performance.md](docs/performance.md).
-The current supported matrix is checked on 2026-11-02; TinyChat15M needs a
-working tokenizer/prompt pairing before it can be called a chat model.
+TinyChat15M needs a working tokenizer/prompt pairing before it can be called a
+chat model.
 
 ## Documentation
 
 - [Engine quick start](engine/README.md)
+- [Checkpoint container (MMCF)](docs/checkpoint-container.md)
 - [Model formats](docs/model-formats.md)
 - [Quantization and Q4M1](docs/quantization.md)
 - [VC4 / engine internals](docs/engine-internals.md)
@@ -136,6 +146,8 @@ not covered by this repository license; see the credits above.
 
 ## Known caveats
 
+- **The engine loads MMCF containers only.**  A `.bin`/`.q8`/`.q4`/`.i16` file
+  is a packer input; `engine/tools/mmcf_pack.py` converts it.
 - Pi and laptop KV caches are **not byte-identical**; build the disk cache on
   the machine that will load it.
 - `CmaFree` is real CMA occupancy. Reducing `gpu_mem` or `cma` does not create

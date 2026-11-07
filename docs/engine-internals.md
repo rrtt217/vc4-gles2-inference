@@ -87,13 +87,13 @@ input one value per texel, because their input is a residual, not an `X`.
 
 Missing any one of the four producers silently degrades generation into
 repeated single tokens (the model sees near-constant activations).  That is what
-`engine/verify_packing.sh` guards: it compares the first 16 greedy tokens
+`engine/scripts/verify_packing.sh` guards: it compares the first 16 greedy tokens
 against the pre-packing engine byte for byte.
 
 
 ### 5. Texture limits: 2048 per side, no half-float, so every weight is decoded
 
-Probed with `engine/texsize_probe.cpp` on this board (Mesa 26.2.2, VC4 V3D 2.1):
+Probed with `engine/probes/texsize_probe.cpp` on this board (Mesa 26.2.2, VC4 V3D 2.1):
 
 | check | result |
 |---|---|

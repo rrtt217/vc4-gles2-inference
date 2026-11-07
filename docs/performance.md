@@ -3,24 +3,35 @@
 Measurements are from the Pi Zero and the local Xe/GLES2 machine. Treat them
 as regression baselines, not portable benchmarks.
 
-## Current model matrix (2026-11-02)
+This file is append-only history.  Commands inside the entries are reproduced
+as they were run, so historical ones may use flags that no longer exist
+(`--template`, `TOKENIZER=`, `ROPE_THETA=`, `ROPE_HALF=`, legacy `.q8`/`.q4`
+paths); the current invocation is in `AGENTS.md` and `engine/README.md`.
+
+## Current model matrix (2026-11-02 run)
 
 Pi Zero, `GPU_LAYER=1 KV_PACK=16`, greedy, 16 generated tokens.  The Pi also
-runs a Minecraft server, so use the ranges rather than individual decimals:
+runs a Minecraft server, so use the ranges rather than individual decimals.
 
-| model | file | size | prefill | decode | status |
+Every row is loaded from the `.mmcf` container named here; the legacy file of
+the same name (without the suffix) is the packer input.  These are the
+**2026-11-02** numbers: the decode campaign, the fused-FFN default and the
+two-position prefill all landed afterwards, so the q8/q4 pair to quote today is
+252 / 388 ms/token (see "q4 parity, step 1" below, which explains the different
+clock state).  Rows keep their date so the cost model stays auditable.
+
+| model | container | size | prefill | decode | status |
 |---|---|---:|---:|---:|---|
-| MiniMind3 q8 | `minimind3.q8` | 66 MB | 20.5 s | **238 ms/token** | default Chinese chat |
-| MiniMind3 q4 | `minimind3.q4` | 45 MB | 33.0 s | **381 ms/token** | memory mode; slightly lower quality |
-| MiniMind2 i16 | `minimind2-small.i16` | 58 MB | 9.2 s | 226 ms/token | reference; weak instruction following |
-| MiniMind2 q8 | `minimind2-small.q8` | 29 MB | 8.4 s | 140–190 ms/token | fastest MiniMind2; needs `ROPE_THETA=1000000 ROPE_HALF=1` |
-| MiniMind2 q4 | `minimind2-small.q4` | 21 MB | 9.7 s | 193–212 ms/token | memory mode; identity answers unreliable |
-| TinyChat15M q8 | `TinyChat15M.q8` | 24 MB | 4.8 s | 139–171 ms/token | loads and runs, but output is not coherent with the repo tokenizer |
-| stories15M i16 | `stories15M.i16` | 49 MB | 3.1 s | 167 ms/token | TinyStories completion; coherent |
-| stories15M legacy | `stories15M.bin` | 60 MB | 3.3 s | 161 ms/token | coherent after legacy-I16 default |
-| stories42M q8 | `stories42M.q8` | 58 MB | 3.8 s | 190 ms/token | TinyStories completion; coherent |
-| stories15M q8 | `stories15M.q8` | 24 MB | 3.1 s | 148 ms/token | **gibberish**; use the `.bin`/i16 path instead |
-| stories260K legacy | `stories260K.bin` + `tok512.bin` | 1 MB | 5.4 s | 85 ms/token | coherent after legacy-I16 default; 5-layer floor probe |
+| MiniMind3 q8 | `minimind3.q8.mmcf` | 66 MB | 20.5 s | **238 ms/token** | default Chinese chat |
+| MiniMind3 q4 | `minimind3.q4.mmcf` | 45 MB | 33.0 s | **381 ms/token** | memory mode; slightly lower quality |
+| MiniMind2 i16 | `minimind2-small.i16.mmcf` | 58 MB | 9.2 s | 226 ms/token | reference; weak instruction following |
+| MiniMind2 q8 | `minimind2-small.q8.mmcf` | 29 MB | 8.4 s | 140–190 ms/token | fastest MiniMind2; rope comes from the container |
+| MiniMind2 q4 | `minimind2-small.q4.mmcf` | 21 MB | 9.7 s | 193–212 ms/token | memory mode; identity answers unreliable |
+| TinyChat15M q8 | `TinyChat15M.q8.mmcf` | 24 MB | 4.8 s | 139–171 ms/token | loads and runs, but output is not coherent with the repo tokenizer |
+| stories15M i16 | `stories15M.i16.mmcf` | 49 MB | 3.1 s | 167 ms/token | TinyStories completion; coherent |
+| stories42M q8 | `stories42M.q8.mmcf` | 58 MB | 3.8 s | 190 ms/token | TinyStories completion; coherent |
+| stories15M q8 | `stories15M.q8.mmcf` | 24 MB | 3.1 s | 148 ms/token | **gibberish**; use the i16 container instead |
+| stories260K | *(no container yet)* `stories260K.bin` | 1 MB | 5.4 s | 85 ms/token | 5-layer floor probe; pack it first |
 
 The Pi store now has TinyStories 15M/42M/260K checkpoints.  They are base
 completion models, not chat models, so test them with a plain prompt such as
@@ -29,13 +40,17 @@ current CMA budget; q8 is the practical 42M path.  TinyChat15M should be
 treated as a format/probe model, not as a usable chat model until its
 tokenizer/prompt pairing is fixed.
 
-The 260K legacy checkpoint is a useful **floor probe**, not a product model:
-its 5-layer/64-dim body reaches 85 ms/token after the legacy-I16 fix, but
-prefill is still 5.4 s because the attention passes walk the full 512-position
-grid and the shader setup is fixed.  This is below the ~150 ms floor of the
-coherent 15M/42M models, but it is not a quality replacement for them.
-Legacy fp32 files now default to I16; `LEGACY_Q8=1` keeps the old low-memory
-q8 path for large checkpoints, at a quality cost on small TinyStories models.
+The 260K checkpoint is a useful **floor probe**, not a product model: its
+5-layer/64-dim body reaches 85 ms/token, but prefill is still 5.4 s because the
+attention passes walk the full 512-position grid and the shader setup is fixed.
+This is below the ~150 ms floor of the coherent 15M/42M models, but it is not a
+quality replacement for them.  It is the only row here still in the legacy
+llama2.c layout — pack it with `mmcf_pack.py --rope-plain` (and `tok512.bin`)
+before the engine can load it.
+
+The `LEGACY_Q8=1` / "legacy fp32 loads as I16" note is historical: those flags
+went with the legacy readers in `fcc4095`, and the precision is now decided by
+which container you pack.
 
 ### Default system prompt
 
@@ -95,6 +110,15 @@ Current state:
   [`future-optimization.md`](future-optimization.md#do-not-retry-measured-2026-11-03).
 - [Pi Zero model matrix (2026-11-02)](#pi-zero-model-matrix-2026-11-02-vlab-cross-build)
 - [Benchmarking caveat](#benchmarking-caveat-the-pi-also-runs-a-minecraft-server)
+
+Recent (the second wave, 2026-11-04 .. 06):
+
+- [Prefill batching, steps 1-6](#prefill-batching-step-1-what-a-draw-and-a-weight-byte-cost-2026-11-04)
+  — the two-position pair path that is now the default.
+- [q4 parity and Q4_SHIFT](#q4_exactfast-the-integer-nibble-unpack-is-a-dead-end-2026-11-04)
+- [Prefix cache step 10](#prefix-cache-step-10-the-file-was-right-the-cli-sampled-from-an-empty-logits-vector-2026-11-05)
+- [TinyBrainBot on VC4](#tinybrainbot-on-vc4-item-12-first-look)
+  — the container's first non-MiniMind model, and why its `GPU_LAYER=1` path is not
 
 History:
 
@@ -523,7 +547,7 @@ test would miss.  The rounding stays in the nibble path; every other decoder
 (weights, activations, residual, RMSNorm input, q4 scale/min) uses the fast form.
 
 Correctness: the engine still produces byte-identical text to the pre-change
-reference binary for both q8 and q4 (`engine/verify_packing.sh`).
+reference binary for both q8 and q4 (`engine/scripts/verify_packing.sh`).
 
 ### Probes
 

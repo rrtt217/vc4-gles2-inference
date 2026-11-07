@@ -6,24 +6,26 @@
 # reports the new binary's output and timing.
 # Both engines must produce the same token text byte for byte; a packing bug
 # shows up as repeated single tokens, which still looks "fluent" at a glance.
+#
+# The model files are MMCF containers, so the template, tokenizer and rope come
+# from the file; passing --template here would be silently ignored.
 set -eu
 cd "$(dirname "$0")/.."
-export TOKENIZER=../models/minimind3/minimind3.tok
 export GPU_LAYER=1 KV_PACK=16 TIMING=1
 REF="${REF:-/tmp/engine_base}"
 PROMPT="用一句话介绍你自己。"
 
 text_of() {
-    MODEL="$1" "$2" --chat --template minimind3 --prompt "$PROMPT" --gen 16 --greedy 2>&1 \
+    MODEL="$1" "$2" --chat --prompt "$PROMPT" --gen 16 --greedy 2>&1 \
         | sed -n 's/^Assistant: //p' | head -1
 }
 
 timing_of() {
-    MODEL="$1" "$2" --chat --template minimind3 --prompt "$PROMPT" --gen 16 --greedy 2>&1 \
+    MODEL="$1" "$2" --chat --prompt "$PROMPT" --gen 16 --greedy 2>&1 \
         | grep '^TIMING' | tail -1
 }
 
-for model in ../models/minimind3/minimind3.q8 ../models/minimind3/minimind3.q4; do
+for model in ../models/minimind3/minimind3.q8.mmcf ../models/minimind3/minimind3.q4.mmcf; do
     new=$(text_of "$model" ./engine_mm3)
     printf '%s\n  new: %s\n' "$model" "$new"
     if [ -x "$REF" ]; then

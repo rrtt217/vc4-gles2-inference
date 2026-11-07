@@ -4,59 +4,86 @@ Central store for all model artifacts used by this repository.  The files
 are large and are intentionally **not tracked by Git**; only this README is
 tracked.
 
+**The engine loads `.mmcf` only.**  Every model here therefore exists twice:
+the legacy file the packer consumes (`.i16`, `.q8`, `.q4`, `.bin`), and the
+container that the engine runs.  Keep both — the legacy file is the re-pack
+source, and a re-pack is how a numerics change is replayed.
+
 Layout:
 
 ```text
 models/
-  minimind3/
-    model.safetensors          # original F16 source
-    config.json                # model config used by converters
-    minimind-64M-3-F16.gguf    # alternate source export
-    minimind3.i16              # I16M2 engine checkpoint
-    minimind3.q8               # Q8M2 engine checkpoint
-    minimind3.q4               # offline Q4M1 engine checkpoint
-    minimind3.tok              # engine tokenizer
-  llama2c/
-    stories15M.bin/.q8/.i16
-    stories42M.bin/.q8/.i16
-    TinyChat15M.bin/.q8/.i16
-    minimind2-small.q8/.i16/.q4
-    stories15M-llama2-enzh.bin
-    tokenizer.bin
-    tok512.bin                  # stories260K only (512-token tokenizer)
-    tokenizer-llama2enzh.bin
-    stories260K.bin
+  minimind3/                     Qwen3-style 64M, the default chat model
+    config.json                  source config used by the converters
+    model.safetensors            original F16 source
+    minimind-64M-3-F16.gguf      alternate source export (llama.cpp reference)
+    minimind3.i16 / .q8 / .q4    legacy layouts (packer input)
+    minimind3.{i16,q8,q4}.mmcf   what the engine loads
+    minimind3.tok                engine tokenizer (embedded into the container)
+
+  llama2c/                       llama2.c TinyStories family + MiniMind2 Small
+    stories15M.bin / .i16 / .q8  (.q8 is gibberish: use i16)
+    stories42M.bin / .i16 / .q8
+    stories260K.bin + tok512.bin 5-layer floor probe, needs the 512-token vocab
+    TinyChat15M.bin / .i16 / .q8 format probe; output is not coherent
+    minimind2-small.i16 / .q8 / .q4
+    tokenizer.bin                the 32k llama2.c vocabulary
+    tokenizer-llama2enzh.bin     for stories15M-llama2-enzh.bin
+
+  tinybrainbot/                  TinyBrainBot-100M-v5.1-Instruct, template kind 3
+    model.safetensors, config.json, llama/ (upstream reference code)
+    convert_tinybrainbot.py, make_tok.py, ref_numpy.py
+    (q4 and i16 are the usable precisions; q8 degenerates — see
+     docs/model-formats.md)
+
+  smollm2-135m/                  SmolLM2-135M base (not adapted): source
+  smollm2-135m-instruct/         weights only, kept for a future conversion
+    model.safetensors, tokenizer.json, vocab.json, merges.txt
+    <name>.i16 / .q8 / .q4 + .mmcf, <name>.tok
+
+  supra2/                        Supra2-100M-Instruct (Qwen3-shaped)
+  feng30m/                       feng-30m (Llama-shaped), see README.txt
+
+  survey_under_110m.csv          candidate survey: params, arch, downloads,
+                                 engine_supported, note
 ```
 
 Rebuild MiniMind3 artifacts from the repository root:
 
 ```bash
-# I16 -> Q8 -> Q4 and tokenizer
+# I16 -> Q8 -> Q4 -> .mmcf, plus the tokenizer
 minimind3/convert.sh
+```
 
-# or just Q4 from F16
-python3 engine/quantize/make_q4.py --input models/minimind3 \
-  --output models/minimind3/minimind3.q4 --seq 512
+`convert.sh` stops at the legacy layouts; pack them afterwards, otherwise the
+artifacts it produces are not loadable by the engine:
+
+```bash
+for p in i16 q8 q4; do
+  python3 engine/tools/mmcf_pack.py --in models/minimind3/minimind3.$p \
+    --tok models/minimind3/minimind3.tok \
+    --out models/minimind3/minimind3.$p.mmcf \
+    --name minimind3 --template minimind3 --chat --verify
+done
 ```
 
 Notes:
 
-- `minimind2-small.q8` is a legacy Q8M1 header and needs
-  `ROPE_THETA=1000000 ROPE_HALF=1` when loaded;
+- `minimind2-small.q8` is a legacy Q8M1 header with **no rope fields**; packing
+  it requires `--theta 1000000 --rope-half`, because the packer refuses to
+  guess.  The container then states the rope, so nothing is passed at run time.
 - `minimind2-small.q4` is generated directly from I16 with
-  `engine/quantize/make_q4_from_i16.py`;
-- `TinyChat15M.q8` loads, but the repository tokenizer/prompt pairing currently
-  produces incoherent text; treat it as a format probe;
-- `stories15M.q8` currently produces gibberish; use `stories15M.bin` (legacy
-  I16 default) or `stories15M.i16`.  stories42M q8 is coherent; its i16
-  exceeds the current Pi CMA budget.
-- `stories260K.bin` needs `tok512.bin` (not the 32k `tokenizer.bin`).  With the
-  legacy-I16 default it is coherent at ~85 ms/token on the Pi, but prefill is
-  still ~5.4 s; it is a floor probe.
-- Legacy fp32 files default to I16.  `LEGACY_Q8=1` restores the old q8 path
-  for memory-constrained 42M `.bin` use, but small TinyStories models become
-  incoherent in q8.
+  `engine/quantize/make_q4_from_i16.py`; q8 is never a source for q4.
+- q8 is not usable for `tinybrainbot` (the break is in the q8 runtime path, not
+  the weights); use q4 or i16.
+- The `smollm2-*` directories hold source weights only.  They are not adapted:
+  nothing here has been validated for them, and the containers sitting in the
+  directory were built outside this line.
+- `stories260K.bin` needs `tok512.bin` (not the 32k `tokenizer.bin`) when a
+  legacy tool needs a tokenizer; the container embeds it.
+- The llama2.c sources default to I16 (`make_i16.py --kind llama2c`).  Small
+  TinyStories models lose coherence in q8.
 
 Model files, tokenizers, KV caches and logs are ignored by `.gitignore`.
-The HuggingFace `tokenizer.json` source is also not tracked; place it in
-`minimind3/tokenizer.json` if you need to rebuild `minimind3.tok`.
+The HuggingFace `tokenizer.json` source for MiniMind3 is also not tracked;
+place it in `minimind3/tokenizer.json` if you need to rebuild `minimind3.tok`.

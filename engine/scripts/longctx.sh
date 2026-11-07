@@ -10,7 +10,7 @@ MODEL=../models/minimind3/minimind3.q8.mmcf
 FILLER=$(python3 -c "print('树莓派是一块很小的电脑板。' * $REPEATS + '只回答两个字：收到')")
 
 for pack in 16 8 0; do
-  out=$(MODEL=$MODEL KV_PACK=$pack timeout 1200 ./engine_mm3 --chat --template minimind3 \
+  out=$(MODEL=$MODEL KV_PACK=$pack timeout 1200 ./engine_mm3 --chat \
         --prompt "$FILLER" --gen 8 --greedy 2>&1)
   line=$(printf '%s\n' "$out" | grep -E "^TIMING" | tail -1)
   printf 'kv_pack=%-2s %s\n' "$pack" "${line:-FAILED}"

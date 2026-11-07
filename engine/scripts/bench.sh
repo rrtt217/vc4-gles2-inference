@@ -9,7 +9,7 @@ GEN="${2:-16}"
 export GPU_LAYER=1
 export TIMING=1
 Q8=../models/minimind3/minimind3.q8.mmcf
-Q4=../models/minimind3/minimind3.q4
+Q4=../models/minimind3/minimind3.q4.mmcf
 
 cma_free() { awk '/^CmaFree:/{print $2}' /proc/meminfo; }
 
@@ -17,7 +17,8 @@ run() {
   local tag="$1" model="$2"; shift 2
   local before after out line
   before=$(cma_free)
-  out=$(env MODEL="$model" "$@" timeout 300 ./engine_mm3 --chat --template minimind3 \
+  # The template (and the tokenizer, and the rope) come from the container.
+  out=$(env MODEL="$model" "$@" timeout 300 ./engine_mm3 --chat \
         --prompt "$PROMPT" --gen "$GEN" --greedy 2>&1)
   after=$(cma_free)
   line=$(printf '%s\n' "$out" | grep -E "^TIMING" | tail -1)

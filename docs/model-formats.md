@@ -1,17 +1,45 @@
 # Model formats
 
-The engine reads four checkpoint families. All are little-endian and use
-the same tensor order; only the header and weight encoding differ.
+Two layers of format live in this repository, and they are easy to confuse:
 
-## Supported checkpoints
+1. **What the engine loads — exactly one thing: an MMCF v2 container.**  See
+   [`checkpoint-container.md`](checkpoint-container.md).  `Model::load()`
+   accepts `"MMCF"` and refuses everything else, naming the packer in the
+   message.
+2. **What the packer consumes — the legacy layouts.**  `Q8M1`, `Q8M2`,
+   `I16M1`, `I16M2`, `Q4M1` and llama2.c fp32 are *conversion inputs*.  They
+   are documented below because `engine/tools/mmcf_pack.py` reads them, not
+   because the engine can run them.
 
-1. **legacy llama2.c fp32** — 28-byte header + fp32 tensors.  The loader
-   quantizes it to I16 by default; `LEGACY_Q8=1` selects the old q8 path for
-   memory-constrained use.
-2. **Q8M1** — int8 weights, int8 embedding
-3. **I16M1** — int16 weights, int16 embedding, rope metadata
-4. **Q8M2 / I16M2** — same as Q8M1/I16M1, plus stored theta/half and
-   per-head Q/K RMSNorm weights (MiniMind3)
+The legacy readers were deleted in `fcc4095`; before that the engine carried
+four of them plus per-format magics.  Do not reintroduce a reader — extend the
+container and the packer.
+
+## What the engine runs
+
+| model | family | notes |
+|---|---|---|
+| MiniMind3 64M | Qwen3-style dense, tied embedding | 8 layers, 768 hidden, 2432 FFN, 8 Q / 4 KV heads, head_dim 96, vocab 6400, theta 1e6, per-head Q/K RMSNorm, ChatML + `<think>` |
+| MiniMind2 Small | Qwen-style | i16/q8/q4; weaker instruction following |
+| Supra2-100M | Qwen3-shaped | see `models/supra2` |
+| Feng30M | Llama-shaped | see `models/feng30m` |
+| TinyBrainBot-100M-v5.1 | Llama-shaped, tied embedding | `<\|user\|>`/`<\|assistant\|>` markers, no system turn; **q8 is not usable, use q4 or i16** |
+| TinyChat15M, stories15M/42M/260K | llama2.c TinyStories family | base completion models, not chat models |
+
+Every one of them is converted to `.mmcf` before use; `models/` keeps the
+legacy source next to the container so a re-pack is possible.
+
+GQA is genuinely supported by the engine, not emulated: `GROUP = heads /
+kv_heads` and the attention shader indexes `int kvh = h / GROUP`.  MiniMind3
+(8 Q / 4 KV) exercises it.  Nothing else about a new model is generic — the
+tokenizer, the rope layout, the template and the embedding grid are all
+per-checkpoint, so a new architecture is a conversion investigation, not a
+config change.
+
+## Legacy layouts (packer input)
+
+All are little-endian and use the same tensor order; only the header and the
+weight encoding differ.
 
 ### I16M1
 
@@ -42,12 +70,13 @@ mat:
 ```
 
 Q8M1 uses the same layout with int8 data and no rope metadata.  MiniMind q8
-needs `ROPE_THETA=1000000 ROPE_HALF=1`; I16M1 stores these fields.
+needs theta 1e6 and rotate-half; I16M1 stores these fields, Q8M1 does not — the
+packer therefore **refuses to guess** (see `checkpoint-container.md`).
 
-`make_q8_from_i16.py` writes `split=1` by default and splits a fused W13
-into W1/W3.  The split layout keeps separate q8 scales and takes the paired
-q16 W1/W3 path.  The runtime also supports fused q8 W13 through
-`matvec_q8_pair_fused`, so old fused files remain loadable.
+`make_q8_from_i16.py` writes `split=1` by default and splits a fused W13 into
+W1/W3.  The split layout keeps separate q8 scales and takes the paired q16
+W1/W3 path.  The runtime also supports fused q8 W13 through
+`matvec_q8_pair_fused`, so old fused files remain convertible.
 
 ### I16M2 / Q8M2
 
@@ -64,10 +93,9 @@ f32 k_norm[layers*head_dim]
 ... same per-layer mats ...
 ```
 
-Q8M2 stores theta/half itself; no `ROPE_THETA`/`ROPE_HALF` environment is
-needed for MiniMind3.
+Q8M2 stores theta/half itself; no environment override is needed.
 
-## Q4M1 (offline q4)
+### Q4M1
 
 Q4M1 is generated from F16 safetensors by `make_q4.py`, or from an I16
 checkpoint by `make_q4_from_i16.py` (I16 is an allowed source; q8 is not):
@@ -97,52 +125,48 @@ groups = ceil(cols/32); scale/min are q16 values multiplied by
 `param_scale`. Q4 matrices require `cols % 32 == 0`. Embeddings and logits
 stay q8.
 
-
-## The container is the only format (2026-11-05)
-
-`engine/src/model.cpp` no longer contains `load_q8` / `load_q4` / `load_i16` /
-`load_legacy`; `Model::load()` accepts `MMCF` and refuses anything else with a
-message that names the packer.  All 15 checkpoints in `models/` were converted
-and verified against their source (same greedy text, same PPL to 4 decimals on
-Xe and on the Pi, where the numbers are the pinned 271.2855 / 325.3751).
-
-Converting a new model is one command:
+## Converting a model
 
 ```bash
-engine/tools/mmcf_pack.py --in model.q4 --tok tokenizer.tok \
-  --out model.q4.mmcf --name model --template chatml --chat \
-  --theta 1000000 [--rope-half] [--verify]
+# 1. HF safetensors -> I16 (reads BF16/F16/F32, HF Llama tensor names)
+python3 engine/quantize/make_i16.py --kind minimind \
+  --input models/<model> --output /tmp/<model>.i16
+
+# 2. I16 -> Q8 and/or Q4, when you want those precisions
+python3 engine/quantize/make_q8_from_i16.py /tmp/<model>.i16 /tmp/<model>.q8
+python3 engine/quantize/make_q4_from_i16.py /tmp/<model>.i16 /tmp/<model>.q4
+
+# 3. legacy layout -> container
+python3 engine/tools/mmcf_pack.py --in /tmp/<model>.q4 --tok models/<model>/<model>.tok \
+  --out models/<model>/<model>.q4.mmcf --name <model> --template chatml --chat \
+  --theta 100000 [--rope-half] [--qk-norm] --verify
+
+# 4. confirm what the engine will read
+python3 engine/tools/mmcf_dump.py models/<model>/<model>.q4.mmcf --check
 ```
 
-`--template` no longer exists as an engine flag: the kind travels in the file
-(0 plain, 1 chatml/qwen, 2 minimind3, 3 tinybrainbot), so the same checkpoint
-cannot be run with the wrong one.  `TOKENIZER=`, `ROPE_THETA=` and `ROPE_HALF=`
-are likewise historical; the container states all three.
+`make_i16.py --kind` selects the tensor naming: `llama2c` for the stories
+family, `minimind` for HF Llama/Qwen-shaped checkpoints.  Both read the
+dtype from the safetensors header rather than assuming F16.
 
-## MMCF containers and the TinyBrainBot family (2026-11-05)
+`mmcf_requant_q8.py` is the shorter route when only q8 is wanted: it rebuilds
+the q8 matrices inside a container from the same model's i16 container, so the
+tokenizer, template and rope metadata are not re-derived.
 
-`engine/tools/mmcf_pack.py` converts every legacy checkpoint in `models/`
-(Q8M1/Q8M2, Q4M1, I16M1/I16N) into the self-describing container described in
-[`checkpoint-container.md`](checkpoint-container.md).  Two implicit conventions
-that used to live in shell history are now in the file:
+### Conventions that used to live in shell history
 
 | convention | where it lives now |
 |---|---|
-| `rope_theta` / rotate-half | metadata key 2; a `Q8M1`/`I16M1` source has no rope at all, so the packer **refuses to guess** and wants `--theta`/`--rope-half`, `--rope-plain` (llama2) or `--assume-llama2-rope` |
-| BOS / EOS / stop ids | metadata key 8, derived from the embedded vocabulary; llama2.c stores `"<s>"` as `"\n<s>\n"`, so matching is on the trimmed token |
-| chat template | metadata key 4 (kind + default system + name); `--template` still overrides |
-| tokenizer | the `.tok` blob is inside the container, so `TOKENIZER=` is optional |
+| `rope_theta` / rotate-half | metadata key 2.  A `Q8M1`/`I16M1` source has no rope at all, so the packer refuses to guess: `--theta` plus `--rope-half`, `--rope-plain` (llama2) or `--assume-llama2-rope` |
+| BOS / EOS / stop ids | metadata key 8, derived from the embedded vocabulary.  llama2.c stores `"<s>"` as `"\n<s>\n"`, so matching is on the trimmed token |
+| chat template | metadata key 4 (kind + default system + name) |
+| tokenizer | the `.tok` blob is inside the container |
 
-`engine/quantize/make_i16.py` also stopped hardcoding the rope: `rope_of(cfg)`
-reads `rope_theta` (and `rope_scaling.rope_theta`) and treats the layout as
-rotate-half unless the config says otherwise, and the safetensors loader picks
-F16/F32 from the tensor header instead of assuming F16.
+## TinyBrainBot-100M-v5.1-Instruct
 
-### TinyBrainBot-100M-v5.1-Instruct
-
-A HF Llama-shaped model with `rope_theta = 10000`, rotate-half, no qk-norm,
-tied embeddings and a SentencePiece BPE tokenizer (32000 entries, `▁` for
-space, byte fallback).  Its special tokens are `<s>`=0, `</s>`=1, `<unk>`=3,
+A HF Llama-shaped model with theta 10000, rotate-half, no qk-norm, tied
+embeddings and a SentencePiece BPE tokenizer (32000 entries, `▁` for space,
+byte fallback).  Its special tokens are `<s>`=0, `</s>`=1, `<unk>`=3,
 `<|user|>`=4, `<|assistant|>`=5, `<|system|>`=6, `<|end|>`=7.  The prompt has
 no system turn and no BOS:
 
@@ -150,9 +174,8 @@ no system turn and no BOS:
 <|user|> {question}<|assistant|> {answer}<|end|>
 ```
 
-`--template tinybrainbot` (or template kind 3 in a container) emits
-`"<|user|> " + q + "<|assistant|> "` and disables the tokenizer's dummy prefix;
-the stop set is `{7}` (EOS 7), not `</s>`.
+Template kind 3 emits `"<|user|> " + q + "<|assistant|> "` and disables the
+tokenizer's dummy prefix; the stop set is `{7}` (EOS 7), not `</s>`.
 
 **q8 is not usable for this model, and the scale is not why.**  `Q8M1` stores
 one scale per matrix (`make_q8_from_i16.py: q8mat` takes `max(|w|)` over the
@@ -162,5 +185,8 @@ quantization (cosine 0.998-0.9999, per-row median error 2.14% against 1.10% for
 the MiniMind3 q8 that works), and a re-quantization at a clipped p99.9 scale
 (0.92%) still degenerates while this model's q4, at 7.83% weight error, answers
 normally.  The break is in the q8 runtime path, not the weights; see
-docs/performance.md, "q8 precision is not why TinyBrainBot degrades", and
-WORKLOG item 15a.  Use **q4 or i16** for this model.
+docs/performance.md, "q8 precision is not why TinyBrainBot degrades".  Use
+**q4 or i16** for this model.
+
+It also needs the CPU layer: its `GPU_LAYER=1` path is not correct on VC4
+(docs/performance.md, item 12), so `--no-gpu-layer` is the deployable setting.

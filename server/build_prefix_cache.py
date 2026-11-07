@@ -63,8 +63,9 @@ def header_text(system: str, tool_names: list[str]) -> str:
 def cmd_build(a) -> int:
     engine = Path(a.engine)
     model = Path(a.model)
-    tok = Path(a.tokenizer)
-    for p in (engine, model, tok):
+    tok = Path(a.tokenizer) if a.tokenizer else None
+    paths = [engine, model] + ([tok] if tok else [])
+    for p in paths:
         if not p.exists():
             raise SystemExit(f"missing: {p}")
     text = header_text(a.system or srv.DEFAULT_SYSTEM, a.tools)
@@ -76,10 +77,11 @@ def cmd_build(a) -> int:
     env = dict(os.environ)
     env.update({
         "MODEL": str(model),
-        "TOKENIZER": str(tok),
         "SEQ": str(a.seq),
         "GPU_LAYER": "1",
     })
+    if tok:
+        env["TOKENIZER"] = str(tok)
     if a.kv_pack:
         env["KV_PACK"] = str(a.kv_pack)
     # The engine takes a *file* for the cache prompt, not inline text.
@@ -91,7 +93,11 @@ def cmd_build(a) -> int:
     if r.returncode != 0 or not out.exists():
         sys.stderr.write(r.stderr[-1500:])
         return 1
-    loaded = re.search(r"PREFIX_CACHE (?:loaded|saved) (\d+)", r.stdout + r.stderr)
+    # The engine prints "CACHE_SAVED <path> tokens=N" on the build path and
+    # "PREFIX_CACHE loaded N tokens" on load; this used to match only the
+    # second one, so every sidecar recorded n_tokens=None.
+    loaded = re.search(r"CACHE_SAVED .* tokens=(\d+)", r.stdout + r.stderr) or \
+             re.search(r"PREFIX_CACHE (?:loaded|saved) (\d+)", r.stdout + r.stderr)
     n_tokens = int(loaded.group(1)) if loaded else None
 
     meta = {
@@ -101,7 +107,8 @@ def cmd_build(a) -> int:
         "model": model.name,
         "model_sha": sha256_file(model),
         "model_bytes": model.stat().st_size,
-        "tokenizer_sha": sha256_file(tok),
+        # empty when the container carries its own tokenizer blob
+        "tokenizer_sha": sha256_file(tok) if tok else "",
         "seq": a.seq,
         "kv_pack": a.kv_pack,
         "tools": a.tools,
@@ -144,11 +151,17 @@ def cmd_verify(a) -> int:
         print("meta ok:", {k: meta[k] for k in ("n_tokens", "seq", "kv_pack", "tools") if k in meta})
 
     env = dict(os.environ)
-    env.update({"MODEL": a.model, "TOKENIZER": a.tokenizer, "SEQ": str(a.seq),
-                "GPU_LAYER": "1"})
+    env.update({"MODEL": a.model, "SEQ": str(a.seq), "GPU_LAYER": "1"})
+    # The container embeds its tokenizer.  Only set TOKENIZER when the caller
+    # names one: an empty value is not "unset", and the engine would try to load
+    # the empty path instead of the embedded blob.
+    if a.tokenizer:
+        env["TOKENIZER"] = a.tokenizer
     if a.kv_pack:
         env["KV_PACK"] = str(a.kv_pack)
-    cmd = [a.engine, "--chat", "--template", "minimind3", "--prompt", "hi", "--gen", "1",
+    # The template, tokenizer and rope come from the container; --template no
+    # longer exists as an engine flag.
+    cmd = [a.engine, "--chat", "--prompt", "hi", "--gen", "1",
            "--greedy", "--prefix-cache", str(cache)]
     r = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=a.timeout)
     m = re.search(r"PREFIX_CACHE loaded (\d+) tokens", r.stderr)
@@ -165,8 +178,9 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("action", choices=["build", "verify"])
     ap.add_argument("--engine", default=str(REPO / "engine/engine_mm3"))
-    ap.add_argument("--model", default=str(REPO / "models/minimind3/minimind3.q8"))
-    ap.add_argument("--tokenizer", default=str(REPO / "models/minimind3/minimind3.tok"))
+    ap.add_argument("--model", default=str(REPO / "models/minimind3/minimind3.q8.mmcf"))
+    ap.add_argument("--tokenizer", default="",
+                    help="legacy .tok path; empty = use the blob inside the container")
     ap.add_argument("--seq", type=int, default=768)
     ap.add_argument("--kv-pack", type=int, default=16, choices=[0, 8, 16])
     ap.add_argument("--system", default="")

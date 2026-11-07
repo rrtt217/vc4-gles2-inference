@@ -22,16 +22,44 @@ replace working paths with demos or cosmetic rewrites.
 | Path | Contents |
 |---|---|
 | `engine/src/` | EGL/GLES2 engine: X-format layouts, shader builders, GPU, model, session, tokenizer, CLI |
+| `engine/tools/` | container packer, container inspector, numpy reference forward passes |
+| `engine/quantize/` | F16/llama2.c → I16 → Q8/Q4 converters (legacy layouts; `mmcf_pack.py` wraps them) |
+| `engine/scripts/` | the regression gate **and** the diagnostic tools |
 | `engine/probes/` | standalone VC4 feature/throughput probes (not linked into the engine) |
-| `engine/quantize/make_i16.py` | F16/llama2.c -> I16M1/M2 |
-| `engine/quantize/make_q8_from_i16.py` | I16 -> Q8M1/M2 (splits fused W13) |
-| `engine/quantize/make_q4.py` | F16 safetensors -> Q4M1 |
-| `engine/quantize/make_q4_from_i16.py` | I16 -> Q4M1 |
-| `engine/scripts/` | benchmark and regression helpers |
-| `server/server.py` | OpenAI-compatible HTTP server and worker protocol |
-| `models/` | central model store (gitignored) |
+| `server/` | OpenAI-compatible HTTP server, deterministic tools, self-test, eval suite |
+| `models/` | central model store (gitignored), one `.mmcf` per precision |
 | `minimind3/` | MiniMind3 source config/tokenizer/reference; artifacts live in `models/` |
+| `refs/` | untracked upstream reference material for MiniMind3 (gitignored) |
 | `docs/` | deep dives; keep READMEs short and link here |
+
+Engine modules are described in [`docs/engine-layout.md`](docs/engine-layout.md);
+the file format in [`docs/model-formats.md`](docs/model-formats.md) and
+[`docs/checkpoint-container.md`](docs/checkpoint-container.md).
+
+### `engine/tools/` — the container toolchain
+
+| Tool | Use it when |
+|---|---|
+| `mmcf_pack.py` | converting a legacy checkpoint (Q8M1/Q8M2, Q4M1, I16M1/I16M2) into an MMCF container |
+| `mmcf_dump.py` | answering "what does the engine actually read from this file" — the whole metadata block, from the file alone (`--check` verifies every CRC) |
+| `mmcf_requant_q8.py` | rebuilding the q8 matrices of a container from its i16 sibling (`--clip P` for a percentile scale) |
+| `ref_forward.py` | a numpy forward pass over an HF safetensors source: separates "bad conversion / bad tokenizer / engine bug" |
+
+### `engine/scripts/` — the gate and the diagnostics
+
+| Script | Answers |
+|---|---|
+| `regression.sh` | the acceptance gate: determinism, behaviour, pinned strings, PPL |
+| `diff_paths.sh` + `dump_diff.awk` | per-stage CPU-vs-GPU comparison, from `STAGE_DUMP=1 HIDDEN_DUMP=1 PREFILL_PAIR=0` |
+| `dump_stats.py` | per-row `max/mean/clamp-count` of a `DUMP` file (is a row saturating?) |
+| `check_att.py` | offline oracle for `ATT_DUMP`: score, softmax stats and `att_out` reproduced from the integers the shaders consumed |
+| `cmp_logits.py` | compares two `LOGITS_OUT` dumps tile by tile |
+| `verify_packing.sh` | byte-for-byte check of the packed-activation layout against a known-good binary |
+| `bench.sh`, `bench_ab.sh`, `bench_plain_ab.sh`, `longctx.sh` | timings; the `ab` ones interleave two binaries to cancel drift |
+
+These scripts existed since `14754be` but were missing from this map, which is
+how a long investigation ended up hand-rolling probes they already contain.
+When a numerics question comes up, read them first.
 
 ## Build
 
@@ -40,6 +68,8 @@ Build for the target and do not reuse a stale binary:
 - Native GLES2: `make -C engine -B engine_mm3`
 - Pi: cross-build with `make -C engine -B pi CROSS_SYSROOT=<sysroot>` on the
   cross host, or build on the Pi with the ARMv6 flags in the Makefile.
+- Probes: `make -C engine -B probes/<name>[_pi]` — see the targets in
+  `engine/Makefile`.
 
 Do not use a short build timeout.  Machine-specific host/sysroot/deploy paths
 belong in `AGENTS.local.md` (DSH) or `AGENTS.override.md` (Hermes/VLAB).
@@ -48,7 +78,8 @@ belong in `AGENTS.local.md` (DSH) or `AGENTS.override.md` (Hermes/VLAB).
 
 Measured on a Pi Zero, `GPU_LAYER=1 KV_PACK=16`, greedy, 32 generated tokens,
 best of two runs; MiniMind3 uses `SEQ=768`.  Prefill is prompt-specific; the
-full matrix and prefills are in [`docs/performance.md`](docs/performance.md).
+full matrix and prefills are in [`docs/performance.md`](docs/performance.md),
+and that file is the authority — this table is a pointer, not a re-baseline.
 
 | model | decode |
 |---|---:|
@@ -64,19 +95,37 @@ full matrix and prefills are in [`docs/performance.md`](docs/performance.md).
 A native ARMv6 build on a Pi Zero takes about 8–10 minutes; never run two
 builds concurrently.  Prefer the VLAB cross-build (see the VLAB override).
 
+## The container is the only format
+
+Since `fcc4095` the engine reads **only** MMCF v2.  `Model::load()` refuses
+anything else and names the packer.  A `.q8` / `.q4` / `.i16` / `.bin` file in
+`models/` is an *input to the packer*, never a model the engine can run:
+
+```bash
+python3 engine/tools/mmcf_pack.py --in models/minimind3/minimind3.q8 \
+  --tok models/minimind3/minimind3.tok \
+  --out models/minimind3/minimind3.q8.mmcf \
+  --name minimind3 --template minimind3 --chat --verify
+```
+
+The container carries the tokenizer, the chat template, the default system
+prompt, the rope configuration and the special-token ids, so `TOKENIZER=`,
+`ROPE_THETA=`, `ROPE_HALF=` and `--template` are **gone**.  Setting them is
+silently ignored, which is worse than an error: a command copied from an old
+note still "works" and quietly tests something else.  Check a file with
+`python3 engine/tools/mmcf_dump.py <file>` before blaming the engine.
+
 ## Canonical smoke tests
 
-Run from `engine/` with the model store paths used by the local checkout.  The
-system prompt is pinned on the command line: the compiled default changed in
-`c1bb4f6` (Chinese persona -> neutral English), so a gate that omits `--system`
-silently changes meaning and stops reproducing.
+Run from `engine/`.  The system prompt is pinned on the command line: the
+compiled default changed in `c1bb4f6` (Chinese persona → neutral English), so a
+gate that omits `--system` silently changes meaning and stops reproducing.
 
 q8:
 
 ```bash
-MODEL=../models/minimind3/minimind3.q8 \
-TOKENIZER=../models/minimind3/minimind3.tok \
-GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat --template minimind3 \
+MODEL=../models/minimind3/minimind3.q8.mmcf \
+GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
   --system "You are a helpful assistant." \
   --prompt "用一句话介绍你自己。" --gen 16 --greedy
 ```
@@ -84,15 +133,14 @@ GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat --template minimind3 \
 Offline q4 (do not set `Q4_WEIGHTS`):
 
 ```bash
-MODEL=../models/minimind3/minimind3.q4 \
-TOKENIZER=../models/minimind3/minimind3.tok \
-GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat --template minimind3 \
+MODEL=../models/minimind3/minimind3.q4.mmcf \
+GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
   --system "You are a helpful assistant." \
   --prompt "用一句话介绍你自己。" --gen 16 --greedy
 ```
 
-Expected text.  The value is **machine specific** - VC4 and Xe round the fused
-FFN differently - so never compare a Pi run with an Xe run:
+Expected text.  The value is **machine specific** — VC4 and Xe round the fused
+FFN differently — so never compare a Pi run with an Xe run:
 
 - Pi Zero q8: `Assistant: 我是一个AI助手，没有自我意识，也没有身体，所以我无法`
 - Pi Zero q4: `Assistant: 我是MiniMind，一个高效的小参数AI模型，专注于`
@@ -108,7 +156,7 @@ same prompt on the same board, so this is the VC4 reference, not a regression.
 a second prompt's behaviour (non-empty, no collapse), the pinned strings when
 the machine sets them, and perplexity.  A deliberate numeric change
 re-baselines `Q8_EXPECT` / `Q4_EXPECT` / `PPL_EXPECT` in the same commit and
-cites the evidence - PPL on a corpus large enough to matter, the behaviour
+cites the evidence — PPL on a corpus large enough to matter, the behaviour
 checks, and where possible a cross-implementation check (llama.cpp on the same
 prompt).  `scripts/regression.sh --rebaseline` prints the new values; keep them
 in the machine's override, not here.
@@ -124,33 +172,97 @@ Chinese default prompt.  They are still reproducible by passing that text to
 `--system`; do not use them as the gate.  If a local q8 checkpoint is known to
 differ, set `Q8_EXPECT` in the local override instead of weakening this gate.
 
+## Debugging protocol
+
+Pick the tool that answers the question before writing a new probe:
+
+| Question | Tool |
+|---|---|
+| does this file say what I think it says? | `mmcf_dump.py` |
+| are the tokenizer / template / rope the ones I meant? | `mmcf_dump.py`, then the engine's startup lines |
+| is the conversion faithful? | `mmcf_pack.py --verify`, `LOGITS_OUT` + `cmp_logits.py` |
+| is the source model sane? | `ref_forward.py` (safetensors) |
+| which stage differs between CPU and GPU? | `diff_paths.sh` + `dump_diff.awk` |
+| is a row saturating / clamping? | `dump_stats.py` on a `STAGE_DUMP` file |
+| is one pass expensive? | `ATTN_DUP`, `PASS_DUP`, `DRAWCOUNT`, `LAYER_PROFILE` |
+| is the attention block internally consistent? | `ATT_DUMP` + `check_att.py` |
+| did my change alter numerics? | `regression.sh`, and PPL rather than one string |
+
+`docs/test-hooks.md` lists the environment switches; `engine/src/*.cpp` is the
+ground truth, and the inventory is one command:
+
+```bash
+grep -rho 'getenv("[A-Z_0-9]*")' engine/src | sort -u
+```
+
+## Measurement rules
+
+These were paid for; do not relearn them.
+
+- **Two builds add enough variance to hide a 1 ms effect.**  A/B inside one
+  binary through an environment switch (`docs/test-hooks.md`), and interleave
+  the runs (`bench_ab.sh`).
+- **A CPU-vs-GPU stage delta is a lead, not a defect.**  The CPU path is f32
+  that round-trips q16 only at the dump; `diff_paths.sh` says so in its own
+  header, and on a *correct* model the per-layer cosine still falls to 0.46 by
+  layer 7.  Only a **same-path** A/B (one flag, one kernel) decides.
+- **Verify a revert by hash, not by reading the diff.**  Keeping the shader
+  uniforms and setting them to the old constant *looked* equivalent and
+  reproduced the regressed numbers exactly; only the literal form restored the
+  pin.  Compare `STAGE_DUMP` hashes and PPL against the parent commit.
+- **A golden string is chaotic across GPUs and across reassociations.**  Pin it
+  per machine, re-baseline deliberately, and let PPL decide.
+- **Never compare a Pi run with an Xe run**, and never compare PPL across
+  different `SEQ` values.
+- **Never run the Pi suite while another GPU client holds the model** (the
+  server, a benchmark); CMA is single-client on this board.
+
 ## Invariants
 
+- **Container only**: the engine loads MMCF v2 and nothing else (see above).
 - **Q4 draw** output is 24-bit; **Q4 residual-add** output is q16. Do not
   merge these encodings.
-- **Q4 source**: quantize from F16/I16, not from q8. q8 -> q4 is a second
+- **Q4 source**: quantize from F16/I16, not from q8. q8 → q4 is a second
   quantization and loses quality.
 - **KV cache**: Pi and laptop caches are not byte-identical. Build disk cache
   on the target machine.
 - **CMA**: `CmaFree` is actual occupancy; reducing `cma`/`gpu_mem` does not
   create free CMA.
-- **Prefix cache** header flags include pack mode; loading with another
-  `KV_PACK` must be rejected.
+- **Prefix cache** header flags include pack mode and `KV_SCALE`; loading with
+  another `KV_PACK` or scale must be rejected.
 - **FFN**: hidden 2432 is split into 1216-wide chunks because VC4 FBO width is
   2048. q4 slicing must copy block scale/min and repack nibbles.
-- **CPU weights** are freed after upload by default; keep
-  `KEEP_CPU_WEIGHTS=1` only for debugging.
+- **CPU weights** are borrowed from the checkpoint mapping by default
+  (`MODEL_BORROW=0` restores the copy); keep `KEEP_CPU_WEIGHTS=1` only for
+  debugging.
 
 ## Documentation rules
 
-- Root README = overview + quick start.
-- `engine/README.md` = engine quick start; deep details go to `docs/`.
-- Keep English and Chinese quick starts in sync:
-  `README.md` / `README.zh-CN.md`,
-  `engine/README.md` / `engine/README.zh-CN.md`.
-- When changing a format, update `docs/model-formats.md`.
-- When changing quantization, update `docs/quantization.md`.
-- When changing performance numbers, update `docs/performance.md`.
+Root README = overview + quick start.  `engine/README.md` = engine quick start;
+deep details go to `docs/`.  Keep English and Chinese quick starts in sync:
+`README.md` / `README.zh-CN.md`, `engine/README.md` / `engine/README.zh-CN.md`,
+`server/README.md` / `server/README.zh-CN.md`.
+
+Update the document that owns the fact:
+
+| Changing | Update |
+|---|---|
+| the container layout, metadata keys, capability bits | `docs/checkpoint-container.md`, `mmcf_dump.py`, `docs/model-formats.md` |
+| a checkpoint format or the loader | `docs/model-formats.md` |
+| a converter or the q4/q8 numerics | `docs/quantization.md` |
+| a timing or a regression baseline | `docs/performance.md` |
+| an environment switch | `docs/test-hooks.md` |
+| a command a human will copy | the README for that component **and** this file |
+| a GPU or format change | `docs/engine-internals.md`, `docs/engine-layout.md` |
+
+A command in a document that no longer runs is a bug in the document, not a
+detail.  When a flag is removed, grep the whole tree for it: `--template`
+survived in five scripts and two READMEs after the engine dropped it.
+
+`docs/performance.md` is append-only history: new measurements go at the
+bottom with the date and the machine, and the current state lives in its top
+matrix.  Do not rewrite old entries; correct them with a new section that says
+what was wrong.
 
 ## Source split policy
 

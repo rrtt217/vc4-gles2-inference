@@ -16,7 +16,7 @@ Layout
 
     0   header 64 B
     64  metadata: TLV records (u16 key, u16 type, u32 len, payload)
-        tensor table: n * 40 B
+        tensor table: n * 48 B
         data: every tensor 16-byte aligned
 
 This tool also verifies itself: `--verify` re-reads the file and compares every
@@ -298,8 +298,9 @@ def build(meta, tensors, tok_blob, args):
     quant = struct.pack("<BBBB", scheme, meta.get("group", 0),
                         1,  # q8u8 pre-biased
                         1 if meta.get("split") else 0)
-    # kind: 0 plain (llama2c), 1 chatml/qwen, 2 minimind3.  The name is kept for
-    # humans and as a fallback for a kind an old engine does not know.
+    # kind: 0 plain (llama2c), 1 chatml/qwen, 2 minimind3, 3 tinybrainbot.  The
+    # name is kept for humans and as a fallback for a kind an old engine does
+    # not know.
     kind = {"plain": 0, "qwen": 1, "chatml": 1, "minimind3": 2, "tinybrainbot": 3}.get(args.template, 1)
     template = (bytes([kind]) + args.system.encode() + b"\0" + args.template.encode() + b"\0")
     caps_val = (1 if args.chat else 0) | (2 if args.tools else 0) | (4 if args.vision else 0)

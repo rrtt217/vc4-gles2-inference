@@ -1,11 +1,13 @@
 # GLES2 inference engine
 
-A small GLES2/EGL inference engine for llama2.c-family and Qwen3-style
-checkpoints. It runs headless on Raspberry Pi Zero (VC4 V3D 2.1) and on
-desktop GLES2 drivers.
+A small GLES2/EGL inference engine for llama2.c-family, Llama-shaped and
+Qwen3-shaped checkpoints. It runs headless on Raspberry Pi Zero (VC4 V3D 2.1)
+and on desktop GLES2 drivers, and it reads exactly one file format: the
+self-describing [MMCF container](../docs/checkpoint-container.md).
 
 This README is the quick start. Deep notes are in [../docs/](../docs/):
 
+- [checkpoint container](../docs/checkpoint-container.md)
 - [model formats](../docs/model-formats.md)
 - [VC4 / engine internals](../docs/engine-internals.md)
 - [quantization and Q4M1](../docs/quantization.md)
@@ -20,10 +22,11 @@ This README is the quick start. Deep notes are in [../docs/](../docs/):
 | `src/` | EGL/GLES2 engine, model, session, tokenizer, CLI |
 | `src/xformat.*` | activation layout and GLSL X macros |
 | `src/shaders*.cpp` | GLSL source builders |
+| `tools/` | MMCF packer/inspector and numpy reference forwards (host python) |
+| `quantize/` | F16/I16/q8/q4 converters (legacy layouts; the packer wraps them) |
+| `scripts/` | regression gate, CPU-vs-GPU diff, attention/logits oracles, benchmarks |
 | `probes/` | standalone VC4 probes, not linked into the engine |
-| `quantize/` | F16/I16/q8/q4 converters |
-| `scripts/` | benchmark and regression helpers |
-| `Makefile` | local and Pi build flags |
+| `Makefile` | local, Pi and probe build flags |
 
 ## Build
 
@@ -86,18 +89,18 @@ Do not set `Q4_WEIGHTS` when the model file is already Q4M1.
 
 ### MiniMind2 Small
 
-MiniMind2 uses the Qwen chat template.  The legacy Q8M1 file does **not** carry
-RoPE metadata, so q8 needs the environment override:
+MiniMind2 uses the Qwen chat template (template kind 1 in the container).  The
+source `Q8M1` file carries no RoPE metadata, so the packer needs `--theta
+1000000 --rope-half` once; after that the container states it and no
+environment override is involved:
 
 ```bash
-\
 MODEL=../models/llama2c/minimind2-small.q8.mmcf \
 GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
   --prompt "用一句话介绍你自己。" --gen 24 --greedy
 ```
 
-The I16 and Q4M1 files carry theta/half in their headers.  Q4 is a memory
-mode and is noticeably weaker on identity questions:
+Q4 is a memory mode and is noticeably weaker on identity questions:
 
 ```bash
 MODEL=../models/llama2c/minimind2-small.q4.mmcf \
@@ -122,17 +125,41 @@ GPU_LAYER=1 KV_PACK=16 ./engine_mm3 \
   --prompt "Once upon a time" --gen 64 --greedy
 ```
 
-On the Pi, stories15M i16 is coherent at ~167 ms/token, the legacy
-`stories15M.bin` at ~161 ms/token, and stories42M q8 at ~190 ms/token.
-`stories15M.q8` currently produces gibberish in the repo's conversion; use the
-`.bin` or i16 file.  stories42M i16 is too large for the current CMA budget.  The
-260K legacy file (`stories260K.bin` + `tok512.bin`) is coherent after the
-legacy-I16 fix at ~85 ms/token, but still has 5.4 s prefill; treat it as a floor
-probe.
+On the Pi, stories15M i16 is coherent at ~167 ms/token and stories42M q8 at
+~190 ms/token.  `stories15M.q8` produces gibberish in this repo's conversion;
+use the i16 container.  stories42M i16 is too large for the current CMA budget.
+The 260K model is a floor probe: ~85 ms/token, but 5.4 s prefill, because the
+attention passes walk the full 512-position grid.
 
-Legacy fp32 checkpoints now load as I16 by default.  Set `LEGACY_Q8=1` only when
-the extra memory of I16 does not fit (for example a 42M `.bin`); small
-TinyStories models lose coherence in that mode.
+These came from llama2.c fp32 `.bin` sources, which the packer converts to I16
+by default (`make_i16.py --kind llama2c`).  There is no `LEGACY_Q8=1` path
+anymore: the engine has no legacy reader.
+
+## Converting a checkpoint
+
+The engine loads only `.mmcf`.  A `.bin`, `.i16`, `.q8` or `.q4` file is an
+input to the packer:
+
+```bash
+# HF safetensors -> I16 (reads BF16/F16/F32 and HF Llama tensor names)
+python3 quantize/make_i16.py --kind minimind \
+  --input ../models/<model> --output ../models/<model>/<model>.i16
+
+# legacy layout -> container, verified byte for byte against the source
+python3 tools/mmcf_pack.py --in ../models/<model>/<model>.i16 \
+  --tok ../models/<model>/<model>.tok \
+  --out ../models/<model>/<model>.i16.mmcf \
+  --name <model> --template chatml --chat \
+  --theta 100000 --rope-half --verify
+
+# what does the engine actually read from it?
+python3 tools/mmcf_dump.py ../models/<model>/<model>.i16.mmcf --check
+```
+
+`--theta` and `--rope-half` are required for a `Q8M1`/`I16M1` source, because
+that header carries no rope at all and the packer refuses to guess.  Templates:
+`plain` (0), `chatml`/`qwen` (1), `minimind3` (2), `tinybrainbot` (3).  The
+tokenizer is embedded, and the special-token ids are derived from it.
 
 ## MiniMind3 64M
 
@@ -140,8 +167,8 @@ TinyStories models lose coherence in that mode.
 heads, head_dim 96, vocab 6400, RoPE theta 1e6, tied embedding, per-head
 Q/K RMSNorm.
 
-`` uses ChatML, an empty `<think>` block, and the same
-short English default system prompt as the other chat templates
+Its container carries template kind 2: ChatML, an empty `<think>` block, and
+the same short English default system prompt as the other chat templates
 (`You are a helpful assistant.`). Override it with `--system`. Add `TIMING=1`
 for prefill/decode timing.
 
@@ -195,7 +222,7 @@ model; tool calls are much more reliable.
 
 | Variable | Meaning |
 |---|---|
-| `MODEL` | checkpoint path (one MMCF container carries the tokenizer, template and rope) |
+| `MODEL` | checkpoint path.  One MMCF container carries the tokenizer, template, rope and special-token ids, so there is nothing else to set |
 | `SEQ` | KV cache length; tools auto-raise to 768 |
 | `GPU_ATTN=1` | GPU RoPE + KV cache + attention |
 | `GPU_LAYER=1` | hidden state, attention, RMSNorm, FFN on GPU |
@@ -211,7 +238,9 @@ model; tool calls are much more reliable.
 | `ACT8=2` | FFN hidden state in I8_4, q8 weights only; opt-in |
 | `ACT8=1` | all matvec inputs in I8_4, q8 weights only; opt-in |
 
-See [test hooks](../docs/test-hooks.md) for the full list.
+See [test hooks](../docs/test-hooks.md) for the full list, including the dump
+and probe switches (`STAGE_DUMP`, `RAW_DUMP`, `QKV_DUMP`, `ATT_DUMP`,
+`ATTN_DUP`, `PASS_DUP`, `DRAWCOUNT`, ...).
 
 ## Perplexity
 
@@ -225,11 +254,32 @@ GPU_LAYER=1 KV_PACK=16 ./engine_mm3  --ppl data/ppl_test.txt
 Use the same corpus when comparing formats; `ACT8=1` and `ACT8=2` are not
 default-safe on every corpus.
 
+## Diagnosing a wrong answer
+
+The question decides the tool.  All of these live in this repository.
+
+| Question | Tool |
+|---|---|
+| does the file say what I meant? | `tools/mmcf_dump.py <file>` |
+| is the conversion faithful? | `tools/mmcf_pack.py --verify`, or `LOGITS_OUT=` + `scripts/cmp_logits.py` |
+| is the source model sane? | `tools/ref_forward.py <hf-dir> "<prompt>"` |
+| which stage differs CPU vs GPU? | `scripts/diff_paths.sh <file.mmcf>` + `scripts/dump_diff.awk` |
+| is a row saturating? | `STAGE_DUMP=1` + `scripts/dump_stats.py` |
+| is the attention block self-consistent? | `ATT_DUMP=<pos>` + `scripts/check_att.py` |
+| is one pass the cost? | `ATTN_DUP`, `PASS_DUP`, `DRAWCOUNT`, `LAYER_PROFILE` |
+| did numerics change? | `scripts/regression.sh` (PPL, not one string) |
+
+`GPU_LAYER=0` is not a CPU reference for the matvecs: attention and FFN move to
+the CPU, but every matvec still runs on the GPU.  A per-stage CPU-vs-GPU delta
+therefore names a lead, not a defect — read the header of `scripts/diff_paths.sh`
+before concluding anything from it.
+
 ## Documentation map
 
 | Document | Read it for |
 |---|---|
-| [model-formats.md](../docs/model-formats.md) | byte layouts |
+| [checkpoint-container.md](../docs/checkpoint-container.md) | the MMCF layout, metadata keys, capability bits |
+| [model-formats.md](../docs/model-formats.md) | the legacy layouts the packer consumes |
 | [quantization.md](../docs/quantization.md) | q4/q6, Q4M1, packed KV, quality |
 | [engine-internals.md](../docs/engine-internals.md) | VC4 shader/FBO quirks |
 | [performance.md](../docs/performance.md) | Pi/laptop numbers |

@@ -32,7 +32,7 @@ LOAD=$(awk '{print $1}' /proc/loadavg)
 awk -v l="$LOAD" 'BEGIN { if (l > 1.5) printf "warning: load average %s — expect noisy numbers\n", l }' >&2
 
 one() {
-    "$1" --chat --template minimind3 --prompt "$PROMPT" --gen "$GEN" --greedy 2>&1 \
+    "$1" --chat --prompt "$PROMPT" --gen "$GEN" --greedy 2>&1 \
         | grep '^TIMING' | tail -1 \
         | sed -e 's/.*prefill=\([0-9.]*\)s decode_avg=\([0-9.]*\)ms.*/\1 \2/'
 }

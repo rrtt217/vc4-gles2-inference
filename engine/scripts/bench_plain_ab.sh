@@ -3,7 +3,7 @@
 #
 #   sh scripts/bench_plain_ab.sh <binA> <binB> [gen] [reps]
 #
-# Plain mode is the canonical performance path (`--template ... --prompt ... --gen N`),
+# Plain mode is the canonical performance path (`--prompt ... --gen N`),
 # so it does not touch --system or the chat template; its timer output is the
 # `decode avg X ms/token` line, not the chat-mode `TIMING ...` line.
 #
@@ -28,7 +28,7 @@ LONG=${LONG_GEN:-128}
 PROMPT=${PROMPT:-Once upon a time, there was a little}
 
 decode_of() { # decode_of <bin> <gen>
-    _d=$("$1" --template minimind3 --prompt "$PROMPT" --gen "$2" --greedy 2>&1 |
+    _d=$("$1" --prompt "$PROMPT" --gen "$2" --greedy 2>&1 |
         sed -n 's/^decode avg \([0-9.]*\) ms\/token$/\1/p' | tail -1)
     if [ -z "$_d" ]; then
         echo "decode_of: no timing line from $1 (gen $2) — model path or run failed" >&2
@@ -39,7 +39,7 @@ decode_of() { # decode_of <bin> <gen>
 
 rusage_of() { # rusage_of <bin> <gen> -> "user sys"
     _f=$(mktemp)
-    { TIMEFORMAT='%U %S'; time "$1" --template minimind3 --prompt "$PROMPT" \
+    { TIMEFORMAT='%U %S'; time "$1" --prompt "$PROMPT" \
         --gen "$2" --greedy >/dev/null ; } 2>"$_f"
     awk '{print $1, $2}' "$_f"
     rm -f "$_f"

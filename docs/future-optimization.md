@@ -4,7 +4,9 @@ This is a working backlog, not a promise list. It records what is already
 implemented, what is worth doing next, and what should not be attempted on the
 current Pi Zero / VC4 target.
 
-Last updated: 2026-11-02.
+Last updated: 2026-11-07.  Items that landed carry a **landed** marker and the
+commit-level note; the rest is still a backlog.  `docs/performance.md` is the
+measurement record this file summarizes.
 
 ## Current baseline
 
@@ -12,12 +14,14 @@ Last updated: 2026-11-02.
 |---|---|
 | Chat models | MiniMind3 64M q8/q4; MiniMind2 Small i16/q8/q4; TinyChat15M is a format probe only |
 | Default Pi context | q4: 1024; q8: 768 |
-| KV cache | packed q16 (`KV_PACK=16`) by default. `KV_PACK=8` is bit-exact to 16-bit at a matched grid, halves the cache (9.0 -> 4.5 MiB at SEQ=768) and saves ~7 ms/token of CPU, but its 1/16 grid changes quality by -4% (q8) / +8% (q4) PPL and changes the greedy text - opt-in only, and the prefix-cache header does not record `KV_SCALE` yet |
+| KV cache | packed q16 (`KV_PACK=16`) by default. `KV_PACK=8` is bit-exact to 16-bit at a matched grid, halves the cache (9.0 -> 4.5 MiB at SEQ=768) and saves ~7 ms/token of CPU, but its 1/16 grid changes quality by -4% (q8) / +8% (q4) PPL and changes the greedy text - opt-in only. The prefix-cache header records `KV_SCALE` since 2026-11-04 |
 | q8 decode (Pi) | **183.5 ms/token min** (2026-11-03, 8 interleaved pairs, `GPU_LAYER=1 KV_PACK=16 SEQ=768`); first-token latency is dominated by ~3.8 s of shader compilation, not by prompt tokens |
 | q4 decode (Pi) | ~381 ms/token, **not re-measured since 2026-11-02**: the 2026-11-03 structural work (FFN fusion, qkv/logits row pairing, inline I16_2 decode) is gated on `WeightType::INT8` and never touched q4 |
 | Tools | get_current_time, calculate_math, system_status |
 | Tool cache | single-tool q8 cache, 252 tokens, built on the Pi |
-| Direct chat cache | --chat --prefix-cache skips the cached prefix |
+| Direct chat cache | `--chat --prefix-cache` skips the cached prefix (the CLI used to sample from an empty logits vector; fixed 2026-11-05) |
+| Container | MMCF v2 is the only format the engine loads; the legacy readers and `--template` are gone (`fcc4095`) |
+| Prefill | two-position pairs are the default (steps 4-5, 2026-11-05); B=4 was priced and does not pay |
 | Sampling | temperature, top-p, greedy, repetition/frequency/presence, no-repeat n-gram, min-p |
 | Server | OpenAI-compatible server; per-request tool/sampling control is partial |
 | Deterministic tools | `/status` `/time` `/math` `/v1/tool` + `tool_choice` routing: 10–30 ms, no model |
@@ -28,12 +32,13 @@ Last updated: 2026-11-02.
 
 ## P0: highest-value work
 
-### 1. Batch prompt prefill
+### 1. Batch prompt prefill — **landed** (two positions)
 
-The engine currently advances one token at a time even for prompt prefill.
-That remains the largest structural item; no batching implementation has
-landed.  The numbers below are the original 2026-11-01 baseline and are kept
-for the cost model.
+The 2-position pair path is the default since 2026-11-05: `Session::step_pair`
+runs one layer for two consecutive positions, one weight fetch feeding both.
+B=4 was priced and does not pay on this driver.  The rest of this section is the
+original 2026-11-01 cost model that led there, kept because it explains why the
+ceiling is two and not four.
 
 **Measured on MiniMind3 q8 (2026-11-01):**
 
@@ -80,8 +85,9 @@ Measured: 10–30 ms per call on the Pi versus 25–185 s through the model, and
 the model's observed mistakes (get_status / get_status_task / `32 + 45 * 3`)
 disappear because it is no longer asked.
 
-Remaining work: expose the same routing in `run.sh`, and add `set_timer` /
-`network_info` once their side effects are decided.
+Landed since: `network_info` and `disk_usage` are in `server/localtools.py` and
+reachable through `tool_choice` and `POST /v1/tool`.  Remaining: `set_timer`
+(needs a side-effect policy) and exposing the routing in `run.sh`.
 
 
 ### 2b. Where the remaining matvec time goes
@@ -208,21 +214,24 @@ A thin local HTTP API may be more useful than full compatibility.
 
 Worth testing on the laptop first:
 
-- Llama-style, GQA, English instruct;
-- q4 weights may fit in roughly 80–100 MB;
+- Llama-style, GQA, 30 layers, vocab 49152, theta 1e5, English instruct;
+- q4 weights are about 124 MB, q8 about 164 MB — both fit on the laptop, not
+  comfortably on the Pi alongside MiniMind3;
 - likely better English instruction following than TinyChat15M;
 - unlikely to provide Chinese or tools.
 
-Only port after a laptop quality/speed check. Do not assume the existing
-llama2.c engine handles every Llama variant without conversion tests.
+Only port after a laptop quality/speed check.  Do not assume the engine handles
+every Llama variant without conversion tests: GQA (`GROUP = heads/kv_heads`) is
+supported, but the rope layout and the tokenizer are per-model.
 
 ### MiniMind2-Small
 
 Keep as an secondary experiment, not the primary chat model:
 
 - i16 math is reasonable; Pi decode is ~226 ms/token;
-- q8 is faster (~140–190 ms/token) but requires
-  `ROPE_THETA=1000000 ROPE_HALF=1` because Q8M1 lacks RoPE metadata;
+- q8 is faster (~140–190 ms/token); its `Q8M1` source has no rope metadata, so
+  the packer needs `--theta 1000000 --rope-half` once, and the container carries
+  it from then on;
 - q4 saves memory but identity answers are unreliable (“一台电脑”);
 - identity and instruction following are weak; multi-question prompts often
   answer only the last question;
@@ -257,6 +266,19 @@ new measurement that contradicts the reason given.
 | Fold qrot into the qkv matvec | Structurally blocked on a qk-norm checkpoint: the scale pass needs the raw q rows and a fragment writes one texel. |
 | Shrink the score viewport to `(pos+2)/2` | Bit-exact by construction, passed every gate, measured **+4%** on the scores lap. No gain, as the profile predicted. |
 | Decode packed q16 bytes without `floor(byte*255+0.5)` | `(128/255)*65280` lands a few ulps off 32768; the qkv pairing looked correct on raw bytes and still moved PPL 312.1366 -> 314.7118. Diff packed formats on decoded integers per layer. |
+
+## Do not retry (measured, 2026-11-04 .. 06)
+
+The second wave, from the q4-parity and prefill work.  Each entry has a section
+in `docs/performance.md` with the numbers.
+
+| Do not | Why (measured) |
+|---|---|
+| Decode q4 nibbles with integer ops (`roundEven`, ESSL 3.00 shifts) | `roundEven` reaches the backend as `fround_even` and **aborts the process**; the ESSL 1.00 integer form (`b/16`, `b-h*16`) is exact but costs more ops than the float decode.  `Q4_SHIFT` (the shift decode) is the shipped compromise. |
+| Split q4 into a hi/lo plane pair to cheapen the unpack | The unpack is FLOOR-bound, so no encoding change moves it. |
+| Merge the q4 gate into one draw | The gate is draw-bound and this driver cannot express it in one draw; the vec4 variant is not faster either. |
+| Pair q4 qkv rows | Not bit-exact *and* not faster. |
+| Batch prefill at B=4 | Priced on the real driver: the extra passes outweigh the shared fetch.  Two positions is the ceiling. |
 
 ## Measurement rules that came out of this campaign
 

@@ -84,12 +84,13 @@ invalidates the cache.
 
 ### Packed KV
 
-Two packed layouts are available:
+The layout is chosen by `KV_PACK` in the engine's environment; the server's
+`--kv-pack` flag only sets that variable for the worker it spawns.
 
 ```text
---kv-pack 0   24-bit, one value per RGBA8 texel, width 768
---kv-pack 16  two int16 per texel, width 384, scale 2048
---kv-pack 8   four int8 per texel, width 192, scale 16
+KV_PACK=0    24-bit, one value per RGBA8 texel, width 768
+KV_PACK=16   two int16 per texel, width 384, scale 2048
+KV_PACK=8    four int8 per texel, width 192, scale 16
 ```
 
 Local Xe validation:
