@@ -76,6 +76,10 @@ class EngineWorker:
         # protocol carries a prompt string - but it picks the renderer from that
         # report, never from a flag or from the file name.
         self.template = "chatml"   # pre-ready default: the historical renderer
+        # True when the container carries its own Jinja template (MMCF key 9).
+        # Then the *engine* renders the prompt and this process only ships
+        # messages; otherwise the renderers below still run here.
+        self.chat_template = False
         cmd = [engine, "--worker"]
         if prefix_cache:
             cmd += ["--prefix-cache", prefix_cache]
@@ -118,6 +122,7 @@ class EngineWorker:
                 # The checkpoint names its template; the server renders the
                 # prompt, so this is the only place that choice is made.
                 self.template = str(ev.get("template") or "chatml")
+                self.chat_template = bool(ev.get("chat_template"))
                 return True
             if ev.get("event") == "error":
                 raise WorkerError(ev.get("message", "worker startup error"))
@@ -147,9 +152,14 @@ class EngineWorker:
         if not self.restart():
             raise WorkerError("engine worker exited (auto-restart disabled or exhausted)")
 
-    def generate(self, prompt: str, max_tokens: int, temperature: float,
-                 top_p: float, seed: int, on_token=None, penalties: dict | None = None):
+    def generate(self, prompt, max_tokens: int, temperature: float,
+                 top_p: float, seed: int, on_token=None, penalties: dict | None = None,
+                 messages: dict | None = None):
         """Return (text, finish_reason, usage).  on_token(text) is optional.
+
+        ``prompt`` is either the rendered prompt string, or ``""`` when
+        ``messages`` carries the request (worker column 11): then the engine
+        renders it with the container's chat template.
 
         ``penalties`` carries the optional worker columns 6..10; any field left
         out keeps the engine's process-level default.
@@ -160,8 +170,12 @@ class EngineWorker:
             if value is None:
                 return default
             return f"{float(value):.6g}" if isinstance(value, float) or isinstance(value, int) else str(value)
+        col11 = ""
+        if messages is not None:
+            payload = json.dumps(messages, ensure_ascii=False, separators=(",", ":"))
+            col11 = base64.b64encode(payload.encode("utf-8")).decode("ascii")
         req = "\t".join([
-            base64.b64encode(prompt.encode("utf-8")).decode("ascii"),
+            "" if messages is not None else base64.b64encode(prompt.encode("utf-8")).decode("ascii"),
             str(max(0, int(max_tokens))),
             f"{float(temperature):.6g}",
             f"{float(top_p):.6g}",
@@ -171,6 +185,7 @@ class EngineWorker:
             field("presence_penalty"),
             str(int(p.get("no_repeat_ngram"))) if p.get("no_repeat_ngram") else "",
             field("min_p"),
+            col11,
         ]) + "\n"
         with self.lock:
             # A crashed worker used to surface as "engine worker exited" on every
@@ -487,6 +502,51 @@ def build_prompt_tinybrainbot(body: dict) -> tuple[str, bool]:
             text += "<|user|> " + content_text(msg)
     text += "<|assistant|> "
     return text, False
+
+
+def build_messages(body: dict) -> dict:
+    """Turn an OpenAI body into the worker's message payload.
+
+    Used only when the container carries its own chat template: then the engine
+    renders it and this process never has to know what the prompt looks like.
+    The system turn keeps the server's normalisation (Chatbox metadata stripped,
+    the neutral default filled in), because that is a policy decision, not a
+    property of the model.
+    """
+    src = body.get("messages")
+    if not isinstance(src, list) or not src:
+        raise ValueError("messages must be a non-empty array")
+    sys_text = None
+    out = []
+    for msg in src:
+        if not isinstance(msg, dict):
+            continue
+        role = msg.get("role")
+        if not isinstance(role, str) or not role:
+            raise ValueError("every message needs a role")
+        if role == "system" and sys_text is None:
+            sys_text = normalize_system_prompt(content_text(msg))
+            continue
+        kept = {"role": role, "content": content_text(msg)}
+        for key in ("tool_calls", "tool_call_id", "name"):
+            if msg.get(key) not in (None, "", []):
+                kept[key] = msg[key]
+        out.append(kept)
+    if sys_text is None:
+        sys_text = normalize_system_prompt("")
+    out.insert(0, {"role": "system", "content": sys_text})
+    req = {"messages": out, "open_thinking": bool(thinking_from_request(body))}
+    tools = body.get("tools")
+    if isinstance(tools, list) and tools:
+        req["tools"] = canonical_tools(tools)
+    return req
+
+
+def request_chars(req) -> int:
+    """Rough prompt size for the context-window estimate (~3 chars per token)."""
+    if isinstance(req, str):
+        return len(req)
+    return sum(len(str(m.get("content") or "")) for m in req.get("messages", []))
 
 
 def build_prompt(body: dict, template: str = "chatml") -> tuple[str, bool]:
@@ -940,7 +1000,16 @@ class Handler(BaseHTTPRequestHandler):
                         if isinstance(t, dict)
                         and (t.get("function") or {}).get("name") == only_tool]
                 body["tools"] = kept or body["tools"]
-            prompt, thinking = build_prompt(body, template)
+            # A container that carries its template is rendered by the engine:
+            # this process sends messages and never a prompt string.
+            use_tmpl = bool(getattr(self.server.worker, "chat_template", False))
+            if use_tmpl:
+                req = build_messages(body)
+                thinking = bool(req["open_thinking"])
+                prompt = ""
+            else:
+                prompt, thinking = build_prompt(body, template)
+                req = prompt
             max_tokens = int(body.get("max_tokens", body.get("max_completion_tokens", 64)) or 64)
             if max_tokens < 1:
                 max_tokens = 1
@@ -996,13 +1065,17 @@ class Handler(BaseHTTPRequestHandler):
         seq = int(getattr(self.server, "seq", 0) or 0)
         if seq > 0:
             for _ in range(8):
-                if len(prompt) // 3 + max_tokens <= seq:
+                if request_chars(req) // 3 + max_tokens <= seq:
                     break
                 trimmed = prune_messages(body.get("messages") or [])
                 if trimmed is None:
                     break
                 body["messages"] = trimmed
-                prompt, _thinking = build_prompt(body, template)
+                if use_tmpl:
+                    req = build_messages(body)
+                else:
+                    prompt, _thinking = build_prompt(body, template)
+                    req = prompt
 
         if not stream:
             # A long chat must not fail outright: if the engine says the prompt
@@ -1010,7 +1083,8 @@ class Handler(BaseHTTPRequestHandler):
             for _attempt in range(4):
                 try:
                     text, finish, usage = self.server.worker.generate(
-                        prompt, max_tokens, temperature, top_p, seed, penalties=penalties)
+                        prompt, max_tokens, temperature, top_p, seed, penalties=penalties,
+                        messages=req if use_tmpl else None)
                     break
                 except ContextFull as e:
                     trimmed = prune_messages(body.get("messages") or [])
@@ -1019,7 +1093,11 @@ class Handler(BaseHTTPRequestHandler):
                                     "context_length_exceeded")
                         return
                     body["messages"] = trimmed
-                    prompt, _thinking = build_prompt(body, template)
+                    if use_tmpl:
+                        req = build_messages(body)
+                    else:
+                        prompt, _thinking = build_prompt(body, template)
+                        req = prompt
                 except WorkerError as e:
                     self._error(str(e), 500, "server_error")
                     return
@@ -1089,7 +1167,8 @@ class Handler(BaseHTTPRequestHandler):
                 # Tool-call deltas are assembled only after the native
                 # <tool_call> block is complete; do not stream partial JSON.
                 text, finish, usage = self.server.worker.generate(
-                    prompt, max_tokens, temperature, top_p, seed, penalties=penalties)
+                    prompt, max_tokens, temperature, top_p, seed, penalties=penalties,
+                    messages=req if use_tmpl else None)
                 if stops:
                     text, stopped = apply_stop_text(text, stops)
                     if stopped:
@@ -1107,7 +1186,8 @@ class Handler(BaseHTTPRequestHandler):
                 stop_filter = StopFilter(stops, delta)
                 text, finish, usage = self.server.worker.generate(
                     prompt, max_tokens, temperature, top_p, seed,
-                    on_token=stop_filter.feed, penalties=penalties)
+                    on_token=stop_filter.feed, penalties=penalties,
+                    messages=req if use_tmpl else None)
                 stop_filter.finish()
                 if stop_filter.hit:
                     finish = "stop"

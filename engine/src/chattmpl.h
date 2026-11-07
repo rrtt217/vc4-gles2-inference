@@ -58,6 +58,13 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
+// Parse a worker request payload:
+//   {"messages":[{"role":..,"content":..,"tool_calls":[..]}], "tools":[..]}
+// Used by --worker when the server sends messages instead of a prompt string.
+// `open_thinking` is set to -1 when the payload does not state it.
+bool chat_parse_request(const std::string& json, std::vector<ChatMsg>& msgs,
+                        std::string& tools, std::string& err, int& open_thinking);
+
 // Normalise a `--tools` payload into a JSON array text: an array is passed
 // through, a sequence of one-object-per-line is wrapped.  Returns "" on a
 // payload that is neither.

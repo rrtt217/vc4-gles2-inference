@@ -122,8 +122,9 @@ class TinyContextWorker:
     def ensure_alive(self):
         pass
 
-    def generate(self, prompt, max_tokens, temperature, top_p, seed, on_token=None, penalties=None):
-        self.prompts.append(prompt)
+    def generate(self, prompt, max_tokens, temperature, top_p, seed, on_token=None, penalties=None,
+                 messages=None):
+        self.prompts.append(prompt if messages is None else json.dumps(messages, sort_keys=True))
         if self.marker in prompt and (self.fail_always or len(self.prompts) == 1):
             raise srv.ContextFull("[context full]")
         return "ok", "length", {"prompt_tokens": 1, "completion_tokens": 1}
@@ -145,8 +146,10 @@ class StubWorker:
         if not self.alive:
             raise srv.WorkerError("engine worker exited (auto-restart disabled or exhausted)")
 
-    def generate(self, prompt, max_tokens, temperature, top_p, seed, on_token=None, penalties=None):
+    def generate(self, prompt, max_tokens, temperature, top_p, seed, on_token=None, penalties=None,
+                 messages=None):
         self.ensure_alive()
+        self.last_messages = messages
         self.calls += 1
         self.last_penalties = penalties
         self.last_prompt = prompt

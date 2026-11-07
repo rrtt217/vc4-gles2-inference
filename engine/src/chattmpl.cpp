@@ -118,6 +118,47 @@ std::vector<PromptPart> ChatTemplate::render(const std::vector<ChatMsg>& msgs,
     return parts;
 }
 
+bool chat_parse_request(const std::string& json, std::vector<ChatMsg>& msgs,
+                        std::string& tools, std::string& err, int& open_thinking) {
+    open_thinking = -1;
+    try {
+        auto root = common_json::parse(json);
+        auto get_str = [](const common_json& o, const char* key) -> std::string {
+            if (!o.contains(key)) return "";
+            const common_json& v = o.at(key);
+            if (!v.is_string()) return "";
+            return static_cast<std::string>(v);
+        };
+        if (!root.contains("messages")) { err = "no messages"; return false; }
+        const common_json& msv = root.at("messages");
+        if (!msv.is_array()) { err = "messages is not an array"; return false; }
+        for (common_json m : msv) {
+            ChatMsg cm;
+            cm.role = get_str(m, "role");
+            cm.content = get_str(m, "content");
+            if (cm.role.empty()) { err = "message without a role"; return false; }
+            if (m.contains("tool_calls")) {
+                const common_json& tc = m.at("tool_calls");
+                if (tc.is_array() && tc.size() > 0) cm.tool_calls = tc.dump();
+            }
+            msgs.push_back(std::move(cm));
+        }
+        if (msgs.empty()) { err = "no messages"; return false; }
+        if (root.contains("open_thinking")) {
+            const common_json& ot = root.at("open_thinking");
+            if (ot.is_boolean()) open_thinking = ot.get<bool>() ? 1 : 0;
+        }
+        if (root.contains("tools")) {
+            const common_json& tv = root.at("tools");
+            if (tv.is_array()) tools = tv.size() ? tv.dump() : "";
+        }
+    } catch (const std::exception& e) {
+        err = e.what();
+        return false;
+    }
+    return true;
+}
+
 std::string chat_tools_array(const std::string& tools) {
     size_t i = 0;
     while (i < tools.size() && isspace((unsigned char)tools[i])) ++i;

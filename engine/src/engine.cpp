@@ -279,7 +279,8 @@ int main(int argc, char** argv) {
                                         : minimind3_template ? "minimind3"
                                         : qwen_template ? "chatml" : "plain";
         emit("{\"event\":\"ready\",\"prefix_cache_tokens\":" + to_string(cache_tokens.size()) +
-             ",\"template\":\"" + json_escape(effective_template) + "\"}");
+             ",\"template\":\"" + json_escape(effective_template) + "\"" +
+             ",\"chat_template\":" + (chat_tmpl ? "true" : "false") + "}");
         string line;
         while (getline(cin, line)) {
             if (g_stop) break;
@@ -317,7 +318,31 @@ int main(int argc, char** argv) {
             if (g_sampling.no_repeat_ngram > 8) g_sampling.no_repeat_ngram = 8;
             if (g_sampling.min_p < 0.0f) g_sampling.min_p = 0.0f;
             if (g_sampling.min_p > 1.0f) g_sampling.min_p = 1.0f;
-            auto tokens = tokenizer.encode(prompt, false, false);
+            // Column 11 (new): base64 of {"messages":[..],"tools":[..]}.  The
+            // server sends it only when this container carries a chat template,
+            // because only then can the engine be the renderer.
+            vector<PromptPart> req_parts;
+            if (f.size() > 10 && !f[10].empty()) {
+                vector<ChatMsg> req_msgs;
+                string req_tools, perr;
+                int req_thinking = -1;
+                if (!chat_parse_request(base64_decode(f[10]), req_msgs, req_tools, perr, req_thinking)) {
+                    emit("{\"event\":\"error\",\"message\":\"" + json_escape("bad request: " + perr) + "\"}");
+                    continue;
+                }
+                if (!chat_tmpl) {
+                    emit("{\"event\":\"error\",\"message\":\"this checkpoint carries no chat template; send a prompt string\"}");
+                    continue;
+                }
+                req_parts = chat_tmpl->render(req_msgs, req_tools, true,
+                                              req_thinking >= 0 ? req_thinking != 0 : open_thinking,
+                                              "", "");
+                if (chat_dump)
+                    for (auto& p : req_parts)
+                        fprintf(stderr, "PROMPT[%s]%s\n", p.is_input ? "in" : "tmpl", p.text.c_str());
+            }
+            auto tokens = req_parts.empty() ? tokenizer.encode(prompt, false, false)
+                                            : tokenizer.encode_parts(req_parts, enc_bos, enc_bos);
             if (tokens.empty()) {
                 emit("{\"event\":\"error\",\"message\":\"empty prompt\"}");
                 continue;
@@ -543,6 +568,34 @@ int main(int argc, char** argv) {
         if (g_stop) gpu.sync();
     };
 
+    // The assistant turn is re-rendered from the template, so the raw
+    // <tool_call> blocks must not also travel inside `content` or the template
+    // would emit them twice.
+    auto strip_tool_calls = [](const string& text) {
+        string out;
+        size_t pos = 0;
+        while (true) {
+            size_t a = text.find("<tool_call>", pos);
+            if (a == string::npos) { out += text.substr(pos); break; }
+            out += text.substr(pos, a - pos);
+            size_t b = text.find("</tool_call>", a);
+            if (b == string::npos) break;
+            pos = b + strlen("</tool_call>");
+        }
+        string trimmed;
+        for (char c : out) if (!isspace((unsigned char)c)) { trimmed += c; }
+        return trimmed.empty() ? string() : out;
+    };
+    auto tool_calls_json = [](const vector<ToolCall>& calls) {
+        string j = "[";
+        for (size_t i = 0; i < calls.size(); ++i) {
+            if (i) j += ",";
+            j += "{\"type\":\"function\",\"function\":{\"name\":\"" + json_escape(calls[i].name) +
+                 "\",\"arguments\":\"" + json_escape(calls[i].args) + "\"}}";
+        }
+        return j + "]";
+    };
+
     auto run_tool_turn = [&](const string& user, bool first) {
         string sys = system_prompt.empty()
             ? string("你的名字叫MiniMind，你是一个乐于助人、知识渊博的AI助手。请用完整且友好的方式回答用户问题，当被问到名字时请回答MiniMind。")
@@ -554,6 +607,16 @@ int main(int argc, char** argv) {
                    "\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n"
                    "<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call>";
         }
+        // Template path: the whole prompt is re-rendered from this list every
+        // round, so the tool loop is model-agnostic.  The legacy path below
+        // keeps building one string, which is why it only ever worked for the
+        // ChatML family.
+        vector<ChatMsg> msgs;
+        if (chat_tmpl) {
+            if (first) msgs.push_back(ChatMsg{"system",
+                system_prompt.empty() ? string(kDefaultSystem) : system_prompt, "", ""});
+            msgs.push_back(ChatMsg{"user", user, "", ""});
+        }
         string text;
         if (first || !tools_json.empty())
             text = "<|im_start|>system\n" + sys + "<|im_end|>\n";
@@ -561,7 +624,16 @@ int main(int argc, char** argv) {
         text += open_thinking ? "<think>\n" : "<think>\n\n</think>\n\n";
 
         for (int round = 0; round < 3; ++round) {
-            auto tokens = tokenizer.encode(text, false, false);
+            vector<PromptPart> parts;
+            if (chat_tmpl)
+                parts = chat_tmpl->render(msgs, tools_array, /*add_generation_prompt=*/true,
+                                          open_thinking, "", "");
+            if (chat_dump) {
+                for (auto& p : parts)
+                    fprintf(stderr, "PROMPT[%s]%s\n", p.is_input ? "in" : "tmpl", p.text.c_str());
+            }
+            auto tokens = chat_tmpl ? tokenizer.encode_parts(parts, enc_bos, enc_bos)
+                                    : tokenizer.encode(text, false, false);
             if ((int)tokens.size() >= model.seq) { cout << "[context full]\n"; return; }
             vector<float> logits;
             CandidateResult cand;
@@ -611,16 +683,23 @@ int main(int argc, char** argv) {
             cout << "\n";
             vector<ToolCall> calls = parse_tool_calls(out);
             if (calls.empty()) return;
-            text += out;
-            text += "<|im_end|>\n<|im_start|>user\n";
+            if (chat_tmpl) {
+                msgs.push_back(ChatMsg{"assistant", strip_tool_calls(out), tool_calls_json(calls), ""});
+            } else {
+                text += out;
+                text += "<|im_end|>\n<|im_start|>user\n";
+            }
             for (const auto& c : calls) {
                 string result = run_tool(c.name, c.args);
                 cout << "[tool] " << c.name << " " << c.args << "\n";
                 cout << "[tool result] " << result << "\n";
-                text += "<tool_response>\n" + result + "\n</tool_response>\n";
+                if (chat_tmpl) msgs.push_back(ChatMsg{"tool", result, "", ""});
+                else text += "<tool_response>\n" + result + "\n</tool_response>\n";
             }
-            text += "<|im_end|>\n<|im_start|>assistant\n";
-            text += open_thinking ? "<think>\n" : "<think>\n\n</think>\n\n";
+            if (!chat_tmpl) {
+                text += "<|im_end|>\n<|im_start|>assistant\n";
+                text += open_thinking ? "<think>\n" : "<think>\n\n</think>\n\n";
+            }
         }
     };
 

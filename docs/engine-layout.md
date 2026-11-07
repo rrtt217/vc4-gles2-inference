@@ -14,7 +14,7 @@ responsibility, not by line count:
 | `src/session.h/.cpp` | KV cache, RoPE, attention, transformer forward, prefix cache |
 | `src/tokenizer.h/.cpp` | llama2.c tokenizer and byte-level BPE, embedded-blob loader |
 | `src/sampling.h/.cpp` | sampling, penalties, top-p/min-p |
-| `src/chattmpl.h/.cpp` | renders the container's Jinja chat template; returns the prompt split into template text and caller text |
+| `src/chattmpl.h/.cpp` | renders the container's Jinja chat template; returns the prompt split into template text and caller text.  Also parses the worker's message request (column 11) |
 | `src/tools.h/.cpp` | tool JSON, restricted arithmetic, built-in handlers |
 | `src/engine.cpp` | CLI, worker protocol, chat loop, capability/template handling |
 

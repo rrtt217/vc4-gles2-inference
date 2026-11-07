@@ -37,10 +37,29 @@ Defaults:
 
 ## Chat template
 
-The checkpoint states its own template (MMCF metadata kind 3 TinyBrainBot, 2
-MiniMind3, 1 chatml, 0 plain) and the worker reports it in its `ready` event,
-so this process renders the prompt with that template instead of always
-building ChatML.  `GET /health` prints the name under `template`.
+Two cases, decided by the worker's `ready` event — never by a flag or a file
+name.
+
+**The container carries its own Jinja template** (MMCF metadata key 9).
+`ready` then has `"chat_template": true`, and this process stops rendering
+prompts entirely: it sends the message list and the engine renders it with the
+model's own template, exactly as `llama.cpp` does with
+`tokenizer.chat_template`.  That is the only way a template this build has never
+seen can work, because only the engine has the Jinja engine.
+
+**It does not.**  `ready` reports the template *kind* (3 TinyBrainBot, 2
+MiniMind3, 1 chatml, 0 plain) and the renderers in this file still build the
+prompt, which is what every container written before key 9 needs.  `GET
+/health` prints the name under `template`.
+
+Either way the system turn is this process's policy: Chatbox's runtime metadata
+is stripped and the neutral default is filled in when the client sends none.
+
+> The server's KV layout is not the CLI's. `server.py` leaves `KV_PACK` unset
+> (24-bit) unless you pass `--kv-pack 16`; the CLI gates use `KV_PACK=16`.  On
+> MiniMind3 q8 the packed and unpacked grids give different first tokens
+> (`我是一个AI助手，…` vs `我是MiniMind，…`), so pass `--kv-pack 16` when you
+> want the server to reproduce the CLI string.
 
 | template | prompt |
 |---|---|
@@ -417,17 +436,30 @@ Request line:
 base64(prompt) \t max_tokens \t temperature \t top_p \t seed
                \t [repetition_penalty \t frequency_penalty \t presence_penalty
                   \t no_repeat_ngram \t min_p]
+               \t [base64(request JSON)]
 ```
 
-The first five columns are required; the last five are optional and may be empty
+The first five columns are required; columns 6-10 are optional and may be empty
 (`\t\t`), which keeps an old server speaking to a new engine.  The engine resets
 `g_sampling` to its process defaults before applying them, so a penalty on one
 request never leaks into the next.
 
+Column 11 is the message-based request: base64 of
+
+```json
+{"messages": [{"role": "user", "content": "..."}],
+ "tools": [...], "open_thinking": false}
+```
+
+When it is present column 1 is empty and the engine renders the prompt from the
+container's chat template.  A container without one rejects the request with an
+`error` event rather than guessing a template, so a server that has not read
+`chat_template` from `ready` cannot silently send the wrong shape.
+
 Events:
 
 ```json
-{"event":"ready"}
+{"event":"ready","chat_template":true,"template":"minimind3"}
 {"event":"start","prompt_tokens":80}
 {"event":"token","text":"春"}
 {"event":"done","text":"...","finish_reason":"stop","prompt_tokens":80,"completion_tokens":64}
