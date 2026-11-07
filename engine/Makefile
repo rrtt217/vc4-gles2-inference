@@ -77,9 +77,15 @@ probes/load_probe_pi: probes/load_probe.cpp
 clean:
 	rm -f engine engine_mm3 engine_mm3_pi
 	rm -f probes/vc4_probe probes/vc4_ffn_probe probes/vc4_topk_probe probes/load_probe_pi
-	rm -f probes/matvec_probe probes/texsize_probe probes/q4fmt_probe_pi probes/glsl_probe_pi probes/q4mv_probe_pi probes/draw_probe_pi
+	rm -f probes/matvec_probe probes/texsize_probe probes/q4fmt_probe_pi probes/glsl_probe_pi probes/q4mv_probe_pi probes/draw_probe_pi probes/packunpack_probe probes/packunpack_probe_pi
 
 probes/glsl_probe_pi: probes/glsl_probe.cpp
+	@test -d "$(CROSS_SYSROOT)" || { echo "missing CROSS_SYSROOT=$(CROSS_SYSROOT)" >&2; exit 2; }
+	$(CROSS_CXX) $(CROSS_CXXFLAGS) -o $@ $< $(CROSS_LDLIBS)
+
+# Which GLSL ES pack/unpack builtins actually run on this driver (VC4 needs the
+# answer more than Xe does; see the probe's header).
+probes/packunpack_probe_pi: probes/packunpack_probe.cpp
 	@test -d "$(CROSS_SYSROOT)" || { echo "missing CROSS_SYSROOT=$(CROSS_SYSROOT)" >&2; exit 2; }
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -o $@ $< $(CROSS_LDLIBS)
 
