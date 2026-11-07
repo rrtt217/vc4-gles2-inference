@@ -19,6 +19,10 @@ enum class XFormat : uint8_t {
     I16_1 = 0,
     I16_2 = 1,
     I8_4 = 2,
+    // 24-bit fixed point, one value per texel: the widest value a float32 can
+    // hold exactly (24 mantissa bits).  Same 1/256 step as I16 but 256x the
+    // range, which is what a model whose residual exceeds the q16 rail needs.
+    I24_1 = 3,
 };
 
 struct XLayout {
@@ -31,6 +35,7 @@ const char* x_format_name(XFormat f);
 int x_per_texel(XFormat f);
 int x_texels(int count, XFormat f);
 bool x_is_int8(XFormat f);
+bool x_is_int24(XFormat f);
 
 // CPU side packing.  Values are real activations; q16 is applied here.
 std::vector<uint8_t> x_pack(const float* values, int count, XFormat f);

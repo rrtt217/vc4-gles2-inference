@@ -47,7 +47,7 @@ private:
 
     vector<float> attention(const vector<float>& q, int layer, int pos);
 
-    static vector<float> add_q16(const vector<float>& a, const vector<float>& b);
+    vector<float> add_q16(const vector<float>& a, const vector<float>& b);
 
     vector<float> swiglu(const vector<float>& h, int n);
 

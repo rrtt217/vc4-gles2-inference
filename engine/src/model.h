@@ -47,6 +47,9 @@ public:
     // hardcode 1e-5, which is 10x MiniMind3's (and feng30m's, and supra2's)
     // 1e-6; that was invisible until a model turned out to be sensitive to it.
     float rms_eps = 1e-5f;
+    // Metadata key 12: the residual stream's width.  False (or absent) keeps
+    // the q16 grid every existing container was packed with.
+    bool res_q24 = false;
     bool rms_eps_stated = false;   // false = use the shader's literal 1e-5
     int capabilities = 0;
     bool have_capabilities = false;

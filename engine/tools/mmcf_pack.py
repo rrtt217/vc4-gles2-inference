@@ -323,6 +323,8 @@ def build(meta, tensors, tok_blob, args):
             vb = vtext.encode("utf-8") if isinstance(vtext, str) else vtext
             body += vname.encode() + b"\0" + struct.pack("<I", len(vb)) + vb
         md += tlv(9, 1, body)
+    if args.res == "q24":
+        md += tlv(12, 1, struct.pack("<B", 1))
     if args.rms_eps is not None:
         md += tlv(11, 1, struct.pack("<f", args.rms_eps))
     if args.add_bos is not None or args.add_eos is not None:
@@ -416,6 +418,10 @@ def main():
                          "chat_template).  Default: read it from tokenizer_config.json next to --in")
     ap.add_argument("--chat-template-variant", metavar="NAME=FILE", action="append", default=[],
                     help="additional named template variant (repeatable)")
+    ap.add_argument("--res", choices=["q16", "q24"], default="q16",
+                    help="residual stream width: q16 (default, ±128) or q24 "
+                         "(same 1/256 step, ±32768).  q24 is what a model that "
+                         "trips the residual-rail check needs")
     ap.add_argument("--allow-over-rail", action="store_true",
                     help="pack even when the residual stream exceeds the engine's q16 rail")
     ap.add_argument("--no-rail-check", action="store_true",

@@ -378,6 +378,8 @@ bool Model::load_mmcf(){
                         }
                         if (chat_template.empty() && !chat_templates.empty())
                                 chat_template = chat_templates.front().second;
+                } else if (key == 12 && type == 1 && len >= 1) {
+                        res_q24 = payload[0] == 1;
                 } else if (key == 11 && type == 1 && len >= 4) {
                         float e; memcpy(&e, payload, 4);
                         if (e > 0.0f) { rms_eps = e; rms_eps_stated = true; }

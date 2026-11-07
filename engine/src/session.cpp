@@ -91,7 +91,24 @@ Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
             gpu_.res_pack_ = !(rp && strcmp(rp, "0") == 0) &&
                              !m_.wo.empty() &&
                              (m_.wo[0].type == WeightType::INT8 || m_.wo[0].type == WeightType::INT4);
-            gpu_.res_fmt_ = gpu_.res_pack_ ? XFormat::I16_2 : XFormat::I16_1;
+            // A container that declares a 24-bit residual gets one value per
+            // texel; packing two values into a texel is a q16-only idea, so it
+            // is switched off rather than reinterpreted.
+            if (m_.res_q24) {
+                // The residual-consuming kernels still store q16 (x_st1q), so
+                // the GPU path would read a 24-bit texel holding a 16-bit
+                // encode.  Refuse instead of answering from garbage; the CPU
+                // path implements the format and is what this declares.
+                if (getenv("Q24_GPU")) {
+                    cerr << "q24 residual: the GPU kernels are not converted yet "
+                            "(the add stores are still q16).  Run GPU_LAYER=0.\n";
+                    exit(2);
+                }
+                gpu_.res_pack_ = false;
+                gpu_.res_fmt_ = XFormat::I24_1;
+            } else {
+                gpu_.res_fmt_ = gpu_.res_pack_ ? XFormat::I16_2 : XFormat::I16_1;
+            }
         }
         // Paired qkv matvec: two output rows per fragment, half the activation
         // decode.  Only the int8 checkpoint uses it; QKV_PAIR=0 restores the
@@ -624,6 +641,16 @@ vector<float> Session::attention(const vector<float>& q, int layer, int pos){
 
 vector<float> Session::add_q16(const vector<float>& a, const vector<float>& b){
         vector<float> o(a.size());
+        if (m_.res_q24) {
+                // Same grid, 256x the range: the clamp moves from 128 to 32768.
+                for (size_t i = 0; i < a.size(); ++i) {
+                        float v = a[i] + b[i];
+                        float q = roundf(v * 256.0f);
+                        q = fmaxf(-8388608.0f, fminf(8388607.0f, q));
+                        o[i] = q / 256.0f;
+                }
+                return o;
+        }
         for (size_t i = 0; i < a.size(); ++i) o[i] = quantize_act_f(a[i] + b[i]);
         return o;
     }

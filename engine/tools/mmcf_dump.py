@@ -101,6 +101,12 @@ def main():
                 q += vlen
                 first = body.split(b"\n", 1)[0].decode("utf-8", "replace")
                 print(f"chat tmpl   '{vname}' {vlen} B  {first[:64]}")
+        elif key == 12 and ln >= 1:
+            print(f"residual    {payload[0] and 'q24 (1 value/texel, +-32768)' or 'q16 (2 per texel, +-128)'}")
+        elif key == 11 and ln >= 4:
+            import struct as _s
+            print(f"rms eps     {_s.unpack('<f', bytes(payload[:4]))[0]:g}"
+                  f"{'' if payload else ' (default 1e-05)'}")
         elif key == 10 and ln >= 2:
             ab, ae = payload[0], payload[1]
             fmt = lambda v: "unset" if v == 255 else str(v)

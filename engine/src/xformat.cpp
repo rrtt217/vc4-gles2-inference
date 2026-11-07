@@ -11,6 +11,7 @@ const char* x_format_name(XFormat f) {
         case XFormat::I16_1: return "x16_1";
         case XFormat::I16_2: return "x16_2";
         case XFormat::I8_4: return "x8_4";
+        case XFormat::I24_1: return "x24_1";
     }
     return "x?";
 }
@@ -20,6 +21,7 @@ int x_per_texel(XFormat f) {
         case XFormat::I16_1: return 1;
         case XFormat::I16_2: return 2;
         case XFormat::I8_4: return 4;
+        case XFormat::I24_1: return 1;
     }
     return 0;
 }
@@ -30,6 +32,7 @@ int x_texels(int count, XFormat f) {
 }
 
 bool x_is_int8(XFormat f) { return f == XFormat::I8_4; }
+bool x_is_int24(XFormat f) { return f == XFormat::I24_1; }
 
 std::vector<uint8_t> x_pack(const float* values, int count, XFormat f) {
     const int texels = x_texels(count, f);
@@ -42,6 +45,15 @@ std::vector<uint8_t> x_pack(const float* values, int count, XFormat f) {
             p[1] = (uint8_t)q;
             p[2] = 0;
             p[3] = 255;
+        } else if (f == XFormat::I24_1) {
+            // offset-binary int24: u = clamp(v*256) + 2^23, big-endian in g,b,a
+            // (the top byte stays 0, which keeps the decode a plain float).
+            long q = lrintf(values[t] * 256.0f);
+            q = std::max(-8388608L, std::min(8388607L, q)) + 8388608L;
+            p[0] = 0;
+            p[1] = (uint8_t)((q >> 16) & 0xFF);
+            p[2] = (uint8_t)((q >> 8) & 0xFF);
+            p[3] = (uint8_t)(q & 0xFF);
         } else if (f == XFormat::I16_2) {
             const int16_t q0 = quantize_act(values[2 * t]);
             const int16_t q1 = 2 * t + 1 < count ? quantize_act(values[2 * t + 1]) : 0;
@@ -102,7 +114,31 @@ std::string x_glsl(XFormat f) {
         "vec4 x_st2q(float a,float b){vec2 p=x_q16enc(a),q=x_q16enc(b);"
         "return vec4(p.x,p.y,q.x,q.y);}\n";
 
+    // A 24-bit residual needs its own decode/encode, and `q24_helpers()` may
+    // already be in the same shader, so these carry distinct names.
+    s +=
+        "float x_q24raw(vec4 c){return float(int(c.g*255.0+0.5))*65536.0+"
+        "float(int(c.b*255.0+0.5))*256.0+float(int(c.a*255.0+0.5))-8388608.0;}\n"
+        "float x_q24(vec4 c){return x_q24raw(c)/256.0;}\n"
+        "vec4 x_q24enc(float v){float q=floor(clamp(v*256.0,-8388608.0,8388607.0)+0.5)+8388608.0;"
+        "float g=floor(q/65536.0),b=floor(q/256.0)-g*256.0,a=q-g*65536.0-b*256.0;"
+        "return vec4(0.0,g/255.0,b/255.0,a/255.0);}\n"
+        "vec4 x_q24encq(float q){return x_q24enc(q/256.0);}\n";
+
     switch (f) {
+        case XFormat::I24_1:
+            s +=
+                "#define X1(T,I,TW) x_q24(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)))\n"
+                "#define X2(T,BASE,TW) vec2(X1(T,(BASE),TW),X1(T,(BASE)+1,TW))\n"
+                "#define X4(T,BASE,TW) vec4(X1(T,(BASE),TW),X1(T,(BASE)+1,TW),"
+                "X1(T,(BASE)+2,TW),X1(T,(BASE)+3,TW))\n"
+                "#define XST1(V) x_q24enc(V)\n"
+                "#define XST2(A,B) vec4(0.0)\n"
+                "#define XST4(A,B,C,D) vec4(0.0)\n"
+                "#define X1Q(T,I,TW) x_q24raw(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)))\n"
+                "#define X2Q(T,B,TW) vec2(X1Q(T,(B),TW),X1Q(T,(B)+1,TW))\n"
+                "#define X4Q(T,B,TW) vec4(X1Q(T,(B),TW),X1Q(T,(B)+1,TW),X1Q(T,(B)+2,TW),X1Q(T,(B)+3,TW))\n";
+            break;
         case XFormat::I16_1:
             s +=
                 "#define X1(T,I,TW) x_i16(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)).rg)\n"
@@ -143,6 +179,11 @@ std::string x_glsl(XFormat f) {
 
 std::string x_residual_glsl(XFormat f) {
     switch (f) {
+        case XFormat::I24_1:
+            return
+                "#define R1(T,I,TW) x_q24(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)))\n"
+                "#define R2(T,BASE,TW) vec2(R1(T,(BASE),TW),R1(T,(BASE)+1,TW))\n"
+                "#define R1Q(T,I,TW) x_q24raw(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)))\n";
         case XFormat::I16_1:
             return
                 "#define R1(T,I,TW) x_i16(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)).rg)\n"
