@@ -104,7 +104,10 @@ static const char* kUsage =
 int main(int argc, char** argv) {
     install_stop_handlers();
     gpu_set_run_t0(Clock::now());
-    string model_path = getenv("MODEL") ? getenv("MODEL") : "../models/llama2c/stories15M.bin";
+    // No default: the engine only reads MMCF containers, so a bare run has
+    // nothing sensible to load and "set MODEL=" is a better answer than a magic
+    // number from a file that happens to sit at the old llama2.c path.
+    string model_path = getenv("MODEL") ? getenv("MODEL") : "";
     string tokenizer_path = getenv("TOKENIZER") ? getenv("TOKENIZER") : "../models/llama2c/tokenizer.bin";
     string prompt = "One day, Lily";
     string system_prompt;
@@ -128,12 +131,12 @@ int main(int argc, char** argv) {
         if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help") || !strcmp(argv[i], "help")) {
             printf("%s", kUsage); return 0;
         }
-        if (!strcmp(argv[i], "--version") || !strcmp(argv[i], "-V")) {
+        else if (!strcmp(argv[i], "--version") || !strcmp(argv[i], "-V")) {
             printf("engine_mm3 %s (MMCF v2)\n", kVersion); return 0;
         }
-        if (!strcmp(argv[i], "-q") || !strcmp(argv[i], "--quiet")) g_quiet = true;
-        if (!strcmp(argv[i], "--model") && i + 1 < argc) model_path = argv[++i];
-        if (!strcmp(argv[i], "--prompt") && i + 1 < argc) {
+        else if (!strcmp(argv[i], "-q") || !strcmp(argv[i], "--quiet")) g_quiet = true;
+        else if (!strcmp(argv[i], "--model") && i + 1 < argc) model_path = argv[++i];
+        else if (!strcmp(argv[i], "--prompt") && i + 1 < argc) {
             prompt = argv[++i]; prompt_set = true;
             if (prompt == "-") {                       // everything on stdin
                 stringstream ss; ss << cin.rdbuf(); prompt = ss.str();
@@ -166,9 +169,39 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--presence-penalty") && i + 1 < argc) g_sampling.presence_penalty = atof(argv[++i]);
         else if (!strcmp(argv[i], "--no-repeat-ngram") && i + 1 < argc) g_sampling.no_repeat_ngram = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--min-p") && i + 1 < argc) g_sampling.min_p = atof(argv[++i]);
+        else {
+            // Silently ignoring an argument is how "CHAT_DUMP=1" ends up on the
+            // command line (where it is not an environment variable) and the
+            // switch appears not to work at all.
+            if (argv[i][0] == '-') {
+                fprintf(stderr, "unknown option: %s  (see --help; environment "
+                                "switches like CHAT_DUMP=1 go before the command)\n", argv[i]);
+                return 2;
+            }
+            if (strchr(argv[i], '='))
+                fprintf(stderr, "%s looks like an environment assignment; put it before "
+                                "the command, not after it\n", argv[i]);
+            else
+                fprintf(stderr, "unexpected argument: %s  (the model comes from MODEL or "
+                                "--model; see --help)\n", argv[i]);
+            return 2;
+        }
     }
     if (chat && !gen_set) gen = 128;
 
+    if (model_path.empty()) {
+        fprintf(stderr, "no model: set MODEL=<file.mmcf> or pass --model PATH (see --help)\n");
+        return 2;
+    }
+    {
+        ifstream probe(model_path, ios::binary);
+        if (!probe) {
+            fprintf(stderr, "cannot open model %s\n"
+                            "  set MODEL=<file.mmcf> or pass --model PATH; the store lives in "
+                            "models/<name>/<name>.<quant>.mmcf (see --help)\n", model_path.c_str());
+            return 2;
+        }
+    }
     Model model;
     if (!model.load(model_path)) return 1;
     if (getenv("SHADER_TIME")) fprintf(stderr, "STARTUP %7.1f ms  model loaded\n", run_time_ms());
@@ -588,8 +621,18 @@ int main(int argc, char** argv) {
                 text = "[INST] " + user + " [/INST]";
         }
         if (chat_dump) {
-            for (auto& p : parts) fprintf(stderr, "PROMPT[%s] %3zu B  %s\n", p.is_input ? "in" : "tmpl",
+            if (parts.empty()) {
+                // No template (kind 0): the prompt is one hand-built string.
+                // Without this branch CHAT_DUMP printed nothing for such a
+                // container, which is indistinguishable from "the switch does
+                // not work".
+                fprintf(stderr, "PROMPT[text] %3zu B  %s\n", text.size(),
+                        dump_escape(text).c_str());
+            } else {
+                for (auto& p : parts)
+                    fprintf(stderr, "PROMPT[%s] %3zu B  %s\n", p.is_input ? "in" : "tmpl",
                             p.text.size(), dump_escape(p.text).c_str());
+            }
         }
         auto tokens = parts.empty() ? tokenizer.encode(text, enc_bos, enc_bos)
                                     : tokenizer.encode_parts(parts, enc_bos, enc_bos);
@@ -735,9 +778,18 @@ int main(int argc, char** argv) {
                 parts = chat_tmpl->render(msgs, tools_array, /*add_generation_prompt=*/true,
                                           open_thinking, "", "");
             if (chat_dump) {
-                for (auto& p : parts)
-                    fprintf(stderr, "PROMPT[%s] %3zu B  %s\n", p.is_input ? "in" : "tmpl",
-                            p.text.size(), dump_escape(p.text).c_str());
+                if (parts.empty()) {
+                    // No template: the prompt is one string built by hand.
+                    // Without this branch CHAT_DUMP printed nothing at all for
+                    // a plain container, which reads exactly like the switch
+                    // being broken.
+                    fprintf(stderr, "PROMPT[text] %3zu B  %s\n", text.size(),
+                            dump_escape(text).c_str());
+                } else {
+                    for (auto& p : parts)
+                        fprintf(stderr, "PROMPT[%s] %3zu B  %s\n", p.is_input ? "in" : "tmpl",
+                                p.text.size(), dump_escape(p.text).c_str());
+                }
             }
             auto tokens = chat_tmpl ? tokenizer.encode_parts(parts, enc_bos, enc_bos)
                                     : tokenizer.encode(text, false, false);
