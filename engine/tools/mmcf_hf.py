@@ -224,19 +224,23 @@ def residual_peaks(m, seq=8):
     seq = max(1, min(seq, vocab))
 
     def rotate(a, pos):          # a: (T, H, hd)
+        # rotate_half pairs (i, i + hd/2); the interleaved convention pairs
+        # (2i, 2i+1).  Using `i`/`i+1` for the interleaved case leaves half the
+        # lanes stale and mixes the rest, which produced NaN scores on the
+        # llama2.c models and a residual of "0.0" once max() swallowed it.
         T = a.shape[0]
         o = np.empty_like(a)
-        for i in range(hd // 2 if half else hd // 2):
+        for i in range(hd // 2):
             if half:
                 ang = np.arange(T)[:, None] / (theta ** (2.0 * i / hd))
                 c, s = np.cos(ang), np.sin(ang)
                 o[:, :, i] = a[:, :, i] * c - a[:, :, i + hd // 2] * s
                 o[:, :, i + hd // 2] = a[:, :, i + hd // 2] * c + a[:, :, i] * s
             else:
-                ang = np.arange(T)[:, None] / (theta ** (i / hd))
+                ang = np.arange(T)[:, None] / (theta ** (2.0 * i / hd))
                 c, s = np.cos(ang), np.sin(ang)
-                o[:, :, i] = a[:, :, i] * c - a[:, :, i + 1] * s
-                o[:, :, i + 1] = a[:, :, i + 1] * c + a[:, :, i] * s
+                o[:, :, 2 * i] = a[:, :, 2 * i] * c - a[:, :, 2 * i + 1] * s
+                o[:, :, 2 * i + 1] = a[:, :, 2 * i + 1] * c + a[:, :, 2 * i] * s
         return o
 
     rep = heads // kv
@@ -270,7 +274,11 @@ def residual_peaks(m, seq=8):
             g = h2 @ m['w1'][l].T
             u = h2 @ m['w3'][l].T
             x = x1 + ((g / (1 + np.exp(-g))) * u) @ m['w2'][l].T
-            peaks[l] = max(peaks[l], float(np.abs(x).max()))
+            mx = float(np.abs(x).max())
+            if not np.isfinite(mx):
+                raise SystemExit("residual calibration produced %s at layer %d; the "
+                                 "check cannot vouch for this model" % (mx, l))
+            peaks[l] = max(peaks[l], mx)
     return peaks
 
 
