@@ -708,6 +708,10 @@ int main(int argc, char** argv) {
             }
         }
         cout << "\n";
+        if (!g_quiet && !g_stop && generated >= gen && !is_stop_token(prev) && generated)
+            fprintf(stderr, "[stopped at the --gen limit: %d tokens.  This model did "
+                            "not emit its end token (eos %d, stop %d); raise --gen]\n",
+                    generated, model.id_eos, model.id_stop);
         if (hist) {
             hist->push_back(ChatMsg{"assistant", reply, "", ""});
             kv_tokens = tokens;
@@ -876,11 +880,19 @@ int main(int argc, char** argv) {
             else run_tool_turn(prompt, true);
         } else {
             bool first = true;
+            int cancels = 0;
             vector<ChatMsg> history;
             while (!g_stop) {
                 string line;
                 if (!line_edit_read("User: ", line)) break;
-                if (line.empty()) continue;
+                if (line.empty()) {
+                    // Ctrl-C cancels the line; a second one in a row leaves,
+                    // which is what people expect from a prompt.
+                    if (++cancels >= 2) break;
+                    fprintf(stderr, "(Ctrl-C again or /exit to leave)\n");
+                    continue;
+                }
+                cancels = 0;
                 if (line == "/exit" || line == "/quit") break;
                 if (line == "/clear") {
                     first = true;
@@ -963,13 +975,14 @@ int main(int argc, char** argv) {
     int generated = 0;
     double decode_ms = 0;
     vector<int> recent;
+    bool ended_on_eos = false;
     for (int i = 0; i < gen; ++i) {
         if (g_stop) break;
         apply_sampling_penalties(logits, recent);
         int next = greedy ? argmax_token(logits)
                           : (cand_mode ? sample_candidate_result(cand, temp, top_p, rng)
                                        : sample_token(logits, temp, top_p, rng));
-        if (!getenv("IGNORE_EOS") && is_stop_token(next)) break;
+        if (!getenv("IGNORE_EOS") && is_stop_token(next)) { ended_on_eos = true; break; }
         cout << tokenizer.decode({next}, tokens.empty() ? 1 : tokens.back()); cout.flush();
         tokens.push_back(next);
         recent.push_back(next);
@@ -989,6 +1002,12 @@ int main(int argc, char** argv) {
         for (int t : tokens) f.write((char*)&t, 4);
     }
     if (g_stop) { gpu.sync(); cout << "[interrupted]\n"; return 0; }
+    // A completion model that never emits its end token looks like "it will not
+    // stop"; say which limit ended it so that is diagnosable from the output.
+    if (!g_quiet && !ended_on_eos && generated >= gen)
+        fprintf(stderr, "\n[stopped at the --gen limit: %d tokens.  This model did not "
+                        "emit its end token (eos %d, stop %d); raise --gen or press "
+                        "Ctrl-C]\n", generated, model.id_eos, model.id_stop);
     if (generated) cout << "decode avg " << decode_ms / generated << " ms/token\n";
     if (getenv("DRAWCOUNT") && generated)
         cout << "draws " << gpu.draws() << " total, "
