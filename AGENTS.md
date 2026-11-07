@@ -34,8 +34,8 @@ replace working paths with demos or cosmetic rewrites.
 | `refs/` | untracked upstream reference material for MiniMind3 (gitignored) |
 | `docs/` | deep dives; keep READMEs short and link here |
 
-**SmolLM2-135M is not supported.**  The `models/smollm2-*` directories are
-source material; no container in them is a validated checkpoint.
+**SmolLM2-135M is not supported** and its files were removed from the store;
+the weights can be re-downloaded, but no container here was ever validated.
 
 Engine modules are described in [`docs/engine-layout.md`](docs/engine-layout.md);
 the file format in [`docs/model-formats.md`](docs/model-formats.md) and
@@ -107,6 +107,10 @@ anything else and names the packer.  A `.q8` / `.q4` / `.i16` / `.bin` file in
 `models/` is an *input to the packer*, never a model the engine can run:
 
 ```bash
+# The store keeps sources, not derived checkpoints: regenerate the legacy file
+# from model.safetensors first (also rebuilds q4 and the tokenizer).
+minimind3/convert.sh
+
 python3 engine/tools/mmcf_pack.py --in models/minimind3/minimind3.q8 \
   --tok models/minimind3/minimind3.tok \
   --out models/minimind3/minimind3.q8.mmcf \

@@ -4,49 +4,47 @@ Central store for all model artifacts used by this repository.  The files
 are large and are intentionally **not tracked by Git**; only this README is
 tracked.
 
-**The engine loads `.mmcf` only.**  Every model here therefore exists twice:
-the legacy file the packer consumes (`.i16`, `.q8`, `.q4`, `.bin`), and the
-container that the engine runs.  Keep both — the legacy file is the re-pack
-source, and a re-pack is how a numerics change is replayed.
-
-Layout:
+**The engine loads `.mmcf` only**, and the store keeps only what is
+needed to build a container: a *source* (safetensors, a llama2.c `.bin`, a
+`.gguf` reference, or one legacy checkpoint that has no other source) next to
+the container(s) built from it.  Derived `.i16` / `.q8` / `.q4` checkpoints are
+deleted once their container exists — they are byte-for-byte inside it, and
+`convert.sh` / `make_q4.py` rebuild them from the source.
 
 ```text
 models/
   minimind3/                     Qwen3-style 64M, the default chat model
-    config.json                  source config used by the converters
-    model.safetensors            original F16 source
-    minimind-64M-3-F16.gguf      alternate source export (llama.cpp reference)
-    minimind3.i16 / .q8 / .q4    legacy layouts (packer input)
+    model.safetensors            source (F16)
+    minimind-64M-3-F16.gguf      llama.cpp reference export
+    config.json
     minimind3.{i16,q8,q4}.mmcf   what the engine loads
-    minimind3.tok                engine tokenizer (embedded into the container)
+    minimind3.tok                tokenizer source, embedded by the packer
 
   llama2c/                       llama2.c TinyStories family + MiniMind2 Small
-    stories15M.bin / .i16 / .q8  (.q8 is gibberish: use i16)
-    stories42M.bin / .i16 / .q8
-    stories260K.bin + tok512.bin 5-layer floor probe, needs the 512-token vocab
-    TinyChat15M.bin / .i16 / .q8 format probe; output is not coherent
-    minimind2-small.i16 / .q8 / .q4
+    stories15M.bin               source
+    stories42M.bin               source
+    TinyChat15M.bin              source; output is not coherent (format probe)
+    stories260K.bin + tok512.bin 5-layer floor probe, 512-token vocabulary
+    minimind2-small.i16          kept: the only local source for this model
+    minimind2-small.{i16,q4,q8}.mmcf
+    minimind2-tokenizer.bin      tokenizer source
     tokenizer.bin                the 32k llama2.c vocabulary
-    tokenizer-llama2enzh.bin     for stories15M-llama2-enzh.bin
+    stories15M-llama2-enzh.bin + tokenizer-llama2enzh.bin   experiment, no container
 
   tinybrainbot/                  TinyBrainBot-100M-v5.1-Instruct, template kind 3
     model.safetensors, config.json, llama/ (upstream reference code)
     convert_tinybrainbot.py, make_tok.py, ref_numpy.py
-    (q4 and i16 are the usable precisions; q8 degenerates — see
-     docs/model-formats.md)
-
-  smollm2-135m/                  SmolLM2-135M base — NOT SUPPORTED, source
-  smollm2-135m-instruct/         weights only (see the note below)
-    model.safetensors, tokenizer.json, vocab.json, merges.txt
-    <name>.i16 / .q8 / .q4 + .mmcf, <name>.tok
+    tinybrainbot.tok
+    tinybrainbot.{i16,q4}.mmcf   q8 is degenerate: use i16 (q4 is unreliable)
 
   supra2/                        Supra2-100M-Instruct (Qwen3-shaped)
   feng30m/                       feng-30m (Llama-shaped), see README.txt
 
-  survey_under_110m.csv          candidate survey: params, arch, downloads,
-                                 engine_supported, note
+  survey_under_110m.csv          candidate survey
 ```
+
+`smollm2-135m/` and `smollm2-135m-instruct/` were **deleted**: SmolLM2 is
+declared unsupported (see the note at the end of this file).
 
 Rebuild MiniMind3 artifacts from the repository root:
 
@@ -56,7 +54,8 @@ minimind3/convert.sh
 ```
 
 `convert.sh` stops at the legacy layouts; pack them afterwards, otherwise the
-artifacts it produces are not loadable by the engine:
+artifacts it produces are not loadable by the engine (and it deletes none of
+them, so remove them again once the containers exist):
 
 ```bash
 for p in i16 q8 q4; do

@@ -3872,3 +3872,42 @@ One operational note: the first pass ran numpy over the 250 MB i16 mmap with
 whole-tensor `float32` temporaries and rebooted the Pi Zero (426 MB, no swap)
 mid-run.  Every analysis script in this section chunks at 128 rows; 250 MB of
 mmap plus one 98 MB array is enough to take the board down.
+
+## The Jinja template engine, measured on the Pi (2026-11-07)
+
+The container's chat template is rendered by the vendored llama.cpp Jinja
+engine (see `engine/third_party/jinja/README.md`).  What it costs, measured
+rather than estimated, because a Pi Zero pays for every byte and every second:
+
+| | before | after |
+|---|---:|---:|
+| cross build (`107`, `-B pi`) | ~18 s | **58 s** |
+| `engine_mm3_pi`, stripped | ~600 KB | **986 KB** |
+| native build (`-O2`, one g++ call) | ~18 s | 38 s |
+| `engine_mm3`, stripped | 570 KB | 1.19 MB (`--gc-sections`) |
+
+`--gc-sections` is worth 120 KB: the Jinja engine is only reachable from the
+chat path, so the linker drops what this build never reaches.
+
+The gate on the Pi, with the shipped (template-carrying) containers, is
+**ACCEPT** and the pins are unchanged to four decimals:
+
+```
+determinism OK / default system prompt OK
+q8 OK: 我是一个AI助手，没有自我意识，也没有身体，所以我无法
+q4 OK: 我是MiniMind，一个高效的小参数AI模型，专注于
+poem OK         PPL baseline: 271.2855   PPL q4: 325.3751
+ACCEPT
+```
+
+So 986 KB and 58 s of cross-build buy no numeric change at all on VC4; the
+template path is byte-identical to the kind path it replaces (the token-id
+comparison on Xe is in the commit that introduced it).
+
+Decode, same board, `SEQ=768 GPU_LAYER=1 KV_PACK=16`, 16 generated tokens:
+MiniMind3 q8 **188.6 ms/token**, q4 **295.1 ms/token** — the same range as the
+matrix at the top of this file, i.e. no regression from the new code path.
+
+Template compile is one-off and invisible next to shader linking: the
+`SHADER_TIME` marks put "model loaded" at 472 ms and "session ready" at
+5.6 s, and the 3.9 KB template compiles between them without moving the mark.
