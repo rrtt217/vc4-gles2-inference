@@ -138,8 +138,23 @@ elsewhere in this file.  It was measured in a single full-screen triangle, not
 in a 1216-fragment matvec, so the honest reading is "not reproduced in this
 probe" rather than "works": retest in the real kernel before relying on it.
 
-All of this needs Mesa's GLES override (`MESA_GLES_VERSION_OVERRIDE=3.0`), which
-the engine sets only for the q4 shift path.
+**Which override actually does it.**  `MESA_GLES_VERSION_OVERRIDE` is the only
+knob that matters; `MESA_GLSL_VERSION_OVERRIDE` is inert on this driver.  Measured
+on both boards:
+
+| environment | Pi Zero | Iris Xe |
+|---|---|---|
+| nothing, client-3 context | `context failed (client 3)` — VC4 only offers ES 2.0 contexts | GLSL 3.20, 310 shaders compile |
+| nothing, client-2 context | GLSL 1.0.16; any `#version 300 es` shader fails | — |
+| `MESA_GLSL_VERSION_OVERRIDE=310` alone | still `context failed (client 3)` | no visible change (already 3.20) |
+| `MESA_GLES_VERSION_OVERRIDE=3.0` | 3.00, 310 shaders fail | **3.00, 310 shaders fail** — it is a ceiling, not a floor |
+| `MESA_GLES_VERSION_OVERRIDE=3.1` | 3.10, everything above works | same |
+| `MESA_GLES_VERSION_OVERRIDE=3.2` | 3.20 | same |
+
+Two consequences.  It has to be set **before `eglInitialize`**, which is why the
+engine can use ESSL 3.00 from a plain client-2 context when the q4 shift path
+asks for it; and a deployment that pins it to `3.0` (the value the older notes
+suggest) silently loses everything that needs 3.10, `bitfieldExtract` included.
 
 ### 5. Texture limits: 2048 per side, no half-float, so every weight is decoded
 

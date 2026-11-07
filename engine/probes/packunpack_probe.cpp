@@ -22,6 +22,11 @@
 //   MESA_GLES_VERSION_OVERRIDE=3.1 ./packunpack_probe es31
 //   MESA_GLES_VERSION_OVERRIDE=3.2 ./packunpack_probe es32
 // A driver that claims 3.1 and then rejects a 310 shader is a result too.
+//
+// Measured on both boards: MESA_GLSL_VERSION_OVERRIDE does nothing here, and
+// MESA_GLES_VERSION_OVERRIDE is both necessary (VC4 has no client-3 context at
+// all) and a ceiling (setting it to 3.0 makes 310 shaders fail even where the
+// driver would otherwise give 3.20).  See docs/engine-internals.md.
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>

@@ -160,6 +160,14 @@ binary.  They are measurement hooks, not production settings.
   just-loaded KV rows back out through the normal save path, so the load can be
   compared byte for byte with the built file (`cmp`).
 
+## Set by the environment, not by the engine
+
+- `MESA_GLES_VERSION_OVERRIDE=3.0|3.1|3.2` — the only knob that raises the
+  shader language on VC4 (it must be set before `eglInitialize`; a client-3
+  context does not exist there).  It is also a **ceiling**: pinning it to 3.0
+  makes `#version 310 es` fail on Xe too.  `MESA_GLSL_VERSION_OVERRIDE` is
+  inert on both boards — measured, see `docs/engine-internals.md` §4c.
+
 ## Retired
 
 - `ATTN_HOIST=0`, `ATTN_FUSE_PROB=0` — the hoisted/fused attention path is
