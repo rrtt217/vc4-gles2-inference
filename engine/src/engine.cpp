@@ -302,7 +302,12 @@ int main(int argc, char** argv) {
     // Stop-token test.  The container states EOS and the extra stop id (key 8).
     // The CLI used to test the literal ids 1 and 2, which is MiniMind3's
     // coincidence; a model whose EOS is 7 never stopped.
+    // BOS counts as a stop while generating: no model means to re-open its own
+    // stream, and a story model that emits <s> mid-text has run out of
+    // distribution - it will repeat one token until --gen otherwise.
+    auto is_bos_token = [&](int id) { return model.id_bos >= 0 && id == model.id_bos; };
     auto is_stop_token = [&](int id) {
+        if (is_bos_token(id)) return true;
         if (model.have_specials)
             return id == model.id_eos || (model.id_stop >= 0 && id == model.id_stop);
         return id == 1 || id == 2;
@@ -835,6 +840,9 @@ int main(int argc, char** argv) {
                                   : (cand_mode ? sample_candidate_result(cand, temp, top_p, rng)
                                                : sample_token(logits, temp, top_p, rng));
                 if (is_stop_token(next)) {
+                    if (!g_quiet && is_bos_token(next))
+                        fprintf(stderr, "\n[stopped after %d tokens: the model emitted its "
+                                        "BOS token mid-generation (%d)]\n", i, next);
                     session.step(next, pos++, false);
                     break;
                 }
@@ -976,13 +984,21 @@ int main(int argc, char** argv) {
     double decode_ms = 0;
     vector<int> recent;
     bool ended_on_eos = false;
+    const char* stop_reason = nullptr;
+    int stop_id = -1;
     for (int i = 0; i < gen; ++i) {
         if (g_stop) break;
         apply_sampling_penalties(logits, recent);
         int next = greedy ? argmax_token(logits)
                           : (cand_mode ? sample_candidate_result(cand, temp, top_p, rng)
                                        : sample_token(logits, temp, top_p, rng));
-        if (!getenv("IGNORE_EOS") && is_stop_token(next)) { ended_on_eos = true; break; }
+        if (!getenv("IGNORE_EOS") && is_stop_token(next)) {
+            ended_on_eos = true;
+            stop_reason = is_bos_token(next) ? "the model emitted its BOS token mid-generation"
+                                             : "the model emitted its end token";
+            stop_id = next;
+            break;
+        }
         cout << tokenizer.decode({next}, tokens.empty() ? 1 : tokens.back()); cout.flush();
         tokens.push_back(next);
         recent.push_back(next);
@@ -1004,6 +1020,8 @@ int main(int argc, char** argv) {
     if (g_stop) { gpu.sync(); cout << "[interrupted]\n"; return 0; }
     // A completion model that never emits its end token looks like "it will not
     // stop"; say which limit ended it so that is diagnosable from the output.
+    if (!g_quiet && ended_on_eos && stop_reason && is_bos_token(stop_id))
+        fprintf(stderr, "\n[stopped after %d tokens: %s (%d)]\n", generated, stop_reason, stop_id);
     if (!g_quiet && !ended_on_eos && generated >= gen)
         fprintf(stderr, "\n[stopped at the --gen limit: %d tokens.  This model did not "
                         "emit its end token (eos %d, stop %d); raise --gen or press "
