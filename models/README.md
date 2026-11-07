@@ -279,6 +279,32 @@ The GPU path is the better of the two on the fact cases and is what a Pi
 deployment uses; the CPU path is the fallback and the reference for the
 format's arithmetic.
 
+### On the Pi Zero the residual is not the problem any more
+
+`supra2.q8q24.mmcf` (126 MB, q8 weights, q24 residual) runs on the board -
+8 tokens take 74 s including startup, ~1.7 s/token - but the text degenerates
+into a repetition loop ("reporting reporting worse worse worse ...").  The
+format is not the cause: forcing `RES_FMT=i16_1` on the same container
+degenerates just as badly, and `KV_PACK=24` does not help either.
+
+The logits say what is happening.  Same prompt, same container:
+
+| | max logit | entropy | top-5 |
+|---|---:|---:|---|
+| Xe | 9.03 | 3.07 | `The`, `It`, `France`, `A`, `Well` |
+| Pi Zero | 6.30 | **5.98** | ` reporting`, ` doesn`, ` thing`, ` didn`, ` wrong` |
+
+Cosine between the two is 0.86: the board is not producing garbage, it is
+producing a **blurred** distribution - the peak is 2.7 logits lower and the
+entropy nearly doubles - and a 100M model that needs a sharp peak to answer
+answers with filler instead.  That points at a stage that quantises on VC4 and
+not on Xe (the attention softmax is the prime suspect: it is fixed point with a
+scale that was tuned on MiniMind3), and it is a separate investigation from the
+residual width.
+
+So: q24 residual - done, and it is what makes the model usable on Xe.  VC4
+still blurs this model, at either residual width.
+
 **What a wider residual would still need.**  A single global factor does not work: it has to buy 18x
 of range for the late layers without spending the early layers' resolution
 (their values are ~0.05), and one q16 grid cannot span both.  A *per-layer*
