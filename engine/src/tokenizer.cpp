@@ -127,11 +127,25 @@ void Tokenizer::bpe_merge(vector<int>& t) const {
 vector<int> Tokenizer::encode(const string& text, bool bos , bool dummy_prefix ){
         vector<int> t;
         if (bos && bos_id_ >= 0) t.push_back(bos_id_);
+        // GPT-2/SmolLM/Qwen style tokenizers fold the leading space into the
+        // first word (" capital" is one token), so it must be prepended to the
+        // text and not emitted as its own token.  TOK_SPACE_FOLD=1 selects that;
+        // the default keeps the historical behaviour the MiniMind2/3 gates were
+        // baselined on.
+        static const bool fold = getenv("TOK_SPACE_FOLD") && atoi(getenv("TOK_SPACE_FOLD")) != 0;
+        // HF's tokenizers.encode() does not prepend a space to a raw string, so
+        // the engine must be able to skip the prefix entirely (TOK_NO_PREFIX=1).
+        static const bool no_prefix = getenv("TOK_NO_PREFIX") && atoi(getenv("TOK_NO_PREFIX")) != 0;
+        if (no_prefix) dummy_prefix = false;
+        string body = text;
         if (dummy_prefix && !text.empty()) {
-            auto it = lookup_.find(" ");
-            if (it != lookup_.end()) t.push_back(it->second);
+            if (fold) body = " " + text;
+            else {
+                auto it = lookup_.find(" ");
+                if (it != lookup_.end()) t.push_back(it->second);
+            }
         }
-        encode_into(text, /*allow_specials=*/true, t);
+        encode_into(body, /*allow_specials=*/true, t);
         bpe_merge(t);
         return t;
     }
