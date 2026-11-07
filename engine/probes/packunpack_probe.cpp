@@ -14,7 +14,11 @@
 //
 //   build:  make -C engine probes/packunpack_probe
 //   Pi:     make -C engine probes/packunpack_probe_pi CROSS_SYSROOT=<sysroot>
-//   run:    ./packunpack_probe [es2|es3|es31|es32]
+//   run:    ./packunpack_probe [es2|es3|es31|es32] [dyn|const] [case-index]
+//
+// A case index restricts the run to one function: the VC4 backend aborts the
+// process on a NIR op it does not implement, so a single failure would
+// otherwise hide every case after it.
 //
 // Modes pick the shader language: es2 = ESSL 1.00, es3 = 300 es, es31 = 310 es,
 // es32 = 320 es.  Mesa only gives the higher languages when the override is
@@ -140,6 +144,10 @@ int main(int argc, char** argv) {
     const string mode = argc > 1 ? argv[1] : "es3";
     // argv[2] = "dyn" (sample a texture) or "const" (literals, folded away).
     const bool dyn = !(argc > 2 && !strcmp(argv[2], "const"));
+    // argv[3] = run one case only (by index).  The backend can abort the whole
+    // process on an unsupported NIR op, which would otherwise hide every case
+    // after it; `run-all` in the shell loops the indices instead.
+    const int only = argc > 3 ? atoi(argv[3]) : -1;
     const int client = mode == "es2" ? 2 : 3;
     const string ver = mode == "es3" ? "300" : mode == "es31" ? "310"
                      : mode == "es32" ? "320" : "300";
@@ -189,7 +197,9 @@ int main(int argc, char** argv) {
     float verts[] = { -1, -1, 3, -1, -1, 3 };
     glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
 
-    for (const Case& c : CASES) {
+    for (int ci = 0; ci < (int)(sizeof(CASES) / sizeof(CASES[0])); ci++) {
+        const Case& c = CASES[ci];
+        if (only >= 0 && ci != only) continue;
         string log;
         GLuint vs = compile(GL_VERTEX_SHADER, vs_src(ver), log);
         GLuint fs = compile(GL_FRAGMENT_SHADER, wrap(c.body, ver, dyn), log);
@@ -227,6 +237,7 @@ int main(int argc, char** argv) {
         printf("%-38s ok  %02x%02x%02x%02x  (expect %s)%s\n",
                c.name, px[0], px[1], px[2], px[3], c.expect,
                err ? "  [GL error]" : "");
+        fflush(stdout);
         glDeleteProgram(p);
         glDeleteShader(vs);
         glDeleteShader(fs);
