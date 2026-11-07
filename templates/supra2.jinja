@@ -1,0 +1,8 @@
+{# Supra2-100M-Instruct, copied verbatim from the model's chat_template.jinja on
+   HuggingFace (SupraLabs/Supra2-100M-Instruct).  Plain ChatML: no system
+   special-case beyond the loop, no <think> block.  A template that opens an
+   empty <think></think> here makes the model stop on its first token. #}
+{% for m in messages %}<|im_start|>{{ m['role'] }}
+{{ m['content'] }}<|im_end|>
+{% endfor %}{% if add_generation_prompt %}<|im_start|>assistant
+{% endif %}

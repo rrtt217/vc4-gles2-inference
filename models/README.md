@@ -37,8 +37,10 @@ models/
     tinybrainbot.tok
     tinybrainbot.{i16,q4}.mmcf   q8 is degenerate: use i16 (q4 is unreliable)
 
-  supra2/                        Supra2-100M-Instruct (Qwen3-shaped)
-  feng30m/                       feng-30m (Llama-shaped), see README.txt
+  supra2/                        Supra2-100M-Instruct (Qwen3-shaped): converts and
+                                 tokenizes exactly, but the engine does not reproduce
+                                 the float reference on it -- see the note below
+  feng30m/                       feng-30m (Qwen3-shaped, 11 layers): works
 
   survey_under_110m.csv          candidate survey
 ```
@@ -83,3 +85,27 @@ Notes:
 Model files, tokenizers, KV caches and logs are ignored by `.gitignore`.
 The HuggingFace `tokenizer.json` source for MiniMind3 is also not tracked;
 place it in `minimind3/tokenizer.json` if you need to rebuild `minimind3.tok`.
+
+## supra2 status (2026-11-07)
+
+Converted from `model.safetensors` with `templates/supra2.jinja` (the model's
+own template, fetched from HuggingFace — it is plain ChatML, **no** `<think>`
+block; opening an empty think block makes this model stop on its first token).
+
+What is verified:
+
+- the weights in `models/supra2` **are** the Instruct checkpoint: a
+  byte-for-byte range comparison against both HF repos matches
+  `SupraLabs/Supra2-100M-Instruct` at offsets 0 and 200 MB, and differs from
+  `SupraLabs/Supra2-100M` (the base repo) in both;
+- the tokenizer is exact: the engine's prompt ids and `tokenizers.encode()` on
+  the same rendered text are **identical, 27/27**;
+- the model is English-only and 100M, so it is weak by design.
+
+What is not: with those exact 27 ids the engine's first generated token is a
+byte-fallback token, while an independent float32 forward pass over the same
+safetensors predicts `'I'` (`I'm a professional assistant.`).  Feeding the
+engine one extra leading space produces that sensible answer, which points at a
+position/prefix-dependent discrepancy rather than broken weights.  Do not call
+this model supported until that is resolved; the next step is a stage-by-stage
+engine-vs-numpy diff (the `STAGE_DUMP` route) on this checkpoint alone.

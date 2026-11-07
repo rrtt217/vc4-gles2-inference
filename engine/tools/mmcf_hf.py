@@ -73,11 +73,18 @@ def q4mat(w):
 
 
 def rope_of(cfg):
-    """(theta, half) from a HF config; half means "rotate half the head"."""
+    """(theta, half) from a HF config; half means "rotate half the head".
+
+    transformers 5 moved the theta into `rope_parameters` (Qwen3 configs use
+    it), while older configs put it at the top level or inside `rope_scaling`.
+    Reading only the top-level key silently gives 1e6, which is the difference
+    between a working feng30m and a model that rambles.
+    """
     theta = float(cfg.get("rope_theta", 10000.0))
-    rs = cfg.get("rope_scaling") or {}
-    if isinstance(rs, dict) and "rope_theta" in rs:
-        theta = float(rs["rope_theta"])
+    for key in ("rope_parameters", "rope_scaling"):
+        rs = cfg.get(key) or {}
+        if isinstance(rs, dict) and "rope_theta" in rs:
+            theta = float(rs["rope_theta"])
     half = 0 if cfg.get("rope_interleaved") or cfg.get("rope_layout") == "interleaved" else 1
     return theta, half
 
