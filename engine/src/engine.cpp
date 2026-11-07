@@ -45,6 +45,22 @@
 #include "tools.h"
 #include "lineedit.h"
 
+// A prompt segment can contain newlines and control characters; printing it raw
+// splits one logical line across several and scatters the PROMPT tags, which is
+// what made CHAT_DUMP look broken.  Escape, and print a byte count so a
+// whitespace difference is still visible.
+static std::string dump_escape(const std::string& t){
+    std::string o;
+    for (unsigned char c : t) {
+        if (c == '\n') o += "\\n";
+        else if (c == '\r') o += "\\r";
+        else if (c == '\t') o += "\\t";
+        else if (c < 0x20) { char b[8]; snprintf(b, sizeof b, "\\x%02x", c); o += b; }
+        else o += (char)c;
+    }
+    return o;
+}
+
 // One short English prompt for every chat model.  MiniMind3's old Chinese
 // prompt was longer and made the default behave differently from the Qwen
 // template; a single ASCII prompt keeps prefill small and is easy to override
@@ -401,7 +417,8 @@ int main(int argc, char** argv) {
                                               "", "");
                 if (chat_dump)
                     for (auto& p : req_parts)
-                        fprintf(stderr, "PROMPT[%s]%s\n", p.is_input ? "in" : "tmpl", p.text.c_str());
+                        fprintf(stderr, "PROMPT[%s] %3zu B  %s\n", p.is_input ? "in" : "tmpl",
+                            p.text.size(), dump_escape(p.text).c_str());
             }
             auto tokens = req_parts.empty() ? tokenizer.encode(prompt, false, false)
                                             : tokenizer.encode_parts(req_parts, enc_bos, enc_bos);
@@ -571,7 +588,8 @@ int main(int argc, char** argv) {
                 text = "[INST] " + user + " [/INST]";
         }
         if (chat_dump) {
-            for (auto& p : parts) fprintf(stderr, "PROMPT[%s]%s\n", p.is_input ? "in" : "tmpl", p.text.c_str());
+            for (auto& p : parts) fprintf(stderr, "PROMPT[%s] %3zu B  %s\n", p.is_input ? "in" : "tmpl",
+                            p.text.size(), dump_escape(p.text).c_str());
         }
         auto tokens = parts.empty() ? tokenizer.encode(text, enc_bos, enc_bos)
                                     : tokenizer.encode_parts(parts, enc_bos, enc_bos);
@@ -718,7 +736,8 @@ int main(int argc, char** argv) {
                                           open_thinking, "", "");
             if (chat_dump) {
                 for (auto& p : parts)
-                    fprintf(stderr, "PROMPT[%s]%s\n", p.is_input ? "in" : "tmpl", p.text.c_str());
+                    fprintf(stderr, "PROMPT[%s] %3zu B  %s\n", p.is_input ? "in" : "tmpl",
+                            p.text.size(), dump_escape(p.text).c_str());
             }
             auto tokens = chat_tmpl ? tokenizer.encode_parts(parts, enc_bos, enc_bos)
                                     : tokenizer.encode(text, false, false);

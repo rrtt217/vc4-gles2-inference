@@ -28,7 +28,7 @@ exist.
 |---|---|
 | `STAGE_DUMP=1` | per-layer `xb` (rms_att out), `att`, `x1` (after the `wo` residual), `xbf` (rms_ffn out), `hid` (FFN output), `hidA` (layer out) as hex q16 texels, one line per row: `DUMP <name> w=<texels> h=<hash> <texels>` |
 | `HIDDEN_DUMP=1` | the same for the layer output on the GPU path, so `GPU_LAYER=0` and `GPU_LAYER=1` runs are diffable |
-| `CHAT_DUMP=1` | the rendered prompt, one line per segment, tagged `PROMPT[tmpl]` or `PROMPT[in]` for text that came from a message.  `[in]` segments are the ones the tokenizer must not turn into special tokens |
+| `CHAT_DUMP=1` | the rendered prompt on stderr, one line per segment: `PROMPT[in] / PROMPT[tmpl] <bytes> B  <text>`, with newlines escaped.  `[in]` segments came from a message and are the ones the tokenizer must not turn into special tokens; `[tmpl]` is template text.  Before it escaped, a segment's own newlines split it across lines and the tags looked scattered - it read as if the switch did nothing |
 | `QKV_DUMP=1` | hashes every layer/position of the `qkv` matvec output; `2` also prints the first two rows.  Layout-agnostic, so `QKV_PAIR=0` and `QKV_PAIR=1` runs compare exactly |
 | `ATT_DUMP=<pos>` | the exact integers the score/softmax path consumed and produced, for every layer at one position.  Feed the log to `engine/scripts/check_att.py` |
 | `FFN_DUMP=1` | the first 8 texels of the layer-0 gate output, for bisecting a 1-LSB drift |
