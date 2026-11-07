@@ -3825,7 +3825,9 @@ matrix.  The q8 file was measured against its own i16 sibling before changing
 any format, and the premise does not hold.
 
 **The file is a faithful quantization.**  For every matrix, `w = i16 * scale`
-from `tinybrainbot.i16.mmcf` is the exact source; the shipped q8 tensor is
+from an i16 container (regenerate it with `mmcf_pack.py --in models/tinybrainbot
+--quant i16 ...`; it is not kept on disk) is the exact source; the shipped q8
+tensor is
 compared against it row by row (`||w_q8_r - w_r|| / ||w_r||`, 128 rows per
 chunk).  The stored scale equals `max|w|/127` to the last digit on all 81
 matrices (ratio 1.000), and the whole-tensor cosine is 0.998-0.9999.
