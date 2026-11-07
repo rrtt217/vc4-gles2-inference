@@ -512,15 +512,27 @@ int main(int argc, char** argv) {
     };
 
     mt19937 rng(seed);
-    auto run_turn = [&](const string& user, bool first, int pos) {
+    // Tokens currently in the KV cache; the REPL keeps this so a turn can
+    // prefill only what changed instead of the whole conversation.
+    vector<int> kv_tokens;
+    auto run_turn = [&](const string& user, bool first, int pos, vector<ChatMsg>* hist = nullptr) {
         auto turn_start = Clock::now();
         string text;
         vector<PromptPart> parts;
         if (chat_tmpl) {
             string sys = system_prompt.empty() ? string(kDefaultSystem) : system_prompt;
             vector<ChatMsg> msgs;
-            if (first) msgs.push_back(ChatMsg{"system", sys, "", ""});
-            msgs.push_back(ChatMsg{"user", user, "", ""});
+            if (hist) {
+                // The REPL keeps the conversation; the system turn goes in once,
+                // at the front, and the whole history is re-rendered so the
+                // template sees the same shape it was trained on.
+                if (hist->empty()) hist->push_back(ChatMsg{"system", sys, "", ""});
+                hist->push_back(ChatMsg{"user", user, "", ""});
+                msgs = *hist;
+            } else {
+                if (first) msgs.push_back(ChatMsg{"system", sys, "", ""});
+                msgs.push_back(ChatMsg{"user", user, "", ""});
+            }
             parts = chat_tmpl->render(msgs, tools_array, /*add_generation_prompt=*/true,
                                       open_thinking, "", "");
         } else if (minimind3_template) {
@@ -564,6 +576,14 @@ int main(int argc, char** argv) {
         auto tokens = parts.empty() ? tokenizer.encode(text, enc_bos, enc_bos)
                                     : tokenizer.encode_parts(parts, enc_bos, enc_bos);
         int skip = (first && !cli_cache_tokens.empty()) ? cache_prefix_len(tokens) : 0;
+        if (hist) {
+            size_t n = 0;
+            while (n < kv_tokens.size() && n < tokens.size() && kv_tokens[n] == tokens[n]) ++n;
+            // the KV holds rows, not the last token's logits, so the final
+            // token of an otherwise-cached prompt still has to run
+            if (!tokens.empty() && n == tokens.size()) n = tokens.size() - 1;
+            skip = (int)n;
+        }
         for (int i = 0; i < skip; ++i) pos = i + 1;
         vector<float> logits;
         CandidateResult cand;
@@ -593,6 +613,7 @@ int main(int argc, char** argv) {
             f.write((char*)logits.data(), logits.size() * 4);
         }
         cout << "Assistant: "; cout.flush();
+        string reply;
         int prev = tokens.empty() ? 1 : tokens.back();
         vector<int> recent;
         for (int i = 0; i < gen && pos < model.seq; ++i) {
@@ -606,6 +627,7 @@ int main(int argc, char** argv) {
                 break;
             }
             cout << tokenizer.decode({next}, prev); cout.flush();
+            reply += tokenizer.decode({next}, prev);
             tokens.push_back(next);
             recent.push_back(next);
             ++generated;
@@ -618,6 +640,10 @@ int main(int argc, char** argv) {
             }
         }
         cout << "\n";
+        if (hist) {
+            hist->push_back(ChatMsg{"assistant", reply, "", ""});
+            kv_tokens = tokens;
+        }
         if (getenv("TIMING")) {
             double ms = elapsed_ms(dec_start, Clock::now());
             cerr << "TIMING prefill=" << elapsed_ms(turn_start, dec_start) / 1000.0
@@ -772,6 +798,7 @@ int main(int argc, char** argv) {
             else run_tool_turn(prompt, true);
         } else {
             bool first = true;
+            vector<ChatMsg> history;
             while (!g_stop) {
                 string line;
                 if (!line_edit_read("User: ", line)) break;
@@ -779,6 +806,8 @@ int main(int argc, char** argv) {
                 if (line == "/exit" || line == "/quit") break;
                 if (line == "/clear") {
                     first = true;
+                    history.clear();
+                    kv_tokens.clear();
                     cout << "[conversation cleared]\n";
                     continue;
                 }
@@ -789,7 +818,7 @@ int main(int argc, char** argv) {
                             "anything else is sent to the model; arrows edit, Up/Down recall.\n";
                     continue;
                 }
-                if (tools_json.empty()) run_turn(line, first, 0);
+                if (tools_json.empty()) run_turn(line, first, 0, chat_tmpl ? &history : nullptr);
                 else run_tool_turn(line, first);
                 first = false;
                 if (g_stop) {

@@ -120,9 +120,21 @@ stdin is a pipe (`echo "hi" | engine_mm3 --chat`) the editor is bypassed and the
 old `getline` behaviour is used, so scripts and the worker protocol are
 unaffected.
 
-Note that each turn currently shows the model only the **current** line: the
-chat history is not carried between REPL turns yet (the HTTP server does carry
-it).  That is the next thing to fix here.
+The REPL **keeps the conversation**: every turn re-renders the whole exchange
+through the container's template, so the model sees the same prompt shape it was
+trained on, system turn included, and `/clear` is the way to start over.  Only
+the tokens that are new since the previous turn are prefilled - the KV cache is
+reused up to the longest common prefix - so a long conversation costs the last
+exchange, not all of it:
+
+```
+User: Hi.                                    prefill 0.372 s   (first turn, compiles)
+User: My name is Alice.                      prefill 0.081 s
+User: What is my name?  -> "My name is Alice." prefill 0.083 s
+```
+
+Before this, each turn carried only the current line *and dropped the system
+turn*, which is why a recall question answered with an invented name.
 
 ### MiniMind2 Small
 
