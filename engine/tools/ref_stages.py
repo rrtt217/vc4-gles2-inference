@@ -63,7 +63,12 @@ def q16(v):
 
 
 def dump(name, values, limit):
-    """One DUMP line, exactly the engine's layout: two q16 per 4-byte texel."""
+    """One DUMP line, exactly the engine's layout: two q16 per 4-byte texel.
+
+    The engine packs the int16 values **big-endian** (high byte first) — decode
+    its dump little-endian and every second value is garbage, which is how a
+    first attempt at this comparison produced a bogus 256x scale factor.
+    """
     q = q16(values)
     n = len(q)
     w = (n + 1) // 2
@@ -72,7 +77,7 @@ def dump(name, values, limit):
     for t in range(show):
         a = int(q[2 * t]) & 0xFFFF
         b = int(q[2 * t + 1]) & 0xFFFF if 2 * t + 1 < n else 0
-        out.append("%02x%02x%02x%02x" % (a & 0xFF, a >> 8, b & 0xFF, b >> 8))
+        out.append("%02x%02x%02x%02x" % (a >> 8, a & 0xFF, b >> 8, b & 0xFF))
     print(" ".join(out))
 
 
@@ -115,10 +120,15 @@ def main():
 
     # The engine dumps per position, and inside it per layer, so do the same.
     for t in range(T):
-        xs = x[: t + 1]
         for l in range(n_layers):
             g = lambda n: get("model.layers.%d.%s" % (l, n))
             an, fn = g("input_layernorm.weight"), g("post_attention_layernorm.weight")
+            # `x` is the running residual: positions < t have already been
+            # through layer l-1, and t itself through l-1 as well, so the
+            # normalisation must be recomputed here, not hoisted out of the
+            # layer loop (the first version of this tool did hoist it, which
+            # made every layer after 0 look broken while layer 0 matched).
+            xs = x[: t + 1]
             xb = rms(xs[t], an, eps)
             dump("xb", xb, a.texels)
             h = rms(xs, an, eps)

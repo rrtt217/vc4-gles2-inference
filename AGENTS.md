@@ -251,6 +251,11 @@ These were paid for; do not relearn them.
   another `KV_PACK` or scale must be rejected.
 - **FFN**: hidden 2432 is split into 1216-wide chunks because VC4 FBO width is
   2048. q4 slicing must copy block scale/min and repack nibbles.
+- **The residual stream rails at ±128.**  It is q16 fixed point, so a model
+  whose residual exceeds 128 cannot be represented on the default path
+  (supra2-100M reaches 2300 at layer 4).  A per-layer power-of-two scale is the
+  fix that fits; a single global factor cannot span the early layers'
+  resolution and the late layers' range.
 - **CPU weights** are borrowed from the checkpoint mapping by default
   (`MODEL_BORROW=0` restores the copy); keep `KEEP_CPU_WEIGHTS=1` only for
   debugging.

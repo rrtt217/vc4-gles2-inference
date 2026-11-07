@@ -155,28 +155,59 @@ Ruled out by measurement, each one a single change:
 So the divergence is inside the engine's maths for this checkpoint shape, and
 none of the config fields above explains it.
 
-### Stage-level measurement (2026-11-07, in progress)
+### Stage-level measurement: the q16 residual rails at layer 4 (2026-11-07)
 
-`engine/tools/ref_stages.py` (new) prints the same per-stage `DUMP` lines as
-`STAGE_DUMP=1` from a float32 forward, so `dump_diff.awk` can compare the
-engine against a reference instead of against itself.  First results, prompt
-"hi" → token 22727, `GPU_LAYER=0`, one position:
+`engine/tools/ref_stages.py` prints the same per-stage `DUMP` lines as
+`STAGE_DUMP=1` from a float32 forward, so the engine can be compared against a
+reference instead of against its own other path.  Prompt "hi" → token 22727,
+`GPU_LAYER=0`, one position, 60 lines each, names aligned:
 
-- the engine's dump is **not in the reference's units** for this model: most
-  values are exactly 256x the reference's q16, i.e. the activation factor is
-  applied before packing.  MiniMind3's factor is 1, which is why the same tool
-  always looked directly comparable.  Divide the engine's values by 256 before
-  comparing.
-- with that undone, layer 0 `xb` agrees to 1-2 LSB at **746 of 768**
-  coordinates, and the 22 that do not agree are the same coordinates for a
-  different token (31, 32, 69, 81, 112, 177, 204 ... both times) - so this is
-  not noise and not token-specific.
-- at those coordinates the engine is near zero while the reference is not:
-  `idx 204`: weight 1.0288, embedding -0.136, reference xb -2.99, engine ~0.
-  The container's embedding row 22727 and its `input_layernorm` row both match
-  the safetensors to 3e-6, so the values are in the file; what disagrees is
-  what the engine computes from them.
+| layer | xb | att | x1 | xbf | hidA |
+|---:|---:|---:|---:|---:|---:|
+| 0 | 0.9998 | 0.9998 | 0.9998 | 0.9996 | 0.9998 |
+| 1 | 0.9997 | 0.9998 | 0.9998 | 0.9997 | 0.9999 |
+| 2 | 0.9998 | 0.9995 | 0.9999 | 0.9997 | 0.9999 |
+| 3 | 0.9998 | 0.9997 | 0.9998 | 0.9998 | 0.99997 |
+| 4 | 0.99996 | 0.9999 | 0.99997 | 0.99997 | **0.9197** |
+| 5 | 0.669 | 0.593 | 0.918 | 0.837 | 0.919 |
+| 11 | 0.398 | 0.265 | 0.761 | 0.880 | **-0.167** |
 
-Open lead for the next round: those 22 fixed coordinates in layer 0, before
-attention.  Everything downstream is therefore measured against an input that
-is already wrong.
+(cosine, engine vs float32).  The first stage that departs is **layer 4's
+`hidA`, the residual add after the FFN**, and everything after it degrades.
+
+**Cause: the model's residual stream does not fit the engine's q16 grid.**
+Measured on the reference, max|x| per layer is
+
+```
+layer   0    1    2    3     4     5     6     7     8     9    10    11
+max|x|  11   16   14   38  2314  2315  2315  2314  2313  2313  2309   174
+```
+
+and it is prompt-independent: tokens 22727, 6398 and 24932 all jump at layer 4
+(2261-2314) and drop again at layer 11.  The engine's residual is fixed point at
+1/256, so its rail is 32767/256 = **128**; the model needs **2300**, eighteen
+times the rail, and saturates from layer 4 on.
+
+Proved by construction rather than by inspection: running the *same* float32
+forward with the engine's clamp applied to each residual add reproduces the
+engine's wrong answer exactly,
+
+```
+f32 reference (no clamp)            -> I        You    Welcome
+same model + q16 clamp, no scaling  -> Introdu  I      Welcome     <- the engine
++ per-layer residual scale 2^5      -> Welcome  I      You
+```
+
+`Introdu` is the user's own word, which is what "it repeats the question"
+looked like from outside.  The clamped simulation puts it first; the f32
+reference does not.
+
+**What a fix needs.**  A single global factor does not work: it has to buy 18x
+of range for the late layers without spending the early layers' resolution
+(their values are ~0.05), and one q16 grid cannot span both.  A *per-layer*
+power-of-two scale does work — the row above shows 2^5 from layer 4 on removes
+the echo — and the engine already has the arithmetic for it
+(`GPU::set_residual_scale`, `res_in_`/`res_out_`, `rescale_residual`), but
+nothing at this commit calls it, and the CPU path's `add_q16` clamps
+unconditionally.  Until that is wired, supra2 is out of range on the default
+path and stays unsupported.

@@ -91,6 +91,19 @@ repeated single tokens (the model sees near-constant activations).  That is what
 against the pre-packing engine byte for byte.
 
 
+### 4b. The residual stream is q16, and that is a 128 rail
+
+The residual is fixed point at 1/256, so it cannot hold a value beyond **±128**;
+`add_q16` clamps there.  That is invisible for the models here (MiniMind3's
+residual peaks around 40, see `docs/performance.md`), and it is the hard limit
+for a model whose residual is larger: supra2-100M reaches **2300** at layer 4
+and saturates, which reproduces exactly as a wrong argmax
+(`models/README.md` has the measurement, including the clamped-simulation
+proof).  A per-layer power-of-two residual scale is the fix that fits
+(`GPU::set_residual_scale` exists but no caller does), and a single global
+factor does not work: the early layers need ~1e-2 resolution while the late
+ones need ~1e3 of range.
+
 ### 5. Texture limits: 2048 per side, no half-float, so every weight is decoded
 
 Probed with `engine/probes/texsize_probe.cpp` on this board (Mesa 26.2.2, VC4 V3D 2.1):
