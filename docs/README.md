@@ -20,6 +20,7 @@ Deep dives:
 | [engine-layout.md](engine-layout.md) | source layout, X formats, regression rule |
 | [quantization.md](quantization.md) | q4/q6 experiments, offline Q4M1, packed KV, quality caveats |
 | [performance.md](performance.md) | Pi/laptop timing tables, the chronological lab notebook, regression baselines |
+| [long-context.md](long-context.md) | why the Pi stops at 2048 tokens, and what passing it would cost |
 | [vc4-glsl-costs.md](vc4-glsl-costs.md) | what each GLSL function costs on VC4, read from Mesa 26.2.2 — and the six that abort the process |
 | [test-hooks.md](test-hooks.md) | environment switches: probes, dumps, A/B hooks |
 | [prefix-cache.md](prefix-cache.md) | in-memory and disk KV prefix cache, packed cache |
