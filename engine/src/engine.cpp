@@ -43,12 +43,47 @@
 #include "tokenizer.h"
 #include "sampling.h"
 #include "tools.h"
+#include "lineedit.h"
 
 // One short English prompt for every chat model.  MiniMind3's old Chinese
 // prompt was longer and made the default behave differently from the Qwen
 // template; a single ASCII prompt keeps prefill small and is easy to override
 // with --system.
 static const char* kDefaultSystem = "You are a helpful assistant.";
+
+static const char* kVersion = "1.0";
+
+// Informational stderr lines (template, tokenizer, specials, rope, cache) are
+// useful when something is wrong and noise when it is not; -q turns them off.
+static bool g_quiet = false;
+
+static const char* kUsage =
+    "usage: engine_mm3 [options]                       (MODEL=<file.mmcf> or --model)\n"
+    "\n"
+    "  --model PATH          container to run (or set MODEL)\n"
+    "  --chat                chat mode; with no --prompt it is a REPL on stdin\n"
+    "  --prompt TEXT         one-shot prompt ('-' reads stdin to EOF)\n"
+    "  --system TEXT         system prompt (default: the container's)\n"
+    "  --gen N              tokens to generate (default 8, 128 with --chat)\n"
+    "  --greedy             argmax instead of sampling\n"
+    "  --temp F --topp F     sampling knobs (default 1.0 / 0.9)\n"
+    "  --seed N              sampling seed (default 1234)\n"
+    "  --min-p F --repeat-penalty F --frequency-penalty F --presence-penalty F\n"
+    "  --no-repeat-ngram N   sampling penalties\n"
+    "  --tools JSON | --tools-file F   tool definitions for the model\n"
+    "  --thinking            open a thinking block before the answer\n"
+    "  --prefix-cache F      load a prefix cache (needs GPU attention)\n"
+    "  --build-prefix-cache PROMPTFILE OUT   write one and exit\n"
+    "  --ppl FILE            perplexity of a text file\n"
+    "  --worker              JSON-lines worker (the HTTP server drives this)\n"
+    "  -q, --quiet           no informational lines on stderr\n"
+    "  -V, --version         print the version\n"
+    "  -h, --help            this text\n"
+    "\n"
+    "In the REPL: /help, /clear (forget the conversation), /exit.\n"
+    "Sampling knobs also come from the environment (TOPK, MIN_P, ...); see\n"
+    "docs/test-hooks.md.  The container carries the tokenizer, the template,\n"
+    "rope and the special-token ids, so there are no flags for those.\n";
 
 int main(int argc, char** argv) {
     install_stop_handlers();
@@ -74,7 +109,22 @@ int main(int argc, char** argv) {
     if (getenv("MIN_P")) g_sampling.min_p = atof(getenv("MIN_P"));
 
     for (int i = 1; i < argc; ++i) {
-        if (!strcmp(argv[i], "--prompt") && i + 1 < argc) { prompt = argv[++i]; prompt_set = true; }
+        if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help") || !strcmp(argv[i], "help")) {
+            printf("%s", kUsage); return 0;
+        }
+        if (!strcmp(argv[i], "--version") || !strcmp(argv[i], "-V")) {
+            printf("engine_mm3 %s (MMCF v2)\n", kVersion); return 0;
+        }
+        if (!strcmp(argv[i], "-q") || !strcmp(argv[i], "--quiet")) g_quiet = true;
+        if (!strcmp(argv[i], "--model") && i + 1 < argc) model_path = argv[++i];
+        if (!strcmp(argv[i], "--prompt") && i + 1 < argc) {
+            prompt = argv[++i]; prompt_set = true;
+            if (prompt == "-") {                       // everything on stdin
+                stringstream ss; ss << cin.rdbuf(); prompt = ss.str();
+                while (!prompt.empty() && (prompt.back() == '\n' || prompt.back() == '\r'))
+                    prompt.pop_back();
+            }
+        }
         else if (!strcmp(argv[i], "--gen") && i + 1 < argc) { gen = atoi(argv[++i]); gen_set = true; }
         else if (!strcmp(argv[i], "--chat")) chat = true;
         else if (!strcmp(argv[i], "--ppl") && i + 1 < argc) ppl_path = argv[++i];
@@ -143,7 +193,7 @@ int main(int argc, char** argv) {
         tbb_template = tbb_template || want_tbb;
         if (tbb_template) qwen_template = false;   // its own markers, not chatml
         if ((!was_qwen && qwen_template) || (!was_mm3 && minimind3_template))
-            cerr << "template: " << (model.template_name.empty() ? "kind " + std::to_string(k) : model.template_name)
+            if (!g_quiet) cerr << "template: " << (model.template_name.empty() ? "kind " + std::to_string(k) : model.template_name)
                  << " (from the checkpoint)\n";
     }
     // Metadata key 9: the model's own Jinja template.  When it is present it is
@@ -157,7 +207,7 @@ int main(int argc, char** argv) {
             cerr << "chat template rejected: " << chat_tmpl->error() << "\n";
             return 2;
         }
-        cerr << "chat template: " << model.chat_template.size() << " B from the checkpoint ("
+        if (!g_quiet) cerr << "chat template: " << model.chat_template.size() << " B from the checkpoint ("
              << model.chat_templates.size() << " variant(s))\n";
     }
     // Capabilities: a checkpoint that says it is not a chat model must not be
@@ -174,13 +224,13 @@ int main(int argc, char** argv) {
     Tokenizer tokenizer;
     if (model.tok_blob && !getenv("TOKENIZER")) {
         if (!tokenizer.load_memory(model.tok_blob, model.tok_blob_bytes, model.vocab)) return 1;
-        cerr << "tokenizer: " << model.tok_blob_bytes << " B embedded in the checkpoint\n";
+        if (!g_quiet) cerr << "tokenizer: " << model.tok_blob_bytes << " B embedded in the checkpoint\n";
     } else if (!tokenizer.load(tokenizer_path, model.vocab)) {
         return 1;
     }
     tokenizer.set_bos(model.have_specials ? model.id_bos : 1);
     if (model.have_specials)
-        cerr << "specials: bos " << model.id_bos << " eos " << model.id_eos
+        if (!g_quiet) cerr << "specials: bos " << model.id_bos << " eos " << model.id_eos
              << " stop " << model.id_stop << " (from the checkpoint)\n";
     tokenizer.set_qwen(qwen_template || minimind3_template);
     tokenizer.set_bytelevel(minimind3_template);
@@ -721,16 +771,24 @@ int main(int argc, char** argv) {
             if (tools_json.empty()) run_turn(prompt, true, 0);
             else run_tool_turn(prompt, true);
         } else {
-            string line; bool first = true;
+            bool first = true;
             while (!g_stop) {
-                cout << "User: "; cout.flush();
-                struct pollfd pfd { STDIN_FILENO, POLLIN, 0 };
-                int pr;
-                do { pr = poll(&pfd, 1, 100); }
-                while ((pr == 0 || (pr < 0 && errno == EINTR)) && !g_stop);
-                if (g_stop || pr < 0) break;
-                if (!getline(cin, line)) break;
+                string line;
+                if (!line_edit_read("User: ", line)) break;
                 if (line.empty()) continue;
+                if (line == "/exit" || line == "/quit") break;
+                if (line == "/clear") {
+                    first = true;
+                    cout << "[conversation cleared]\n";
+                    continue;
+                }
+                if (line == "/help") {
+                    cout << "/clear  forget the conversation so far\n"
+                            "/exit   leave\n"
+                            "/help   this list\n"
+                            "anything else is sent to the model; arrows edit, Up/Down recall.\n";
+                    continue;
+                }
                 if (tools_json.empty()) run_turn(line, first, 0);
                 else run_tool_turn(line, first);
                 first = false;

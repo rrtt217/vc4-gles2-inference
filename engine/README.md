@@ -87,6 +87,43 @@ GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
 
 Do not set `Q4_WEIGHTS` when the model file is already Q4M1.
 
+### Interactive chat
+
+`--chat` without `--prompt` is a REPL: the model loads once and the prompt comes
+back for the next line, which is what makes a 7-second Pi start worth waiting
+for.
+
+```bash
+MODEL=../models/supra2-medium/medium.q8.q24.mmcf \
+GPU_LAYER=1 KV_PACK=16 SEQ=512 ./engine_mm3 --chat --gen 64 --greedy
+```
+
+```
+User: What is the capital of France?
+Assistant: The capital of France is Bordeaux, ...
+User: /help
+```
+
+| key | |
+|---|---|
+| Left / Right | move the cursor (UTF-8 aware, one character at a time) |
+| Up / Down | previous lines, up to 32 of them |
+| Home / End, Ctrl-A / Ctrl-E | start / end of line |
+| Backspace, Delete, Ctrl-D | delete backwards, forwards, forwards |
+| Ctrl-K / Ctrl-U / Ctrl-W | kill to end, kill to start, kill the word before |
+| Ctrl-L | clear the screen and redraw |
+| Ctrl-C | abandon the line, keep the session |
+| Ctrl-D on an empty line | leave |
+
+`/clear` forgets the conversation, `/exit` leaves, `/help` lists them.  When
+stdin is a pipe (`echo "hi" | engine_mm3 --chat`) the editor is bypassed and the
+old `getline` behaviour is used, so scripts and the worker protocol are
+unaffected.
+
+Note that each turn currently shows the model only the **current** line: the
+chat history is not carried between REPL turns yet (the HTTP server does carry
+it).  That is the next thing to fix here.
+
 ### MiniMind2 Small
 
 MiniMind2 uses the Qwen chat template (template kind 1 in the container).  The
