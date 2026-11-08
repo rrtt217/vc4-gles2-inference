@@ -139,8 +139,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    printf("header: kLogitsGrid=%d (packed %d), kMatvecStripRows=%d\n",
-           kLogitsGrid, kLogitsGridPacked, kMatvecStripRows);
+    printf("header: kLogitsGrid=%d (packed %d)\n", kLogitsGrid, kLogitsGridPacked);
     printf("host assumes: %d\n\n", host_grid);
     bool ok = host_grid == kLogitsGrid;
 

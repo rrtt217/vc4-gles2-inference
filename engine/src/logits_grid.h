@@ -39,8 +39,3 @@ constexpr int kLogitsGrid = 1536;
 // The paired vocabulary kernel writes two logits per texel.
 constexpr int kLogitsGridPacked = kLogitsGrid / 2;
 
-// draw() splits a matvec into column strips when the matrix has this many rows
-// (a single pass of that width is unreliable on VC4).  It is the qkv width for
-// MiniMind3 and therefore equals kLogitsGrid, but it is a separate quantity:
-// another model's qkv width changes this one and not the vocabulary grid.
-constexpr int kMatvecStripRows = 1536;

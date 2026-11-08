@@ -881,10 +881,15 @@ void GPU::matvec_add(const Mat& m, GLuint x, GLuint residual, Target& out, XForm
         // The q4 kernels take their scale as "ps"; "ws" does not exist there.
         if (m.type != WeightType::INT4) glUniform1f(uloc(p, "ws"), m.scale);
         setup_attrib(p);
-        const int strip = pair ? ((m.rows == kMatvecStripRows) ? 384 : (m.rows + 1) / 2)
-                               : ((m.rows == kMatvecStripRows) ? kMatvecStripRows / 2 : m.rows);
-        for (int x0 = 0; x0 < m.rows; x0 += strip) {
-            int w = min(strip, m.rows - x0);
+        // Same rule as draw(): a single draw never exceeds 1024 fragments.  A
+        // full-target-width draw is what gets dropped (docs/engine-internals.md
+        // section 2), and a 1536-row matrix is exactly that for its own target.
+        // The old special case split 1536 into 768+768 and left every other
+        // width in one pass; the cap covers all of them, and `ow` is the
+        // fragment count (rows/2 for the paired kernels), not the row count.
+        const int strip = min(1024, ow);
+        for (int x0 = 0; x0 < ow; x0 += strip) {
+            int w = min(strip, ow - x0);
             glViewport(x0, 0, w, 1);
             glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         }
@@ -2055,11 +2060,11 @@ void GPU::draw(const Mat& m, GLuint x, Target& t, int row ){
         // costs one draw (~10 us), so cap every strip at 1024 and keep the
         // gl_FragCoord-absolute convention the shader relies on.
         //
-        // The 1536 special case in matvec() (768-wide halves) is a different
-        // failure: a single 1536-wide draw is byte-exact in a readback probe but
-        // corrupts the qkv target when the next pass samples it as a texture -
+        // That cap is what protects the 1536-wide qkv today: a single
+        // 1536-wide draw is byte-exact in a readback probe but leaves the qkv
+        // target unwritten when the next pass samples it as a texture -
         // different garbage every run, PPL 271.2855 -> 71669 on the Pi
-        // (docs/engine-internals.md section 2).  Both workarounds stay.
+        // (docs/engine-internals.md section 2).  matvec_add() uses the same cap.
         // MATVEC_STRIP overrides the cap for experiments.
         const char* sv = getenv("MATVEC_STRIP");
         const int env_strip = sv ? atoi(sv) : 0;
