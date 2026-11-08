@@ -77,8 +77,12 @@ The engine uses this form in all FBO-sampling shaders.
 > it only needs one.  The 2048 case is a different failure (5030/8192 bytes wrong
 > in readback).
 >
-> Both workarounds stay - the 1024-fragment cap in `draw()` and the 1536 special
-> case in `matvec()`.
+> Both split points now use one rule: `draw()` and `matvec_add()` each cap a
+> single draw at 1024 fragments, which is what keeps the qkv at 1024+512 and
+> every other matvec narrower than its own target.  (The old 1536-only special
+> case in `matvec_add()` was removed in `625c591`: it split 1536 into 768+768 and
+> left every other width in one pass, and its loop walked rows instead of
+> fragments, issuing a second strip entirely outside the paired target.)
 
 ### 3. FBO -> texture sampling needs an explicit finish
 

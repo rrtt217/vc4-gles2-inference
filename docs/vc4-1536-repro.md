@@ -6,7 +6,9 @@ Two claims are open on the board and cannot be settled on the laptop:
    §2 and the "do not retry" table in `docs/future-optimization.md` say yes
    (measured 2026-11-03: garbage tokens).  The width sweep in `30b2882`
    (2026-11-04) measured 768..2040 as byte-identical and only **2048** as wrong.
-   The two have never been reconciled; the code keeps both workarounds.
+   Settled 2026-11-08: the first claim is right *in the engine* and the sweep is
+   blind to it - its readback path cannot see a draw that is dropped before the
+   next pass samples the target.  See "Results" below.
 2. **What does changing `kLogitsGrid` cost on VC4?**  On Xe a repack at 1024 gave
    the same greedy text and PPL 270.3170 -> 270.5287 (+0.08%), two more logits
    draws per token.  Nothing about that is VC4-specific except the strip
