@@ -32,20 +32,32 @@ The engine uses this form in all FBO-sampling shaders.
 > (`QKV_PAIR=0 MATVEC_STRIP=1536`, i.e. the unpaired qkv drawn in one 1536-wide
 > pass) prints *different* garbage every run - `..nnnnnnnn...`,
 > `听今天今天...`, `佳译译译...`, `儿火火火...` - and `--ppl` goes
-> **271.2855 -> 71669.1013**.  `MATVEC_STRIP=1535` (a 1535+1 split) is clean,
-> and `FORCE_GLFINISH=1` does not help, so this is not a missing finish.
+> **271.2855 -> 71669.1013**.
 >
-> The 2026-11-04 width sweep does **not** contradict this: that probe draws the
-> wide matvec and compares it against two half-width draws *after
-> `glReadPixels`*, and it reports 1536 as byte-identical (the 2048 case is the
-> one it catches, at 5030/8192 bytes).  The corruption here appears only when
-> the next pass samples the target as a texture, which a readback does not
-> reproduce.  Read "768..2040 identical" as a statement about readback, not
-> about the engine's pipeline.
+> **What is actually happening.**  `DRAW_CLEAR=1` (fill the target with
+> 0x33/0x66/0x99/0xff before the draw, see `docs/test-hooks.md`) plus
+> `QKV_DUMP=1` shows the target still holding the clear pattern after the draw:
+> the draw was not executed, it did not merely read stale input.  With
+> `PREFILL_PAIR=0` and one 1536 draw per layer, every layer's qkv comes back
+> with **layer 0's** hash - the first full-width draw into the target lands and
+> every later one is dropped.  Narrower draws (1535+1, 1024+512, 768+768) always
+> land, so the whole target gets written.
 >
-> The 1536 special case in `matvec()` therefore stays, and so does the
-> 1024-fragment cap in `draw()` - the cap is what keeps the qkv at 1024+512
-> today.
+> Not sync: `LAYER_SAFE_FINISH=1` (a real `glFinish` after the producing pass)
+> changes nothing, and neither does drawing the qkv twice (`ATTN_DUP=qkv`).
+> The command list does contain the 1536-wide clip window, so the call reaches
+> the driver.
+>
+> The 2026-11-04 width sweep does **not** contradict this: `draw_probe` draws the
+> wide matvec repeatedly into one target and compares after `glReadPixels`, and
+> reports 1536 as byte-identical - its first draw lands, and it only needs one.
+> The 2048 case is a different failure (5030/8192 bytes wrong in readback).
+>
+> The root cause inside Mesa/vc4 is not established from here: what is proven is
+> that a *second and later full-width draw into a recycled 1536x1 target* is
+> silently dropped on this driver, while any narrower draw is not.  Both
+> workarounds stay - the 1024-fragment cap in `draw()` and the 1536 special case
+> in `matvec()`.
 
 ### 3. FBO -> texture sampling needs an explicit finish
 

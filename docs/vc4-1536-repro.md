@@ -288,3 +288,19 @@ Conclusion: a single 1536-wide draw is exact in a readback probe and corrupt in
 the engine's pipeline, nondeterministically; 2048 is corrupt in readback too.
 The 1024-fragment cap covers both.  The 2026-11-04 sweep's "768..2040 identical"
 is a readback statement and must not be read as clearing the engine path.
+
+### Mechanism (2026-11-08)
+
+The draw is **not executed**, it does not read stale input: `DRAW_CLEAR=1`
+(fill the target with 0x33/0x66/0x99/0xff before the draw) leaves the clear
+pattern in the qkv target after the draw, and `PREFILL_PAIR=0` shows every
+layer's qkv coming back with layer 0's hash - the first full-width 1536 draw
+into the target lands, every later one is dropped.  `LAYER_SAFE_FINISH=1`
+(a real `glFinish` after the producing pass) and `ATTN_DUP=qkv` (draw twice)
+change nothing; the command list does contain the 1536-wide clip window.
+
+`draw_probe` cannot see it because it draws the wide matvec repeatedly into one
+target and reads back once: the first draw lands and the comparison passes.
+
+The 2048 case is separate and worse in a different way: it is wrong in readback
+(5030/8192 bytes) with or without a split, and 2040 is exact.

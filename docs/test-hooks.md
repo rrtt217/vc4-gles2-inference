@@ -210,6 +210,7 @@ path on one.
 | `KV_VSTEP` | 8-bit KV per-head V step (step 9b/9c experiment) |
 | `MATVEC_STRIP` | debug the 1536-column strip split in `draw()` |
 | `NO_SHADER_SELFTEST` | skip the link-time program self-test |
+| `DRAW_CLEAR` | fill a draw target with 0x33/0x66/0x99/0xff before the draw, so a readback can tell "the draw did not execute" from "the draw saw stale input" (used to pin down the 1536-draw drop, `docs/engine-internals.md` §2) |
 | `TZ` | timezone for the built-in `get_current_time` tool |
 
 `REPETITION_PENALTY`, `FREQUENCY_PENALTY`, `PRESENCE_PENALTY`,

@@ -2029,11 +2029,12 @@ void GPU::draw(const Mat& m, GLuint x, Target& t, int row ){
                   : (m.type == WeightType::INT4) ? x_i4(m.rows, m.cols)
                                                  : x_i16(m.rows, m.cols);
         bind_fbo(t.fbo);
-        // Debug hook (DRAW_CLEAR=1): fill the target with a known pattern before
-        // the draw, so "the draw did not execute" and "the draw read stale
-        // input" are distinguishable in a readback.  0x33/0x66/0x99/0xff is not
-        // a valid q16 pair for any small value.
-        if (getenv("DRAW_CLEAR")) { glClearColor(0.2f, 0.4f, 0.6f, 1.0f); glClear(GL_COLOR_BUFFER_BIT); }
+        // DRAW_CLEAR=1 fills the target with a known pattern before the draw, so
+        // "the draw did not execute" and "the draw read stale input" are
+        // distinguishable in a readback.  0x33/0x66/0x99/0xff is not a valid q16
+        // pair for any small value.  Cached: this sits on the per-draw path.
+        static const bool draw_clear = getenv("DRAW_CLEAR") != nullptr;
+        if (draw_clear) { glClearColor(0.2f, 0.4f, 0.6f, 1.0f); glClear(GL_COLOR_BUFFER_BIT); }
         use_program(p);
         bind_tex(0, m.tex);
         set_sampler(p, "W", 0);
