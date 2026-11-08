@@ -10,6 +10,11 @@ using std::to_string;
 
 namespace {
 
+// 24-bit logits decode, shared by the sum and the two Top-K passes.
+const string kDec24Q =
+    "float dec(vec4 c){return (floor(c.r*255.0+0.5)*16777216.0+floor(c.g*255.0+0.5)*65536.0+"
+    "floor(c.b*255.0+0.5)*256.0+floor(c.a*255.0+0.5)-8388608.0)/256.0;}";
+
 // QKV holds the q/k/v matvec output.  When the qkv matvec pairs two output
 // rows into one texel the reads become a half-width fetch plus a component
 // select; otherwise the original 24-bit fetch is emitted verbatim.
@@ -358,8 +363,7 @@ string att_v(const AttnConfig& c, XFormat out) {
 string sum_logits() {
     return "precision highp float;"
         "uniform sampler2D L;uniform float tr,nr,mrows,invt;"
-        "float dec(vec4 c){return (floor(c.r*255.0+0.5)*16777216.0+floor(c.g*255.0+0.5)*65536.0+"
-        "floor(c.b*255.0+0.5)*256.0+floor(c.a*255.0+0.5)-8388608.0)/256.0;}"
+               + kDec24Q +
         "void main(){float mx=-1e30;for(int i=0;i<1536;i++){if(float(i)>=mrows)break;"
         "vec4 c=texture2D(L,vec2((float(i)+0.5)/1536.0,(tr+0.5)/nr));mx=max(mx,dec(c));}"
         "float sum=0.0;for(int i=0;i<1536;i++){if(float(i)>=mrows)break;"
@@ -373,8 +377,7 @@ string sum_logits() {
 string top2_fast(int rows, int chunk) {
     return "precision highp float;"
         "uniform sampler2D L;uniform float tr,nr;"
-        "float dec(vec4 c){return (floor(c.r*255.0+0.5)*16777216.0+floor(c.g*255.0+0.5)*65536.0+"
-        "floor(c.b*255.0+0.5)*256.0+floor(c.a*255.0+0.5)-8388608.0)/256.0;}"
+               + kDec24Q +
         "void main(){int x=int(gl_FragCoord.x);int ch=x/2;int rank=x-ch*2;int start=ch*" + to_string(chunk) + ";"
         "float best1=-1e30,best2=-1e30;int i1=0,i2=0;"
         "for(int k=0;k<" + to_string(chunk) + ";k++){int idx=start+k;if(idx>=" + to_string(rows) + ")break;"
@@ -389,8 +392,7 @@ string top2_fast(int rows, int chunk) {
 string top2(int rows, int chunk) {
     return "precision highp float;"
         "uniform sampler2D L;uniform float tr,nr,invt;"
-        "float dec(vec4 c){return (floor(c.r*255.0+0.5)*16777216.0+floor(c.g*255.0+0.5)*65536.0+"
-        "floor(c.b*255.0+0.5)*256.0+floor(c.a*255.0+0.5)-8388608.0)/256.0;}"
+               + kDec24Q +
         "void main(){int x=int(gl_FragCoord.x);int ch=x/3;int rank=x-ch*3;int start=ch*" + to_string(chunk) + ";"
         "float best1=-1e30,best2=-1e30,lm=-1e30,ls=0.0;int i1=0,i2=0;"
         "for(int k=0;k<" + to_string(chunk) + ";k++){int idx=start+k;if(idx>=" + to_string(rows) + ")break;"

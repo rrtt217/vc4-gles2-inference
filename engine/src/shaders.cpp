@@ -32,13 +32,48 @@ string q24_helpers() {
         "return vec4(r0/255.0,g/255.0,b/255.0,a/255.0);}\n";
 }
 
+// Shared GLSL fragments.  These are constants rather than GLSL helper
+// functions on purpose: the hot matvec loops must keep the decode inline (VC4
+// compiles a helper that takes a texture fetch as an argument much slower -
+// 177 against 283 MMAC/s, docs/performance.md), so the emitted program carries
+// the text either way.  Defining it once means a change to the decode is made
+// once, and --dump-shaders proves the emitted bytes did not move.
+//
+// The q4 kernels route through q4_head(), which has always put each decoder on
+// its own line; the newline-separated join is kept there so the text is
+// unchanged.
+const string kDec16A =
+    "float dA(vec4 c){float u=c.r*65280.0+c.g*255.0;"
+    "return u>=32768.0?u-65536.0:u;}";
+const string kDec16B =
+    "float dB(vec4 c){float u=c.b*65280.0+c.a*255.0;"
+    "return u>=32768.0?u-65536.0:u;}";
+
+// Round/clamp to q16, then swiglu: the fused gate kernels.
+const string kQzSl =
+    "float qz(float v){return clamp(floor(v+0.5),-32768.0,32767.0);}"
+    "float sl(float q,float g){float a=q/256.0;return (a/(1.0+exp(-a)))*(g/256.0);}";
+
+// q16 pair from a scaled value (s*w) and from a value already in q16 units.
+const string kEnc16Mul =
+    "vec2 enc16(float s,float w){float v=clamp(floor(s*w+0.5),-32768.0,32767.0);"
+    "if(v<0.0)v+=65536.0;float hi=floor(v/256.0);"
+    "return vec2(hi/255.0,(v-hi*256.0)/255.0);}";
+const string kEnc16Raw =
+    "vec2 enc16(float v){v=clamp(floor(v+0.5),-32768.0,32767.0);"
+    "if(v<0.0)v+=65536.0;float hi=floor(v/256.0);"
+    "return vec2(hi/255.0,(v-hi*256.0)/255.0);}";
+
+// Sum of squares in 24-bit fixed point, scale 4096 (the rms stats passes).
+const string kEncs4096 =
+    "vec4 encs(float s){float q=floor(s*4096.0+0.5)+8388608.0;"
+    "float r0=floor(q/16777216.0),g=floor(q/65536.0)-r0*256.0,"
+    "b=floor(q/256.0)-r0*65536.0-g*256.0,a=q-r0*16777216.0-g*65536.0-b*256.0;"
+    "return vec4(r0/255.0,g/255.0,b/255.0,a/255.0);}";
+
 static string q4_head(XFormat xf, bool inl) {
     if (!inl || xf != XFormat::I16_2) return head(xf);
-    return head(xf) +
-        "float dA(vec4 c){float u=c.r*65280.0+c.g*255.0;"
-        "return u>=32768.0?u-65536.0:u;}\n"
-        "float dB(vec4 c){float u=c.b*65280.0+c.a*255.0;"
-        "return u>=32768.0?u-65536.0:u;}\n";
+    return head(xf) + kDec16A + "\n" + kDec16B + "\n";
 }
 
 // INT4 kernels all decode eight I16_2 activations per 32-weight group.  The
@@ -199,10 +234,7 @@ string matvec_q8(int rows, int cols, XFormat xf) {
     // the I16_2 fast path keeps the inline form.
     if (xf == XFormat::I16_2) {
         return "precision highp float;uniform sampler2D W,X;uniform float ws;"
-               "float dA(vec4 c){float u=c.r*65280.0+c.g*255.0;"
-               "return u>=32768.0?u-65536.0:u;}"
-               "float dB(vec4 c){float u=c.b*65280.0+c.a*255.0;"
-               "return u>=32768.0?u-65536.0:u;}"
+               + kDec16A + kDec16B +
                "void main(){int r=int(gl_FragCoord.x);float s=0.0;"
                "for(int q=0;q<" + COLS4 + ";q++){"
                "vec4 c=texture2D(W,vec2((float(q)+0.5)/float(" + COLS4 + "),"
@@ -235,13 +267,8 @@ string matvec_q8_pair(int rows, int cols, XFormat xf) {
     const string ROWS = to_string(rows), COLS4 = to_string(cols / 4), AXW = to_string(axw);
     if (xf == XFormat::I16_2) {
         return "precision highp float;uniform sampler2D W1,W2,X;uniform float ws1,ws2;"
-               "float dA(vec4 c){float u=c.r*65280.0+c.g*255.0;"
-               "return u>=32768.0?u-65536.0:u;}"
-               "float dB(vec4 c){float u=c.b*65280.0+c.a*255.0;"
-               "return u>=32768.0?u-65536.0:u;}"
-               "vec2 enc16(float s,float w){float v=clamp(floor(s*w+0.5),-32768.0,32767.0);"
-               "if(v<0.0)v+=65536.0;float hi=floor(v/256.0);"
-               "return vec2(hi/255.0,(v-hi*256.0)/255.0);}"
+               + kDec16A + kDec16B
+               + kEnc16Mul +
                "void main(){int r=int(gl_FragCoord.x);float s1=0.0,s2=0.0;"
                "for(int q=0;q<" + COLS4 + ";q++){"
                "vec4 c1=texture2D(W1,vec2((float(q)+0.5)/float(" + COLS4 + "),"
@@ -289,13 +316,8 @@ string matvec_q8_pair_logits(int rows, int cols, XFormat xf) {
     // are identical, so the packed output is byte-identical.
     if (xf == XFormat::I16_2) {
         return "precision highp float;uniform sampler2D W,X;uniform float ws;"
-               "float dA(vec4 c){float u=c.r*65280.0+c.g*255.0;"
-               "return u>=32768.0?u-65536.0:u;}"
-               "float dB(vec4 c){float u=c.b*65280.0+c.a*255.0;"
-               "return u>=32768.0?u-65536.0:u;}"
-               "vec2 enc16(float s,float w){float v=clamp(floor(s*w+0.5),-32768.0,32767.0);"
-               "if(v<0.0)v+=65536.0;float hi=floor(v/256.0);"
-               "return vec2(hi/255.0,(v-hi*256.0)/255.0);}"
+               + kDec16A + kDec16B
+               + kEnc16Mul +
                "void main(){int t=int(gl_FragCoord.x);int r0=2*t;int r1=r0+1;float s0=0.0,s1=0.0;"
                "for(int q=0;q<" + COLS4 + ";q++){"
                "vec4 xa=texture2D(X,vec2((float(2*q)+0.5)/float(" + AXW + "),0.5));"
@@ -340,12 +362,8 @@ string matvec_q8_pair_swiglu(int rows, int cols, XFormat xf, bool inl) {
     // form in the same binary for an interleaved A/B.
     if (inl && xf == XFormat::I16_2) {
         return head(xf) + "uniform sampler2D W1,W2,X;uniform float ws1,ws2;"
-               "float dA(vec4 c){float u=c.r*65280.0+c.g*255.0;"
-               "return u>=32768.0?u-65536.0:u;}"
-               "float dB(vec4 c){float u=c.b*65280.0+c.a*255.0;"
-               "return u>=32768.0?u-65536.0:u;}"
-               "float qz(float v){return clamp(floor(v+0.5),-32768.0,32767.0);}"
-               "float sl(float q,float g){float a=q/256.0;return (a/(1.0+exp(-a)))*(g/256.0);}"
+               + kDec16A + kDec16B
+               + kQzSl +
                "void main(){int t=int(gl_FragCoord.x);int r0=2*t;"
                "int r1=min(r0+1," + to_string(rows - 1) + ");float s10=0.0,s20=0.0,s11=0.0,s21=0.0;"
                "for(int q=0;q<" + COLS4 + ";q++){"
@@ -365,8 +383,7 @@ string matvec_q8_pair_swiglu(int rows, int cols, XFormat xf, bool inl) {
     }
     return head(xf) +
         "uniform sampler2D W1,W2,X;uniform float ws1,ws2;"
-        "float qz(float v){return clamp(floor(v+0.5),-32768.0,32767.0);}"
-        "float sl(float q,float g){float a=q/256.0;return (a/(1.0+exp(-a)))*(g/256.0);}"
+               + kQzSl +
         "void main(){int t=int(gl_FragCoord.x);int r0=2*t;"
         "int r1=min(r0+1," + to_string(rows - 1) + ");float s10=0.0,s20=0.0,s11=0.0,s21=0.0;"
         "for(int q=0;q<" + COLS4 + ";q++){"
@@ -403,13 +420,8 @@ string matvec_q8_gate2(int rows, int cols) {
                       "(float(r)+0.5)/float(" + ROWS + "))";
     return head(XFormat::I16_2) + x_pair2_glsl() +
         "uniform sampler2D W1,W2,X;uniform float ws1,ws2;"
-        "float dA(vec4 c){float u=c.r*65280.0+c.g*255.0;"
-        "return u>=32768.0?u-65536.0:u;}"
-        "float dB(vec4 c){float u=c.b*65280.0+c.a*255.0;"
-        "return u>=32768.0?u-65536.0:u;}"
-        "float qz(float v){return clamp(floor(v+0.5),-32768.0,32767.0);}"
-        "float sl(float q,float g){float a=q/256.0;"
-        "return (a/(1.0+exp(-a)))*(g/256.0);}"
+               + kDec16A + kDec16B
+               + kQzSl +
         "void main(){int r=int(gl_FragCoord.x);"
         "float s10=0.0,s20=0.0,s11=0.0,s21=0.0;"
         "for(int q=0;q<" + COLS4 + ";q++){"
@@ -476,10 +488,7 @@ string rms_stats2(int dim, XFormat rf) {
     const string RW = to_string(x_texels(dim, rf));
     return head(XFormat::I16_2) + x_residual_glsl(rf) + q24_helpers() +
         "uniform sampler2D XA,XB;"
-        "vec4 encs(float s){float q=floor(s*4096.0+0.5)+8388608.0;"
-        "float r0=floor(q/16777216.0),g=floor(q/65536.0)-r0*256.0,"
-        "b=floor(q/256.0)-r0*65536.0-g*256.0,a=q-r0*16777216.0-g*65536.0-b*256.0;"
-        "return vec4(r0/255.0,g/255.0,b/255.0,a/255.0);}"
+               + kEncs4096 +
         "void main(){int pid=int(gl_FragCoord.x);int per=(" + D + "+31)/32;"
         "int i0=(pid-(pid/32)*32)*per;"
         "float s=0.0;"
@@ -521,9 +530,7 @@ string matvec_q8_gate2_p2(int rows, int cols) {
                       "(float(r)+0.5)/float(" + ROWS + "))";
     return head(XFormat::I16_2) + x_pair2_glsl() +
         "uniform sampler2D W1,W2,X;uniform float ws1,ws2;"
-        "float qz(float v){return clamp(floor(v+0.5),-32768.0,32767.0);}"
-        "float sl(float q,float g){float a=q/256.0;"
-        "return (a/(1.0+exp(-a)))*(g/256.0);}"
+               + kQzSl +
         "void main(){int r=int(gl_FragCoord.x);"
         "float s10=0.0,s20=0.0,s11=0.0,s21=0.0;"
         "for(int q=0;q<" + COLS4 + ";q++){"
@@ -629,13 +636,8 @@ string matvec_q8_pair_fused(int rows, int cols, XFormat xf) {
     // the loop body; matvec_probe measures 283 vs 177 MMAC/s for that shape.
     if (xf == XFormat::I16_2) {
         return "precision highp float;uniform sampler2D W,X;uniform float ws;"
-               "float dA(vec4 c){float u=c.r*65280.0+c.g*255.0;"
-               "return u>=32768.0?u-65536.0:u;}"
-               "float dB(vec4 c){float u=c.b*65280.0+c.a*255.0;"
-               "return u>=32768.0?u-65536.0:u;}"
-               "vec2 enc16(float s,float w){float v=clamp(floor(s*w+0.5),-32768.0,32767.0);"
-               "if(v<0.0)v+=65536.0;float hi=floor(v/256.0);"
-               "return vec2(hi/255.0,(v-hi*256.0)/255.0);}"
+               + kDec16A + kDec16B
+               + kEnc16Mul +
                "void main(){int r=int(gl_FragCoord.x);float s1=0.0,s2=0.0;"
                "for(int q=0;q<" + to_string(cols / 4) + ";q++){"
                "vec4 xa=texture2D(X,vec2((float(2*q)+0.5)/float(" + to_string(axw) + "),0.5));"
@@ -673,10 +675,7 @@ string matvec_q8_add(int rows, int cols, XFormat xf, XFormat rf) {
         // Inline form: VC4 compiles this noticeably faster than the generic
         // helper-based version (the helper takes two texel fetches as arguments).
         return "precision highp float;uniform sampler2D W,X,R;uniform float ws;"
-               "float dA(vec4 c){float u=c.r*65280.0+c.g*255.0;"
-               "return u>=32768.0?u-65536.0:u;}"
-               "float dB(vec4 c){float u=c.b*65280.0+c.a*255.0;"
-               "return u>=32768.0?u-65536.0:u;}"
+               + kDec16A + kDec16B +
                "float dr(vec4 c){float u=c.r*65280.0+c.g*255.0;"
                "if(u>=32768.0)u-=65536.0;return u/256.0;}"
                "void main(){int r=int(gl_FragCoord.x);float s=0.0;"
@@ -718,13 +717,8 @@ string matvec_q8_add_pair(int rows, int cols, XFormat xf, bool inl) {
     // the q16 rounding are unchanged, so the packed output is bit-identical.
     if (inl && xf == XFormat::I16_2) {
         return "precision highp float;uniform sampler2D W,X,R;uniform float ws;"
-               "float dA(vec4 c){float u=c.r*65280.0+c.g*255.0;"
-               "return u>=32768.0?u-65536.0:u;}"
-               "float dB(vec4 c){float u=c.b*65280.0+c.a*255.0;"
-               "return u>=32768.0?u-65536.0:u;}"
-               "vec2 enc16(float v){v=clamp(floor(v+0.5),-32768.0,32767.0);"
-               "if(v<0.0)v+=65536.0;float hi=floor(v/256.0);"
-               "return vec2(hi/255.0,(v-hi*256.0)/255.0);}"
+               + kDec16A + kDec16B
+               + kEnc16Raw +
                "void main(){int t=int(gl_FragCoord.x);int r0=2*t;int r1=r0+1;"
                "vec4 rc=texture2D(R,vec2((float(t)+0.5)/float(" + to_string(rw) + "),0.5));"
                "float res0=dA(rc),res1=dB(rc);"
@@ -940,9 +934,8 @@ string matvec_i4_pair_swiglu(int rows, int cols, XFormat xf, bool inl) {
         "uniform sampler2D W1,W2,P1,P2,X;uniform float ps1,ps2;" +
         (mv4 ? string()
              : "float dot4(vec4 w0,vec4 xa,vec4 xb){" + q4_taps("w0") +
-               "return l0*xa.x+h0*xa.y+l1*xa.z+h1*xa.w+l2*xb.x+h2*xb.y+l3*xb.z+h3*xb.w;}") +
-        "float qz(float v){return clamp(floor(v+0.5),-32768.0,32767.0);}"
-        "float sl(float q,float g){float a=q/256.0;return (a/(1.0+exp(-a)))*(g/256.0);}"
+               "return l0*xa.x+h0*xa.y+l1*xa.z+h1*xa.w+l2*xb.x+h2*xb.y+l3*xb.z+h3*xb.w;}")
+        + kQzSl +
         "void main(){int t=int(gl_FragCoord.x);int r0=2*t;"
         "int r1=min(r0+1," + to_string(rows - 1) + ");"
         "float u0=float(r0),u1=float(r1);"
@@ -1072,10 +1065,7 @@ string rms_stats_split(int dim, XFormat residual) {
     const string RW = to_string(x_texels(dim, residual));
     return head(residual) + x_residual_glsl(residual) +
         "uniform sampler2D X;"
-        "vec4 encs(float s){float q=floor(s*4096.0+0.5)+8388608.0;"
-        "float r0=floor(q/16777216.0),g=floor(q/65536.0)-r0*256.0,"
-        "b=floor(q/256.0)-r0*65536.0-g*256.0,a=q-r0*16777216.0-g*65536.0-b*256.0;"
-        "return vec4(r0/255.0,g/255.0,b/255.0,a/255.0);}"
+               + kEncs4096 +
         "void main(){int pid=int(gl_FragCoord.x);int per=(" + D + "+31)/32;"
         "int i0=pid*per;float s=0.0;"
         "for(int k=0;k<per;k++){int i=i0+k;if(i<" + D + "){"
@@ -1089,10 +1079,7 @@ string rms_stats_reduce() {
         "float raw(vec4 c){return floor(c.r*255.0+0.5)*16777216.0+"
         "floor(c.g*255.0+0.5)*65536.0+floor(c.b*255.0+0.5)*256.0+"
         "floor(c.a*255.0+0.5)-8388608.0;}"
-        "vec4 encs(float s){float q=floor(s*4096.0+0.5)+8388608.0;"
-        "float r0=floor(q/16777216.0),g=floor(q/65536.0)-r0*256.0,"
-        "b=floor(q/256.0)-r0*65536.0-g*256.0,a=q-r0*16777216.0-g*65536.0-b*256.0;"
-        "return vec4(r0/255.0,g/255.0,b/255.0,a/255.0);}"
+               + kEncs4096 +
         "void main(){float s=0.0;for(int p=0;p<32;p++){"
         "s+=raw(texture2D(S,vec2((float(p)+0.5)/32.0,0.5)))/4096.0;}"
         "gl_FragColor=encs(s);}";

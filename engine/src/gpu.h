@@ -15,6 +15,9 @@
 void gpu_set_run_t0(Clock::time_point t);
 // True when the context offers ESSL 3.00 and the q4 shift decode is enabled.
 bool gpu_q4_shift();
+// Dump-only override: --dump-shaders has no context to query, and the q4
+// builders emit different text for the two decodes, so it forces both.
+void gpu_force_q4_shift(bool on);
 double run_time_ms();
 int gpu_upload_textures();
 double gpu_upload_texture_ms();

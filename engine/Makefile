@@ -11,7 +11,8 @@ JINJA := $(TP)/jinja/lexer.cpp $(TP)/jinja/parser.cpp $(TP)/jinja/runtime.cpp \
          $(TP)/jinja/string.cpp $(TP)/jinja/value.cpp $(TP)/jinja/json.cpp \
          $(TP)/jinja/unicode.cpp
 CORE := $(SRC)/engine.cpp $(SRC)/common.cpp $(SRC)/xformat.cpp \
-        $(SRC)/shaders.cpp $(SRC)/shaders_attn.cpp $(SRC)/gpu.cpp \
+        $(SRC)/shaders.cpp $(SRC)/shaders_attn.cpp $(SRC)/dump_shaders.cpp \
+        $(SRC)/gpu.cpp \
         $(SRC)/tokenizer.cpp $(SRC)/model.cpp $(SRC)/session.cpp $(SRC)/lineedit.cpp \
         $(SRC)/sampling.cpp $(SRC)/tools.cpp $(SRC)/chattmpl.cpp $(JINJA)
 HEADERS := $(wildcard $(SRC)/*.h)

@@ -34,6 +34,7 @@
 #endif
 
 #include "common.h"
+#include "dump_shaders.h"
 #include "shaders.h"
 #include "xformat.h"
 #include "gpu.h"
@@ -124,6 +125,8 @@ static const char* kUsage =
     "  --prefix-cache F      load a prefix cache (needs GPU attention)\n"
     "  --build-prefix-cache PROMPTFILE OUT   write one and exit\n"
     "  --ppl FILE            perplexity of a text file\n"
+    "  --dump-shaders[=raw]  print every shader builder's GLSL digest (or the\n"
+    "                        text) and exit; needs no model and no GPU\n"
     "  --worker              JSON-lines worker (the HTTP server drives this)\n"
     "  -q, --quiet           no informational lines on stderr\n"
     "  -V, --version         print the version\n"
@@ -145,6 +148,7 @@ int main(int argc, char** argv) {
     string prompt = "One day, Lily";
     string system_prompt;
     int gen = 8;
+    int dump_mode = 0;   // --dump-shaders: 1 = digests, 2 = raw GLSL
     bool prompt_set = false, gen_set = false;
     bool chat = false, qwen_template = false, minimind3_template = false, greedy = false, worker = false;
     bool tbb_template = false;   // <|user|>/<|assistant|>/<|end|>, no system turn, no BOS
@@ -202,6 +206,8 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--presence-penalty") && i + 1 < argc) g_sampling.presence_penalty = atof(argv[++i]);
         else if (!strcmp(argv[i], "--no-repeat-ngram") && i + 1 < argc) g_sampling.no_repeat_ngram = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--min-p") && i + 1 < argc) g_sampling.min_p = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--dump-shaders")) dump_mode = 1;
+        else if (!strcmp(argv[i], "--dump-shaders=raw")) dump_mode = 2;
         else {
             // Silently ignoring an argument is how "CHAT_DUMP=1" ends up on the
             // command line (where it is not an environment variable) and the
@@ -220,6 +226,7 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
+    if (dump_mode) return dump_shaders(dump_mode == 2);
     if (chat && !gen_set) gen = 128;
 
     if (model_path.empty()) {

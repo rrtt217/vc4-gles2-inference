@@ -9,6 +9,7 @@ responsibility, not by line count:
 | `src/xformat.h/.cpp` | **the only activation-layout definition** (I16_1, I16_2, I8_4, and the P2 pair-of-positions target) and its GLSL macros |
 | `src/shaders.h/.cpp` | matvec / FFN / RMS shader builders |
 | `src/shaders_attn.cpp` | attention, KV and logits shader builders |
+| `src/dump_shaders.h/.cpp` | the `--dump-shaders` matrix: every builder's emitted GLSL, digested |
 | `src/gpu.h/.cpp` | EGL context, textures, targets, program cache, GPU passes |
 | `src/model.h/.cpp` | model metadata, the MMCF reader, q4/q8/i16 conversion, FFN split |
 | `src/session.h/.cpp` | KV cache, RoPE, attention, transformer forward, prefix cache |
@@ -62,6 +63,34 @@ prefill pair, one texel holds value *k* of position A in `.rg` and value *k* of
 position B in `.ba`, so `x_per_texel()` does not apply and the width is
 `x_pair2_texels(n) == n`.
 
+## Shader text
+
+The builders are pure functions — `(rows, cols, XFormat) -> std::string` — and
+the text they emit *is* the numerics. Wrapping a decode in a GLSL helper cost
+VC4 177 against 283 MMAC/s and moved PPL with the same arithmetic
+(`docs/performance.md`, "The refactor's 12% regression"), so the emitted bytes
+are the contract, not the builder's source. Two tools read them:
+
+| Question | Tool |
+|---|---|
+| what did the program that just ran look like? | `SHADER_SRC=<substr> ./engine_mm3 ...` |
+| what does *every* builder emit? | `./engine_mm3 --dump-shaders[=raw]` |
+| did a refactor move any of it? | `scripts/shader_hashes.sh` |
+
+`--dump-shaders` needs no model and no GL context: it calls every builder over a
+fixed matrix (q8/q4/i16 shapes, all four X formats, the attention layouts) and
+prints one digest per program; `=raw` prints the GLSL. The one driver-dependent
+choice in the builders, the q4 shift/and decode, is forced both ways, so
+`q4shift0/…` and `q4shift1/…` appear only where the two texts differ and the
+dump is machine independent.
+
+`scripts/shader_hashes.sh` compares that dump with `scripts/shader_hashes.txt`
+(`--rebaseline` rewrites it, `--show NAME` prints one program). A refactor that
+claims to be text-neutral must leave the golden file untouched. The hot kernels
+repeat the decode inline on purpose, so the repetition is generated from the
+shared `k*` constants in `shaders.cpp` / `shaders_attn.cpp` rather than copied:
+one definition, same bytes.
+
 ## Build
 
 ```bash
@@ -84,6 +113,10 @@ A change to GPU state, X formats or shader text must preserve:
 Then `engine/scripts/regression.sh`, which is the gate — determinism, a second
 prompt's behaviour, the per-machine pins, and PPL.  Only after those pass should
 `ACT8` or performance numbers be compared.
+
+When the change touches a builder at all, run `engine/scripts/shader_hashes.sh`
+first: it is seconds, it needs no GPU, and it says whether the emitted text moved
+at all.  PPL can hide a one-texel change; a digest cannot.
 
 A same-path A/B (one flag, one kernel) is what decides a numerics question; a
 CPU-vs-GPU stage delta from `diff_paths.sh` names a lead, not a defect, because

@@ -1624,6 +1624,7 @@ static bool q4_shift_wanted(){
     }
 
 bool gpu_q4_shift(){ return g_q4_shift_ok; }
+void gpu_force_q4_shift(bool on){ g_q4_shift_ok = on; }
 
 void GPU::init_egl(){
         // Q4_SHIFT emits ESSL 3.00 kernels, and Mesa only accepts those when the

@@ -57,6 +57,7 @@ the file format in [`docs/model-formats.md`](docs/model-formats.md) and
 | Script | Answers |
 |---|---|
 | `regression.sh` | the acceptance gate: determinism, behaviour, pinned strings, PPL |
+| `shader_hashes.sh` | did a builder change move the emitted GLSL: digests of every builder's text (`--dump-shaders`), no GPU or model needed |
 | `diff_paths.sh` + `dump_diff.awk` | per-stage CPU-vs-GPU comparison, from `STAGE_DUMP=1 HIDDEN_DUMP=1 PREFILL_PAIR=0` |
 | `dump_stats.py` | per-row `max/mean/clamp-count` of a `DUMP` file (is a row saturating?) |
 | `check_att.py` | offline oracle for `ATT_DUMP`: score, softmax stats and `att_out` reproduced from the integers the shaders consumed |
@@ -206,6 +207,7 @@ Pick the tool that answers the question before writing a new probe:
 | is one pass expensive? | `ATTN_DUP`, `PASS_DUP`, `DRAWCOUNT`, `LAYER_PROFILE` |
 | is the attention block internally consistent? | `ATT_DUMP` + `check_att.py` |
 | did my change alter numerics? | `regression.sh`, and PPL rather than one string |
+| did my change move the emitted GLSL? | `scripts/shader_hashes.sh` (no GPU needed); `--dump-shaders` / `--dump-shaders=raw` to look |
 
 `docs/test-hooks.md` lists the environment switches; `engine/src/*.cpp` is the
 ground truth, and the inventory is one command:
@@ -299,9 +301,12 @@ Shader text belongs in `shaders.cpp` / `shaders_attn.cpp`, and activation
 layout knowledge belongs in `xformat.h/.cpp`. Do not reintroduce per-shader
 activation-layout strings. Run q8, q4 and `--ppl` comparisons after any GPU or
 format change, and run `engine/scripts/regression.sh` (determinism, behaviour,
-pinned strings, PPL).  A single golden string is a tripwire, not the gate: it is
-chaotic across GPUs and across reassociations, so pin it per machine and
-re-baseline it deliberately when the numbers move on purpose.
+pinned strings, PPL).  A shader refactor also runs
+`engine/scripts/shader_hashes.sh`: the emitted text is the numerics, so a
+text-neutral change must leave `scripts/shader_hashes.txt` untouched.  A single
+golden string is a tripwire, not the gate: it is chaotic across GPUs and across
+reassociations, so pin it per machine and re-baseline it deliberately when the
+numbers move on purpose.
 
 ## Local overrides
 
