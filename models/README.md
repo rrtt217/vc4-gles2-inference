@@ -402,10 +402,19 @@ Checked against `nkthebass/tinybrainbot-100m-v5.1-instruct`:
   degenerates into echoing the user marker:
 
   ```
-  greedy              ->  <|user|> Give me a packing list for a weekend camping trip.
+  greedy, old binary  ->  <|user|> Give me a packing list for a weekend camping trip.
   temp .4 top-p .9    ->  1. Pack snacks and water for the trip 2. Bring a map and
                           compass for navigation 3. Bring a first aid kit to he...
   "How's it going?"   ->  Hi there! I'm doing well, thanks for asking. How about you?
   ```
 
   That last line is the model card's own sample, word for word.
+
+  The echo was the *engine*: the board was still running a build from before
+  the empty-system change, so it rendered a `<|system|>` turn this model never
+  saw.  With the current binary the same greedy run gives "We're doing well!
+  How is everything?" - no marker, no mask.  `BLOCK_MARKERS=1` exists but does
+  not fix that case and is off by default; it cannot tell a marker from content
+  (`<think>` is a special token here) and a plain `<` gets past it anyway:
+
+      "Is 2 < 3 true?"  ->  Yes, 2 < 3 is true.

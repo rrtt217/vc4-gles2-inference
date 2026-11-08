@@ -166,6 +166,13 @@ binary.  They are measurement hooks, not production settings.
   the substring.  The builder branches on the activation and residual formats,
   and reading the generated text is the only way to be sure which branch ran.
 
+- `BLOCK_MARKERS=1` — mask the `<|...|>` marker tokens while generating.  Off
+  by default: the engine cannot tell a marker from content (`<think>` is a
+  special token for TinyBrainBot, and blocking it removes the scratchpad the
+  model was trained to use), and it would not stop the failure it was written
+  for — echoing `<|user|>` starts with a plain `<` and the rest is spelled out
+  token by token.
+
 ## Set by the environment, not by the engine
 
 - `MESA_GLES_VERSION_OVERRIDE=3.0|3.1|3.2` — the only knob that raises the
