@@ -1,4 +1,5 @@
 #include "shaders.h"
+#include "logits_grid.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -354,7 +355,7 @@ string top2_fast(int rows, int chunk) {
         "void main(){int x=int(gl_FragCoord.x);int ch=x/2;int rank=x-ch*2;int start=ch*" + to_string(chunk) + ";"
         "float best1=-1e30,best2=-1e30;int i1=0,i2=0;"
         "for(int k=0;k<" + to_string(chunk) + ";k++){int idx=start+k;if(idx>=" + to_string(rows) + ")break;"
-        "vec4 c=texture2D(L,vec2((float(idx)+0.5)/1536.0,(tr+0.5)/nr));float v=dec(c);"
+        "vec4 c=texture2D(L,vec2((float(idx)+0.5)/" + to_string(kLogitsGrid) + ".0,(tr+0.5)/nr));float v=dec(c);"
         "if(v>best1){best2=best1;i2=i1;best1=v;i1=idx;}else if(v>best2){best2=v;i2=idx;}}"
         "float bv=(rank==0?best1:best2)*256.0;int bi=rank==0?i1:i2;"
         "if(bv<0.0)bv+=65536.0;float vh=floor(bv/256.0),vl=bv-vh*256.0;"
@@ -369,7 +370,7 @@ string top2(int rows, int chunk) {
         "void main(){int x=int(gl_FragCoord.x);int ch=x/3;int rank=x-ch*3;int start=ch*" + to_string(chunk) + ";"
         "float best1=-1e30,best2=-1e30,lm=-1e30,ls=0.0;int i1=0,i2=0;"
         "for(int k=0;k<" + to_string(chunk) + ";k++){int idx=start+k;if(idx>=" + to_string(rows) + ")break;"
-        "vec4 c=texture2D(L,vec2((float(idx)+0.5)/1536.0,(tr+0.5)/nr));float v=dec(c);"
+        "vec4 c=texture2D(L,vec2((float(idx)+0.5)/" + to_string(kLogitsGrid) + ".0,(tr+0.5)/nr));float v=dec(c);"
         "if(v>best1){best2=best1;i2=i1;best1=v;i1=idx;}else if(v>best2){best2=v;i2=idx;}"
         "if(v>lm){ls=ls*exp((lm-v)*invt)+1.0;lm=v;}else{ls+=exp((v-lm)*invt);}}"
         "if(rank<2){float bv=(rank==0?best1:best2)*256.0;int bi=rank==0?i1:i2;"
@@ -393,7 +394,7 @@ string top2_fast_packed(int rows, int chunk) {
         "void main(){int x=int(gl_FragCoord.x);int ch=x/2;int rank=x-ch*2;int start=ch*" + to_string(chunk) + ";"
         "float best1=-1e30,best2=-1e30;int i1=0,i2=0;"
         "for(int k=0;k<" + to_string(chunk) + ";k++){int idx=start+k;if(idx>=" + to_string(rows) + ")break;"
-        "int h=idx/2;vec4 c=texture2D(L,vec2((float(h)+0.5)/768.0,(tr+0.5)/nr));"
+        "int h=idx/2;vec4 c=texture2D(L,vec2((float(h)+0.5)/" + to_string(kLogitsGridPacked) + ".0,(tr+0.5)/nr));"
         "float v=((h*2)==idx)?dl(c):dh(c);"
         "if(v>best1){best2=best1;i2=i1;best1=v;i1=idx;}else if(v>best2){best2=v;i2=idx;}}"
         "float bv=(rank==0?best1:best2)*256.0;int bi=rank==0?i1:i2;"
@@ -411,7 +412,7 @@ string top2_packed(int rows, int chunk) {
         "void main(){int x=int(gl_FragCoord.x);int ch=x/3;int rank=x-ch*3;int start=ch*" + to_string(chunk) + ";"
         "float best1=-1e30,best2=-1e30,lm=-1e30,ls=0.0;int i1=0,i2=0;"
         "for(int k=0;k<" + to_string(chunk) + ";k++){int idx=start+k;if(idx>=" + to_string(rows) + ")break;"
-        "int h=idx/2;vec4 c=texture2D(L,vec2((float(h)+0.5)/768.0,(tr+0.5)/nr));"
+        "int h=idx/2;vec4 c=texture2D(L,vec2((float(h)+0.5)/" + to_string(kLogitsGridPacked) + ".0,(tr+0.5)/nr));"
         "float v=((h*2)==idx)?dl(c):dh(c);"
         "if(v>best1){best2=best1;i2=i1;best1=v;i1=idx;}else if(v>best2){best2=v;i2=idx;}"
         "if(v>lm){ls=ls*exp((lm-v)*invt)+1.0;lm=v;}else{ls+=exp((v-lm)*invt);}}"

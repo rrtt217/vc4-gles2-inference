@@ -1,4 +1,5 @@
 #include "model.h"
+#include "logits_grid.h"
 #include <algorithm>
 #include <fstream>
 #include <iostream>
@@ -550,6 +551,23 @@ bool Model::load_mmcf(){
         if ((!has_q8_emb && !has_i16_emb) || (int)rms_att.size() != layers * dim || logits_tiles.empty()) {
                 cerr << "mmcf: missing required tensors\n";
                 return false;
+        }
+        // The vocabulary tiles are the contract the shaders and the token
+        // mapping are written against (src/logits_grid.h).  A file packed with
+        // another stride would decode with shifted tokens and no error at all,
+        // so refuse it here instead.
+        {
+                const int want = (vocab + kLogitsGrid - 1) / kLogitsGrid;
+                bool fit = (int)logits_tiles.size() == want;
+                for (size_t i = 0; fit && i < logits_tiles.size(); ++i)
+                        fit = logits_tiles[i].rows <= kLogitsGrid;
+                if (!fit) {
+                        cerr << "mmcf: vocabulary tiles do not fit the engine's grid: "
+                             << logits_tiles.size() << " tiles for vocab " << vocab
+                             << " (want " << want << " of at most " << kLogitsGrid << " rows);"
+                             << " repack with the current mmcf_pack.py\n";
+                        return false;
+                }
         }
         (void)group;
         return true;

@@ -153,6 +153,23 @@ tokenizer blob.  Per-layer tensors carry the layer in the high byte
 (`id | layer << 8`).  q4 needs three tensors per matrix (nibbles, group scale,
 group min) sharing one id.
 
+The vocabulary (`0x20`) is stored as several tiles of at most **1536 rows**
+(`LOGITS_GRID` in `engine/tools/mmcf_grid.py`, `kLogitsGrid` in
+`engine/src/logits_grid.h`), and the last tile is short: MiniMind3's 6400 rows
+are 4 x 1536 + 256.  The engine renders one tile per target row and maps
+`token = tile * 1536 + index`, so the stride is a property of the file, not of
+the engine build; `Model::load` refuses a file whose tiles do not fit the grid
+rather than decoding with shifted token ids.  `engine/probes/logits_grid_probe`
+holds the packer, the host and the four Top-K kernels to the same number.
+
+The stride is a convention, not an algorithm requirement: repacking MiniMind3 q8
+at 1024 rows (7 tiles instead of 5) gave the same greedy text and PPL 270.5287
+against 270.3170 - the 0.08% is the per-tile q8 scale, since each tile
+quantises its own rows.  Changing it therefore costs a repack of every model
+and two more logits draws per token, and the unpacked logits target is
+`LOGITS_GRID` texels wide, so it must stay within the driver's texture/FBO
+limit (2048 on VC4).
+
 dtypes: `0` f32, `1` i16, `2` q8u8 (biased, so the upload is a copy), `3` q8i8,
 `4` q4, `5` blob.  `dtype` replaces the magic: q8 pre-biased and q8 signed are
 two values of one enum, so the upload path picks "copy straight from the map" or

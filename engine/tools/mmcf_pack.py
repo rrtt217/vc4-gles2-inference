@@ -32,6 +32,7 @@ import sys
 import zlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from mmcf_grid import LOGITS_GRID
 from mmcf_hf import (RESIDUAL_RAIL, RESIDUAL_WARN, is_llama2c, load_llama2c,
                      tensors_from_hf, tok_entry_count)
 
@@ -166,7 +167,7 @@ def parse_legacy(path):
             else:
                 mat(T_W13, l)
             mat(T_W2, l)
-        for i in range((vocab + 1535) // 1536):
+        for i in range((vocab + LOGITS_GRID - 1) // LOGITS_GRID):
             mat(T_LOGITS, i)
     elif magic in (MAGIC_I16, MAGIC_I16_V2):
         theta = r.f32(); half = r.i32(); split = r.i32()
@@ -195,7 +196,7 @@ def parse_legacy(path):
             else:
                 mat(T_W13, l, q8=False)
             mat(T_W2, l, q8=False)
-        for i in range((vocab + 1535) // 1536):
+        for i in range((vocab + LOGITS_GRID - 1) // LOGITS_GRID):
             mat(T_LOGITS, i, q8=False)
     elif magic == MAGIC_Q4:
         theta = r.f32(); half = r.i32(); split = r.i32(); qk = r.i32()
@@ -233,7 +234,7 @@ def parse_legacy(path):
             else:
                 q4mat(T_W13, l, True)
             q4mat(T_W2, l, True)
-        for i in range((vocab + 1535) // 1536):
+        for i in range((vocab + LOGITS_GRID - 1) // LOGITS_GRID):
             rows, cols = r.i32(), r.i32()
             sc = r.f32()
             tensors.append((T_LOGITS | (i << 8), DT_Q8I8, rows, cols, 0, r.take(rows * cols), sc))

@@ -7,6 +7,7 @@ responsibility, not by line count:
 |---|---|
 | `src/common.h/.cpp` | shared types (`Mat`, `Target`), q16 helpers, signals, file helpers |
 | `src/xformat.h/.cpp` | **the only activation-layout definition** (I16_1, I16_2, I8_4, and the P2 pair-of-positions target) and its GLSL macros |
+| `src/logits_grid.h` | **the only vocabulary-grid definition**: tile rows, the packed half-width, the matvec strip threshold |
 | `src/shaders.h/.cpp` | matvec / FFN / RMS shader builders |
 | `src/shaders_attn.cpp` | attention, KV and logits shader builders |
 | `src/dump_shaders.h/.cpp` | the `--dump-shaders` matrix: every builder's emitted GLSL, digested |
@@ -90,6 +91,14 @@ claims to be text-neutral must leave the golden file untouched. The hot kernels
 repeat the decode inline on purpose, so the repetition is generated from the
 shared `k*` constants in `shaders.cpp` / `shaders_attn.cpp` rather than copied:
 one definition, same bytes.
+
+The vocabulary grid is the one constant that is not a C++ detail: the packer
+splits the logits matrix at the same stride, the host uses it as the read-back
+stride and the token formula, and the four Top-K kernels divide by it.  It lives
+in `src/logits_grid.h` and `probes/logits_grid_probe` checks all three languages
+(`make -C engine probes/logits_grid_probe`, no GL needed).  Those kernels only
+run when `TOPK` is set, so neither greedy output nor PPL would notice a
+mismatch - measured, see the header's comment.
 
 Builders also check their arguments where the text is made: the q8 column loop
 steps by four and the q4 loop by 32, so a width that is neither is a shader that

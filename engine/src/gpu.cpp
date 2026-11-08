@@ -1,4 +1,5 @@
 #include "gpu.h"
+#include "logits_grid.h"
 #include <algorithm>
 #include <iostream>
 #include <cstring>
@@ -406,12 +407,12 @@ bool GPU::logits_pair_ok(const vector<Mat>& tiles) const{
     }
 
 // Logits pass.  The paired path renders two vocabulary rows per fragment and
-// packs both q16 logits into one texel, so the target is half as wide (768).
+// packs both q16 logits into one texel, so the target is half as wide.
 void GPU::logits_pass(const vector<Mat>& tiles, GLuint x){
         const int rows = (int)tiles.size();
         if (logits_pair_ok(tiles)) {
-            if (logits_target_.tex == 0 || logits_target_.h != rows || logits_target_.w != 768)
-                logits_target_ = make_target(768, rows);
+            if (logits_target_.tex == 0 || logits_target_.h != rows || logits_target_.w != kLogitsGridPacked)
+                logits_target_ = make_target(kLogitsGridPacked, rows);
             logits_packed_ = true;
             for (int i = 0; i < rows; ++i) {
                 const Mat& m = tiles[i];
@@ -427,8 +428,8 @@ void GPU::logits_pass(const vector<Mat>& tiles, GLuint x){
             }
             return;
         }
-        if (logits_target_.tex == 0 || logits_target_.h != rows || logits_target_.w != 1536)
-            logits_target_ = make_target(1536, rows);
+        if (logits_target_.tex == 0 || logits_target_.h != rows || logits_target_.w != kLogitsGrid)
+            logits_target_ = make_target(kLogitsGrid, rows);
         logits_packed_ = false;
         for (int i = 0; i < rows; ++i) draw(tiles[i], x, logits_target_, i);
     }
@@ -438,7 +439,7 @@ void GPU::logits_pass(const vector<Mat>& tiles, GLuint x){
 vector<float> GPU::read_logits_full(const vector<Mat>& tiles){
         const int rows = (int)tiles.size();
         vector<float> out;
-        out.reserve((size_t)rows * 1536);
+        out.reserve((size_t)rows * kLogitsGrid);
         if (logits_packed_) {
             const int w = logits_target_.w;
             bind_fbo(logits_target_.fbo);
@@ -456,10 +457,10 @@ vector<float> GPU::read_logits_full(const vector<Mat>& tiles){
             }
             return out;
         }
-        vector<int32_t> raw = read_i32(logits_target_, 1536, rows);
+        vector<int32_t> raw = read_i32(logits_target_, kLogitsGrid, rows);
         for (int i = 0; i < rows; ++i) {
             for (int j = 0; j < tiles[i].rows; ++j) {
-                int v = raw[(size_t)i * 1536 + j];
+                int v = raw[(size_t)i * kLogitsGrid + j];
                 if (v >= 32768) v -= 65536;
                 out.push_back((float)v / ACT_SCALE);
             }
@@ -520,7 +521,7 @@ CandidateResult GPU::logits_candidates_from(const vector<Mat>& tiles, GLuint xt,
                     int value = (int)raw[o] * 256 + raw[o + 1];
                     if (value >= 32768) value -= 65536;
                     int idx = (int)raw[o + 2] * 256 + raw[o + 3];
-                    if (idx < M) cand.push_back({(float)value / ACT_SCALE, r * 1536 + idx});
+                    if (idx < M) cand.push_back({(float)value / ACT_SCALE, r * kLogitsGrid + idx});
                 }
             }
             sort(cand.begin(), cand.end(), [](const Candidate& a, const Candidate& b) { return a.value > b.value; });
@@ -569,7 +570,7 @@ CandidateResult GPU::logits_candidates_from(const vector<Mat>& tiles, GLuint xt,
                         int idx = (int)raw[o + 2] * 256 + raw[o + 3];
                         if (idx < M) {
                             float v = (float)value / ACT_SCALE;
-                            cand.push_back({v, r * 1536 + idx});
+                            cand.push_back({v, r * kLogitsGrid + idx});
                             cmax[r][c] = max(cmax[r][c], v);
                             gmax = max(gmax, v);
                         }
@@ -880,8 +881,8 @@ void GPU::matvec_add(const Mat& m, GLuint x, GLuint residual, Target& out, XForm
         // The q4 kernels take their scale as "ps"; "ws" does not exist there.
         if (m.type != WeightType::INT4) glUniform1f(uloc(p, "ws"), m.scale);
         setup_attrib(p);
-        const int strip = pair ? ((m.rows == 1536) ? 384 : (m.rows + 1) / 2)
-                               : ((m.rows == 1536) ? 768 : m.rows);
+        const int strip = pair ? ((m.rows == kMatvecStripRows) ? 384 : (m.rows + 1) / 2)
+                               : ((m.rows == kMatvecStripRows) ? kMatvecStripRows / 2 : m.rows);
         for (int x0 = 0; x0 < m.rows; x0 += strip) {
             int w = min(strip, m.rows - x0);
             glViewport(x0, 0, w, 1);
@@ -2041,7 +2042,7 @@ void GPU::draw(const Mat& m, GLuint x, Target& t, int row ){
             glUniform1f(uloc(p, "ws"), m.scale);
         }
         setup_attrib(p);
-        // VC4 is unreliable for a single 1536-column pass (the logits tile
+        // VC4 is unreliable for a single pass at that width (the logits tile
         // and fused-W13 width).  Split only that width; other widths are fine
         // and keeping them in one draw avoids per-draw overhead.
         // A single draw must stay below GL_MAX_TEXTURE_SIZE: at exactly 2048

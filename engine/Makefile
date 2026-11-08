@@ -58,6 +58,11 @@ probes/vc4_ffn_probe: probes/vc4_ffn_probe.cpp
 probes/vc4_topk_probe: probes/vc4_topk_probe.cpp
 	$(CXX) $(CXXFLAGS) -o $@ $< $(LDLIBS)
 
+# No GL, no model: the logits grid is a text and source question.
+probes/logits_grid_probe: probes/logits_grid_probe.cpp $(SRC)/shaders_attn.cpp \
+                          $(SRC)/shaders.h $(SRC)/xformat.cpp $(SRC)/xformat.h
+	$(CXX) $(CXXFLAGS) -I$(SRC) -o $@ probes/logits_grid_probe.cpp $(SRC)/shaders_attn.cpp $(SRC)/xformat.cpp
+
 probes/matvec_probe: probes/matvec_probe.cpp $(SRC)/common.cpp $(SRC)/common.h
 	$(CXX) $(CXXFLAGS) -I$(SRC) -o $@ probes/matvec_probe.cpp $(SRC)/common.cpp $(LDLIBS)
 
@@ -78,7 +83,7 @@ probes/load_probe_pi: probes/load_probe.cpp
 clean:
 	rm -f engine engine_mm3 engine_mm3_pi
 	rm -f probes/vc4_probe probes/vc4_ffn_probe probes/vc4_topk_probe probes/load_probe_pi
-	rm -f probes/matvec_probe probes/texsize_probe probes/q4fmt_probe_pi probes/glsl_probe_pi probes/q4mv_probe_pi probes/draw_probe_pi probes/packunpack_probe probes/packunpack_probe_pi
+	rm -f probes/matvec_probe probes/texsize_probe probes/q4fmt_probe_pi probes/glsl_probe_pi probes/q4mv_probe_pi probes/draw_probe_pi probes/packunpack_probe probes/packunpack_probe_pi probes/logits_grid_probe
 
 probes/glsl_probe_pi: probes/glsl_probe.cpp
 	@test -d "$(CROSS_SYSROOT)" || { echo "missing CROSS_SYSROOT=$(CROSS_SYSROOT)" >&2; exit 2; }

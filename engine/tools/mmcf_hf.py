@@ -21,6 +21,8 @@ import struct
 
 import numpy as np
 
+from mmcf_grid import LOGITS_GRID
+
 DT_F32, DT_I16, DT_Q8I8, DT_Q4 = 0, 1, 3, 4
 T_EMB, T_EMB_SCALE, T_RMS_ATT, T_RMS_FFN, T_RMS_FINAL = 1, 2, 3, 4, 5
 T_Q_NORM, T_K_NORM = 6, 7
@@ -399,8 +401,8 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
     # Logits: q8 from the float weights in a q4 container (the vocabulary head
     # stays 8-bit there), but i16-then-q8 in a q8 container -- the two-step order
     # again, and it is visible in the shipped files.
-    for i, st in enumerate(range(0, vocab, 1536)):
-        w = m['wcls'][st:st + 1536]
+    for i, st in enumerate(range(0, vocab, LOGITS_GRID)):
+        w = m['wcls'][st:st + LOGITS_GRID]
         if scheme != 'q4':
             mat(T_LOGITS, i, w)
         else:
