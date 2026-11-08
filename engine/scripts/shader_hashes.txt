@@ -69,8 +69,6 @@ a440d840a310caad    7602 attn_q8_kv16_unpaired/att_v_i8_4
 b821845a2ef44b10    3108 attn_q8_kv16_unpaired/att_vscale
 c6e60e2729a95f50    3776 matvec_i16_6400x768_i16_2
 bce5631919a0b6b7    3335 matvec_i16_add_1536x768_i16_2_i16_1
-ec16231c677cf5ff    3860 matvec_i4_add_768x768_i16_2_i16_1
-971d41ae0efb89b8    3937 matvec_i4_pair_2432x768_i16_2
 93324dbf110f8096     839 matvec_q8_1536x768_i16_2
 710cad4ae26605b1    3528 matvec_q8_2432x768_i16_1
 c8cefa5626c0635f    3572 matvec_q8_2432x768_i8_4
@@ -94,14 +92,18 @@ ed270356e0038885    3720 matvec_q8_pair_swiglu_2432x768_i16_2_gen
 b4bee173f2275727    3826 p2_split_768_i16_2
 3b996a4e969e1539    4304 q4shift0/matvec_i4_6400x768_i16_2_gen
 627c03f7010b47d9    4774 q4shift0/matvec_i4_6400x768_i16_2_inl
+ec16231c677cf5ff    3860 q4shift0/matvec_i4_add_768x768_i16_2_i16_1
 926f423dcce88089    4432 q4shift0/matvec_i4_add_pair_768x768_i16_2_gen
 beb8753261e58e07    4902 q4shift0/matvec_i4_add_pair_768x768_i16_2_inl
+971d41ae0efb89b8    3937 q4shift0/matvec_i4_pair_2432x768_i16_2
 d105242983f8fcd1    4708 q4shift0/matvec_i4_pair_swiglu_2432x768_i16_2_gen
 231d6492a640c111    5178 q4shift0/matvec_i4_pair_swiglu_2432x768_i16_2_inl
 0e63d40bbc712c20    4286 q4shift1/matvec_i4_6400x768_i16_2_gen
 87a1a3f68092f290    4756 q4shift1/matvec_i4_6400x768_i16_2_inl
+a419c0850b61ff44    3842 q4shift1/matvec_i4_add_768x768_i16_2_i16_1
 9065e397ab046492    4414 q4shift1/matvec_i4_add_pair_768x768_i16_2_gen
 414f40026146e354    4884 q4shift1/matvec_i4_add_pair_768x768_i16_2_inl
+896ff0c8521d4e6d    3919 q4shift1/matvec_i4_pair_2432x768_i16_2
 fe768055d25bf0c6    4690 q4shift1/matvec_i4_pair_swiglu_2432x768_i16_2_gen
 af516a55bb7211a2    5160 q4shift1/matvec_i4_pair_swiglu_2432x768_i16_2_inl
 3793ad537339d11b    3977 rms_norm_768_i16_1_i8_4

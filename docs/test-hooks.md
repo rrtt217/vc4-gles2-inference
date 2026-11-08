@@ -204,7 +204,7 @@ path on one.
 
 | Switch | What it does |
 |---|---|
-| `Q4_INLINE`, `Q4_MV4`, `Q4_NOUNPACK`, `Q4_BFAST`, `Q4_HFAST`, `Q4_NOMIN` | select q4 kernel variants (inline decode, vec4, no unpack, fast/slow nibble paths, drop the min term).  Landed variants are the default; these exist to A/B them inside one binary. |
+| `Q4_INLINE`, `Q4_MV4`, `Q4_NOUNPACK`, `Q4_BFAST`, `Q4_HFAST`, `Q4_NOMIN` | select q4 kernel variants (inline decode, vec4, no unpack, fast/slow nibble paths, drop the min term).  Landed variants are the default; these exist to A/B them inside one binary.  Every q4 kernel unpacks through `q4_taps()`, so `Q4_NOUNPACK`/`Q4_BFAST`/`Q4_HFAST` and the ESSL 3.00 shift decode reach all of them (`scripts/shader_hashes.sh` shows `q4shift0/` and `q4shift1/` entries); `Q4_MV4` and `Q4_NOMIN` are scoped to the paired swiglu gate. |
 | `KV_VSTEP` | 8-bit KV per-head V step (step 9b/9c experiment) |
 | `MATVEC_STRIP` | debug the 1536-column strip split in `draw()` |
 | `NO_SHADER_SELFTEST` | skip the link-time program self-test |

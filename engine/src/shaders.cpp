@@ -859,11 +859,7 @@ string matvec_i4_pair(int rows, int cols, XFormat xf) {
     return head(xf) +
         "uniform sampler2D W1,W2,P1,P2,X;uniform float ps1,ps2;"
         "float dot4(vec4 w0,vec4 xa,vec4 xb){"
-        "float b0=floor(w0.r*255.0+0.5),b1=floor(w0.g*255.0+0.5),"
-        "b2=floor(w0.b*255.0+0.5),b3=floor(w0.a*255.0+0.5);"
-        "float h0=floor(b0*0.0625),h1=floor(b1*0.0625),"
-        "h2=floor(b2*0.0625),h3=floor(b3*0.0625);"
-        "float l0=b0-h0*16.0,l1=b1-h1*16.0,l2=b2-h2*16.0,l3=b3-h3*16.0;"
+        + q4_taps("w0") +
         "return l0*xa.x+h0*xa.y+l1*xa.z+h1*xa.w+l2*xb.x+h2*xb.y+l3*xb.z+h3*xb.w;}"
         "void main(){int r=int(gl_FragCoord.x);float s1=0.0,s2=0.0;"
         "for(int g=0;g<" + to_string(groups) + ";g++){"
@@ -975,11 +971,7 @@ string matvec_i4_add(int rows, int cols, XFormat xf, XFormat rf) {
         "for(int t=0;t<4;t++){int c=g*32+t*8;"
         "vec4 w=texture2D(W,vec2((float(g*4+t)+0.5)/float(" + to_string(texw) + "),"
         "(float(r)+0.5)/float(" + to_string(rows) + ")));"
-        "float b0=floor(w.r*255.0+0.5),b1=floor(w.g*255.0+0.5),"
-        "b2=floor(w.b*255.0+0.5),b3=floor(w.a*255.0+0.5);"
-        "float h0=floor(b0*0.0625),h1=floor(b1*0.0625),"
-        "h2=floor(b2*0.0625),h3=floor(b3*0.0625);"
-        "float l0=b0-h0*16.0,l1=b1-h1*16.0,l2=b2-h2*16.0,l3=b3-h3*16.0;"
+        + q4_taps("w") +
         "vec4 xa=X4Q(X,c," + to_string(axw) + ".0);"
         "vec4 xb=X4Q(X,c+4," + to_string(axw) + ".0);"
         // (n*sc + mn)*x sums to sc*sum(n*x) + mn*sum(x): the min term is paid
