@@ -418,3 +418,36 @@ Checked against `nkthebass/tinybrainbot-100m-v5.1-instruct`:
   (`<think>` is a special token here) and a plain `<` gets past it anyway:
 
       "Is 2 < 3 true?"  ->  Yes, 2 < 3 is true.
+
+### Why the Pi and a desktop disagree on TinyBrainBot (2026-11-08)
+
+Same container, same flags, wildly different text.  Measured on `"What is AI?"`
+with `LOGITS_OUT` on both:
+
+| | max logit | entropy | top-1 | cosine |
+|---|---:|---:|---|---:|
+| desktop GPU | 14.85 | 2.35 | `Art` | 0.82 |
+| Pi Zero | 14.65 | **1.73** | `A` | |
+
+So the board is *sharper* here, not flatter - the two runs simply take different
+paths from a near-tie (`A` -> "AI is…" vs `Art` -> "Artificial intelligence
+is…"), and both openings are good.  The difference appears later, and it is a
+sampling draw, not a worse distribution: one path fell into a sentence loop.
+
+What that means in practice:
+
+- **greedy is the wrong setting for this model.**  It locks into the loop
+  hardest: `AI is also the use of AI technologies to create new AI technologies
+  that can be used to create AI-based AI technologies.` on repeat.
+- **`--no-repeat-ngram 4` is what breaks sentence-level loops.**  Same prompt,
+  same card sampler, 200 tokens, no loop:
+
+      AI's potential to transform industries into thriving hubs where innovation
+      thrives is unparalleled. AI'S ability to enhance human capabilities …
+
+  So the command to use on the board is
+
+      --temp 0.4 --topp 0.9 --repeat-penalty 1.15 --no-repeat-ngram 4
+
+- `SEQ=16384` on a desktop and `SEQ=1024` on the Pi make no numeric difference;
+  the window only costs memory, so keep it as small as the conversation needs.
