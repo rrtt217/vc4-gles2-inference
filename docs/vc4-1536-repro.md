@@ -223,9 +223,12 @@ container and the extra binary afterwards.
 
 ## 6. Rules that decide whether a number means anything
 
-- **One GPU client.**  Stop the server and any benchmark; CMA is single-client
-  on this board.  Check `grep CmaFree /proc/meminfo` before a run (81 MB free
-  when this was written).
+- **One GPU client, under the board's lock.**  Stop the server and any
+  benchmark; CMA is single-client.  Every run on the Pi takes
+  `flock -w 300 /tmp/vc4-pi.lock <command>`: that file is the convention the
+  tuning side uses, and nothing in the runtime takes it for you.  Check
+  `grep CmaFree /proc/meminfo` before a run (88 MB free when this was
+  measured).
 - **Interleave A/B.**  Same binary, one env switch, alternate the runs; take the
   best of two and note the median.  `bench_ab.sh` compares two *binaries*, so
   for an env switch run the loop by hand.
