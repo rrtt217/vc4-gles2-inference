@@ -22,7 +22,16 @@
 // 1536 is a VC4 texture-width choice (the FBO limit is 2048, and draw() still
 // splits a 1536-row matvec because a single pass of that width is unreliable),
 // not a model property: a smaller vocabulary simply ends with a short tile
-// (MiniMind3: 4 x 1536 + 256 = 6400).  It is also not load bearing: repacking
+// (MiniMind3: 4 x 1536 + 256 = 6400, which is a side effect, not a derivation -
+// 1600 would have split 6400 into four even tiles).
+//
+// Provenance: the number arrived with the first import (571b099), already baked
+// into the legacy checkpoint layout by converters that were later deleted
+// without a note; no commit in this repository derives it.  What it happens to
+// match: three quarters of VC4's 2048 limit; 2 x 768, the hidden size of
+// MiniMind3 and the fused W13 width of the llama2.c models the engine was first
+// brought up on; and MiniMind3's qkv width (768 + 2 x 384).  Which of those was
+// the reason is not recorded.  It is also not load bearing: repacking
 // MiniMind3 q8 at 1024 (7 tiles) gave the same greedy text and PPL 270.5287
 // against 270.3170, the 0.08% being the per-tile q8 scale, at the cost of two
 // more logits draws per token and a repack of every model.

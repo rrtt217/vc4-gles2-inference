@@ -167,6 +167,14 @@ with such a file printed the correct greedy text *and* the correct `TOPK=8`
 sample because every chosen token happened to be in the first tile.  `engine/probes/logits_grid_probe`
 holds the packer, the host and the four Top-K kernels to the same number.
 
+Where 1536 came from is not recorded: it arrived with the first commit, already
+baked into the legacy layout by converters that were deleted without a note.  It
+is three quarters of VC4's 2048 texture limit, 2 x 768 (MiniMind3's hidden size
+and the fused W13 width of the llama2.c models the engine was first brought up
+on), and MiniMind3's qkv width - which of those drove the choice is unknown.
+6400 = 4 x 1536 + 256 is a side effect, not a derivation: 1600 would have
+divided the vocabulary into four even tiles.
+
 The stride is a convention, not an algorithm requirement: repacking MiniMind3 q8
 at 1024 rows (7 tiles instead of 5) gave the same greedy text and PPL 270.5287
 against 270.3170 - the 0.08% is the per-tile q8 scale, since each tile
