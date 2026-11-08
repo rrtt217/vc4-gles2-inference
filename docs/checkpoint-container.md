@@ -159,7 +159,12 @@ The vocabulary (`0x20`) is stored as several tiles of at most **1536 rows**
 are 4 x 1536 + 256.  The engine renders one tile per target row and maps
 `token = tile * 1536 + index`, so the stride is a property of the file, not of
 the engine build; `Model::load` refuses a file whose tiles do not fit the grid
-rather than decoding with shifted token ids.  `engine/probes/logits_grid_probe`
+rather than decoding with shifted token ids.  The rule is: the tile count must
+be `ceil(vocab / 1536)`, every tile except the last must be exactly 1536 rows,
+and the last 1..1536.  The count alone is not enough - a 1300-row stride gives
+the same five tiles and every row fits, but shifts token ids by 236, and a run
+with such a file printed the correct greedy text *and* the correct `TOPK=8`
+sample because every chosen token happened to be in the first tile.  `engine/probes/logits_grid_probe`
 holds the packer, the host and the four Top-K kernels to the same number.
 
 The stride is a convention, not an algorithm requirement: repacking MiniMind3 q8
