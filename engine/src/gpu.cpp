@@ -2049,10 +2049,12 @@ void GPU::draw(const Mat& m, GLuint x, Target& t, int row ){
         // costs one draw (~10 us), so cap every strip at 1024 and keep the
         // gl_FragCoord-absolute convention the shader relies on.
         //
-        // The 1536 special case in matvec() (768-wide halves) predates this
-        // sweep and is not a known driver boundary: the sweep measured 768..2040
-        // as exact.  It stays because a split costs ~10 us, not because 1536 is
-        // wrong.  MATVEC_STRIP overrides the cap for experiments.
+        // The 1536 special case in matvec() (768-wide halves) is a different
+        // failure: a single 1536-wide draw is byte-exact in a readback probe but
+        // corrupts the qkv target when the next pass samples it as a texture -
+        // different garbage every run, PPL 271.2855 -> 71669 on the Pi
+        // (docs/engine-internals.md section 2).  Both workarounds stay.
+        // MATVEC_STRIP overrides the cap for experiments.
         const char* sv = getenv("MATVEC_STRIP");
         const int env_strip = sv ? atoi(sv) : 0;
         const int cap = (env_strip > 0) ? env_strip : 1024;

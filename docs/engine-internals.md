@@ -28,33 +28,24 @@ The engine uses this form in all FBO-sampling shaders.
 
 ### 2. A single 1536-column matvec draw is unreliable
 
-> **Correction (2026-11-08).**  The width sweep in `30b2882` (Pi Zero, one draw
-> against two half-width references) measured every width from 768 to 2040 as
-> byte-identical and only **2048** as wrong (5029/8192 bytes, 3x too fast).  So
-> 1536 is not a driver boundary: it was the width of the qkv/logits pass where
-> the failure was first seen, and the original failure has not been reproduced
-> since.  The enforced rule today is the 1024-fragment cap in `draw()`; the
-> `matvec()` special case below stays because splitting costs ~10 us, not
-> because 1536 is known to be bad.
-
-A matvec whose output width is exactly 1536 (the logits tile width and fused
-W13 width) intermittently reads a stale or zero target.  A zero RGBA target
-decodes as q16 `-32768`, which is why an entire FFN could look like
-`h = -5e7` and why logits sometimes had the wrong top-1.
-
-Fix in `draw()`: when `m.rows == 1536`, render the viewport in two 768-column
-strips.  `gl_FragCoord.x` includes the viewport origin, so the shader still
-addresses the global row; only the draw width changes.
-
-Other widths (864, 4096, 11008, 6144) stay in one draw.  Splitting every
-matvec was noticeably slower on 42M.
-
-This one fix removed the VC4 nondeterminism:
-
-- 15M q8, `--temp 0.001`, 5/5 runs: `and Ben went to the park`
-- forced `TOPK=64` gives the same output as full logits
-- 42M q8: `and Tom were playing`
-- MiniMind CPU FFN and GPU FFN now produce the same text
+> **Reproduced on the board, 2026-11-08.**  Lifting the draw cap
+> (`QKV_PAIR=0 MATVEC_STRIP=1536`, i.e. the unpaired qkv drawn in one 1536-wide
+> pass) prints *different* garbage every run - `..nnnnnnnn...`,
+> `听今天今天...`, `佳译译译...`, `儿火火火...` - and `--ppl` goes
+> **271.2855 -> 71669.1013**.  `MATVEC_STRIP=1535` (a 1535+1 split) is clean,
+> and `FORCE_GLFINISH=1` does not help, so this is not a missing finish.
+>
+> The 2026-11-04 width sweep does **not** contradict this: that probe draws the
+> wide matvec and compares it against two half-width draws *after
+> `glReadPixels`*, and it reports 1536 as byte-identical (the 2048 case is the
+> one it catches, at 5030/8192 bytes).  The corruption here appears only when
+> the next pass samples the target as a texture, which a readback does not
+> reproduce.  Read "768..2040 identical" as a statement about readback, not
+> about the engine's pipeline.
+>
+> The 1536 special case in `matvec()` therefore stays, and so does the
+> 1024-fragment cap in `draw()` - the cap is what keeps the qkv at 1024+512
+> today.
 
 ### 3. FBO -> texture sampling needs an explicit finish
 

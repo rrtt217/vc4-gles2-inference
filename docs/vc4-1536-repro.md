@@ -114,8 +114,8 @@ Read the `halves identical (diff N/M)` field, and the MB/s:
 
 | observation | conclusion |
 |---|---|
-| `MATVEC_STRIP=1536` -> `1536x768 ... identical (diff 0/...)`, MB/s ~270 | 1536 is **not** a boundary; the 11-03 result was specific to that build/path and the doc correction stands |
-| `MATVEC_STRIP=1536` -> `DIFFER` | 1536 really is bad; restore §2's claim and re-open the question of *why* 11-04's sweep missed it |
+| `MATVEC_STRIP=1536` -> `1536x768 ... identical`, MB/s ~270 | the command is fine, but this probe **cannot** clear 1536: it compares after `glReadPixels`, and the engine's failure only appears when the next pass samples the target.  Run step 4 before concluding anything |
+| `MATVEC_STRIP=1536` -> `DIFFER` | 1536 is bad even in readback; the 11-03 claim is confirmed twice over |
 | `MATVEC_STRIP=2048` -> `DIFFER` with ~5000/8192 bytes and a much higher MB/s | reproduces `30b2882`; this is the expected control |
 | `MATVEC_STRIP=2048` -> identical | the 2048 finding does not reproduce on this driver/build; stop and record it |
 
@@ -248,4 +248,40 @@ container and the extra binary afterwards.
 | grid 1024: same greedy text, PPL 270.3170 -> 270.5287, 7 tiles | repack on Xe, 2026-11-08 |
 | grid 1300: token ids off by 236, yet greedy and TOPK=8 output looked correct | repack on Xe, 2026-11-08 |
 | a 2048-fragment draw is wrong; 2040 is exact | width sweep, `30b2882`, Pi Zero |
-| a single 1536 draw is wrong | `future-optimization.md`, 2026-11-03 - **not reproduced since** |
+| a single 1536 draw is wrong | `future-optimization.md`, 2026-11-03; reproduced 2026-11-08, see below |
+
+## Results, 2026-11-08 (Pi Zero, Mesa 26.2.2, commit `3c1da83`)
+
+Cross build: `Tag_CPU_arch v6`, `Tag_FP_arch VFPv2`.  `--dump-shaders` on the Pi:
+117 programs, 6609 bytes of digests, **byte-identical** to
+`scripts/shader_hashes.txt` (`diff` clean) - the cross build emits the laptop's
+GLSL.
+
+`draw_probe_pi` (halves comparison, MB/s in the last column of the run):
+
+| `MATVEC_STRIP` | 1536x768 | 2048x768 |
+|---|---|---|
+| default (1024) | split, identical | split, identical |
+| 1536 | one draw, **identical** 279 MB/s | one draw, identical |
+| 2048 | one draw, identical | one draw, **DIFFER 5030/8192**, 776 MB/s |
+
+Engine, q8, `SEQ=768`, greedy:
+
+| run | output |
+|---|---|
+| paired qkv, cap 1024 | `我是一个AI助手，没有自我意识，也没有身体，所以我无法…` (pin) |
+| `QKV_PAIR=0`, cap 1024 | pin |
+| `QKV_PAIR=0 MATVEC_STRIP=1535` | pin (split 1535+1) |
+| `QKV_PAIR=0 MATVEC_STRIP=1536` | **garbage, different every run**: `..nnnnnnnn…`, `听今天今天…`, `佳译译译…`, `儿火火火…` |
+
+`FORCE_GLFINISH=1` does not change the garbage.  PPL on the same corpus:
+
+| configuration | PPL |
+|---|---:|
+| paired qkv, cap 1024 | **271.2855** (matches the pin) |
+| `QKV_PAIR=0 MATVEC_STRIP=1536` | **71669.1013** |
+
+Conclusion: a single 1536-wide draw is exact in a readback probe and corrupt in
+the engine's pipeline, nondeterministically; 2048 is corrupt in readback too.
+The 1024-fragment cap covers both.  The 2026-11-04 sweep's "768..2040 identical"
+is a readback statement and must not be read as clearing the engine path.
