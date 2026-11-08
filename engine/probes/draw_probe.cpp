@@ -254,7 +254,7 @@ int main() {
         for (int i = 0; i < iters; ++i) sz += matvec_q8(768, 768, XFormat::I16_2).size();
         const double mv768 = elapsed_ms(a, Clock::now()) / iters;
         a = Clock::now();
-        for (int i = 0; i < iters; ++i) sz += rms_norm(768, XFormat::I16_1, XFormat::I16_2, true).size();
+        for (int i = 0; i < iters; ++i) sz += rms_norm(768, XFormat::I16_1, XFormat::I16_2, true, false).size();
         const double rmsb = elapsed_ms(a, Clock::now()) / iters;
         printf("CPU  matvec_q8 1536x768 %.4f ms/draw (chars %zu)\n", mv1536, sz);
         printf("CPU  matvec_q8  768x768 %.4f ms/draw\n", mv768);
