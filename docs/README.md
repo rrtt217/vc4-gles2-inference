@@ -23,6 +23,7 @@ Deep dives:
 | [long-context.md](long-context.md) | why the Pi stops at 2048 tokens, and what passing it would cost |
 | [vc4-glsl-costs.md](vc4-glsl-costs.md) | what each GLSL function costs on VC4, read from Mesa 26.2.2 — and the six that abort the process |
 | [test-hooks.md](test-hooks.md) | environment switches: probes, dumps, A/B hooks |
+| [vc4-1536-repro.md](vc4-1536-repro.md) | the runbook for the two open VC4 questions: is a single 1536 draw wrong, and what changing the vocabulary grid costs |
 | [prefix-cache.md](prefix-cache.md) | in-memory and disk KV prefix cache, packed cache |
 | [deterministic-tools.md](deterministic-tools.md) | model-free tool routing, argument validation, cache interaction |
 | [future-optimization.md](future-optimization.md) | prioritized future work, measured dead ends, explicit non-goals |
