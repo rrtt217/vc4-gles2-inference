@@ -493,7 +493,29 @@ int main(int argc, char** argv) {
             int pos = (int)tokens.size();
             max_new = min(max_new, model.seq - pos);
             bool greedy_req = wt <= 0.0f;
-            mt19937 rng(seed);
+            // Optional: block the <|...|> marker tokens while generating.  Off by
+    // default, because the engine cannot tell a marker from content - this
+    // model's <think> is a special token too, and blocking it would remove the
+    // scratchpad the model was trained to use.  Even for the marker case it is
+    // partial: the echo it was written for started with a plain '<' and spelled
+    // the rest out, which no token mask can stop.
+    vector<char> marker_mask;
+    if (getenv("BLOCK_MARKERS") && atoi(getenv("BLOCK_MARKERS")) != 0) {
+        marker_mask.assign((size_t)model.vocab, 0);
+        for (const auto& sp : tokenizer.specials()) {
+            const int id = sp.second;
+            if (id < 0 || id >= model.vocab) continue;
+            if (id == model.id_eos || id == model.id_stop || id == model.id_bos) continue;
+            if (sp.first.size() < 3 || sp.first.find('|') == string::npos) continue;
+            marker_mask[(size_t)id] = 1;
+        }
+    }
+    auto mask_markers = [&](vector<float>& logits) {
+        for (size_t i = 0; i < logits.size() && i < marker_mask.size(); ++i)
+            if (marker_mask[i]) logits[i] = -1e30f;
+    };
+
+    mt19937 rng(seed);
             string pending, full, finish = "length";
             int generated = 0;
             int prev = tokens.back();
@@ -571,6 +593,28 @@ int main(int argc, char** argv) {
         // clamps prefill_from the same way; this is the CLI equivalent.
         if (!tokens.empty() && n == tokens.size()) n = tokens.size() - 1;
         return (int)n;
+    };
+
+    // Optional: block the <|...|> marker tokens while generating.  Off by
+    // default, because the engine cannot tell a marker from content - this
+    // model's <think> is a special token too, and blocking it would remove the
+    // scratchpad the model was trained to use.  Even for the marker case it is
+    // partial: the echo it was written for started with a plain '<' and spelled
+    // the rest out, which no token mask can stop.
+    vector<char> marker_mask;
+    if (getenv("BLOCK_MARKERS") && atoi(getenv("BLOCK_MARKERS")) != 0) {
+        marker_mask.assign((size_t)model.vocab, 0);
+        for (const auto& sp : tokenizer.specials()) {
+            const int id = sp.second;
+            if (id < 0 || id >= model.vocab) continue;
+            if (id == model.id_eos || id == model.id_stop || id == model.id_bos) continue;
+            if (sp.first.size() < 3 || sp.first.find('|') == string::npos) continue;
+            marker_mask[(size_t)id] = 1;
+        }
+    }
+    auto mask_markers = [&](vector<float>& logits) {
+        for (size_t i = 0; i < logits.size() && i < marker_mask.size(); ++i)
+            if (marker_mask[i]) logits[i] = -1e30f;
     };
 
     mt19937 rng(seed);
@@ -691,6 +735,7 @@ int main(int argc, char** argv) {
         vector<int> recent;
         for (int i = 0; i < gen && pos < model.seq; ++i) {
             if (g_stop) { gpu.sync(); return; }
+            if (!marker_mask.empty()) mask_markers(logits);
             apply_sampling_penalties(logits, recent);
             int next = greedy ? argmax_token(logits)
                               : (cand_mode ? sample_candidate_result(cand, temp, top_p, rng)
@@ -988,6 +1033,7 @@ int main(int argc, char** argv) {
     int stop_id = -1;
     for (int i = 0; i < gen; ++i) {
         if (g_stop) break;
+        if (!marker_mask.empty()) mask_markers(logits);
         apply_sampling_penalties(logits, recent);
         int next = greedy ? argmax_token(logits)
                           : (cand_mode ? sample_candidate_result(cand, temp, top_p, rng)

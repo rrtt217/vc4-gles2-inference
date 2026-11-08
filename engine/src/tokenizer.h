@@ -33,6 +33,12 @@ private:
     vector<float> scores_;
     unordered_map<string, int> lookup_;
     vector<pair<string, int>> specials_;
+public:
+    // Ids of the atomic <...> tokens this blob carries.  Generation should not
+    // be able to spell one of these as text: a model that starts emitting
+    // "<|user|>" has left its own format, and every token after that is noise.
+    const vector<pair<string, int>>& specials() const { return specials_; }
+private:
     bool qwen_ = false;
     bool bytelevel_ = false;
     int bos_id_ = 1;
