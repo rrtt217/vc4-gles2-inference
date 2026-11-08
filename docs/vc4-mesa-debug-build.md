@@ -166,6 +166,24 @@ remaining candidate is below the driver's command list (the kernel's RCL
 generation or the VC4 binner handling a single draw that covers every tile of
 the job), not a Mesa state bug reachable from the app.
 
+## What the kernel source adds (read, not modified)
+
+The render list is built in the kernel, in
+`drivers/gpu/drm/vc4/vc4_render_cl.c`.  It takes the tile range straight from
+the submit (`min_x_tile..max_x_tile`) and walks it tile by tile, and for each
+tile it references the binner's per-tile list at
+
+```c
+exec->tile_alloc_offset + (y * exec->bin_tiles_x + x) * 32
+```
+
+So the 24-tile range we measured (0..23) is what the kernel consumes; there is
+no kernel-side branch that could drop a draw.  A one-draw job whose target is
+left unwritten is therefore consistent with the **binner's tile allocation or
+per-tile list not covering all 24 tiles for that job**, not with Mesa's command
+list.  Confirming that means instrumenting `vc4_render_cl.c`/the bin job, i.e.
+building a kernel - which is where this stopped.
+
 ## If this is picked up again
 
 - The instrumented build is on 107 at `~/mesa/` (`src/`, `build/`, `prefix/`,
