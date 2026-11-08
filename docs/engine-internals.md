@@ -53,11 +53,32 @@ The engine uses this form in all FBO-sampling shaders.
 > reports 1536 as byte-identical - its first draw lands, and it only needs one.
 > The 2048 case is a different failure (5030/8192 bytes wrong in readback).
 >
-> The root cause inside Mesa/vc4 is not established from here: what is proven is
-> that a *second and later full-width draw into a recycled 1536x1 target* is
-> silently dropped on this driver, while any narrower draw is not.  Both
-> workarounds stay - the 1024-fragment cap in `draw()` and the 1536 special case
-> in `matvec()`.
+> **Where it sits in the driver.**  `vc4_draw_vbo()` (`vc4_draw.c`) has exactly
+> two silent drops: an empty clip window (`vc4->clip_window_empty`, cached until
+> `VC4_DIRTY_CLIP_WINDOW` is set again) and a failed shader variant
+> (`vc4_update_compiled_shaders()`, whose warning is `debug_warn_once` - compiled
+> out unless Mesa is built with `MESA_DEBUG`).  Two experiments narrow it:
+>
+> - forcing a clip-window recompute by drawing with a viewport one pixel wider
+>   (the clip clamps back to the framebuffer, output identical) changes nothing -
+>   so a stale empty clip window is not the whole story;
+> - a failed variant would stay failed, and later full-width draws do land, so
+>   the shader path does not fit either.
+>
+> What is left is below `vc4_draw_vbo`: the BCL the driver emits does contain the
+> 1536-wide clip packet (`VC4_DEBUG=cl`), and the kernel builds the per-tile list
+> from it.  Pinning that needs a Mesa built with `MESA_DEBUG` (so the drop warns)
+> or a patched driver that counts the two early returns; neither is in this
+> repository.
+>
+> The 2026-11-04 width sweep does **not** contradict any of this: `draw_probe`
+> draws the wide matvec repeatedly into one target and compares after
+> `glReadPixels`, and reports 1536 as byte-identical - its first draw lands, and
+> it only needs one.  The 2048 case is a different failure (5030/8192 bytes wrong
+> in readback).
+>
+> Both workarounds stay - the 1024-fragment cap in `draw()` and the 1536 special
+> case in `matvec()`.
 
 ### 3. FBO -> texture sampling needs an explicit finish
 

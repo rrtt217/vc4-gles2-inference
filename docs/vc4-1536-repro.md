@@ -304,3 +304,12 @@ target and reads back once: the first draw lands and the comparison passes.
 
 The 2048 case is separate and worse in a different way: it is wrong in readback
 (5030/8192 bytes) with or without a split, and 2040 is exact.
+
+Mesa source check: `vc4_draw_vbo()` has two silent drops - a cached empty clip
+window and a failed shader variant (`debug_warn_once`, compiled out without
+`MESA_DEBUG`).  Forcing a clip recompute (viewport one pixel wider, clipped back
+by the framebuffer) does not change the result, and a failed variant would stay
+failed while later full-width draws do land, so the drop is most likely below
+`vc4_draw_vbo`, in the kernel's per-tile list.  Next step if anyone picks this
+up: a `MESA_DEBUG` build, or a driver patch that counts those two early
+returns.

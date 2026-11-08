@@ -2065,14 +2065,9 @@ void GPU::draw(const Mat& m, GLuint x, Target& t, int row ){
         const int env_strip = sv ? atoi(sv) : 0;
         const int cap = (env_strip > 0) ? env_strip : 1024;
         const int strip = std::min(cap, m.rows);
-        static const bool nudge = getenv("DRAW_NUDGE") != nullptr;
         for (int x0 = 0; x0 < m.rows; x0 += strip) {
             int w = min(strip, m.rows - x0);
-            // DRAW_NUDGE: one pixel wider than the strip.  The clip is clamped
-            // back to the framebuffer, so the output is identical, but the
-            // viewport state changes and the driver must recompute the clip
-            // window before this draw.
-            glViewport(x0, row, nudge ? w + 1 : w, 1);
+            glViewport(x0, row, w, 1);
             glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         }
     }
