@@ -57,7 +57,13 @@ without moving the gate:
   the draw issued before it, so use the replay probes to price a pass; keep
   `LAYER_PROFILE` for finding *which* pass moved.
 - `PAIR_PROFILE=1` — the same for the two-position prefill pair.
-- `TIMING=1` — chat prefill and decode to stderr.
+- `TIMING=1` — prefill and decode to stderr.  The line is printed on every way
+  out of a turn, including the interrupted ones: Ctrl-C during prefill, Ctrl-C
+  or SIGTERM during decode, and a context that filled up all used to return
+  before the print, so the runs worth measuring were the ones with no numbers.
+  An interrupted turn appends `cut=prefill|decode|context` after `gen=`, which
+  makes a short `gen=` unambiguous.  Covers chat turns, tool turns and the
+  plain `--prompt` path.
 - `SHADER_TIME=1` — `STARTUP <ms>` phase marks and one line per fragment
   program link (`link <ms>`, source bytes, key, cumulative).  It also prints
   `rmsnorm eps: <v> (container-stated)` when the container carries key 11.

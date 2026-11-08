@@ -73,6 +73,39 @@ static const char* kVersion = "1.0";
 // useful when something is wrong and noise when it is not; -q turns them off.
 static bool g_quiet = false;
 
+// TIMING has to survive every way a turn can end: Ctrl-C during prefill, Ctrl-C
+// during decode, a context that filled up, or the normal stop.  The early
+// returns that mark an interruption are exactly the runs someone wants numbers
+// for, which is why the old inline print - at the end of the happy path - was
+// silent in every case that mattered.  A destructor runs on all of them; `cut`
+// names the reason when the turn did not finish on its own, so a short `gen=`
+// is never ambiguous.
+struct TurnTiming {
+        Clock::time_point start = Clock::now();
+        Clock::time_point decode_start {};
+        int generated = 0;
+        bool decoding = false;
+        const char* cut = nullptr;
+
+        void begin_decode() {
+                decode_start = Clock::now();
+                decoding = true;
+        }
+        ~TurnTiming() {
+                const char* on = getenv("TIMING");
+                if (!on || !*on) return;
+                const auto now = Clock::now();
+                const double prefill = elapsed_ms(start, decoding ? decode_start : now) / 1000.0;
+                const double avg = (decoding && generated)
+                                       ? elapsed_ms(decode_start, now) / generated
+                                       : 0.0;
+                cerr << "TIMING prefill=" << prefill << "s decode_avg=" << avg
+                     << "ms/token gen=" << generated;
+                if (cut) cerr << " cut=" << cut;
+                cerr << "\n";
+        }
+};
+
 static const char* kUsage =
     "usage: engine_mm3 [options]                       (MODEL=<file.mmcf> or --model)\n"
     "\n"
@@ -622,7 +655,7 @@ int main(int argc, char** argv) {
     // prefill only what changed instead of the whole conversation.
     vector<int> kv_tokens;
     auto run_turn = [&](const string& user, bool first, int pos, vector<ChatMsg>* hist = nullptr) {
-        auto turn_start = Clock::now();
+        TurnTiming tt;
         string text;
         vector<PromptPart> parts;
         if (chat_tmpl) {
@@ -706,8 +739,8 @@ int main(int argc, char** argv) {
         CandidateResult cand;
         bool cand_mode = topk != 0 && !greedy && !sampling_penalties_active();
         for (size_t i = skip; i < tokens.size(); ++i) {
-            if (g_stop) { gpu.sync(); return; }
-            if (pos >= model.seq) { cout << "[context full]\n"; return; }
+            if (g_stop) { tt.cut = "prefill"; gpu.sync(); return; }
+            if (pos >= model.seq) { tt.cut = "context"; cout << "[context full]\n"; return; }
             bool last = (i + 1 == tokens.size());
             if (last && cand_mode) {
                 cand = session.step_candidates(tokens[i], pos++, topk, temp, top_p);
@@ -722,8 +755,8 @@ int main(int argc, char** argv) {
                 logits = session.step(tokens[i], pos++, last);
             }
         }
-        if (g_stop) { gpu.sync(); return; }
-        auto dec_start = Clock::now();
+        if (g_stop) { tt.cut = "prefill"; gpu.sync(); return; }
+        tt.begin_decode();
         int generated = 0;
         if (!cand_mode && getenv("LOGITS_OUT")) {
             ofstream f(getenv("LOGITS_OUT"), ios::binary);
@@ -734,7 +767,7 @@ int main(int argc, char** argv) {
         int prev = tokens.empty() ? 1 : tokens.back();
         vector<int> recent;
         for (int i = 0; i < gen && pos < model.seq; ++i) {
-            if (g_stop) { gpu.sync(); return; }
+            if (g_stop) { tt.cut = "decode"; gpu.sync(); return; }
             if (!marker_mask.empty()) mask_markers(logits);
             apply_sampling_penalties(logits, recent);
             int next = greedy ? argmax_token(logits)
@@ -749,6 +782,7 @@ int main(int argc, char** argv) {
             tokens.push_back(next);
             recent.push_back(next);
             ++generated;
+            tt.generated = generated;
             prev = next;
             if (cand_mode) {
                 cand = session.step_candidates(next, pos++, topk, temp, top_p);
@@ -758,6 +792,9 @@ int main(int argc, char** argv) {
             }
         }
         cout << "\n";
+        // The loop also stops at the KV limit, which otherwise looks like a
+        // model that simply had nothing more to say.
+        if (pos >= model.seq) tt.cut = "context";
         if (!g_quiet && !g_stop && generated >= gen && !is_stop_token(prev) && generated)
             fprintf(stderr, "[stopped at the --gen limit: %d tokens.  This model did "
                             "not emit its end token (eos %d, stop %d); raise --gen]\n",
@@ -765,11 +802,6 @@ int main(int argc, char** argv) {
         if (hist) {
             hist->push_back(ChatMsg{"assistant", reply, "", ""});
             kv_tokens = tokens;
-        }
-        if (getenv("TIMING")) {
-            double ms = elapsed_ms(dec_start, Clock::now());
-            cerr << "TIMING prefill=" << elapsed_ms(turn_start, dec_start) / 1000.0
-                 << "s decode_avg=" << (generated ? ms / generated : 0.0) << "ms/token gen=" << generated << "\n";
         }
         if (getenv("TOKENS_OUT")) {
             ofstream f(getenv("TOKENS_OUT"), ios::binary);
@@ -834,6 +866,7 @@ int main(int argc, char** argv) {
         text += open_thinking ? "<think>\n" : "<think>\n\n</think>\n\n";
 
         for (int round = 0; round < 3; ++round) {
+            TurnTiming tt;   // one line per model turn, interrupted or not
             vector<PromptPart> parts;
             if (chat_tmpl)
                 parts = chat_tmpl->render(msgs, tools_array, /*add_generation_prompt=*/true,
@@ -854,13 +887,13 @@ int main(int argc, char** argv) {
             }
             auto tokens = chat_tmpl ? tokenizer.encode_parts(parts, enc_bos, enc_bos)
                                     : tokenizer.encode(text, false, false);
-            if ((int)tokens.size() >= model.seq) { cout << "[context full]\n"; return; }
+            if ((int)tokens.size() >= model.seq) { tt.cut = "context"; cout << "[context full]\n"; return; }
             vector<float> logits;
             CandidateResult cand;
             bool cand_mode = topk != 0 && !greedy && !sampling_penalties_active();
             int skip = (first && round == 0 && !cli_cache_tokens.empty()) ? cache_prefix_len(tokens) : 0;
             for (size_t i = skip; i < tokens.size(); ++i) {
-                if (g_stop) { gpu.sync(); return; }
+                if (g_stop) { tt.cut = "prefill"; gpu.sync(); return; }
                 bool last = (i + 1 == tokens.size());
                 if (last && cand_mode) {
                     cand = session.step_candidates(tokens[i], (int)i, topk, temp, top_p);
@@ -872,14 +905,15 @@ int main(int argc, char** argv) {
                     logits = session.step(tokens[i], (int)i, last);
                 }
             }
-            if (g_stop) { gpu.sync(); return; }
+            if (g_stop) { tt.cut = "prefill"; gpu.sync(); return; }
+            tt.begin_decode();
             cout << "Assistant: "; cout.flush();
             string out;
             int prev = tokens.empty() ? 1 : tokens.back();
             int pos = (int)tokens.size();
             vector<int> recent;
             for (int i = 0; i < gen && pos < model.seq; ++i) {
-                if (g_stop) { gpu.sync(); return; }
+                if (g_stop) { tt.cut = "decode"; gpu.sync(); return; }
                 apply_sampling_penalties(logits, recent);
                 int next = greedy ? argmax_token(logits)
                                   : (cand_mode ? sample_candidate_result(cand, temp, top_p, rng)
@@ -895,6 +929,7 @@ int main(int argc, char** argv) {
                 cout << piece; cout.flush();
                 out += piece;
                 recent.push_back(next);
+                ++tt.generated;
                 prev = next;
                 if (cand_mode) {
                     cand = session.step_candidates(next, pos++, topk, temp, top_p);
@@ -904,6 +939,7 @@ int main(int argc, char** argv) {
                 }
             }
             cout << "\n";
+            if (pos >= model.seq) tt.cut = "context";
             vector<ToolCall> calls = parse_tool_calls(out);
             if (calls.empty()) return;
             if (chat_tmpl) {
@@ -958,7 +994,8 @@ int main(int argc, char** argv) {
                     cout << "/clear  forget the conversation so far\n"
                             "/exit   leave\n"
                             "/help   this list\n"
-                            "anything else is sent to the model; arrows edit, Up/Down recall.\n";
+                            "anything else is sent to the model; arrows edit, Up/Down recall,\n"
+                            "Ctrl-Left/Right (or Alt-b/f) move by word.\n";
                     continue;
                 }
                 if (tools_json.empty()) run_turn(line, first, 0, chat_tmpl ? &history : nullptr);
@@ -1005,10 +1042,11 @@ int main(int argc, char** argv) {
         }
         return lg;
     };
+    TurnTiming tt;
     auto start = Clock::now();
     if (getenv("SHADER_TIME")) fprintf(stderr, "STARTUP %7.1f ms  first step\n", run_time_ms());
     logits = prefill_once();
-    if (g_stop) { gpu.sync(); cout << "\n[interrupted]\n"; return 0; }
+    if (g_stop) { tt.cut = "prefill"; gpu.sync(); cout << "\n[interrupted]\n"; return 0; }
     double prefill = chrono::duration<double>(Clock::now() - start).count();
     cout << "prefill " << prefill << " s\n";
     if (getenv("PREFILL_REPEAT")) {
@@ -1025,6 +1063,7 @@ int main(int argc, char** argv) {
         ofstream f(getenv("LOGITS_OUT"), ios::binary);
         f.write((char*)logits.data(), logits.size() * 4);
     }
+    tt.begin_decode();
     int generated = 0;
     double decode_ms = 0;
     vector<int> recent;
@@ -1057,13 +1096,14 @@ int main(int argc, char** argv) {
         }
         decode_ms += elapsed_ms(a, Clock::now());
         ++generated;
+        tt.generated = generated;
     }
     cout << "\n";
     if (getenv("TOKENS_OUT")) {
         ofstream f(getenv("TOKENS_OUT"), ios::binary);
         for (int t : tokens) f.write((char*)&t, 4);
     }
-    if (g_stop) { gpu.sync(); cout << "[interrupted]\n"; return 0; }
+    if (g_stop) { tt.cut = "decode"; gpu.sync(); cout << "[interrupted]\n"; return 0; }
     // A completion model that never emits its end token looks like "it will not
     // stop"; say which limit ended it so that is diagnosable from the output.
     if (!g_quiet && ended_on_eos && stop_reason && is_bos_token(stop_id))
