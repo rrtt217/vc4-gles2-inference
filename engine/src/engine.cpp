@@ -582,23 +582,23 @@ int main(int argc, char** argv) {
         string text;
         vector<PromptPart> parts;
         if (chat_tmpl) {
-            string sys = system_prompt.empty() ? string(kDefaultSystem) : system_prompt;
+            const string& sys = system_prompt;
             vector<ChatMsg> msgs;
             if (hist) {
                 // The REPL keeps the conversation; the system turn goes in once,
                 // at the front, and the whole history is re-rendered so the
                 // template sees the same shape it was trained on.
-                if (hist->empty()) hist->push_back(ChatMsg{"system", sys, "", ""});
+                if (hist->empty() && !sys.empty()) hist->push_back(ChatMsg{"system", sys, "", ""});
                 hist->push_back(ChatMsg{"user", user, "", ""});
                 msgs = *hist;
             } else {
-                if (first) msgs.push_back(ChatMsg{"system", sys, "", ""});
+                if (first && !sys.empty()) msgs.push_back(ChatMsg{"system", sys, "", ""});
                 msgs.push_back(ChatMsg{"user", user, "", ""});
             }
             parts = chat_tmpl->render(msgs, tools_array, /*add_generation_prompt=*/true,
                                       open_thinking, "", "");
         } else if (minimind3_template) {
-            string sys = system_prompt.empty() ? string(kDefaultSystem) : system_prompt;
+            string sys = system_prompt;
             if (!tools_json.empty()) {
                 sys += "\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\n"
                        "You are provided with function signatures within <tools></tools> XML tags:\n<tools>\n" +
@@ -606,7 +606,7 @@ int main(int argc, char** argv) {
                        "\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n"
                        "<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call>";
             }
-            if (first)
+            if (first && !sys.empty())
                 text = "<|im_start|>system\n" + sys + "<|im_end|>\n";
             text += "<|im_start|>user\n" + user + "<|im_end|>\n"
                     "<|im_start|>assistant\n";
@@ -621,7 +621,7 @@ int main(int argc, char** argv) {
             text = string("<|user|> ") + user + "<|assistant|> ";
         } else if (qwen_template) {
             if (first)
-                text = "<|im_start|>system\n" + (system_prompt.empty() ? string(kDefaultSystem) : system_prompt) +
+                text = "<|im_start|>system\n" + system_prompt +
                        "<|im_end|>\n<|im_start|>user\n" + user + "<|im_end|>\n<|im_start|>assistant\n";
             else
                 text = "<|im_start|>user\n" + user + "<|im_end|>\n<|im_start|>assistant\n";
@@ -778,8 +778,8 @@ int main(int argc, char** argv) {
         // ChatML family.
         vector<ChatMsg> msgs;
         if (chat_tmpl) {
-            if (first) msgs.push_back(ChatMsg{"system",
-                system_prompt.empty() ? string(kDefaultSystem) : system_prompt, "", ""});
+            if (first && !system_prompt.empty())
+                msgs.push_back(ChatMsg{"system", system_prompt, "", ""});
             msgs.push_back(ChatMsg{"user", user, "", ""});
         }
         string text;

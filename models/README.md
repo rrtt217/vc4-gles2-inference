@@ -349,3 +349,37 @@ the echo — and the engine already has the arithmetic for it
 nothing at this commit calls it, and the CPU path's `add_q16` clamps
 unconditionally.  Until that is wired, supra2 is out of range on the default
 path and stays unsupported.
+
+## Two limits, measured: TinyBrainBot and SmolLM2 (2026-11-08)
+
+The rail check now runs on every pack, so "this model is unsupported" has a
+number behind it.  Per-layer maxima from a float32 forward, against the q16
+grid's +-128:
+
+| model | residual `x` | attention out | normed `xb`/`xbf` | FFN hidden `hid` |
+|---|---:|---:|---:|---:|
+| TinyBrainBot 100M q4 | 380 | <8 | <8 | <16 |
+| **SmolLM2-135M** | **25982** | 7.4 | 32 | **3164** |
+
+- **TinyBrainBot** overflows the residual by 3x and answers anyway (a handful of
+  clamped values do not move its argmax).  `--res q24` changes little; what did
+  fix it was the *system turn*: its trained format has none, and the packer
+  defaulted one in, so every answer came out as template soup.  Repacked with
+  `--system ""` it answers correctly -
+
+  ```
+  What is the capital of France?  ->  The capital of France is Paris.
+  Tell me a short joke.           ->  Why don't scientists trust atoms? Because they make up everything.
+  ```
+
+- **SmolLM2-135M is a two-limit model.**  The residual jumps to 25982 at layer
+  11 (204x the rail), so q16 produces *nothing* - the model emits its end token
+  immediately.  `--res q24` covers that (32768) and generation starts, but the
+  **FFN hidden reaches 3164** and that value still travels through an I16_2
+  texture, so the output degenerates ("I am a local." repeated).  The float32
+  reference answers "The capital of France is Paris.", so the weights are fine:
+  the engine would need a wider format for the FFN intermediate as well, which
+  is the activation-grid work, not the residual work.
+
+That is the honest status: TinyBrainBot is supported and now correct; SmolLM2 is
+one widening away, and the widening is named.

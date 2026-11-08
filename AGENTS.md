@@ -33,8 +33,11 @@ replace working paths with demos or cosmetic rewrites.
 | `refs/` | untracked upstream reference material for MiniMind3 (gitignored) |
 | `docs/` | deep dives; keep READMEs short and link here |
 
-**SmolLM2-135M is not supported** and its files were removed from the store;
-the weights can be re-downloaded, but no container here was ever validated.
+**SmolLM2-135M is not supported.**  Measured (2026-11-08): its residual reaches
+25982 at layer 11 (204x the q16 rail) *and* its FFN hidden reaches 3164, which
+still travels through an I16_2 texture.  `--res q24` fixes the first and the
+output then degenerates on the second.  The float32 reference is correct, so
+this is a format limit, not a weight problem; `models/README.md` has the table.
 
 Engine modules are described in [`docs/engine-layout.md`](docs/engine-layout.md);
 the file format in [`docs/model-formats.md`](docs/model-formats.md) and
