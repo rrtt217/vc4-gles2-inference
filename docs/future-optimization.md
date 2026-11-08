@@ -272,6 +272,11 @@ new measurement that contradicts the reason given.
 | Shrink the score viewport to `(pos+2)/2` | Bit-exact by construction, passed every gate, measured **+4%** on the scores lap. No gain, as the profile predicted. |
 | Decode packed q16 bytes without `floor(byte*255+0.5)` | `(128/255)*65280` lands a few ulps off 32768; the qkv pairing looked correct on raw bytes and still moved PPL 312.1366 -> 314.7118. Diff packed formats on decoded integers per layer. |
 
+*The 1536-wide row above was **not** reproduced by the 2026-11-04 width sweep
+(`30b2882`): a single draw at 768..2040 is byte-exact and only 2048 is wrong.
+Do not read it as "1536 is a driver boundary" - the enforced rule is the
+1024-fragment cap, and the 1536 split survives only because it costs ~10 us.*
+
 ## Do not retry (measured, 2026-11-04 .. 06)
 
 The second wave, from the q4-parity and prefill work.  Each entry has a section

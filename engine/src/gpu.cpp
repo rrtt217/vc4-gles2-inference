@@ -2042,16 +2042,17 @@ void GPU::draw(const Mat& m, GLuint x, Target& t, int row ){
             glUniform1f(uloc(p, "ws"), m.scale);
         }
         setup_attrib(p);
-        // VC4 is unreliable for a single pass at that width (the logits tile
-        // and fused-W13 width).  Split only that width; other widths are fine
-        // and keeping them in one draw avoids per-draw overhead.
         // A single draw must stay below GL_MAX_TEXTURE_SIZE: at exactly 2048
         // fragments wide vc4 silently produces wrong bytes (2040 is fine,
         // 2048 differs in 5029/8192 bytes and finishes 3x too fast), while the
         // same matrix drawn as two viewport-offset halves is exact.  Splitting
         // costs one draw (~10 us), so cap every strip at 1024 and keep the
         // gl_FragCoord-absolute convention the shader relies on.
-        // MATVEC_STRIP overrides the cap for experiments.
+        //
+        // The 1536 special case in matvec() (768-wide halves) predates this
+        // sweep and is not a known driver boundary: the sweep measured 768..2040
+        // as exact.  It stays because a split costs ~10 us, not because 1536 is
+        // wrong.  MATVEC_STRIP overrides the cap for experiments.
         const char* sv = getenv("MATVEC_STRIP");
         const int env_strip = sv ? atoi(sv) : 0;
         const int cap = (env_strip > 0) ? env_strip : 1024;
