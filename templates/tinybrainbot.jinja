@@ -1,4 +1,7 @@
-{# TinyBrainBot-100M-v5.1-Instruct, copied verbatim from the model's
-   tokenizer_config.json.  Markers are <|user|>/<|assistant|>/<|system|> and the
-   stop token is <|end|>; there is no system turn in the trained format. #}
+{# TinyBrainBot-100M-v5.1-Instruct.  The HuggingFace repo has no
+   tokenizer_config.json; this is byte-identical to the template the author
+   embeds in the official GGUF (tokenizer.chat_template), which is the one the
+   card says tokenises exactly like transformers.  Markers are
+   <|user|>/<|assistant|>/<|system|> and the stop token is <|end|>.  There is no
+   system turn in the trained format, and the prompt opens with a space. #}
 {{ ' ' }}{%- for m in messages -%}{{- '<|' + m['role'] + '|>\n' + m['content'] + '\n<|end|>\n' -}}{%- endfor -%}{%- if add_generation_prompt -%}{{- '<|assistant|>\n' -}}{%- endif -%}
