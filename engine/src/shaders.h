@@ -64,12 +64,11 @@ std::string att_kv_rope(const AttnConfig& c);
 std::string att_vscale(const AttnConfig& c);
 std::string att_qnorm_scale(const AttnConfig& c);
 std::string att_qrot(const AttnConfig& c);
-std::string att_score(const AttnConfig& c, bool hoist);
+std::string att_score(const AttnConfig& c);
 std::string att_stats(const AttnConfig& c);
 std::string att_prob(const AttnConfig& c);
 std::string att_v(const AttnConfig& c, XFormat out);
 
-std::string sum_logits();
 std::string top2_fast(int rows, int chunk);
 std::string top2(int rows, int chunk);
 std::string top2_fast_packed(int rows, int chunk);

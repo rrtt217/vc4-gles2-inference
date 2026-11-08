@@ -6,8 +6,7 @@ c7815ecf861f53f2    6675 attn_kv24/att_kv_rope
 ee974f3912d5a789    3272 attn_kv24/att_prob
 7b910438ab77ec75    3281 attn_kv24/att_qnorm_scale
 65b12f53669322eb    4029 attn_kv24/att_qrot
-f3db714a03449643    3837 attn_kv24/att_score_hoist
-7750149e51d7fc46    4327 attn_kv24/att_score_plain
+f3db714a03449643    3837 attn_kv24/att_score
 98f3e2e6eb8f8e2e    3585 attn_kv24/att_stats
 d94f4e35deb09511    6947 attn_kv24/att_v_i16_2
 8ef09ffbc1ea54c3    7601 attn_kv24/att_v_i8_4
@@ -17,8 +16,7 @@ ddf4c6e9b4585e62    6502 attn_kv8_nostep_unpaired/att_kv_rope
 89096d5d2fb321d5    3271 attn_kv8_nostep_unpaired/att_prob
 3996a16ebe3130dd    3112 attn_kv8_nostep_unpaired/att_qnorm_scale
 b6154d6bbbe09503    3860 attn_kv8_nostep_unpaired/att_qrot
-777fa46f91f556af    3836 attn_kv8_nostep_unpaired/att_score_hoist
-7b3af4541e571cb2    4158 attn_kv8_nostep_unpaired/att_score_plain
+777fa46f91f556af    3836 attn_kv8_nostep_unpaired/att_score
 a4a394e7332cdeda    3584 attn_kv8_nostep_unpaired/att_stats
 014c66020e838a27    6946 attn_kv8_nostep_unpaired/att_v_i16_2
 8066a6e428941e57    7600 attn_kv8_nostep_unpaired/att_v_i8_4
@@ -28,8 +26,7 @@ a4a394e7332cdeda    3584 attn_kv8_nostep_unpaired/att_stats
 1bcf99c169231824    3271 attn_q4_kv8_vstep/att_prob
 d350fe9ff4552742    3280 attn_q4_kv8_vstep/att_qnorm_scale
 bbe02069aa3d396c    4028 attn_q4_kv8_vstep/att_qrot
-f0db6f2cf91b4fac    3836 attn_q4_kv8_vstep/att_score_hoist
-577ca23d580fbc5d    4326 attn_q4_kv8_vstep/att_score_plain
+f0db6f2cf91b4fac    3836 attn_q4_kv8_vstep/att_score
 a904a62d042671a1    3584 attn_q4_kv8_vstep/att_stats
 eb6606ca07c3d1fe    7180 attn_q4_kv8_vstep/att_v_i16_2
 ff7969098d86334a    7854 attn_q4_kv8_vstep/att_v_i8_4
@@ -39,8 +36,7 @@ d37e2f4eb4ccfb5a    6676 attn_q8_kv16_qkn0_ropehalf/att_kv_rope
 4ef4e2cf416e3fd1    3273 attn_q8_kv16_qkn0_ropehalf/att_prob
 55b2ad561f246d8d    3282 attn_q8_kv16_qkn0_ropehalf/att_qnorm_scale
 f8bf5fef6f030d13    4030 attn_q8_kv16_qkn0_ropehalf/att_qrot
-b25e2435e1c25d3b    3838 attn_q8_kv16_qkn0_ropehalf/att_score_hoist
-ebce1e663e89785e    4328 attn_q8_kv16_qkn0_ropehalf/att_score_plain
+b25e2435e1c25d3b    3838 attn_q8_kv16_qkn0_ropehalf/att_score
 79db51b5e5e815e6    3586 attn_q8_kv16_qkn0_ropehalf/att_stats
 f6d7175b085b307f    6948 attn_q8_kv16_qkn0_ropehalf/att_v_i16_2
 8a37e618af8953a3    7602 attn_q8_kv16_qkn0_ropehalf/att_v_i8_4
@@ -50,8 +46,7 @@ f6d7175b085b307f    6948 attn_q8_kv16_qkn0_ropehalf/att_v_i16_2
 259708d2bf21426f    3273 attn_q8_kv16_qkvpair/att_prob
 2e528c35e248a0df    3282 attn_q8_kv16_qkvpair/att_qnorm_scale
 1a4e761a1d54f5b9    4030 attn_q8_kv16_qkvpair/att_qrot
-c3a159f18b941821    3838 attn_q8_kv16_qkvpair/att_score_hoist
-d8a802a69993c5b8    4328 attn_q8_kv16_qkvpair/att_score_plain
+c3a159f18b941821    3838 attn_q8_kv16_qkvpair/att_score
 a86b7577aff2ec6c    3586 attn_q8_kv16_qkvpair/att_stats
 6408d7cd2eb10f8d    6948 attn_q8_kv16_qkvpair/att_v_i16_2
 a440d840a310caad    7602 attn_q8_kv16_qkvpair/att_v_i8_4
@@ -61,8 +56,7 @@ a481dc5dad00c1a0    3280 attn_q8_kv16_qkvpair/att_vscale
 259708d2bf21426f    3273 attn_q8_kv16_unpaired/att_prob
 f4c83db15bf3e677    3114 attn_q8_kv16_unpaired/att_qnorm_scale
 357791f02c52b7d1    3862 attn_q8_kv16_unpaired/att_qrot
-c3a159f18b941821    3838 attn_q8_kv16_unpaired/att_score_hoist
-eb5ac823b3a92214    4160 attn_q8_kv16_unpaired/att_score_plain
+c3a159f18b941821    3838 attn_q8_kv16_unpaired/att_score
 a86b7577aff2ec6c    3586 attn_q8_kv16_unpaired/att_stats
 6408d7cd2eb10f8d    6948 attn_q8_kv16_unpaired/att_v_i16_2
 a440d840a310caad    7602 attn_q8_kv16_unpaired/att_v_i8_4
@@ -114,7 +108,6 @@ e3ccd49498ed0a79    4166 rms_stats2_768_i16_1
 71298f8eb8279fbe     548 rms_stats_reduce
 09c0323f6dbad409    3194 rms_stats_split_768_i16_1
 d0c474a9fd81a457    3001 rms_stats_split_768_i8_4
-ddfc6e6d6de79f2e     772 sum_logits
 e68074ce7e5d3f53    3765 swiglu_2432_fused_i16_2
 0547d21ae9c71648    3778 swiglu_2432_split_i8_4
 c18840fe750c6319    3755 swiglu_2row_2432_i16_2

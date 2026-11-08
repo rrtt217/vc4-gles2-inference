@@ -62,8 +62,7 @@ void add_attn(vector<Case>& v, const string& tag, const AttnConfig& c) {
     add(v, tag + "/att_vscale", [c] { return att_vscale(c); });
     add(v, tag + "/att_qnorm_scale", [c] { return att_qnorm_scale(c); });
     add(v, tag + "/att_qrot", [c] { return att_qrot(c); });
-    add(v, tag + "/att_score_hoist", [c] { return att_score(c, true); });
-    add(v, tag + "/att_score_plain", [c] { return att_score(c, false); });
+    add(v, tag + "/att_score", [c] { return att_score(c); });
     add(v, tag + "/att_stats", [c] { return att_stats(c); });
     add(v, tag + "/att_prob", [c] { return att_prob(c); });
     add(v, tag + "/att_v_i16_2", [c] { return att_v(c, XFormat::I16_2); });
@@ -146,7 +145,6 @@ vector<Case> cases() {
         [] { return rms_norm_pair2(768, I16_1, false); });
     add(v, "rms_norm_pair2_768_i16_1_eps",
         [] { return rms_norm_pair2(768, I16_1, true); });
-    add(v, "sum_logits", [] { return sum_logits(); });
     add(v, "top2_fast_6400_256", [] { return top2_fast(6400, 256); });
     add(v, "top2_6400_256", [] { return top2(6400, 256); });
     add(v, "top2_fast_packed_6400_256", [] { return top2_fast_packed(6400, 256); });

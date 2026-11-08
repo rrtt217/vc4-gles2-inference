@@ -189,8 +189,10 @@ binary.  They are measurement hooks, not production settings.
 
 ## Retired
 
-- `ATTN_HOIST=0`, `ATTN_FUSE_PROB=0` — the hoisted/fused attention path is
-  mandatory since the q16 layout; the variables are ignored.
+- `ATTN_HOIST=0`, `ATTN_FUSE_PROB=0` — the hoisted/fused attention path became
+  mandatory with the q16 layout, and the code they selected was removed: the
+  variables now do nothing at all (there is no unhoisted `att_score` and no
+  probability texture to read).
 - `LEGACY_Q8=1`, `ROPE_THETA=`, `ROPE_HALF=`, `TOKENIZER=`, `--template` — gone
   with the legacy readers; the container states all of it.
 - `--kv-pack` and `--seq` are **server** flags, never engine flags: the server

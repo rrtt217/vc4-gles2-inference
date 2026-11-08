@@ -184,10 +184,9 @@ private:
     GLuint x_kv_rope();
     GLuint x_qnorm();
     GLuint x_qrot();
-    GLuint x_score(bool hoist);
+    GLuint x_score();
     GLuint x_stats();
     GLuint x_prob();
-    GLuint x_sum();
     GLuint x_top2_fast(int rows, int chunk);
     GLuint x_top2(int rows, int chunk);
     GLuint x_q8_pair_logits(int rows, int cols);

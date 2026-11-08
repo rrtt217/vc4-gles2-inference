@@ -91,6 +91,15 @@ repeat the decode inline on purpose, so the repetition is generated from the
 shared `k*` constants in `shaders.cpp` / `shaders_attn.cpp` rather than copied:
 one definition, same bytes.
 
+Builders also check their arguments where the text is made: the q8 column loop
+steps by four and the q4 loop by 32, so a width that is neither is a shader that
+reads past its activation texture and still compiles — it is now an abort that
+names the builder.  `att_defs()` does the same for the attention layout
+(`heads % kv_heads`, even `head_dim`, a known `KVPACK`).  A uniform that is set
+but not declared is reported once with the program name: `-1` from
+`glGetUniformLocation` used to be a silent no-op, which is a wrong number rather
+than an error.
+
 ## Build
 
 ```bash

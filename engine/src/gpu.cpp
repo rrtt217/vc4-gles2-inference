@@ -806,7 +806,6 @@ GLuint GPU::rmsnorm(GLuint x, GLuint w, Target& out){
         if (rms_stats_.tex == 0) rms_stats_ = make_target(1, 1);
         if (rms_partial_.tex == 0 || rms_partial_.w != RMS_PARTIALS)
             rms_partial_ = make_target(RMS_PARTIALS, 1);
-        GLuint loc = 0;
         GLuint ps = x_rms_split();
         bind_fbo(rms_partial_.fbo);
         glViewport(0, 0, RMS_PARTIALS, 1);
@@ -878,7 +877,8 @@ void GPU::matvec_add(const Mat& m, GLuint x, GLuint residual, Target& out, XForm
             bind_tex(2, residual);
             set_sampler(p, "R", 2);
         }
-        glUniform1f(uloc(p, "ws"), m.scale);
+        // The q4 kernels take their scale as "ps"; "ws" does not exist there.
+        if (m.type != WeightType::INT4) glUniform1f(uloc(p, "ws"), m.scale);
         setup_attrib(p);
         const int strip = pair ? ((m.rows == 1536) ? 384 : (m.rows + 1) / 2)
                                : ((m.rows == 1536) ? 768 : m.rows);
@@ -1027,7 +1027,11 @@ double GPU::shader_time_ms(){
         return run_time_ms();
     }
 
-static const char* g_prog_key = "?";
+// The key of the program currently being built.  A std::string, not a
+// const char*: every caller passes a temporary ("xq8_" + to_string(rows)), and
+// the pointer dangles as soon as the expression ends - which is exactly when a
+// diagnostic or a uniform lookup still wants to name the program.
+static string g_prog_key = "?";
 static Clock::time_point g_run_t0;
 
 void gpu_set_run_t0(Clock::time_point t){ g_run_t0 = t; }
@@ -1086,7 +1090,7 @@ GLuint GPU::x_prog(const string& key, const string& src){
                 fprintf(stderr, "SHADER_TIME reuse key %s (identical text)\n", key.c_str());
             return t->second;
         }
-        g_prog_key = key.c_str();
+        g_prog_key = key;
         GLuint p = link_program(src);
         check_program_runs(p, key);
         programs_[key] = p;
@@ -1395,7 +1399,7 @@ GLuint GPU::x_i4_pair(int rows, int cols){
         const string key = "xi4p_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(act_fmt_);
         auto it = programs_.find(key);
         if (it != programs_.end()) return it->second;
-        g_prog_key = key.c_str();
+        g_prog_key = key;
         GLuint p = link_program(matvec_i4_pair(rows, cols, act_fmt_));
         programs_[key] = p;
         return p;
@@ -1486,6 +1490,12 @@ GLint GPU::uloc(GLuint prog, const char* name) {
         }
         for (const auto& e : *uloc_tab_) if (e.name == name) return e.loc;
         GLint loc = glGetUniformLocation(prog, name);
+        // -1 is what a misspelt name and a name the compiler dropped both look
+        // like, and glUniform* then silently does nothing: the kernel runs with
+        // whatever the uniform held (0), which is a wrong number, not an error.
+        if (loc < 0)
+                fprintf(stderr, "program '%s': uniform '%s' not found (typo, or the "
+                                "compiler removed it)\n", g_prog_key.c_str(), name);
         uloc_tab_->push_back({name, loc});
         return loc;
     }
@@ -1511,7 +1521,7 @@ GLuint GPU::x_i4_add_pair(int rows, int cols, XFormat xf){
         const string key = "xi4ap_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(xf) + (inl ? "" : "_gen");
         auto it = programs_.find(key);
         if (it != programs_.end()) return it->second;
-        g_prog_key = key.c_str();
+        g_prog_key = key;
         GLuint p = link_program(matvec_i4_add_pair(rows, cols, xf, inl));
         programs_[key] = p;
         return p;
@@ -1582,13 +1592,11 @@ GLuint GPU::x_qnorm(){ return x_prog("xqn", att_qnorm_scale(att_cfg())); }
 
 GLuint GPU::x_qrot(){ return x_prog("xqr", att_qrot(att_cfg())); }
 
-GLuint GPU::x_score(bool hoist){ return x_prog(string("xsc_") + (hoist ? "1" : "0"), att_score(att_cfg(), hoist)); }
+GLuint GPU::x_score(){ return x_prog("xsc", att_score(att_cfg())); }
 
 GLuint GPU::x_stats(){ return x_prog("xst", ::att_stats(att_cfg())); }
 
 GLuint GPU::x_prob(){ return x_prog("xpr", att_prob(att_cfg())); }
-
-GLuint GPU::x_sum(){ return x_prog("xsum", sum_logits()); }
 
 GLuint GPU::x_top2_fast(int rows, int chunk){
         return x_prog("xt2f_" + to_string(rows) + "_" + to_string(chunk), top2_fast(rows, chunk));
@@ -1733,7 +1741,7 @@ GLuint GPU::link_program(const string& fs_in){
             ++count; total += ms;
             fprintf(stderr, "SHADER_TIME #%02d at %8.1f ms  link %6.1f ms  src %5zu B  h=%08zx  key=%s  cum %7.1f ms\n",
                     count, shader_time_ms(), ms, fs.size(),
-                    (size_t)std::hash<string>{}(fs), g_prog_key, total);
+                    (size_t)std::hash<string>{}(fs), g_prog_key.c_str(), total);
         }
         return p;
     }
@@ -1884,8 +1892,7 @@ void GPU::kv_vscale(int layer, int pos){
 
 void GPU::att_scores(int layer, int pos){
         // The q16 score-pair layout requires the hoisted q path; ATTN_HOIST=0
-        // is intentionally ignored after the q16 attention change.
-        static const bool hoist = true;
+        // was removed with the kernel it selected (see att_score).
         const bool sprof = getenv("LAYER_PROFILE") != nullptr;
         auto stp = Clock::now();
         auto slap = [&](const char* n) {
@@ -1895,29 +1902,6 @@ void GPU::att_scores(int layer, int pos){
             cerr << "PROFATT2 " << n << " " << elapsed_ms(stp, nw) << "\n";
             stp = nw;
         };
-        if (!hoist) {
-            GLuint pi = x_score(false);
-            bind_fbo(att_scores_.fbo);
-            glViewport(0, 0, att_seq_ / 2, att_heads_);
-            use_program(pi);
-            bind_tex(0, qkv_target_.tex);
-            set_sampler(pi, "R", 0);
-            bind_tex(1, kv_cache_[layer].tex);
-            set_sampler(pi, "KV", 1);
-            bind_tex(2, rope_tex_);
-            set_sampler(pi, "RT", 2);
-            if (att_qk_norm_) {
-                bind_tex(3, q_norm_tex_[layer]);
-                set_sampler(pi, "QN", 3);
-            }
-            glUniform1f(uloc(pi, "pos"), (float)pos);
-            glUniform1f(uloc(pi, "invsqrt"), 1.0f / sqrtf((float)att_head_dim_));
-            setup_attrib(pi);
-            glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
-            att_finish();
-            slap("qknorm");
-            return;
-        }
         // Position-only work first: qk-norm factor per head, then the rotated q.
         if (att_qk_norm_) {
             if (qscale_target_.tex == 0 || qscale_target_.w != att_heads_)
@@ -1963,7 +1947,7 @@ void GPU::att_scores(int layer, int pos){
         if (attn_dup("qrot")) go_qrot();
         slap("qrot");
 
-        GLuint p = x_score(true);
+        GLuint p = x_score();
         auto go_score = [&]{
             bind_fbo(att_scores_.fbo);
             glViewport(0, 0, att_seq_ / 2, att_heads_);
@@ -2053,8 +2037,9 @@ void GPU::draw(const Mat& m, GLuint x, Target& t, int row ){
             bind_tex(2, m.q4_param_tex);
             set_sampler(p, "P", 2);
             glUniform1f(uloc(p, "ps"), m.q4_param_scale);
+        } else {
+            glUniform1f(uloc(p, "ws"), m.scale);
         }
-        glUniform1f(uloc(p, "ws"), m.scale);
         setup_attrib(p);
         // VC4 is unreliable for a single 1536-column pass (the logits tile
         // and fused-W13 width).  Split only that width; other widths are fine

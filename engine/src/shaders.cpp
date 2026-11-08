@@ -2,6 +2,7 @@
 #include "gpu.h"
 
 #include <string>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
@@ -70,6 +71,26 @@ const string kEncs4096 =
     "float r0=floor(q/16777216.0),g=floor(q/65536.0)-r0*256.0,"
     "b=floor(q/256.0)-r0*65536.0-g*256.0,a=q-r0*16777216.0-g*65536.0-b*256.0;"
     "return vec4(r0/255.0,g/255.0,b/255.0,a/255.0);}";
+
+// Shape contract.  The q8 kernels step the column loop by four; the q4 kernels
+// take eight weights per texel in groups of 32.  A width that is not a multiple
+// of that reads past the activation texture and the shader still compiles - it
+// just returns a wrong number a layer later, which is how a mis-sized call
+// survives to the PPL run.  Check where the text is made, once per program.
+static void need_shape(const char* who, int rows, int cols, int unit) {
+    if (rows <= 0 || cols <= 0 || cols % unit != 0) {
+        fprintf(stderr, "shader %s: rows=%d cols=%d (cols must be a positive multiple of %d)\n",
+                who, rows, cols, unit);
+        exit(2);
+    }
+}
+
+static void need_dim(const char* who, int n) {
+    if (n <= 0) {
+        fprintf(stderr, "shader %s: size=%d\n", who, n);
+        exit(2);
+    }
+}
 
 static string q4_head(XFormat xf, bool inl) {
     if (!inl || xf != XFormat::I16_2) return head(xf);
@@ -226,6 +247,7 @@ static string q4_h(const string& w) {
 }  // namespace
 
 string matvec_q8(int rows, int cols, XFormat xf) {
+    need_shape("matvec_q8", rows, cols, 4);
     const int axw = x_texels(cols, xf);
     const string ROWS = to_string(rows), COLS4 = to_string(cols / 4), AXW = to_string(axw);
     // VC4's shader compiler generates a slower loop when the activation decode
@@ -263,6 +285,7 @@ string matvec_q8(int rows, int cols, XFormat xf) {
 }
 
 string matvec_q8_pair(int rows, int cols, XFormat xf) {
+    need_shape("matvec_q8_pair", rows, cols, 4);
     const int axw = x_texels(cols, xf);
     const string ROWS = to_string(rows), COLS4 = to_string(cols / 4), AXW = to_string(axw);
     if (xf == XFormat::I16_2) {
@@ -306,6 +329,7 @@ string matvec_q8_pair(int rows, int cols, XFormat xf) {
 // clamp as x_i24encq, so the packed pair holds the same two integers that the
 // unpacked pass writes.
 string matvec_q8_pair_logits(int rows, int cols, XFormat xf) {
+    need_shape("matvec_q8_pair_logits", rows, cols, 4);
     const int axw = x_texels(cols, xf);
     const string ROWS = to_string(rows), COLS4 = to_string(cols / 4), AXW = to_string(axw);
     const string WR0 = "vec2((float(q)+0.5)/float(" + COLS4 + "),(float(r0)+0.5)/float(" + ROWS + "))";
@@ -350,6 +374,7 @@ string matvec_q8_pair_logits(int rows, int cols, XFormat xf) {
 // rounding are the same operations the separate passes perform, so the output is
 // bit-identical.
 string matvec_q8_pair_swiglu(int rows, int cols, XFormat xf, bool inl) {
+    need_shape("matvec_q8_pair_swiglu", rows, cols, 4);
     const int axw = x_texels(cols, xf);
     const string ROWS = to_string(rows), COLS4 = to_string(cols / 4), AXW = to_string(axw);
     const string WR0 = "vec2((float(q)+0.5)/float(" + COLS4 + "),(float(r0)+0.5)/float(" + ROWS + "))";
@@ -413,6 +438,7 @@ string matvec_q8_pair_swiglu(int rows, int cols, XFormat xf, bool inl) {
 // qz/sl/encode steps are the same operations in the same order as
 // matvec_q8_pair_swiglu, so the bytes must match two single-position draws.
 string matvec_q8_gate2(int rows, int cols) {
+    need_shape("matvec_q8_gate2", rows, cols, 4);
     const int axw = x_texels(cols, XFormat::I16_2);
     const string ROWS = to_string(rows), COLS4 = to_string(cols / 4);
     const string AXW = to_string(axw), AXW2 = to_string(2 * axw);
@@ -447,6 +473,7 @@ string matvec_q8_gate2(int rows, int cols) {
 // eight MACs (four per position): the weight byte is used twice.  The output
 // is the P2 layout, which the CPU read-back deinterleaves.
 string matvec_q8_p2(int rows, int cols) {
+    need_shape("matvec_q8_p2", rows, cols, 4);
     const string ROWS = to_string(rows), COLS4 = to_string(cols / 4);
     const string CW = to_string(cols);
     return head(XFormat::I16_2) + x_pair2_glsl() +
@@ -484,6 +511,7 @@ string matvec_q8_p2(int rows, int cols) {
 // result lands in changes, so the gate sees the q16 integers the serial
 // rmsnorm would have produced.
 string rms_stats2(int dim, XFormat rf) {
+    need_dim("rms_stats2", dim);
     const string D = to_string(dim);
     const string RW = to_string(x_texels(dim, rf));
     return head(XFormat::I16_2) + x_residual_glsl(rf) + q24_helpers() +
@@ -498,6 +526,7 @@ string rms_stats2(int dim, XFormat rf) {
 }
 
 string rms_norm_pair2(int dim, XFormat rf, bool use_eps_uniform) {
+    need_dim("rms_norm_pair2", dim);
     const string eps_src = use_eps_uniform ? "eps" : "1e-5";
     const string D = to_string(dim);
     const string RW = to_string(x_texels(dim, rf));
@@ -524,6 +553,7 @@ string rms_norm_pair2(int dim, XFormat rf, bool use_eps_uniform) {
 // each carrying one value per position, so the fetch count and the MAC order
 // are exactly those of matvec_q8_gate2 and the output bytes match it.
 string matvec_q8_gate2_p2(int rows, int cols) {
+    need_shape("matvec_q8_gate2_p2", rows, cols, 4);
     const string ROWS = to_string(rows), COLS4 = to_string(cols / 4);
     const string CW = to_string(cols);
     const string WR = "vec2((float(q)+0.5)/float(" + COLS4 + ")," 
@@ -554,6 +584,7 @@ string matvec_q8_gate2_p2(int rows, int cols) {
 // already P2: one texel carries both positions value r, so the add reads one
 // texel instead of two and the add itself is the same expression.
 string matvec_q8_p2_add_p2(int rows, int cols) {
+    need_shape("matvec_q8_p2_add_p2", rows, cols, 4);
     const string ROWS = to_string(rows), COLS4 = to_string(cols / 4), CW = to_string(cols);
     return head(XFormat::I16_2) + x_pair2_glsl() +
         "uniform sampler2D W,X,RA;uniform float ws;"
@@ -582,6 +613,7 @@ string matvec_q8_p2_add_p2(int rows, int cols) {
 // the float sum lands inside one ULP of a 0.5 boundary.  So the add has to
 // happen inside the kernel, in the same expression order as the serial path.
 string matvec_q8_p2_add(int rows, int cols, XFormat rf) {
+    need_shape("matvec_q8_p2_add", rows, cols, 4);
     const string ROWS = to_string(rows), COLS4 = to_string(cols / 4), CW = to_string(cols);
     const string RW = to_string(x_texels(rows, rf));
     return head(XFormat::I16_2) + x_pair2_glsl() + x_residual_glsl(rf) +
@@ -607,6 +639,7 @@ string matvec_q8_p2_add(int rows, int cols, XFormat rf) {
 // integers, so this is a re-encode and cannot move a value; it exists because
 // a draw has one target and the next pass wants the per-position layout.
 string p2_split(int rows, XFormat rf) {
+    need_dim("p2_split", rows);
     const string ROWS = to_string(rows), RW = to_string(x_texels(rows, rf));
     const string H = head(XFormat::I16_2) + x_pair2_glsl() + x_residual_glsl(rf);
     if (rf != XFormat::I16_2)
@@ -628,6 +661,7 @@ string p2_split(int rows, XFormat rf) {
 }
 
 string matvec_q8_pair_fused(int rows, int cols, XFormat xf) {
+    need_shape("matvec_q8_pair_fused", rows, cols, 4);
     const int axw = x_texels(cols, xf);
     const int rows2 = 2 * rows;
     // The FFN gate/swiglu kernel is the hottest matvec in the token (4864x768
@@ -669,6 +703,7 @@ string matvec_q8_pair_fused(int rows, int cols, XFormat xf) {
 }
 
 string matvec_q8_add(int rows, int cols, XFormat xf, XFormat rf) {
+    need_shape("matvec_q8_add", rows, cols, 4);
     const int axw = x_texels(cols, xf);
     const string ROWS = to_string(rows), COLS4 = to_string(cols / 4), AXW = to_string(axw);
     if (xf == XFormat::I16_2 && rf == XFormat::I16_1) {
@@ -707,6 +742,7 @@ string matvec_q8_add(int rows, int cols, XFormat xf, XFormat rf) {
 }
 
 string matvec_q8_add_pair(int rows, int cols, XFormat xf, bool inl) {
+    need_shape("matvec_q8_add_pair", rows, cols, 4);
     const int axw = x_texels(cols, xf);
     const int rw = (rows + 1) / 2;
     const string ROWS = to_string(rows), COLS4 = to_string(cols / 4), AXW = to_string(axw);
@@ -756,6 +792,7 @@ string matvec_q8_add_pair(int rows, int cols, XFormat xf, bool inl) {
 }
 
 string matvec_i16(int rows, int cols, XFormat xf) {
+    need_shape("matvec_i16", rows, cols, 1);
     const int tw = (cols + 1) / 2;
     const int axw = x_texels(cols, xf);
     return head(xf) + q24_helpers() +
@@ -771,6 +808,7 @@ string matvec_i16(int rows, int cols, XFormat xf) {
 }
 
 string matvec_i16_add(int rows, int cols, XFormat xf, XFormat rf) {
+    need_shape("matvec_i16_add", rows, cols, 1);
     const int tw = (cols + 1) / 2;
     const int axw = x_texels(cols, xf);
     return head(xf) + x_residual_glsl(rf) +
@@ -787,9 +825,9 @@ string matvec_i16_add(int rows, int cols, XFormat xf, XFormat rf) {
 }
 
 string matvec_i4(int rows, int cols, XFormat xf, bool inl) {
+    need_shape("matvec_i4", rows, cols, 32);
     const int texw = cols / 8;
     const int groups = (cols + 31) / 32;
-    const int axw = x_texels(cols, xf);
     return q4_head(xf, inl) + q24_helpers() +
         "uniform sampler2D W,P,X;uniform float ps;"
         "void main(){int r=int(gl_FragCoord.x);float s=0.0;"
@@ -817,9 +855,9 @@ string matvec_i4(int rows, int cols, XFormat xf, bool inl) {
 // decode and one residual fetch, and are written as a raw q16 pair (x_st2q, since
 // the q4 accumulator works in raw q16 units, not activation units).
 string matvec_i4_add_pair(int rows, int cols, XFormat xf, bool inl) {
+    need_shape("matvec_i4_add_pair", rows, cols, 32);
     const int texw = cols / 8;
     const int groups = (cols + 31) / 32;
-    const int axw = x_texels(cols, xf);
     const int rw = (rows + 1) / 2;
     return q4_head(xf, inl) + x_residual_glsl(XFormat::I16_2) +
         "uniform sampler2D W,P,X,R;uniform float ps;"
@@ -853,6 +891,7 @@ string matvec_i4_add_pair(int rows, int cols, XFormat xf, bool inl) {
 // q4 FFN gate, paired: one fragment computes w1[r] and w3[r], sharing the
 // activation decode, and writes both as a raw q16 pair for swiglu.
 string matvec_i4_pair(int rows, int cols, XFormat xf) {
+    need_shape("matvec_i4_pair", rows, cols, 32);
     const int texw = cols / 8;
     const int groups = (cols + 31) / 32;
     const int axw = x_texels(cols, xf);
@@ -893,6 +932,7 @@ string matvec_i4_pair(int rows, int cols, XFormat xf) {
 // reproduce x_st2q -> x_i16pair -> x_st2 exactly, so the packed output is
 // bit-identical to the two-pass path.
 string matvec_i4_pair_swiglu(int rows, int cols, XFormat xf, bool inl) {
+    need_shape("matvec_i4_pair_swiglu", rows, cols, 32);
     const int texw = cols / 8;
     const int groups = (cols + 31) / 32;
     const int axw = x_texels(cols, xf);
@@ -958,6 +998,7 @@ string matvec_i4_pair_swiglu(int rows, int cols, XFormat xf, bool inl) {
 
 
 string matvec_i4_add(int rows, int cols, XFormat xf, XFormat rf) {
+    need_shape("matvec_i4_add", rows, cols, 32);
     const int texw = cols / 8;
     const int groups = (cols + 31) / 32;
     const int axw = x_texels(cols, xf);
@@ -988,6 +1029,7 @@ string matvec_i4_add(int rows, int cols, XFormat xf, XFormat rf) {
 
 
 string swiglu_pair(int hidden, XFormat out) {
+    need_dim("swiglu_pair", hidden);
     const string H = to_string(hidden);
     string act =
         "float actv(int i){if(i>=" + H + ")return 0.0;"
@@ -1005,6 +1047,7 @@ string swiglu_pair(int hidden, XFormat out) {
 }
 
 string swiglu_2row(int hidden, XFormat out) {
+    need_dim("swiglu_2row", hidden);
     const string H = to_string(hidden);
     string read =
         "float yat(int i){float x=float(i);"
@@ -1024,6 +1067,7 @@ string swiglu_2row(int hidden, XFormat out) {
 }
 
 string swiglu(int hidden, bool fused, XFormat out) {
+    need_dim("swiglu", hidden);
     const string H = to_string(hidden);
     string read;
     if (fused) {
@@ -1053,6 +1097,7 @@ string swiglu(int hidden, bool fused, XFormat out) {
 }
 
 string rms_stats_split(int dim, XFormat residual) {
+    need_dim("rms_stats_split", dim);
     const string D = to_string(dim);
     const string RW = to_string(x_texels(dim, residual));
     return head(residual) + x_residual_glsl(residual) +
@@ -1079,6 +1124,7 @@ string rms_stats_reduce() {
 
 string rms_norm(int dim, XFormat residual, XFormat out, bool fused_reduce,
                 bool use_eps_uniform) {
+    need_dim("rms_norm", dim);
     const string eps_src = use_eps_uniform ? "eps" : "1e-5";
     // Fusing the 32-way reduce into every normalising fragment keeps the exact
     // summation order, so the result is bit-identical to the separate pass; it

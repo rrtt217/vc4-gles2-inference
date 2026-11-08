@@ -1,5 +1,6 @@
 #include "shaders.h"
 
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
@@ -34,7 +35,24 @@ string qkv_read(const AttnConfig& c, const char* tex, const char* macro) {
 
 }  // namespace
 
+// The attention kernels bake dim/heads/seq/kv layout into #defines, and a
+// config that violates the pairing assumptions (GROUP = heads/kv_heads, rope
+// pairs of head_dim) compiles to a shader that indexes out of bounds.
+static void need_attn(const AttnConfig& c) {
+    const bool ok = c.dim > 0 && c.kv_dim > 0 && c.heads > 0 && c.kv_heads > 0 &&
+                    c.head_dim > 0 && (c.head_dim % 2) == 0 && c.seq > 0 &&
+                    (c.heads % c.kv_heads) == 0 && c.kv_width > 0 &&
+                    (c.kv_bits == 0 || c.kv_bits == 8 || c.kv_bits == 16);
+    if (!ok) {
+        fprintf(stderr, "attn config: dim=%d kv_dim=%d heads=%d kv_heads=%d head_dim=%d "
+                        "seq=%d kv_bits=%d width=%d\n", c.dim, c.kv_dim, c.heads, c.kv_heads,
+                c.head_dim, c.seq, c.kv_bits, c.kv_width);
+        exit(2);
+    }
+}
+
 string att_defs(const AttnConfig& c) {
+    need_attn(c);
     return string("#define DIM ") + to_string(c.dim) + "\n" +
            "#define KVDIM " + to_string(c.kv_dim) + "\n" +
            "#define QKVDIM " + to_string(c.dim + 2 * c.kv_dim) + "\n" +
@@ -207,35 +225,9 @@ string att_qrot(const AttnConfig& c) {
 }
 
 
-string att_score(const AttnConfig& c, bool hoist) {
-    if (!hoist) {
-        return "precision highp float;\n" + att_defs(c) + att_helpers() +
-            "uniform sampler2D R,KV,RT,QN;uniform float pos,invsqrt;" + qkv_read(c, "R", "RQKVQ") +
-            "void main(){int t=int(gl_FragCoord.x);int h=int(gl_FragCoord.y);"
-            "if(float(t)>pos){gl_FragColor=enc24s(0.0,1024.0);return;}int kvh=h/GROUP;float s=0.0;"
-            "float rq=1.0;"
-            "if(QKNORM==1){float ss=0.0;for(int z=0;z<HEADDIM;z++){"
-            "float zq=RQKVQ(h*HEADDIM+z);ss+=zq*zq;}"
-            "rq=inversesqrt(ss/float(HEADDIM)+QKEPS);}"
-            "for(int i=0;i<HEADDIM;i++){"
-            "float qv=RQKVQ(h*HEADDIM+i);"
-            "int j,ti;int even=i-(i/2)*2;"
-            "if(ROPEHALF==1){if(i<HALF){j=i+HALF;ti=i;}else{j=i-HALF;ti=i-HALF;}}"
-            "else{j=(even==0)?i+1:i-1;ti=i/2;}"
-            "float b=RQKVQ(h*HEADDIM+j);"
-            "if(QKNORM==1){qv=qv*rq*dec16(texture2D(QN,vec2((float(i)+0.5)/float(HEADDIM),0.5)).rg);"
-            "b=b*rq*dec16(texture2D(QN,vec2((float(j)+0.5)/float(HEADDIM),0.5)).rg);}"
-            "vec4 rc=texture2D(RT,vec2((float(2*ti)+0.5)/float(2*HALF),(pos+0.5)/float(SEQ)));"
-            "vec4 rs=texture2D(RT,vec2((float(2*ti+1)+0.5)/float(2*HALF),(pos+0.5)/float(SEQ)));"
-            "float co=dec24s(rc,4096.0),sn=dec24s(rs,4096.0);"
-            "bool first=(ROPEHALF==1)?(i<HALF):(even==0);"
-            "float q=first?qv*co-b*sn:b*sn+qv*co;"
-            "int ki=kvh*HEADDIM+i;int tx=ki;int odd=0;"
-            "if(KVPACK==16){tx=ki/2;odd=ki-tx*2;}else if(KVPACK==8){tx=ki/4;odd=ki-tx*4;}"
-            "float k=decKV(texture2D(KV,vec2((float(tx)+0.5)/float(KVWIDTH),(float(t)+0.5)/float(SEQ))),odd);"
-            "s+=q*k;}"
-            "gl_FragColor=enc24s(s*invsqrt,1024.0);}";
-    }
+// The q16 score-pair layout needs the hoisted, rotated q, so this is the only
+// form: ATTN_HOIST=0 and the R/RT/QN kernel it used to select are gone.
+string att_score(const AttnConfig& c) {
     return "precision highp float;\n" + att_defs(c) + att_helpers() +
         "uniform sampler2D Q,KV;uniform float pos,invsqrt;"
         "vec4 qe(float v){float q=clamp(floor(v*1024.0+0.5),-32768.0,32767.0);"
@@ -289,19 +281,14 @@ string att_prob(const AttnConfig& c) {
 }
 
 string att_v(const AttnConfig& c, XFormat out) {
-    // q16 score/stats layout has one packed texel per head; fused decode is mandatory.
-    static const bool fuse_prob = true;
-    const string prob_bind = fuse_prob ? "S,ST,KV,VS" : "P,KV,VS";
-    const string prob_body = fuse_prob
-        ? string("vec4 st=texture2D(ST,vec2((float(h)+0.5)/float(HEADS),0.5));"
-                 "float mx=dec16(st.rg)/4.0;float sum=dec16(st.ba)*8.0;"
-                 "float invs=(sum>0.0)?(1.0/sum):0.0;")
-        : string("");
-    const string prob_read = fuse_prob
-        ? string("vec4 sp=texture2D(S,vec2((float(t/2)+0.5)/float(SEQ/2),(float(h)+0.5)/float(HEADS)));"
-                 "float sc=((t-(t/2)*2)==0)?dec16(sp.rg)/4.0:dec16(sp.ba)/4.0;"
-                 "float p=exp(sc-mx)*invs;")
-        : string("float p=dec24s(texture2D(P,vec2((float(t)+0.5)/float(SEQ),(float(h)+0.5)/float(HEADS))),65536.0);");
+    // The q16 score/stats layout packs (max,sum) into one texel per head, so the
+    // probability decode is fused into this pass; there is no probability
+    // texture to read and no unfused variant to keep.
+    const string prob_bind = "S,ST,KV,VS";
+    const string prob_body =
+        "vec4 st=texture2D(ST,vec2((float(h)+0.5)/float(HEADS),0.5));"
+        "float mx=dec16(st.rg)/4.0;float sum=dec16(st.ba)*8.0;"
+        "float invs=(sum>0.0)?(1.0/sum):0.0;";
 
     // Two (or four) output channels per fragment share one probability decode and
     // one pass over the KV rows.  HEADDIM is even, so a fragment never straddles a
@@ -359,20 +346,6 @@ string att_v(const AttnConfig& c, XFormat out) {
     return fs;
 }
 
-
-string sum_logits() {
-    return "precision highp float;"
-        "uniform sampler2D L;uniform float tr,nr,mrows,invt;"
-               + kDec24Q +
-        "void main(){float mx=-1e30;for(int i=0;i<1536;i++){if(float(i)>=mrows)break;"
-        "vec4 c=texture2D(L,vec2((float(i)+0.5)/1536.0,(tr+0.5)/nr));mx=max(mx,dec(c));}"
-        "float sum=0.0;for(int i=0;i<1536;i++){if(float(i)>=mrows)break;"
-        "vec4 c=texture2D(L,vec2((float(i)+0.5)/1536.0,(tr+0.5)/nr));sum+=exp((dec(c)-mx)*invt);}"
-        "float v=floor(sum*4096.0+0.5)+8388608.0;"
-        "float r0=floor(v/16777216.0);float g=floor(v/65536.0)-r0*256.0;"
-        "float b=floor(v/256.0)-r0*65536.0-g*256.0;float a=v-r0*16777216.0-g*65536.0-b*256.0;"
-        "gl_FragColor=vec4(r0/255.0,g/255.0,b/255.0,a/255.0);}";
-}
 
 string top2_fast(int rows, int chunk) {
     return "precision highp float;"
