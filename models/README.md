@@ -383,3 +383,29 @@ grid's +-128:
 
 That is the honest status: TinyBrainBot is supported and now correct; SmolLM2 is
 one widening away, and the widening is named.
+
+### TinyBrainBot: what the upstream repo actually says (2026-11-08)
+
+Checked against `nkthebass/tinybrainbot-100m-v5.1-instruct`:
+
+- `model.safetensors` here is **byte-identical** to that repo's (sha256
+  `ad4fedc7…`, 200,197,496 B);
+- the shipped template is byte-identical to the `tokenizer.chat_template`
+  embedded in the author's official GGUF (the HF repo has no
+  `tokenizer_config.json`, which is where the old comment claimed it came from);
+- the GGUF also states `add_bos_token = 0`, `add_eos_token = 0`,
+  `add_space_prefix = 0` and `bos 0 / eos 7`, so a container that adds no BOS and
+  stops on 7 matches it - plus token 1, because `generation_config.json` lists
+  `eos_token_id: [7, 1]`;
+- **judge it with its recommended sampler**, `--temp 0.4 --topp 0.9
+  --repeat-penalty 1.15`, which is what the published samples use.  Greedy
+  degenerates into echoing the user marker:
+
+  ```
+  greedy              ->  <|user|> Give me a packing list for a weekend camping trip.
+  temp .4 top-p .9    ->  1. Pack snacks and water for the trip 2. Bring a map and
+                          compass for navigation 3. Bring a first aid kit to he...
+  "How's it going?"   ->  Hi there! I'm doing well, thanks for asking. How about you?
+  ```
+
+  That last line is the model card's own sample, word for word.
