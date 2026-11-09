@@ -4092,9 +4092,22 @@ not the 293-token `data/ppl_test.txt`), the same pinned string, and TinyBrainBot
 logits are **bit-identical** to the unpatched run.  So the change is a no-op where
 the decode already worked, which is the shape a fix for this should have.
 
-Not applied yet: it is a numerics change in a header every shader consumes, so
-it wants the full gate on both machines (`Q8_EXPECT`, `Q4_EXPECT`, `PPL_EXPECT`,
-`shader_hashes.sh`) before it lands.  The Pi side is the one that matters: until
-a VC4 build of this patch has run `scripts/regression.sh`, the pins there are
-unverified, and a model that saturates (TinyBrainBot) needs its own pin either
-way.
+Landed in `6234328`.  The board then corrected the "on VC4 it changes only the
+values that are wrong" reading above: the old decode trusted the 8-bit texture
+sample to be exactly `hi/255`, and VC4's sample is not, so **every** q16 value
+was reconstructed with a small error, not just the rail.  The Pi therefore
+re-baselines:
+
+| on the Pi Zero (VC4) | old decode | integer decode |
+|---|---|---:|
+| MiniMind3 q8 identity answer | `我是一个AI助手，没有自我意识…` | `我是MiniMind，一个由jingyaogong…` |
+| MiniMind3 q8 PPL, 293-token corpus | 271.2855 | 271.6420 |
+| MiniMind3 q4 PPL, same corpus | — | 326.8088 |
+| TinyBrainBot q4 vs Xe: cosine / top-5 overlap | 0.7233 / 1 of 5 | **0.9971 / 5 of 5** |
+| TinyBrainBot q4 vs the board's own CPU path | — | 0.9953 / 5 of 5 |
+
+Xe is unchanged (PPL 270.3170, both pinned strings, TinyBrainBot bit-identical),
+and the q4 prefix `我是MiniMind` still matches on both machines.  The board's q8
+string and PPL move, which is what a corrected decode looks like: the board now
+agrees with the desktop and with its own CPU path, where before the saturating
+model agreed with neither.
