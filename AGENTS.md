@@ -161,14 +161,20 @@ GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
 Expected text.  The value is **machine specific** — VC4 and Xe round the fused
 FFN differently — so never compare a Pi run with an Xe run:
 
-- Pi Zero q8: `Assistant: 我是一个AI助手，没有自我意识，也没有身体，所以我无法`
+- Pi Zero q8: `Assistant: 我是MiniMind，一个由jingyaogong`
 - Pi Zero q4: `Assistant: 我是MiniMind，一个高效的小参数AI模型，专注于`
 - Xe / desktop GLES2 q8: `Assistant: 我是一个AI助手，我的存在是为了提供帮助和信息。`
 
-The Pi q8 string was re-baselined on 2026-11-03 when the fused FFN became the
-default (`b7dce0d`): the reassociation moves the last bits on VC4, and
-llama.cpp with the official `minimind-3.q8.gguf` prints the same text for the
-same prompt on the same board, so this is the VC4 reference, not a regression.
+The strings are re-baselined whenever a deliberate numeric change moves them,
+and each re-baseline cites its evidence.  The Pi q8 string last moved on
+2026-11-09 with the integer q16 decode (`6234328`): the old decode rebuilt every
+value from an 8-bit texture sample that VC4 does not return exactly, so the
+whole board moved slightly, not only at the rail — the same change fixed
+TinyBrainBot q4's residual sign flip (Pi-vs-Xe cosine 0.7233 -> 0.9971).  Before
+that the Pi printed `我是一个AI助手，没有自我意识，也没有身体，所以我无法`
+(2026-11-03, when the fused FFN became the default); `docs/performance.md` keeps
+both, and the old binary is still runnable as
+`bin/engine_mm3_pi.predecode` on the board.
 
 **The string is a tripwire, not the acceptance criterion.**
 `engine/scripts/regression.sh` is the gate: determinism (same binary twice),

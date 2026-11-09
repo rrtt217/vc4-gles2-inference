@@ -60,7 +60,7 @@ MiniMind3 prompt and the server's Chinese default.  Tested behavior:
 
 | model | identity response | note |
 |---|---|---|
-| MiniMind3 q8 (Pi) | “我是一个AI助手，没有自我意识，也没有身体……” | re-baselined 2026-11-03; see below |
+| MiniMind3 q8 (Pi) | “我是MiniMind，一个由jingyaogong……” | re-baselined 2026-11-09 with the integer q16 decode; see the 2026-11-09 section |
 | MiniMind3 q8 (Xe) | “我是一个AI助手，我的存在是为了提供帮助和信息。” | the two GPUs round the fused FFN differently |
 | MiniMind3 q4 | “我是MiniMind……” | retains the model identity |
 | MiniMind2 i16/q8 | “我是一款智能语音助手……” | coherent |
