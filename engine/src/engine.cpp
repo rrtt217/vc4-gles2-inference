@@ -1171,6 +1171,19 @@ int main(int argc, char** argv) {
     int stop_id = -1;
     for (int i = 0; i < gen; ++i) {
         if (g_stop) break;
+        // The chat and tool loops stop at the container's seq; this one did
+        // not, so a --gen larger than seq walked past the KV cache and the rope
+        // table and printed whatever came back.  Measured on void.1 (seq 1024,
+        // --gen 4096): the text turns to "walk inkinkinkinkin" at position
+        // 1023 and stays garbage -- and the same file packed at seq 2048 turns
+        // to " t t t t" at 2047 instead, which is how the boundary was found.
+        if ((int)tokens.size() >= model.seq) {
+            tt.cut = "context";
+            if (!g_quiet)
+                fprintf(stderr, "\n[context full] %d tokens, seq %d; raise --seq when "
+                                "packing or lower --gen\n", generated, model.seq);
+            break;
+        }
         if (!marker_mask.empty()) mask_markers(logits);
         apply_sampling_penalties(logits, recent);
         int next = greedy ? argmax_token(logits)
