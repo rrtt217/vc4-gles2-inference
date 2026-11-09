@@ -564,7 +564,7 @@ bool Model::load_mmcf(){
                 // (vocab 6400 at 1300 rows is 5 tiles, same as at 1536) and
                 // every row fits, but the token mapping would shift by 236 -
                 // and a run with such a file printed the correct greedy text
-                // and the correct TOPK=8 sample, because every chosen token
+                // and the correct top-k 8 candidate sample, because every chosen token
                 // happened to be in the first tile.
                 for (size_t i = 0; fit && i < logits_tiles.size(); ++i) {
                         const int rows = logits_tiles[i].rows;

@@ -15,7 +15,7 @@
 // it is a decode with shifted tokens.  Measured before this constant existed:
 // changing only the shader divisor left greedy output and PPL (270.3170)
 // bit-identical, because the gate never runs the Top-K path, and changed
-// TOPK=8 sampling from "我是由Jingyaogong创建的..." to "the manuscript is the
+// top-k 8 candidate sampling from "我是由Jingyaogong创建的..." to "the manuscript is the
 // speaker...".  engine/probes/logits_grid_probe holds the three languages to
 // this value.
 //

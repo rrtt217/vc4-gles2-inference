@@ -97,7 +97,7 @@ splits the logits matrix at the same stride, the host uses it as the read-back
 stride and the token formula, and the four Top-K kernels divide by it.  It lives
 in `src/logits_grid.h` and `probes/logits_grid_probe` checks all three languages
 (`make -C engine probes/logits_grid_probe`, no GL needed).  Those kernels only
-run when `TOPK` is set, so neither greedy output nor PPL would notice a
+run when `--top-k-candidates` is set, so neither greedy output nor PPL would notice a
 mismatch - measured, see the header's comment.
 
 Builders also check their arguments where the text is made: the q8 column loop

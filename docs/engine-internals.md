@@ -352,8 +352,8 @@ values are inflated, use the shares):
 
 The two remaining bottlenecks are the 5-pass attention chain and the single
 128 KiB logits readback.  On 42M, the two RMSNorm passes become the largest
-serialized stage.  `TOPK=64` does not win on 15M because the top-2 pass costs
-more than the logits readback it removes.
+serialized stage.  `--top-k 64 --top-k-candidates` does not win on 15M
+because the top-2 pass costs more than the logits readback it removes.
 
 Rejected experiments:
 
@@ -364,36 +364,43 @@ Rejected experiments:
 - CPU final RMSNorm, skipping hidden-upload finish: no measurable gain.
 - `NF_FFN` (skip SwiGLU finish): slower on VC4.
 
-`GPU_LAYER=1` implies GPU attention and GPU FFN, and `TOPK=64` still works on
-top of it.
+`GPU_LAYER=1` implies GPU attention and GPU FFN, and
+`--top-k 64 --top-k-candidates` still works on top of it.
 
 ## Top-K
 
-`TOPK=N` enables the exact candidate path:
+`--top-k N --top-k-candidates` sources the k candidates from the candidate
+pass instead of the full logits:
 
 - a second GPU pass emits per-16-token top-2 values/indices and an online
   logsumexp;
 - the CPU reads only candidates, computes the global denominator, and falls
   back to full logits if the candidate mass is below `top_p`;
-- `TOPK_FAST=1` is the older approximate candidate-renormalized path; it is
-  not the correctness baseline.
+- the candidate set is not guaranteed to contain the exact global top-k (one
+  tile can contribute more than two of the k), so this is the approximate
+  path.  Without `--top-k-candidates` the sampler reads the full logits and
+  is exact;
+- `TOPK_FAST=1` (with `--top-k-candidates`) is the older approximate
+  candidate-renormalized path; it is not the correctness baseline.
 
-After the 1536-column draw fix, Top-K is correct on VC4 too.  It is still not a
-net speed win there, so **full logits remains the default**; use `TOPK=64`
-when you want to test the candidate path.
+After the 1536-column draw fix, the candidate path is correct on VC4 too.  It
+is still not a net speed win there, so **full logits remains the default**;
+use `--top-k 64 --top-k-candidates` when you want to test the candidate path.
+The timings below were measured with the old `TOPK=64` switch, which selected
+the same candidate pass.
 
 Pi Zero, 15M q8:
 
 | mode | decode |
 |---|---:|
 | full logits | ~137–151 ms/token |
-| `TOPK=64` | ~146–147 ms/token |
+| `TOPK=64` (now `--top-k 64 --top-k-candidates`) | ~146–147 ms/token |
 
 Pi Zero, 42M q8:
 
 | mode | decode |
 |---|---:|
 | full logits | ~346–355 ms/token |
-| `TOPK=64` | ~350–428 ms/token |
+| `TOPK=64` (now `--top-k 64 --top-k-candidates`) | ~350–428 ms/token |
 
 Iris Xe, 15M I16: Top-K can be faster than full logits; measure on the target.

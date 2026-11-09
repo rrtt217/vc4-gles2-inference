@@ -346,7 +346,7 @@ model; tool calls are much more reliable.
 | `KEEP_CPU_WEIGHTS=1` | keep CPU weights after upload (debug) |
 | `TIMING=1` | print prefill/decode timing |
 | `LAYER_PROFILE=1` | per-layer timing |
-| `TOPK`, `TOPK_FAST` | candidate Top-K paths |
+| `TOPK_FAST=1` | approximate candidate path; needs `--top-k-candidates` |
 | `RES_PACK=0` | disable the default packed residual stream (q8/q4) |
 | `ACT8=2` | FFN hidden state in I8_4, q8 weights only; opt-in |
 | `ACT8=1` | all matvec inputs in I8_4, q8 weights only; opt-in |
@@ -354,6 +354,14 @@ model; tool calls are much more reliable.
 See [test hooks](../docs/test-hooks.md) for the full list, including the dump
 and probe switches (`STAGE_DUMP`, `RAW_DUMP`, `QKV_DUMP`, `ATT_DUMP`,
 `ATTN_DUP`, `PASS_DUP`, `DRAWCOUNT`, ...).
+
+Top-k is a sampler flag, not an environment switch: `--top-k N` keeps the N
+most likely tokens before top-p (0 = off, the default), and
+`--top-k-candidates` takes those k from the candidate pass instead of the full
+logits.  The candidate path is approximate: it falls back to full logits when
+the candidate mass is below `top_p` and does not guarantee the exact global
+top-k.  Without `--top-k-candidates`, the CPU path selects with `nth_element`
+and sorts only the k kept logits.
 
 ## Perplexity
 

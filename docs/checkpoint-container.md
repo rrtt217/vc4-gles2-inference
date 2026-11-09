@@ -163,7 +163,7 @@ rather than decoding with shifted token ids.  The rule is: the tile count must
 be `ceil(vocab / 1536)`, every tile except the last must be exactly 1536 rows,
 and the last 1..1536.  The count alone is not enough - a 1300-row stride gives
 the same five tiles and every row fits, but shifts token ids by 236, and a run
-with such a file printed the correct greedy text *and* the correct `TOPK=8`
+with such a file printed the correct greedy text *and* the correct `--top-k 8 --top-k-candidates`
 sample because every chosen token happened to be in the first tile.  `engine/probes/logits_grid_probe`
 holds the packer, the host and the four Top-K kernels to the same number.
 

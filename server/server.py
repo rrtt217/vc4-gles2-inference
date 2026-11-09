@@ -154,15 +154,15 @@ class EngineWorker:
 
     def generate(self, prompt, max_tokens: int, temperature: float,
                  top_p: float, seed: int, on_token=None, penalties: dict | None = None,
-                 messages: dict | None = None):
+                 messages: dict | None = None, top_k: int = 0):
         """Return (text, finish_reason, usage).  on_token(text) is optional.
 
         ``prompt`` is either the rendered prompt string, or ``""`` when
         ``messages`` carries the request (worker column 11): then the engine
         renders it with the container's chat template.
 
-        ``penalties`` carries the optional worker columns 6..10; any field left
-        out keeps the engine's process-level default.
+        ``penalties`` carries the optional worker columns 6..10 and ``top_k``
+        column 12; any field left out keeps the engine's process-level default.
         """
         p = penalties or {}
         def field(key, default=""):
@@ -186,6 +186,7 @@ class EngineWorker:
             str(int(p.get("no_repeat_ngram"))) if p.get("no_repeat_ngram") else "",
             field("min_p"),
             col11,
+            str(int(top_k)) if top_k and top_k > 0 else "",
         ]) + "\n"
         with self.lock:
             # A crashed worker used to surface as "engine worker exited" on every
@@ -1016,6 +1017,9 @@ class Handler(BaseHTTPRequestHandler):
             max_tokens = min(max_tokens, 256)
             temperature = float(body.get("temperature", 0.8) or 0.0)
             top_p = float(body.get("top_p", 0.9) or 0.9)
+            top_k = int(body.get("top_k", 0) or 0)
+            if top_k < 0:
+                top_k = 0
             seed = int(body.get("seed", 1234) or 1234)
             stream = bool(body.get("stream", False))
             model = str(body.get("model") or self.server.model_id)
@@ -1084,7 +1088,7 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     text, finish, usage = self.server.worker.generate(
                         prompt, max_tokens, temperature, top_p, seed, penalties=penalties,
-                        messages=req if use_tmpl else None)
+                        messages=req if use_tmpl else None, top_k=top_k)
                     break
                 except ContextFull as e:
                     trimmed = prune_messages(body.get("messages") or [])
@@ -1168,7 +1172,7 @@ class Handler(BaseHTTPRequestHandler):
                 # <tool_call> block is complete; do not stream partial JSON.
                 text, finish, usage = self.server.worker.generate(
                     prompt, max_tokens, temperature, top_p, seed, penalties=penalties,
-                    messages=req if use_tmpl else None)
+                    messages=req if use_tmpl else None, top_k=top_k)
                 if stops:
                     text, stopped = apply_stop_text(text, stops)
                     if stopped:
@@ -1187,7 +1191,7 @@ class Handler(BaseHTTPRequestHandler):
                 text, finish, usage = self.server.worker.generate(
                     prompt, max_tokens, temperature, top_p, seed,
                     on_token=stop_filter.feed, penalties=penalties,
-                    messages=req if use_tmpl else None)
+                    messages=req if use_tmpl else None, top_k=top_k)
                 stop_filter.finish()
                 if stop_filter.hit:
                     finish = "stop"

@@ -12,7 +12,7 @@
 // not a compile error, a link error or a GL error.  Measured before the
 // constant existed (2026-11-08): with only the shader divisor changed, greedy
 // output and PPL were bit-identical - the gate never runs the Top-K path - and
-// TOPK=8 sampling changed from "我是由Jingyaogong创建的..." to "the manuscript
+// top-k 8 candidate sampling changed from "我是由Jingyaogong创建的..." to "the manuscript
 // is the speaker...".
 //
 // This probe builds the kernels, reads the packer, and fails if any of the

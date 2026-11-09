@@ -205,13 +205,19 @@ FFN hidden 2432 超过 VC4 2048 像素 FBO 限制。
 | `KEEP_CPU_WEIGHTS=1` | 上传后保留 CPU 权重（调试） |
 | `TIMING=1` | 打印 prefill/decode 时间 |
 | `LAYER_PROFILE=1` | 逐层时间 |
-| `TOPK`, `TOPK_FAST` | candidate Top-K 路径 |
+| `TOPK_FAST=1` | 近似 candidate 路径；需配合 `--top-k-candidates` |
 | `RES_PACK=0` | 关闭默认的 packed residual（q8/q4） |
 | `ACT8=1/2` | int8 activation 实验，需 q8 权重，默认关闭 |
 
 完整列表见 [测试开关](../docs/test-hooks.md)，包括 dump 和探针开关
 （`STAGE_DUMP`、`RAW_DUMP`、`QKV_DUMP`、`ATT_DUMP`、`ATTN_DUP`、
 `PASS_DUP`、`DRAWCOUNT` 等）。
+
+Top-k 现在是采样参数而不是环境变量：`--top-k N` 在 top-p 之前只保留概率最高的
+N 个 token（0 = 关闭，默认），`--top-k-candidates` 则让这 k 个候选走上表的
+candidate 路径而不是全 logits。candidate 路径是近似的：候选质量不足 `top_p` 时
+回退全 logits，也不保证精确的全局 top-k；不加这个开关时，CPU 路径用
+`nth_element` 选出 k 个、只排序这 k 个。
 
 ## 排查一个错误答案
 

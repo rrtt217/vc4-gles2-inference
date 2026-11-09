@@ -117,6 +117,10 @@ static const char* kUsage =
     "  --gen N              tokens to generate (default 8, 128 with --chat)\n"
     "  --greedy             argmax instead of sampling\n"
     "  --temp F --topp F     sampling knobs (default 1.0 / 0.9)\n"
+    "  --top-k N            keep only the N most likely tokens (0 = off)\n"
+    "  --top-k-candidates   with --top-k, read back only the candidates instead\n"
+    "                       of the full logits (approximate; falls back when it\n"
+    "                       cannot decide).  Without this flag the CPU path is exact\n"
     "  --seed N              sampling seed (default 1234)\n"
     "  --min-p F --repeat-penalty F --frequency-penalty F --presence-penalty F\n"
     "  --no-repeat-ngram N   sampling penalties\n"
@@ -133,7 +137,7 @@ static const char* kUsage =
     "  -h, --help            this text\n"
     "\n"
     "In the REPL: /help, /clear (forget the conversation), /exit.\n"
-    "Sampling knobs also come from the environment (TOPK, MIN_P, ...); see\n"
+    "Sampling penalties also come from the environment (MIN_P, ...); see\n"
     "docs/test-hooks.md.  The container carries the tokenizer, the template,\n"
     "rope and the special-token ids, so there are no flags for those.\n";
 
@@ -157,7 +161,8 @@ int main(int argc, char** argv) {
     string build_cache_prompt, build_cache_out, prefix_cache_path, ppl_path;
     uint32_t seed = 1234;
     float temp = 1.0f, top_p = 0.9f;
-    int topk = getenv("TOPK") ? atoi(getenv("TOPK")) : 0;
+    int top_k = 0;
+    bool top_k_candidates = false;
     if (getenv("REPETITION_PENALTY")) g_sampling.repetition_penalty = atof(getenv("REPETITION_PENALTY"));
     if (getenv("FREQUENCY_PENALTY")) g_sampling.frequency_penalty = atof(getenv("FREQUENCY_PENALTY"));
     if (getenv("PRESENCE_PENALTY")) g_sampling.presence_penalty = atof(getenv("PRESENCE_PENALTY"));
@@ -201,6 +206,8 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--seed") && i + 1 < argc) seed = (uint32_t)strtoul(argv[++i], nullptr, 10);
         else if (!strcmp(argv[i], "--temp") && i + 1 < argc) temp = atof(argv[++i]);
         else if (!strcmp(argv[i], "--topp") && i + 1 < argc) top_p = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--top-k") && i + 1 < argc) top_k = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--top-k-candidates")) top_k_candidates = true;
         else if (!strcmp(argv[i], "--repeat-penalty") && i + 1 < argc) g_sampling.repetition_penalty = atof(argv[++i]);
         else if (!strcmp(argv[i], "--frequency-penalty") && i + 1 < argc) g_sampling.frequency_penalty = atof(argv[++i]);
         else if (!strcmp(argv[i], "--presence-penalty") && i + 1 < argc) g_sampling.presence_penalty = atof(argv[++i]);
@@ -227,6 +234,14 @@ int main(int argc, char** argv) {
         }
     }
     if (dump_mode) return dump_shaders(dump_mode == 2);
+    if (top_k < 0) top_k = 0;
+    if (top_k_candidates && top_k <= 0) {
+        if (!g_quiet) cerr << "--top-k-candidates needs --top-k N; using full logits\n";
+        top_k_candidates = false;
+    }
+    if (top_k > 0 && !g_quiet)
+        cerr << "sampling: top-k " << top_k
+             << (top_k_candidates ? " (candidates preferred)" : " (full logits)") << "\n";
     if (chat && !gen_set) gen = 128;
 
     if (model_path.empty()) {
@@ -524,15 +539,27 @@ int main(int argc, char** argv) {
             emit("{\"event\":\"start\",\"prompt_tokens\":" + to_string(tokens.size()) +
                  ",\"cached_tokens\":" + to_string(common) +
                  ",\"prefill_tokens\":" + to_string(prefill_tokens) + "}");
+            int req_top_k = top_k;
+            if (f.size() > 11 && !f[11].empty()) req_top_k = atoi(f[11].c_str());
+            if (req_top_k < 0) req_top_k = 0;
+            bool greedy_req = wt <= 0.0f;
+            bool cand_mode = top_k_candidates && req_top_k > 0 && !greedy_req &&
+                             !sampling_penalties_active();
             vector<float> logits;
+            CandidateResult cand;
             for (int i = prefill_from; i < (int)tokens.size(); ++i) {
                 if (g_stop) break;
-                logits = session.step(tokens[i], i, i + 1 == (int)tokens.size());
+                bool last = i + 1 == (int)tokens.size();
+                if (last && cand_mode) {
+                    cand = session.step_candidates(tokens[i], i, req_top_k, wt, wp);
+                    if (!cand.complete) { logits = std::move(cand.full); cand_mode = false; }
+                } else {
+                    logits = session.step(tokens[i], i, last);
+                }
             }
             if (g_stop) break;
             int pos = (int)tokens.size();
             max_new = min(max_new, model.seq - pos);
-            bool greedy_req = wt <= 0.0f;
             // Optional: block the <|...|> marker tokens while generating.  Off by
     // default, because the engine cannot tell a marker from content - this
     // model's <think> is a special token too, and blocking it would remove the
@@ -565,7 +592,8 @@ int main(int argc, char** argv) {
                 if (g_stop) { finish = "stop"; break; }
                 apply_sampling_penalties(logits, recent);
                 int next = greedy_req ? argmax_token(logits)
-                                      : sample_token(logits, wt, wp, rng);
+                                      : (cand_mode ? sample_candidate_result(cand, wt, wp, req_top_k, rng)
+                                                   : sample_token(logits, wt, wp, req_top_k, rng));
                 const bool is_eos = model.have_specials
                         ? (next == model.id_eos || (model.id_stop >= 0 && next == model.id_stop))
                         : (next == 1 || next == 2);
@@ -586,7 +614,12 @@ int main(int argc, char** argv) {
                 ++generated;
                 all_tokens.push_back(next);
                 recent.push_back(next);
-                logits = session.step(next, pos++, true);
+                if (cand_mode) {
+                    cand = session.step_candidates(next, pos++, req_top_k, wt, wp);
+                    if (!cand.complete) { logits = std::move(cand.full); cand_mode = false; }
+                } else {
+                    logits = session.step(next, pos++, true);
+                }
             }
             if (!pending.empty()) {
                 string text = "\xEF\xBF\xBD";
@@ -747,13 +780,13 @@ int main(int argc, char** argv) {
         for (int i = 0; i < skip; ++i) pos = i + 1;
         vector<float> logits;
         CandidateResult cand;
-        bool cand_mode = topk != 0 && !greedy && !sampling_penalties_active();
+        bool cand_mode = top_k_candidates && top_k > 0 && !greedy && !sampling_penalties_active();
         for (size_t i = skip; i < tokens.size(); ++i) {
             if (g_stop) { tt.cut = "prefill"; gpu.sync(); return; }
             if (pos >= model.seq) { tt.cut = "context"; cout << "[context full]\n"; return; }
             bool last = (i + 1 == tokens.size());
             if (last && cand_mode) {
-                cand = session.step_candidates(tokens[i], pos++, topk, temp, top_p);
+                cand = session.step_candidates(tokens[i], pos++, top_k, temp, top_p);
                 if (!cand.complete) { logits = std::move(cand.full); cand_mode = false; }
             } else if (!last && i + 2 < tokens.size() && pos + 1 < model.seq && session.pair_ok()) {
                 // Two prompt tokens per layer pass; the last token stays on the
@@ -782,8 +815,8 @@ int main(int argc, char** argv) {
             if (!marker_mask.empty()) mask_markers(logits);
             apply_sampling_penalties(logits, recent);
             int next = greedy ? argmax_token(logits)
-                              : (cand_mode ? sample_candidate_result(cand, temp, top_p, rng)
-                                           : sample_token(logits, temp, top_p, rng));
+                              : (cand_mode ? sample_candidate_result(cand, temp, top_p, top_k, rng)
+                                           : sample_token(logits, temp, top_p, top_k, rng));
             if (!getenv("IGNORE_EOS") && is_stop_token(next)) {
                 session.step(next, pos++, false);
                 break;
@@ -805,7 +838,7 @@ int main(int argc, char** argv) {
             tt.generated = generated;
             prev = next;
             if (cand_mode) {
-                cand = session.step_candidates(next, pos++, topk, temp, top_p);
+                cand = session.step_candidates(next, pos++, top_k, temp, top_p);
                 if (!cand.complete) { logits = std::move(cand.full); cand_mode = false; }
             } else {
                 logits = session.step(next, pos++, true);
@@ -924,7 +957,7 @@ int main(int argc, char** argv) {
             if ((int)tokens.size() >= model.seq) { tt.cut = "context"; cout << "[context full]\n"; return; }
             vector<float> logits;
             CandidateResult cand;
-            bool cand_mode = topk != 0 && !greedy && !sampling_penalties_active();
+            bool cand_mode = top_k_candidates && top_k > 0 && !greedy && !sampling_penalties_active();
             int skip = 0;
             if (!kv_tokens.empty()) {
                 size_t n = 0;
@@ -943,7 +976,7 @@ int main(int argc, char** argv) {
                 if (g_stop) { tt.cut = "prefill"; gpu.sync(); return; }
                 bool last = (i + 1 == tokens.size());
                 if (last && cand_mode) {
-                    cand = session.step_candidates(tokens[i], (int)i, topk, temp, top_p);
+                    cand = session.step_candidates(tokens[i], (int)i, top_k, temp, top_p);
                     if (!cand.complete) { logits = std::move(cand.full); cand_mode = false; }
                 } else if (!last && i + 2 < tokens.size() && (int)i + 1 < model.seq && session.pair_ok()) {
                     session.step_pair(tokens[i], (int)i, tokens[i + 1], (int)i + 1, false);
@@ -964,8 +997,8 @@ int main(int argc, char** argv) {
                 if (g_stop) { tt.cut = "decode"; gpu.sync(); return; }
                 apply_sampling_penalties(logits, recent);
                 int next = greedy ? argmax_token(logits)
-                                  : (cand_mode ? sample_candidate_result(cand, temp, top_p, rng)
-                                               : sample_token(logits, temp, top_p, rng));
+                                  : (cand_mode ? sample_candidate_result(cand, temp, top_p, top_k, rng)
+                                               : sample_token(logits, temp, top_p, top_k, rng));
                 if (is_stop_token(next)) {
                     if (!g_quiet && is_bos_token(next))
                         fprintf(stderr, "\n[stopped after %d tokens: the model emitted its "
@@ -984,7 +1017,7 @@ int main(int argc, char** argv) {
                 ++tt.generated;
                 prev = next;
                 if (cand_mode) {
-                    cand = session.step_candidates(next, pos++, topk, temp, top_p);
+                    cand = session.step_candidates(next, pos++, top_k, temp, top_p);
                     if (!cand.complete) { logits = std::move(cand.full); cand_mode = false; }
                 } else {
                     logits = session.step(next, pos++, true);
@@ -1083,7 +1116,7 @@ int main(int argc, char** argv) {
     cout << "\n";
     vector<float> logits;
     CandidateResult cand;
-    bool cand_mode = topk != 0 && !greedy && !sampling_penalties_active();
+    bool cand_mode = top_k_candidates && top_k > 0 && !greedy && !sampling_penalties_active();
     // PREFILL_REPEAT=n runs the same prefill n times in one process.  The first
     // pass pays every lazy shader link and every QPU program generation, which
     // on VC4 is seconds; a comparison between two modes that compile different
@@ -1097,7 +1130,7 @@ int main(int argc, char** argv) {
             if (g_stop) break;
             bool last = (i + 1 == tokens.size());
             if (last && cand_mode) {
-                cand = session.step_candidates(tokens[i], (int)i, topk, temp, top_p);
+                cand = session.step_candidates(tokens[i], (int)i, top_k, temp, top_p);
                 if (!cand.complete) { lg = std::move(cand.full); cand_mode = false; }
             } else if (!last && i + 2 < tokens.size() && (int)i + 1 < model.seq && session.pair_ok()) {
                 session.step_pair(tokens[i], (int)i, tokens[i + 1], (int)i + 1, false);
@@ -1141,8 +1174,8 @@ int main(int argc, char** argv) {
         if (!marker_mask.empty()) mask_markers(logits);
         apply_sampling_penalties(logits, recent);
         int next = greedy ? argmax_token(logits)
-                          : (cand_mode ? sample_candidate_result(cand, temp, top_p, rng)
-                                       : sample_token(logits, temp, top_p, rng));
+                          : (cand_mode ? sample_candidate_result(cand, temp, top_p, top_k, rng)
+                                       : sample_token(logits, temp, top_p, top_k, rng));
         if (!getenv("IGNORE_EOS") && is_stop_token(next)) {
             ended_on_eos = true;
             stop_reason = is_bos_token(next) ? "the model emitted its BOS token mid-generation"
@@ -1155,7 +1188,7 @@ int main(int argc, char** argv) {
         recent.push_back(next);
         auto a = Clock::now();
         if (cand_mode) {
-            cand = session.step_candidates(next, (int)tokens.size() - 1, topk, temp, top_p);
+            cand = session.step_candidates(next, (int)tokens.size() - 1, top_k, temp, top_p);
             if (!cand.complete) { logits = std::move(cand.full); cand_mode = false; }
         } else {
             logits = session.step(next, (int)tokens.size() - 1, true);

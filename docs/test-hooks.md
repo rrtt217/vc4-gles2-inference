@@ -108,8 +108,6 @@ binary.  They are measurement hooks, not production settings.
   fast path; not correct for every model on VC4 (see `docs/performance.md`).
 - `GPU_ATTN=1` — GPU RoPE + KV cache + attention, CPU FFN.
 - `CPU_FFN=1`, `GPU_FFN=1` — force FFN placement.
-- `TOPK=N` — exact Top-K candidate path (0/absent = full logits).
-- `TOPK_FAST=1` — approximate candidate path; not the correctness baseline.
 
 > `GPU_LAYER=0` is **not** CPU-only: attention/FFN move to the CPU, but the
 > matvecs and logits still run on the GPU.  The engine has no CPU matvec path,
@@ -177,6 +175,15 @@ the blob these switches act on.
 
 - `--greedy` — deterministic argmax sampling.
 - `--seed N` — RNG seed for non-greedy sampling (default 1234).
+- `--top-k N` — hard top-k truncation before top-p (0 = off).  The default is
+  the exact CPU path: the k kept logits are selected with `nth_element` and
+  sorted, the rest are dropped.
+- `--top-k-candidates` — with `--top-k`, use the candidate pass (per-tile
+  top-2 + logsumexp) instead of the full logits; it falls back to full logits
+  when the candidate mass is below `top_p`.  This is the approximate path, not
+  the correctness baseline.
+- `TOPK_FAST=1` — with `--top-k-candidates`, use the older renormalized
+  candidate path; also approximate.
 - `--system TEXT` — override the default system prompt.  The compiled default
   is `You are a helpful assistant.`; the checkpoint may state its own.
 - `--thinking`, `--open-thinking` — prefill `<think>` instead of the empty
@@ -185,7 +192,6 @@ the blob these switches act on.
 - `--worker` — long-lived JSONL generation worker used by the OpenAI server.
 - `IGNORE_EOS=1` — keep generating after the stop tokens, for 64-token math
   tests.
-- `TOPK`, `TOPK_FAST` — see placement above.
 
 ## Prefix cache
 

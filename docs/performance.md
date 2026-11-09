@@ -4287,3 +4287,16 @@ The same change fixed a REPL-only abort: a Chinese reply cut mid-character by
 history, and `common_json::parse` terminated the process (exit 134).  The REPL
 now buffers the tail like the worker does and emits U+FFFD at a cut, so the
 third turn prefills that one token again instead of aborting.
+
+## `TOPK` is now `--top-k` + `--top-k-candidates` (2026-11-09)
+
+The sampler's hard top-k is a CLI flag now: `--top-k N` truncates before top-p
+and uses `nth_element` + a k-element sort on the full logits (exact).  The old
+`TOPK=N` environment switch is gone; the candidate path is opt-in with
+`--top-k-candidates` and remains approximate (per-tile top-2, falls back to
+full logits when the candidate mass is below `top_p`).  `TOPK_FAST=1` only
+matters together with `--top-k-candidates`.
+
+Historical commands above that say `TOPK=...` were measured with the old
+switch; the candidate pass is the same one `--top-k-candidates` selects, but
+the new flag also applies the hard top-k truncation.

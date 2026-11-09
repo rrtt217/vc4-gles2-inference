@@ -55,7 +55,7 @@ void apply_sampling_penalties(vector<float>& logits, const vector<int>& recent) 
     }
 }
 
-int sample_token(const vector<float>& logits, float temp, float top_p, mt19937& rng) {
+int sample_token(const vector<float>& logits, float temp, float top_p, int top_k, mt19937& rng) {
     vector<pair<float, int>> p(logits.size());
     float mx = -1e30f;
     for (size_t i = 0; i < logits.size(); ++i) mx = max(mx, logits[i] / temp);
@@ -65,7 +65,23 @@ int sample_token(const vector<float>& logits, float temp, float top_p, mt19937& 
         p[i] = {e, (int)i}; sum += e;
     }
     for (auto& x : p) x.first /= sum;
-    sort(p.begin(), p.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+    // A hard top-k truncation before top-p, as MiniMind's own generate() does
+    // (temperature, then top_k, then top_p).  The selection is O(V) and the
+    // sort only touches the k kept tokens; k <= 0 keeps the old full sort.
+    const auto cmp = [](const auto& a, const auto& b) { return a.first > b.first; };
+    if (top_k > 0 && top_k < (int)p.size()) {
+        nth_element(p.begin(), p.begin() + top_k, p.end(), cmp);
+        sort(p.begin(), p.begin() + top_k, cmp);
+        p.resize(top_k);
+        // Top-k renormalizes before top-p (MiniMind's generate() and llama.cpp
+        // both do); without this the top-p threshold is measured against the
+        // full-vocabulary mass and can keep more than the reference would.
+        float mass = 0;
+        for (const auto& x : p) mass += x.first;
+        if (mass > 0) for (auto& x : p) x.first /= mass;
+    } else {
+        sort(p.begin(), p.end(), cmp);
+    }
     float c = 0; int cut = 0;
     for (; cut < (int)p.size(); ++cut) { c += p[cut].first; if (c >= top_p) { ++cut; break; } }
     float r = uniform_real_distribution<float>(0, 1)(rng) * c;
@@ -78,7 +94,7 @@ int argmax_token(const vector<float>& logits) {
     return (int)(max_element(logits.begin(), logits.end()) - logits.begin());
 }
 
-int sample_candidate_result(const CandidateResult& r, float temp, float top_p, mt19937& rng) {
+int sample_candidate_result(const CandidateResult& r, float temp, float top_p, int top_k, mt19937& rng) {
     if (r.cand.empty()) return 2;
     vector<Candidate> cand = r.cand;
     if (r.strict) {
@@ -91,8 +107,14 @@ int sample_candidate_result(const CandidateResult& r, float temp, float top_p, m
         for (auto& c : cand) c.value /= sum;
     }
     sort(cand.begin(), cand.end(), [](const Candidate& a, const Candidate& b) { return a.value > b.value; });
+    const int kmax = (top_k > 0 && top_k < (int)cand.size()) ? top_k : (int)cand.size();
+    if (top_k > 0 && kmax > 0) {
+        float mass = 0;
+        for (int i = 0; i < kmax; ++i) mass += cand[i].value;
+        if (mass > 0) for (int i = 0; i < kmax; ++i) cand[i].value /= mass;
+    }
     float cdf = 0; int cut = 0;
-    for (; cut < (int)cand.size(); ++cut) { cdf += cand[cut].value; if (cdf >= top_p) { ++cut; break; } }
+    for (; cut < kmax; ++cut) { cdf += cand[cut].value; if (cdf >= top_p) { ++cut; break; } }
     float x = uniform_real_distribution<float>(0, 1)(rng) * cdf;
     float acc = 0;
     for (int i = 0; i < cut; ++i) { acc += cand[i].value; if (x <= acc) return cand[i].token; }

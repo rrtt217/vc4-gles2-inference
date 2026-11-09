@@ -100,6 +100,7 @@ curl -sS http://127.0.0.1:8000/v1/chat/completions \
     "max_tokens": 32,
     "temperature": 0.8,
     "top_p": 0.9,
+    "top_k": 50,
     "seed": 2
   }'
 ```
@@ -151,6 +152,7 @@ The request body is forwarded per request, not fixed at worker start:
 |---|---|---|
 | `temperature` | 0 = greedy | |
 | `top_p` | (0, 1] | |
+| `top_k` | >= 0, 0 disables | hard truncation before `top_p`; MiniMind3 recommends 50 |
 | `seed` | integer | |
 | `repetition_penalty` | 0.5–2.0 | not OpenAI, but every local runtime has it |
 | `frequency_penalty` | -2.0–2.0 | OpenAI range |
@@ -158,9 +160,10 @@ The request body is forwarded per request, not fixed at worker start:
 | `no_repeat_ngram` | 0–8 | 0 disables |
 | `min_p` | 0.0–1.0 | 0 disables |
 
-They travel as optional tab-separated worker columns 6–10; a client (or an old
-server) that sends five columns still works, and values are clamped in both the
-server and the engine.  Prefer greedy (`temperature: 0`) for tool JSON — the
+They travel as optional tab-separated worker columns 6–10, and `top_k` is
+column 12 (column 11 is the base64 request JSON); a client (or an old server)
+that sends five columns still works, and values are clamped in both the server
+and the engine.  Prefer greedy (`temperature: 0`) for tool JSON — the
 penalties are for prose.
 
 ## Request stats
@@ -436,11 +439,11 @@ Request line:
 base64(prompt) \t max_tokens \t temperature \t top_p \t seed
                \t [repetition_penalty \t frequency_penalty \t presence_penalty
                   \t no_repeat_ngram \t min_p]
-               \t [base64(request JSON)]
+               \t [base64(request JSON) \t [top_k]]
 ```
 
-The first five columns are required; columns 6-10 are optional and may be empty
-(`\t\t`), which keeps an old server speaking to a new engine.  The engine resets
+The first five columns are required; columns 6-10 and 12 are optional and may be
+empty (`\t\t`), which keeps an old server speaking to a new engine.  The engine resets
 `g_sampling` to its process defaults before applying them, so a penalty on one
 request never leaks into the next.
 

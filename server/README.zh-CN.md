@@ -150,6 +150,7 @@ curl -sS http://127.0.0.1:8000/v1/chat/completions \
     "max_tokens": 32,
     "temperature": 0.8,
     "top_p": 0.9,
+    "top_k": 50,
     "seed": 2
   }'
 ```

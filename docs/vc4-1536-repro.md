@@ -251,7 +251,7 @@ container and the extra binary afterwards.
 |---|---|
 | q8 logits are packed, 768 fragments per tile; 5 tiles at stride 1536 | `logits_pass`, `read_logits_full` |
 | grid 1024: same greedy text, PPL 270.3170 -> 270.5287, 7 tiles | repack on Xe, 2026-11-08 |
-| grid 1300: token ids off by 236, yet greedy and TOPK=8 output looked correct | repack on Xe, 2026-11-08 |
+| grid 1300: token ids off by 236, yet greedy and `--top-k 8 --top-k-candidates` output looked correct | repack on Xe, 2026-11-08 |
 | a 2048-fragment draw is wrong; 2040 is exact | width sweep, `30b2882`, Pi Zero |
 | a single 1536 draw is wrong | `future-optimization.md`, 2026-11-03; reproduced 2026-11-08, see below |
 
