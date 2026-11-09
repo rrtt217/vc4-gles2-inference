@@ -11,6 +11,12 @@
 # still prints the old string on Xe, and a 64M model at temp 0.8 gives a
 # different sample for the same weights.  So the suite checks in this order:
 #
+#   0. docs          - the documents still describe this tree: every switch the
+#                      source reads is in docs/test-hooks.md, every in-tree path
+#                      a document names exists, and no document calls a live
+#                      switch dead.  scripts/docs_check.sh, no GPU needed; a
+#                      drift here is a real defect (a stale doc sends the next
+#                      reader at the wrong thing), so it fails the gate.
 #   1. determinism   - the same binary, run twice, prints the same text.  A
 #                      failure here is a real bug (uninitialised state, a race,
 #                      a stale cache), never "noise".
@@ -115,6 +121,13 @@ if bad:
     sys.exit(1)
 print("%s OK: %s" % (tag, s))
 PY
+}
+
+# Documentation first: it costs a fraction of a second, needs no model, and a
+# command that no longer runs is a bug in the document (AGENTS.md).
+sh scripts/docs_check.sh || {
+    echo "docs FAIL: run scripts/docs_check.sh for the list" >&2
+    exit 1
 }
 
 q8=$(text "$Q8" "$PROMPT" 16 "$SYS")
