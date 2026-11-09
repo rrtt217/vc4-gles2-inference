@@ -52,6 +52,7 @@ the file format in [`docs/model-formats.md`](docs/model-formats.md) and
 | `mmcf_requant_q8.py` | rebuilding the q8 matrices of a container from its i16 sibling (`--clip P` for a percentile scale) |
 | `ref_forward.py` | a numpy forward pass over an HF safetensors source: separates "bad conversion / bad tokenizer / engine bug" |
 | `make_tok.py` | building the `.tok` blob from a HF `tokenizer.json` — ByteLevel or SentencePiece, with added tokens laid onto their ids (a blob built from `model["vocab"]` alone ends at the wrong id and the engine splits `<\|im_start\|>` into characters) |
+| `make_tok_byte.py` | the same blob from a *pure byte* `byte_vocab.json` (259 entries, no merges — `void.1`): `<0xNN>` becomes the raw byte, not six characters. `make_tok.py` writes the text `<0x41>` for that vocab, which still gives every id a home, so nothing fails loudly |
 
 ### `engine/scripts/` — the gate and the diagnostics
 
