@@ -4214,6 +4214,30 @@ the cold start (about 10 s of the wall-clock difference) is the other pages the
 run touches, and the texture work is 5 s of it.
 
 Practical consequences: a cold start pays roughly 8 s per 65 MiB of container
-(the 87 MB Vertex-100M q4 costs ~10 s before the GPU does anything), and a
-deploy over the network is bounded by the 7.4 MB/s write.  `--prefix-cache`
+(the 87 MB Vertex-100M q4 costs ~10 s before the GPU does anything).  `--prefix-cache`
 saves the prefill but not this.
+
+### The network is slower than the card, not the other way round
+
+The same 64 MiB, moved over the SSH path this workstation actually uses
+(100 Mb/s on the board's side, the workstation on WiFi behind CGNAT), timed by
+bracketing the transfer; `ssh_download` / `ssh_upload` to RAM to isolate the
+link from the card:
+
+| transfer | wall | throughput |
+|---|---:|---:|
+| board -> workstation | 20.3 s | 3.15 MB/s |
+| workstation -> board, into `tmpfs` | 22.5 s | 2.84 MB/s |
+| workstation -> board, into the SD card | 26.4 s | 2.42 MB/s |
+
+So the link runs at ~3 MB/s, the card writes at 7.4 and reads at 11.4: **the
+network is the slowest part of this system by 2.6-4.7x**, and writing to the
+card on top of a transfer costs only ~15% (the two overlap).  A deploy of a
+65 MiB container is ~25 s, a cold load from the card is ~8 s.
+
+A caution about the instrument: a plain `nc` between the two machines reported
+0.47 MB/s in both directions, 6x worse than SSH.  That test has the board dial
+*in* to the workstation's public address, which crosses the workstation's
+carrier-grade NAT in the inbound direction; the SSH path is the workstation
+dialling out.  Measure the path you deploy over, not a path that merely reaches
+the same two hosts.
