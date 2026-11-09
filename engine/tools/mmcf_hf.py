@@ -96,6 +96,84 @@ def st_dtype(e):
     return {"F16": "<f2", "F32": "<f4", "BF16": "<u2"}.get(e.get("dtype", "F16"))
 
 
+def check_source(cfg, hdr):
+    """Refuse what the engine cannot represent, before any tensor is read.
+
+    The engine has one dense block: RMSNorm, silu SwiGLU, RoPE with the angle in
+    the shader, grouped-query attention, no bias tensors and no sliding window.
+    A checkpoint outside that shape used to pack without complaint and then run
+    with part of itself silently dropped - the worst of both worlds, because the
+    file looks fine and the answers are wrong.  Everything known to be
+    unrepresentable stops here, with the reason, and the model is named.
+    """
+    arch = (cfg.get('architectures') or [cfg.get('model_type', '?')])[0]
+    kind = cfg.get('model_type', '')
+    # Name the block before the tensor-level checks: a GPT-2 checkpoint has
+    # biases *and* a different block, and "it has biases" would send the reader
+    # looking for a bias kernel when the real answer is that the whole block is
+    # a different one.
+    blocks = {
+        'gpt2': "the GPT-2 block (LayerNorm, gelu_new, learned position embeddings)",
+        'gpt_bigcode': "the GPT-2 block (LayerNorm, gelu_new, learned position embeddings)",
+        'gpt_neox': "the GPT-NeoX block (LayerNorm, gelu, parallel residual)",
+        'gptj': "the GPT-J block (LayerNorm, gelu_new, rotary on half the head)",
+        'opt': "the OPT block (LayerNorm, learned positions, a bias in every projection)",
+        'mamba': "the Mamba SSM block (a convolution and a state-space recurrences, no attention)",
+        'rwkv': "the RWKV block (a linear-attention recurrence, no softmax)",
+        'falcon': "the Falcon block (parallel attention/FFN with LayerNorm, alibi or multiquery)",
+        'gemma': "the Gemma block (a 256k vocabulary and a scaled embedding)",
+        'mixtral': "a mixture-of-experts block",
+        'qwen3_moe': "a mixture-of-experts block",
+    }
+    for key, what in blocks.items():
+        if kind == key or kind.startswith(key + '_') or key in arch.lower():
+            raise SystemExit(
+                "%s: this is %s.  The engine has one dense block - RMSNorm, silu "
+                "SwiGLU, RoPE, grouped-query attention, no bias tensors - so it "
+                "cannot be converted; see docs/model-formats.md." % (arch, what))
+    for key in ('num_experts', 'num_local_experts', 'n_routed_experts',
+                'moe_layer_freq', 'num_experts_per_tok'):
+        if cfg.get(key):
+            raise SystemExit(
+                "%s: %s is set, so this is a mixture-of-experts checkpoint.  The "
+                "engine runs one dense FFN per layer; there is no routing path."
+                % (arch, key))
+    biases = sorted(k for k in hdr if k.endswith('.bias'))
+    if biases:
+        raise SystemExit(
+            "%s: the checkpoint carries bias tensors (%s%s).  The matvec kernels "
+            "add no bias, so packing this would drop them silently and the logits "
+            "would be wrong."
+            % (arch, ', '.join(biases[:3]), ', ...' if len(biases) > 3 else ''))
+    if cfg.get('attention_bias') or cfg.get('mlp_bias'):
+        raise SystemExit(
+            "%s: config declares attention_bias/mlp_bias, which the engine cannot "
+            "apply (no bias tensors are read)." % arch)
+    act = cfg.get('hidden_act') or cfg.get('activation_function')
+    if act and str(act).lower() not in ('silu', 'swish'):
+        raise SystemExit(
+            "%s: hidden_act is %r; the FFN kernel computes silu only (a GPT-2 "
+            "checkpoint says gelu_new, a NeoX one gelu)." % (arch, act))
+    rs = cfg.get('rope_scaling')
+    if rs:
+        kind = rs.get('rope_type') or rs.get('type')
+        if kind not in (None, 'default'):
+            raise SystemExit(
+                "%s: rope_scaling %r is not representable; the container carries a "
+                "theta and a half/plain convention, nothing else." % (arch, kind))
+    dim = cfg.get('hidden_size') or cfg.get('n_embd')
+    heads = cfg.get('num_attention_heads') or cfg.get('n_head')
+    hd = cfg.get('head_dim')
+    if dim and heads and hd and hd != dim // heads:
+        raise SystemExit(
+            "%s: head_dim %d does not match hidden_size/heads = %d/%d; the engine "
+            "derives the head width from the two." % (arch, hd, dim, heads))
+    if cfg.get('sliding_window') and cfg.get('use_sliding_window') is not False:
+        print("note: %s declares sliding_window %s, which the engine ignores; the "
+              "attention is dense, so keep SEQ <= %s"
+              % (arch, cfg.get('sliding_window'), cfg.get('sliding_window')))
+
+
 def load_minimind(model_dir, seq=512):
     """Read a HF Llama/Qwen-shaped directory into float arrays."""
     with open(model_dir + '/config.json') as f:
@@ -104,6 +182,7 @@ def load_minimind(model_dir, seq=512):
         n = struct.unpack('<Q', f.read(8))[0]
         hdr = json.loads(f.read(n))
         data = f.read()
+    check_source(cfg, hdr)
 
     def get(name):
         e = hdr[name]

@@ -207,6 +207,31 @@ The source type is detected from `--in`: a directory is an HF checkpoint
 whose first word is a legacy magic is a legacy checkpoint, anything else is
 assumed to be llama2.c.
 
+### What the packer refuses
+
+The engine has exactly one block: RMSNorm, silu SwiGLU, RoPE with the angle in
+the shader, grouped-query attention, no bias tensors, no sliding window.  A
+checkpoint outside that shape is refused at `--in`, before any tensor is read
+(`check_source()` in `engine/tools/mmcf_hf.py`).  It used to be accepted and
+packed, with the unsupported part silently dropped — the file looked fine and
+the answers were wrong, which is the worst failure mode this tool has.
+
+| the source is | the packer says |
+|---|---|
+| a GPT-2 / GPT-NeoX / OPT / Falcon / Mamba / RWKV / Mixtral block (`model_type`) | names the block and what it needs (LayerNorm, gelu, learned positions, a recurrence, routing); `docs/model-formats.md` is where the list lives |
+| any checkpoint with `*.bias` tensors (Qwen2 with `attention_bias`, GPT-2, pythia) | prints up to three of them and stops — the matvec kernels add no bias |
+| `hidden_act` other than silu/swish | names the value (`gelu_new`, `gelu`) |
+| `rope_scaling` other than default | the container carries a theta and a half/plain convention, nothing else |
+| `head_dim` that is not `hidden_size / num_attention_heads` | both numbers — the engine derives the head width |
+| `tie_word_embeddings: false` with no `lm_head.weight` | refuses rather than use the embedding as the head |
+| a mixture-of-experts config (`num_local_experts`, `num_experts_per_tok`, …) | one dense FFN per layer, no routing |
+
+What is still accepted but warned about: `sliding_window` (the attention is
+dense, so keep `SEQ` inside the window).  What is accepted because the engine
+really does support it: tied or untied heads, GQA, per-head q/k norms
+(`--qk-norm` is implied by the tensors), a tokenizer with or without added
+tokens.
+
 `mmcf_requant_q8.py` is the shorter route when only q8 is wanted: it rebuilds
 the q8 matrices inside a container from the same model's i16 container, so the
 tokenizer, template and rope metadata are not re-derived.
