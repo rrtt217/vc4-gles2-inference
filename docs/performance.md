@@ -4111,3 +4111,67 @@ and the q4 prefix `我是MiniMind` still matches on both machines.  The board's 
 string and PPL move, which is what a corrected decode looks like: the board now
 agrees with the desktop and with its own CPU path, where before the saturating
 model agreed with neither.
+
+## Where the last 0.5% lives: the q16 store, not a kernel (2026-11-09)
+
+After the integer decode (6234328) the board and the desktop still disagree by
+cosine 0.9994 / max |d| 0.47 on MiniMind3 q8, and by 0.49% PPL (271.6420 vs
+270.3170).  This is that gap, attributed stage by stage.
+
+### It compounds, it does not jump
+
+`STAGE_DUMP=1`, same container and prompt, both machines, patched builds.
+Per stage: percentage of elements that are bit-identical, the largest difference
+in q16 units, and the mean absolute value of the row (real units).
+
+| line | stage | identical | max \|d\| | mean \|d\| | mean \|x\| |
+|---|---|---:|---:|---:|---:|
+| 0 | xb (layer 0) | 68.1% | 1 | 0.32 | 0.757 |
+| 1 | att | 72.3% | 2 | 0.29 | 0.197 |
+| 2 | x1 | 78.8% | 1 | 0.21 | 0.100 |
+| 3 | xbf | 45.6% | 8 | 1.84 | 0.719 |
+| 4 | xb (layer 1) | 40.6% | 17 | 3.23 | 0.692 |
+| ... | | | | | |
+| 15 | xbf (layer 7) | 7.9% | 30 | 6.68 | 0.784 |
+| 16 | xb (layer 8) | 11.3% | 32 | 7.08 | 0.783 |
+
+Two things to read there.  In layer 0 the stages are 68-79% bit-identical and
+differ by **one** q16 unit (1/256), inside a value of order 1 — that is the
+store's own rounding, not arithmetic that differs.  Then the difference grows
+smoothly, roughly 1.5x per layer, with no stage that jumps: it is the residual
+chain and the nonlinear attention carrying a last-bit difference forward, not a
+kernel doing something different on one machine.  The whole layer-output dump
+shows the same shape (line 0 differs by 1 unit, line 31 by up to 72), and it
+resets to exact at every new token, because the embedding lookup reads the same
+bytes on both machines.
+
+By layer 8 the residual is ~10% off in relative terms (32 units on a 0.78 mean);
+the logits are not, because a 768-term dot product averages uncorrelated last-bit
+noise down by about sqrt(768): hidden-state cosine 0.9957 against logits cosine
+0.9994.
+
+### The grid is the amplifier, the width is the lever
+
+Two single-variable runs decide between "the store's grid" and "a wrong kernel".
+
+| change | Pi vs Xe cosine | max \|d\| | reading |
+|---|---:|---:|---|
+| baseline (q16 activations, q16 residual) | 0.9991 | 0.5586 | |
+| residual q16 -> **q24** (`--res q24`, same weights) | 0.9995 | **0.4180** (-25%) | one store of five widened |
+| activations q16 -> int8 (`ACT8=1`, 16x coarser) | 0.9803 | **3.0000** (+437%) | the grid scales the gap |
+
+Coarsening the grid by 16x multiplies the cross-machine difference by 5.4x, and
+widening one of the five stores removes a quarter of it.  A kernel that computed
+something different would not scale with the grid like that; last-bit rounding
+at a quantisation boundary does.
+
+So the 0.5% is the price of 1/256: every store puts values astride a boundary,
+the two fragment units round their own way, and the difference compounds through
+eight layers.  Nothing in the shader text can make two vendors' fragment units
+round a boundary identically.  The levers are all width: the residual is already
+switchable (`--res q24`), and the other four stores (xb, att, xbf, hid) would
+need an I24 activation format, which is 2x the fetch traffic and a decode VC4
+pays for in three byte conversions.
+
+Until then, the pins are per machine, and a 0.5% PPL difference between the
+board and the desktop is the floor, not a defect.
