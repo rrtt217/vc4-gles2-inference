@@ -219,7 +219,8 @@ tokenizer, template and rope metadata are not re-derived.
 | BOS / EOS / stop ids | metadata key 8, derived from the embedded vocabulary.  llama2.c stores `"<s>"` as `"\n<s>\n"`, so matching is on the trimmed token |
 | chat template | metadata key 9 (the Jinja text, verbatim); key 4 keeps the kind + default system + name as the fallback |
 | BOS policy | metadata key 10 (`add_bos` / `add_eos`) |
-| BOS policy | metadata key 10 (`add_bos` / `add_eos`) |
+| the LM head | the embedding when the checkpoint is tied; `lm_head.weight` when it ships one (2026-11-09).  A `tie_word_embeddings: false` config with no `lm_head.weight` is **refused**, not packed — before that the head silently became the embedding and the container ran but answered nonsense (Minueza-32M, pythia, `genz-translator`) |
+| the tokenizer blob | `engine/tools/make_tok.py --input <dir> --output model.tok`: ByteLevel (`Ġ`) or SentencePiece (`▁`) detected from the vocabulary, added tokens laid onto their ids, merges split on the first space |
 | tokenizer | the `.tok` blob is inside the container |
 
 ## TinyBrainBot-100M-v5.1-Instruct

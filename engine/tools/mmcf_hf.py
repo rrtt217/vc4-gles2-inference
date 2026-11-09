@@ -119,6 +119,20 @@ def load_minimind(model_dir, seq=512):
 
     emb = get('model.embed_tokens.weight')
     vocab, dim = emb.shape
+    # The LM head is the embedding unless the checkpoint ships its own.  A
+    # `tie_word_embeddings: false` model that only *looks* like a Llama block
+    # (Mistral labels, Minueza, pythia) has a separate matrix, and using the
+    # embedding for it produces a container that runs and answers nonsense.
+    wcls = emb
+    if 'lm_head.weight' in hdr:
+        wcls = get('lm_head.weight')
+        if wcls.shape != emb.shape:
+            raise SystemExit("lm_head %s does not match the embedding %s"
+                             % (list(wcls.shape), list(emb.shape)))
+    elif cfg.get('tie_word_embeddings') is False:
+        raise SystemExit("config says tie_word_embeddings: false but there is no "
+                         "lm_head.weight in the checkpoint; refusing to pack a model "
+                         "whose head would silently become its embedding")
     layers = cfg['num_hidden_layers']
     heads = cfg['num_attention_heads']
     kv = cfg['num_key_value_heads']
@@ -139,9 +153,9 @@ def load_minimind(model_dir, seq=512):
     theta, half = rope_of(cfg)
     return dict(dim=dim, hidden=hidden, layers=layers, heads=heads, kv=kv, vocab=vocab, seq=seq,
                 emb=emb, rms_att=rms_att, rms_ffn=rms_ffn, rms_final=rms_final,
-                wq=wq, wk=wk, wv=wv, wo=wo, w1=w1, w2=w2, w3=w3, wcls=emb,
+                wq=wq, wk=wk, wv=wv, wo=wo, w1=w1, w2=w2, w3=w3, wcls=wcls,
                 theta=theta, half=half, qk_norm=1 if qk else 0,
-                q_norm=q_norm, k_norm=k_norm)
+                q_norm=q_norm, k_norm=k_norm, untied='lm_head.weight' in hdr)
 
 
 def load_llama2c(path):

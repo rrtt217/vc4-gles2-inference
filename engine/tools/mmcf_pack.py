@@ -466,6 +466,10 @@ def main():
         meta, tensors = tensors_from_hf(args.src, args.quant, args.seq,
                                         rail_check=not args.no_rail_check,
                                         vocab_limit=_ntok or None)
+        if _cfg.get("tie_word_embeddings") is False:
+            # load_minimind refuses a false tie with no lm_head, so reaching here
+            # means the head really is the checkpoint's own matrix.
+            print("head: tie_word_embeddings is false, using lm_head.weight")
         _vs = meta['vocab']
         if _ntok and _ntok != _vs:
             print("note: tokenizer has %d entries, container uses %d (embedding padded)"
