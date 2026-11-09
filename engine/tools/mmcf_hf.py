@@ -131,13 +131,22 @@ def check_source(cfg, hdr):
                 "%s: this is %s.  The engine has one dense block - RMSNorm, silu "
                 "SwiGLU, RoPE, grouped-query attention, no bias tensors - so it "
                 "cannot be converted; see docs/model-formats.md." % (arch, what))
-    for key in ('num_experts', 'num_local_experts', 'n_routed_experts',
-                'moe_layer_freq', 'num_experts_per_tok'):
-        if cfg.get(key):
-            raise SystemExit(
-                "%s: %s is set, so this is a mixture-of-experts checkpoint.  The "
-                "engine runs one dense FFN per layer; there is no routing path."
-                % (arch, key))
+    # MoE is decided by the checkpoint, not by the config: MiniMind's config
+    # class carries num_experts on dense releases too (the 2026-10 forks say
+    # num_experts 4 with 90 dense tensors and not one expert in the header).
+    moe = [k for k in hdr
+           if '.experts.' in k or 'block_sparse_moe' in k or '.router.' in k
+           or k.endswith('gate_inp.weight')]
+    if moe:
+        raise SystemExit(
+            "%s: the checkpoint has mixture-of-experts tensors (%s%s).  The engine "
+            "runs one dense FFN per layer; there is no routing path."
+            % (arch, ', '.join(sorted(moe)[:2]), ', ...' if len(moe) > 2 else ''))
+    moe_cfg = [k for k in ('num_experts', 'num_local_experts', 'n_routed_experts',
+                           'moe_layer_freq', 'num_experts_per_tok') if cfg.get(k)]
+    if moe_cfg:
+        print("note: config declares %s but the checkpoint has no expert tensors; "
+              "treating it as dense" % ', '.join(moe_cfg))
     biases = sorted(k for k in hdr if k.endswith('.bias'))
     if biases:
         raise SystemExit(
@@ -168,6 +177,23 @@ def check_source(cfg, hdr):
         raise SystemExit(
             "%s: head_dim %d does not match hidden_size/heads = %d/%d; the engine "
             "derives the head width from the two." % (arch, hd, dim, heads))
+    # The loader maps Llama/Qwen names only.  A BERT/ModernBERT encoder, a
+    # Tinyllm or a MiniMind fork passes every check above (no biases, silu) and
+    # then dies on a KeyError halfway through the first tensor read.
+    need = ['model.embed_tokens.weight', 'model.norm.weight',
+            'model.layers.0.input_layernorm.weight',
+            'model.layers.0.post_attention_layernorm.weight',
+            'model.layers.0.self_attn.q_proj.weight',
+            'model.layers.0.self_attn.o_proj.weight',
+            'model.layers.0.mlp.gate_proj.weight',
+            'model.layers.0.mlp.down_proj.weight']
+    missing = [n for n in need if n not in hdr]
+    if missing:
+        raise SystemExit(
+            "%s: the tensor names are not the Llama/Qwen layout this loader maps "
+            "(missing %s%s).  A BERT encoder, a GPT-2 `transformer.h` tree or an "
+            "unusual fork lands here."
+            % (arch, ', '.join(missing[:3]), ', ...' if len(missing) > 3 else ''))
     if cfg.get('sliding_window') and cfg.get('use_sliding_window') is not False:
         print("note: %s declares sliding_window %s, which the engine ignores; the "
               "attention is dense, so keep SEQ <= %s"
