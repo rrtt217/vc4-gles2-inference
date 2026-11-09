@@ -65,6 +65,7 @@ the file format in [`docs/model-formats.md`](docs/model-formats.md) and
 | `cmp_logits.py` | compares two `LOGITS_OUT` dumps tile by tile |
 | `verify_packing.sh` | byte-for-byte check of the packed-activation layout against a known-good binary |
 | `bench.sh`, `bench_ab.sh`, `bench_plain_ab.sh`, `longctx.sh` | timings; the `ab` ones interleave two binaries to cancel drift |
+| `docs_check.sh` | documentation drift: every switch the source reads is in `docs/test-hooks.md`, every in-tree path a document names exists, and nothing calls a live switch dead.  Runs without a model or a GPU |
 
 These scripts existed since `14754be` but were missing from this map, which is
 how a long investigation ended up hand-rolling probes they already contain.
@@ -129,10 +130,18 @@ only produced formats the engine cannot read.
 The container carries the tokenizer, the chat template **text** (metadata
 key 9, the same Jinja string a GGUF file holds in `tokenizer.chat_template`),
 the default system prompt, the rope configuration, the BOS policy and the
-special-token ids, so `TOKENIZER=`,
-`ROPE_THETA=`, `ROPE_HALF=` and `--template` are **gone**.  Setting them is
-silently ignored, which is worse than an error: a command copied from an old
-note still "works" and quietly tests something else.  Check a file with
+special-token ids, so `ROPE_THETA=`, `ROPE_HALF=` and the engine's `--template`
+are **gone**; setting them is silently ignored, which is worse than an error, so
+a command copied from an old note still "works" and quietly tests something
+else.
+
+`TOKENIZER=` is the exception and the worse trap: it still works and it
+**overrides** the embedded blob (`engine.cpp` only uses the container's
+tokenizer when the variable is unset).  Nothing warns; the ids stop meaning what
+the model was trained on and the reply comes back empty.  Leave it unset, and if
+a run prints no `tokenizer: ... embedded in the checkpoint` line, that is why.
+`docs/test-hooks.md` has the full list, including the three switches that used
+to be undocumented (`FFN_PAIR`, `TOK_NO_PREFIX`, `TOK_SPACE_FOLD`).  Check a file with
 `python3 engine/tools/mmcf_dump.py <file>` before blaming the engine.
 
 ## Canonical smoke tests
@@ -293,8 +302,16 @@ Update the document that owns the fact:
 | a GPU or format change | `docs/engine-internals.md`, `docs/engine-layout.md` |
 
 A command in a document that no longer runs is a bug in the document, not a
-detail.  When a flag is removed, grep the whole tree for it: `--template`
-survived in five scripts and two READMEs after the engine dropped it.
+detail.  `engine/scripts/docs_check.sh` is the mechanical half of that rule and
+runs in under a second: it compares the `getenv()` inventory with
+`docs/test-hooks.md`, checks that every `engine/tools`, `engine/scripts`,
+`minimind3`, `server` and `templates` path a document tells you to run still
+exists, and refuses to let a document call a switch dead while the source still
+reads it.  Run it before committing a documentation change.
+
+When a flag is removed, grep the whole tree for it: `--template` survived in
+five scripts and two READMEs after the engine dropped it, and `docs_check.sh`
+only catches the paths it knows about.
 
 `docs/performance.md` is append-only history: new measurements go at the
 bottom with the date and the machine, and the current state lives in its top

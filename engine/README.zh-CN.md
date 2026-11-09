@@ -130,6 +130,16 @@ python3 tools/mmcf_dump.py ../models/<model>/<model>.q4.mmcf --check
 rope，打包器拒绝猜测。模板取值：`plain`(0)、`chatml`/`qwen`(1)、
 `minimind3`(2)、`tinybrainbot`(3)。tokenizer 会被内嵌，特殊 token id 从词表推导。
 
+`--tok` 由模型自己的 `tokenizer.json` 生成：
+
+```bash
+python3 tools/make_tok.py --input ../models/<model> --output ../models/<model>/<model>.tok
+```
+
+ByteLevel（`Ġ`）与 SentencePiece（`▁`）两种词表都支持，并把位于 BPE 范围**之上**
+的 chat 标记铺到各自 id —— 只用 `model["vocab"]` 生成的 blob 会在错误的 id 上结束，
+引擎就会把 `<|im_start|>` 拆成字符。
+
 ## MiniMind3 64M
 
 64M Qwen3 风格 dense 模型：8 层、768 hidden、2432 FFN、8 Q / 4 KV heads、

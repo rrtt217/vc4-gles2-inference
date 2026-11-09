@@ -45,8 +45,13 @@ models/
   survey_under_110m.csv          candidate survey
 ```
 
-`smollm2-135m/` and `smollm2-135m-instruct/` were **deleted**: SmolLM2 is
-declared unsupported (see the note at the end of this file).
+`smollm2-135m/` is **not** what it looks like: the source weights, config and a
+`smollm.tok` built outside this line are still on disk, but nothing in it is
+validated and no container from it has ever passed the gate.  `smollm2-135m-instruct/`
+is gone.  SmolLM2 is declared unsupported (see the note at the end of this file),
+so deleting the rest is fine.  This paragraph used to say both directories had
+been deleted; they had not, and a stale "deleted" is exactly the kind of claim
+that makes the next reader trust the store.
 
 Rebuild MiniMind3 artifacts from the repository root:
 

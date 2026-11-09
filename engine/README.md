@@ -210,6 +210,17 @@ more than 4x the engine's q16 rail (128); `--allow-over-rail` overrides,
 `--no-rail-check` skips the 2 s calibration.  See the residual-rail note in
 [model-formats.md](../docs/model-formats.md).
 
+The `--tok` blob comes from the model's own `tokenizer.json`:
+
+```bash
+python3 tools/make_tok.py --input ../models/<model> --output ../models/<model>/<model>.tok
+```
+
+It handles ByteLevel (`Ġ`) and SentencePiece (`▁`) vocabularies, and lays the
+chat markers that sit *above* the BPE range onto their ids — a blob built from
+`model["vocab"]` alone ends at the wrong id and the engine splits
+`<|im_start|>` into characters.
+
 A llama2.c `.bin` works the same way (`--in ../models/llama2c/stories15M.bin
 --quant i16 --tok ... --template plain --chat`).  A legacy checkpoint is still
 accepted, and then `--theta` and `--rope-half` are required for a `Q8M1`/`I16M1`

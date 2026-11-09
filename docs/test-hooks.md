@@ -6,7 +6,7 @@ not production settings.
 Three rules before using this list:
 
 - **A switch that no longer exists is worse than a missing one.**  `--template`,
-  `TOKENIZER=`, `ROPE_THETA=` and `ROPE_HALF=` were removed with the legacy
+  `ROPE_THETA=` and `ROPE_HALF=` were removed with the legacy
   readers (`fcc4095`); the container carries all four.  Passing them now is
   silently ignored.
 - **Prefer an in-binary switch to a second build.**  Two builds add enough
@@ -79,6 +79,8 @@ binary.  They are measurement hooks, not production settings.
   (200.7 vs 183.5 ms/token).
 - `FFN_FUSE=0` — two-pass FFN gate+swiglu; the fused kernel is the default
   (228.7 vs 183.5 ms/token).
+- `FFN_PAIR=0` — unpaired FFN rows; the paired q8/q4 path is the default (the
+  paired shader covers q8 and q4, and `FFN_FUSE` only applies inside it).
 - `LOGITS_SPLIT=1` — unpaired logits rows.
 - `RMS_SPLIT=1`, `RMS_FUSED=1` — force the split or fused rmsnorm reduce.  VC4
   defaults to fused (it drops one draw per norm); other drivers default to
@@ -141,6 +143,35 @@ binary.  They are measurement hooks, not production settings.
 - `KEEP_CPU_WEIGHTS=1` — keep the CPU copies after texture upload (default:
   free them; q8 MiniMind3 RSS drops from ~119 MB to ~56 MB).
 
+## Tokenizer
+
+The container normally decides how text becomes ids: the blob is inside the
+file, and the template supplies whatever prefix the model was trained with.
+Two switches exist for the cases where it does not, both of them about the
+SentencePiece dummy prefix (a leading `▁` that a Llama-shaped tokenizer adds
+before the first word):
+
+- `TOK_NO_PREFIX=1` — do not add it at all.  This is what matches HF's
+  `tokenizers.encode()` on a raw string, and it is what a fixture test needs
+  when the reference tokenizes the same text.
+- `TOK_SPACE_FOLD=1` — add it as part of the text (`" hello"`) instead of
+  emitting it as its own token, so the BPE can merge it into `▁hello`.  The
+  default emits it separately, which is what the MiniMind2/3 gates were
+  baselined on.
+
+Measured on a Llama-shaped fixture (`tiny-random-LlamaForCausalLM`), `"hello"`:
+
+| setting | ids |
+|---|---|
+| default | `[22172, 28401]` — prefix emitted as its own token |
+| `TOK_SPACE_FOLD=1` | `[22172, 28401]` — no merge, same output |
+| `TOK_NO_PREFIX=1` | `[12199, 4456]` — no prefix at all |
+| HF `tokenizers` | `[22172]` — prefix merged into the word |
+
+So neither switch reproduces HF for that model yet; see `engine/src/tokenizer.cpp`
+and the note in `docs/performance.md` (2026-11-09).  `make_tok.py --input` builds
+the blob these switches act on.
+
 ## Generation
 
 - `--greedy` — deterministic argmax sampling.
@@ -193,8 +224,14 @@ binary.  They are measurement hooks, not production settings.
   mandatory with the q16 layout, and the code they selected was removed: the
   variables now do nothing at all (there is no unhoisted `att_score` and no
   probability texture to read).
-- `LEGACY_Q8=1`, `ROPE_THETA=`, `ROPE_HALF=`, `TOKENIZER=`, `--template` — gone
-  with the legacy readers; the container states all of it.
+- `LEGACY_Q8=1`, `ROPE_THETA=`, `ROPE_HALF=`, `--template` — gone with the
+  legacy readers; the container states all of it.
+- **`TOKENIZER=` is *not* retired**, and it is the one to be careful with: the
+  engine loads that blob *instead of* the container's embedded tokenizer
+  (`engine.cpp`: `if (model.tok_blob && !getenv("TOKENIZER"))`).  Nothing warns,
+  the token ids then mean something else, and for a model whose stop token is
+  vocabulary-dependent the answer comes back **empty**.  Leave it unset; if a
+  run prints no `tokenizer: ... embedded` line, this variable is why.
 - `--kv-pack` and `--seq` are **server** flags, never engine flags: the server
   turns them into `KV_PACK` / `SEQ` for the worker it spawns.
 
