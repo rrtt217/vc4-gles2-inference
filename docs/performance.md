@@ -4311,7 +4311,7 @@ plane (one f32 per output row, 486 KB for the whole model) fixes it.
 
 | void.1, Xe/GLES2, seq 1024 | q8 | q8 per row | i16 |
 |---|---:|---:|---:|
-| logits vs f32 at the prompt that diverged (T=47) | 14.44, top-1 wrong | **1.11, top-1 right** | 0.93 |
+| logits vs f32 at the prompt that diverged (T=47) | 14.44, top-1 wrong | **0.67, top-1 right** | 0.93 |
 | English PPL (1022 tokens) | 3.9017 | **3.7979** | 3.7824 |
 | greedy 400 B | misspells | clean | clean |
 | decode, ms/token | 21-27 | 19-33 | 37-54 |
@@ -4326,6 +4326,14 @@ exactly the GLSL it linked before.
 The two-position prefill kernels have no row-scale variant yet, so a file with
 planes prefills on the single-position path (`Session::pair_ok()`); its prefill
 is slower than a plain q8 file's, which the table above does not separate.
+
+The plane is 16 bits in a 4-texel-wide texture.  A 1-texel-wide texture is the
+one shape VC4 had never been asked to sample: the same container printed
+`<pad>` plus invalid bytes on the Pi while it was clean on Xe, and widening the
+texture to four texels is what the Pi build below needed.  The 16-bit value is
+also what the desktop run now measures: 0.67 logits against f32, better than
+i16's 0.93, because a 24-bit decode through a 1-wide fetch had been costing
+about 0.4 logits of scale error that the wider 16-bit form does not.
 
 Two bugs on the way, both worth recognising: the upload divided the plane by
 the unit a second time, which clamped every row to 1.0 and made per-row scales

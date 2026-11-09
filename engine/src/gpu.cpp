@@ -104,21 +104,26 @@ void GPU::upload(Mat& m){
         if (!m.row_scale.empty()) {
                 // The plane already holds s_row / unit; `scale` is the unit, and
                 // the shader multiplies it back.  Dividing again here would put
-                // every row past 2^24 and clamp the whole plane to 1.0, which
+                // every row past 2^16 and clamp the whole plane to 1.0, which
                 // looks exactly like "per-row scales do nothing".
-                const double S = m.scale > 0.0f ? (double)m.scale : 1.0;
-                vector<uint8_t> rs((size_t)m.rows * 4);
+                //
+                // Two bytes per row, and four texels wide: a 1-texel-wide
+                // texture is the one shape VC4 never had to sample, and void.1
+                // came back as <pad> plus invalid bytes on the Pi while the same
+                // file was clean on Xe.
+                const int W = 4;
+                vector<uint8_t> rs((size_t)m.rows * W * 4, 0);
                 for (int r = 0; r < m.rows; ++r) {
                         double v = (double)m.row_scale[(size_t)r];
-                        long q = lrint(v * 16777216.0);
+                        long q = lrint(v * 65536.0);
                         if (q < 0) q = 0;
-                        if (q > 16777215) q = 16777215;
-                        rs[(size_t)r * 4 + 0] = (uint8_t)(q >> 16);
-                        rs[(size_t)r * 4 + 1] = (uint8_t)(q >> 8);
-                        rs[(size_t)r * 4 + 2] = (uint8_t)q;
-                        rs[(size_t)r * 4 + 3] = 255;
+                        if (q > 65535) q = 65535;
+                        uint8_t* o = &rs[(size_t)r * W * 4];
+                        o[0] = (uint8_t)(q >> 8);
+                        o[1] = (uint8_t)q;
+                        o[3] = 255;
                 }
-                m.row_scale_tex = make_texture(1, m.rows, rs.data());
+                m.row_scale_tex = make_texture(W, m.rows, rs.data());
         }
         if (m.type == WeightType::INT8) {
             const int8_t* src = m.w8();

@@ -255,15 +255,23 @@ static string q4_h(const string& w) {
 // has one: a model without it links exactly the text it linked before.
 string wrow_scale(int rows, const char* smp = "WS", const char* fn = "wsr",
                   const char* unit = "ws") {
-    // One 24-bit value per row: the row scale divided by the matrix's unit,
+    // One 16-bit value per row: the row scale divided by the matrix's unit,
     // which travels in the kernel's existing scale uniform (ws, or ws1/ws2
     // where one draw covers two matrices).  The W fetches are already per row,
     // so this adds one texel read per fragment.
+    //
+    // 16 bits, not 24: the plane is 4 texels wide and only the first is read,
+    // because a 1-texel-wide texture is exactly the shape VC4 had never been
+    // asked for -- void.1 answered with <pad> and invalid bytes on the Pi while
+    // the same file was clean on Xe.  The value also stays below 2^16, so a
+    // backend whose fragment stage demotes precision still decodes it exactly;
+    // 1/65536 of the unit is 7.6e-5 relative on a row at 0.2, against the 0.79%
+    // weight error this exists to remove.
     return string("uniform sampler2D ") + smp +
            ";float " + fn + "(int r){vec4 c=texture2D(" + smp +
-           ",vec2(0.5,(float(r)+0.5)/float(" + to_string(rows) + ")));"
-           "return (c.r*16711680.0+c.g*65280.0+c.b*255.0)*" + unit +
-           "*(1.0/16777216.0);}";
+           ",vec2(0.125,(float(r)+0.5)/float(" + to_string(rows) + ")));"
+           "return (c.r*65280.0+c.g*255.0)*" + unit +
+           "*(1.0/65536.0);}";
 }
 
 string matvec_q8(int rows, int cols, XFormat xf, bool wrow) {

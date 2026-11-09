@@ -33,7 +33,7 @@ matrix, tensor id part 3; see [checkpoint-container.md](checkpoint-container.md)
 |---|---:|---:|---:|
 | median relative weight error | 2.36% | 0.79% | 0.001% |
 | worst matrix | 16.56% | 1.91% | — |
-| logits vs f32, the diverging prompt | 14.44 (wrong top-1) | **1.11 (right)** | 0.93 |
+| logits vs f32, the diverging prompt | 14.44 (wrong top-1) | **0.67 (right)** | 0.93 |
 | English PPL, seq 1024 | 3.9017 | **3.7979** | 3.7824 |
 | greedy 400 B | `everythinteresting` | clean | clean |
 
@@ -44,7 +44,13 @@ error, so the number to look at is `max|w| / median|w|` per matrix.
 container; on void.1 it reproduces the packer's greedy text.
 
 The cost is one texel fetch per fragment in the q8 kernels and a plane of
-`rows` 24-bit values (486 KB for the whole of void.1, 0.5%).  The two-position
+`rows` 16-bit values (486 KB for the whole of void.1, 0.5%).  The plane texture
+is **4 texels wide** and only the first is read: a 1-texel-wide texture is the
+one shape VC4 has never had to sample, and void.1 answered with `<pad>` and
+invalid bytes on the Pi while the same file was clean on Xe.  16 bits also keep
+the decoded value under 2^16, so the decode stays exact even if a backend
+demotes the fragment stage to mediump; the same change moved the desktop error
+from 1.11 to 0.67 logits, which is better than i16's 0.93.  The two-position
 prefill kernels have no row-scale variant, so such a model prefills on the
 single-position path (`Session::pair_ok()` returns false).
 
