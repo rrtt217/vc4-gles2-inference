@@ -57,7 +57,7 @@ the file format in [`docs/model-formats.md`](docs/model-formats.md) and
 
 | Script | Answers |
 |---|---|
-| `regression.sh` | the acceptance gate: determinism, behaviour, pinned strings, PPL |
+| `regression.sh` | the acceptance gate: docs drift, determinism, behaviour, pinned strings, PPL |
 | `shader_hashes.sh` | did a builder change move the emitted GLSL: digests of every builder's text (`--dump-shaders`), no GPU or model needed |
 | `diff_paths.sh` + `dump_diff.awk` | per-stage CPU-vs-GPU comparison, from `STAGE_DUMP=1 HIDDEN_DUMP=1 PREFILL_PAIR=0` |
 | `dump_stats.py` | per-row `max/mean/clamp-count` of a `DUMP` file (is a row saturating?) |
@@ -302,8 +302,9 @@ Update the document that owns the fact:
 | a GPU or format change | `docs/engine-internals.md`, `docs/engine-layout.md` |
 
 A command in a document that no longer runs is a bug in the document, not a
-detail.  `engine/scripts/docs_check.sh` is the mechanical half of that rule and
-runs in under a second: it compares the `getenv()` inventory with
+detail.  `engine/scripts/docs_check.sh` is the mechanical half of that rule; it
+is step 0 of `scripts/regression.sh`, and it runs in under a second: it compares
+the `getenv()` inventory with
 `docs/test-hooks.md`, checks that every `engine/tools`, `engine/scripts`,
 `minimind3`, `server` and `templates` path a document tells you to run still
 exists, and refuses to let a document call a switch dead while the source still
