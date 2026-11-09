@@ -741,6 +741,9 @@ int main(int argc, char** argv) {
             if (!tokens.empty() && n == tokens.size()) n = tokens.size() - 1;
             skip = (int)n;
         }
+        if (getenv("CHAT_CACHE"))
+            fprintf(stderr, "CHAT_CACHE turn cached=%d prefill=%zu prompt=%zu\n",
+                    skip, tokens.size() - (size_t)skip, tokens.size());
         for (int i = 0; i < skip; ++i) pos = i + 1;
         vector<float> logits;
         CandidateResult cand;
@@ -771,6 +774,7 @@ int main(int argc, char** argv) {
         }
         cout << "Assistant: "; cout.flush();
         string reply;
+        string pending;   // holds an incomplete UTF-8 sequence between tokens
         int prev = tokens.empty() ? 1 : tokens.back();
         vector<int> recent;
         for (int i = 0; i < gen && pos < model.seq; ++i) {
@@ -784,8 +788,17 @@ int main(int argc, char** argv) {
                 session.step(next, pos++, false);
                 break;
             }
-            cout << tokenizer.decode({next}, prev); cout.flush();
-            reply += tokenizer.decode({next}, prev);
+            // A token may carry only the first bytes of a multi-byte character.
+            // Emitting those bytes would put ill-formed UTF-8 into the reply,
+            // and the reply goes back into the template on the next turn, where
+            // the JSON marshal rejects it (SIGABRT).  Hold the tail until it is
+            // complete, exactly as the worker does.
+            pending += tokenizer.decode({next}, prev);
+            string chunk = utf8_take(pending);
+            if (!chunk.empty()) {
+                cout << chunk; cout.flush();
+                reply += chunk;
+            }
             tokens.push_back(next);
             recent.push_back(next);
             ++generated;
@@ -797,6 +810,10 @@ int main(int argc, char** argv) {
             } else {
                 logits = session.step(next, pos++, true);
             }
+        }
+        if (!pending.empty()) {
+            cout << "\xEF\xBF\xBD"; cout.flush();
+            reply += "\xEF\xBF\xBD";
         }
         cout << "\n";
         // The loop also stops at the KV limit, which otherwise looks like a
@@ -845,7 +862,7 @@ int main(int argc, char** argv) {
         return j + "]";
     };
 
-    auto run_tool_turn = [&](const string& user, bool first) {
+    auto run_tool_turn = [&](const string& user, bool first, vector<ChatMsg>* hist = nullptr) {
         string sys = system_prompt.empty()
             ? string("你的名字叫MiniMind，你是一个乐于助人、知识渊博的AI助手。请用完整且友好的方式回答用户问题，当被问到名字时请回答MiniMind。")
             : system_prompt;
@@ -859,11 +876,21 @@ int main(int argc, char** argv) {
         // Template path: the whole prompt is re-rendered from this list every
         // round, so the tool loop is model-agnostic.  The legacy path below
         // keeps building one string, which is why it only ever worked for the
-        // ChatML family.
-        vector<ChatMsg> msgs;
+        // ChatML family.  With a history the list *is* the conversation, so a
+        // REPL turn after a tool round-trip sees the same exchange the HTTP
+        // server would have sent; without it (one-shot --prompt) the list is
+        // local and holds this turn only.
+        vector<ChatMsg> local_msgs;
+        vector<ChatMsg>& msgs = hist ? *hist : local_msgs;
         if (chat_tmpl) {
-            if (first && !system_prompt.empty())
+            if (hist) {
+                if (msgs.empty() && !system_prompt.empty())
+                    msgs.push_back(ChatMsg{"system", system_prompt, "", ""});
+            } else if (!system_prompt.empty()) {
+                // Always the system turn: dropping it after the first user line
+                // was the old bug, and it also kills the shared prefix.
                 msgs.push_back(ChatMsg{"system", system_prompt, "", ""});
+            }
             msgs.push_back(ChatMsg{"user", user, "", ""});
         }
         string text;
@@ -898,7 +925,20 @@ int main(int argc, char** argv) {
             vector<float> logits;
             CandidateResult cand;
             bool cand_mode = topk != 0 && !greedy && !sampling_penalties_active();
-            int skip = (first && round == 0 && !cli_cache_tokens.empty()) ? cache_prefix_len(tokens) : 0;
+            int skip = 0;
+            if (!kv_tokens.empty()) {
+                size_t n = 0;
+                while (n < kv_tokens.size() && n < tokens.size() && kv_tokens[n] == tokens[n]) ++n;
+                // A fully covered prompt still runs its last token: the KV keeps
+                // rows, not the logits that token would produce.
+                if (!tokens.empty() && n == tokens.size()) n = tokens.size() - 1;
+                skip = (int)n;
+            } else if (first && round == 0 && !cli_cache_tokens.empty()) {
+                skip = cache_prefix_len(tokens);
+            }
+            if (getenv("CHAT_CACHE"))
+                fprintf(stderr, "CHAT_CACHE round=%d cached=%d prefill=%zu prompt=%zu\n",
+                        round, skip, tokens.size() - (size_t)skip, tokens.size());
             for (size_t i = skip; i < tokens.size(); ++i) {
                 if (g_stop) { tt.cut = "prefill"; gpu.sync(); return; }
                 bool last = (i + 1 == tokens.size());
@@ -916,6 +956,7 @@ int main(int argc, char** argv) {
             tt.begin_decode();
             cout << "Assistant: "; cout.flush();
             string out;
+            string pending;
             int prev = tokens.empty() ? 1 : tokens.back();
             int pos = (int)tokens.size();
             vector<int> recent;
@@ -932,9 +973,13 @@ int main(int argc, char** argv) {
                     session.step(next, pos++, false);
                     break;
                 }
-                string piece = tokenizer.decode({next}, prev);
-                cout << piece; cout.flush();
-                out += piece;
+                pending += tokenizer.decode({next}, prev);
+                string chunk = utf8_take(pending);
+                if (!chunk.empty()) {
+                    cout << chunk; cout.flush();
+                    out += chunk;
+                }
+                tokens.push_back(next);
                 recent.push_back(next);
                 ++tt.generated;
                 prev = next;
@@ -945,13 +990,27 @@ int main(int argc, char** argv) {
                     logits = session.step(next, pos++, true);
                 }
             }
+            if (!pending.empty()) {
+                cout << "\xEF\xBF\xBD"; cout.flush();
+                out += "\xEF\xBF\xBD";
+            }
             cout << "\n";
             if (pos >= model.seq) tt.cut = "context";
             vector<ToolCall> calls = parse_tool_calls(out);
-            if (calls.empty()) return;
             if (chat_tmpl) {
-                msgs.push_back(ChatMsg{"assistant", strip_tool_calls(out), tool_calls_json(calls), ""});
-            } else {
+                // The final answer goes into the history too.  Before this the
+                // tool path returned without recording it, so the next REPL turn
+                // lost the answer and had no shared prefix to reuse.
+                msgs.push_back(ChatMsg{"assistant", strip_tool_calls(out),
+                                       calls.empty() ? string() : tool_calls_json(calls), ""});
+            }
+            kv_tokens = tokens;
+            if (getenv("TOKENS_OUT")) {
+                ofstream f(getenv("TOKENS_OUT"), ios::binary);
+                for (int t : tokens) f.write((char*)&t, 4);
+            }
+            if (calls.empty()) return;
+            if (!chat_tmpl) {
                 text += out;
                 text += "<|im_end|>\n<|im_start|>user\n";
             }
@@ -1006,7 +1065,7 @@ int main(int argc, char** argv) {
                     continue;
                 }
                 if (tools_json.empty()) run_turn(line, first, 0, chat_tmpl ? &history : nullptr);
-                else run_tool_turn(line, first);
+                else run_tool_turn(line, first, chat_tmpl ? &history : nullptr);
                 first = false;
                 if (g_stop) {
                     cout << "\n[interrupted]\n";

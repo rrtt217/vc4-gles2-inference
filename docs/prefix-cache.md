@@ -7,6 +7,17 @@ token to re-seat the final logits.
 The CLI `--prefix-cache` path clamps the skip the same way; before step 10 it
 could skip every token and sample from an empty logits vector (docs/performance.md).
 
+The chat REPL is a third chain, in memory only.  It keeps the tokens of the
+previous turn, re-renders the whole exchange through the container's template,
+and reuses the KV rows before the longest common token prefix.  That includes
+the assistant reply, which re-tokenizes to the tokens that produced it, and it
+survives `--tools`: the tool loop appends the assistant turn, its tool calls and
+the tool results to the same history, so a round that follows a tool response
+prefills only the response and the template markers - the system + tools
+preamble and the earlier exchange stay in the cache.  Nothing is written to
+disk and no `MMKV1` header is involved; `/clear` drops the chain.  `CHAT_CACHE=1`
+prints the `cached=` / `prefill=` split of every call.
+
 `start` and `done` events include:
 
 ```json

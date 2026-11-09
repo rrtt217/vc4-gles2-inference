@@ -29,11 +29,12 @@ exist.
 | `STAGE_DUMP=1` | per-layer `xb` (rms_att out), `att`, `x1` (after the `wo` residual), `xbf` (rms_ffn out), `hid` (FFN output), `hidA` (layer out) as hex q16 texels, one line per row: `DUMP <name> w=<texels> h=<hash> <texels>` |
 | `HIDDEN_DUMP=1` | the same for the layer output on the GPU path, so `GPU_LAYER=0` and `GPU_LAYER=1` runs are diffable |
 | `CHAT_DUMP=1` | the rendered prompt on stderr, one line per segment: `PROMPT[in] / PROMPT[tmpl] <bytes> B  <text>`, with newlines escaped.  `[in]` segments came from a message and are the ones the tokenizer must not turn into special tokens; `[tmpl]` is template text.  Before it escaped, a segment's own newlines split it across lines and the tags looked scattered - it read as if the switch did nothing |
+| `CHAT_CACHE=1` | the cache split of every model call on stderr: `CHAT_CACHE turn cached=<n> prefill=<n> prompt=<n>` in the chat REPL, `CHAT_CACHE round=<r> ...` in the tool loop (one line per round).  `cached` is the longest common token prefix with the previous call (or the loaded disk prefix on the first), so `prefill` is what the GPU actually ran |
 | `QKV_DUMP=1` | hashes every layer/position of the `qkv` matvec output; `2` also prints the first two rows.  Layout-agnostic, so `QKV_PAIR=0` and `QKV_PAIR=1` runs compare exactly |
 | `ATT_DUMP=<pos>` | the exact integers the score/softmax path consumed and produced, for every layer at one position.  Feed the log to `engine/scripts/check_att.py` |
 | `FFN_DUMP=1` | the first 8 texels of the layer-0 gate output, for bisecting a 1-LSB drift |
 | `LOGITS_OUT=path` | float32 logits after prefill.  `engine/scripts/cmp_logits.py` compares two of them per tile |
-| `TOKENS_OUT=path` | prompt + generated token ids (int32) |
+| `TOKENS_OUT=path` | prompt + generated token ids (int32).  A tool turn rewrites it after each model round, so a watcher sees every round |
 | `MODEL_DUMP=1` | the parsed model metadata, right after load |
 | `MMCF_DEBUG=1` | per-tensor detail while walking the container table |
 

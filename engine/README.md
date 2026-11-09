@@ -136,6 +136,27 @@ User: What is my name?  -> "My name is Alice." prefill 0.083 s
 Before this, each turn carried only the current line *and dropped the system
 turn*, which is why a recall question answered with an invented name.
 
+The same chain covers `--tools`.  The tool loop keeps the conversation (the
+assistant turn, its tool calls and the tool results are appended to the history
+like the HTTP server does), and every model call reuses the KV rows before the
+longest common token prefix.  A tool round-trip therefore prefills only the tool
+response and the template markers; the system + tools block and the exchange
+before it are already in the cache.  A second user turn after a tool round-trip
+costs the new line, not the whole tools preamble:
+
+```
+What is the system status?   round 0  prefill 233   (first turn, compiles)
+                             round 1  prefill 101   (the tool response)
+What is the temperature?     round 0  prefill  24   (the new line)
+                             round 1  prefill  99   (the tool response)
+```
+
+A token can carry only the first bytes of a multi-byte character.  The REPL
+holds that tail until the character is complete, or flushes U+FFFD when
+generation stops mid-character, so the re-rendered history is always valid
+UTF-8.  `CHAT_CACHE=1` prints the `cached=` / `prefill=` split of each model
+call.
+
 ### MiniMind2 Small
 
 MiniMind2 uses the Qwen chat template (template kind 1 in the container).  The

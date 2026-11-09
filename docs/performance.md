@@ -4241,3 +4241,49 @@ A caution about the instrument: a plain `nc` between the two machines reported
 carrier-grade NAT in the inbound direction; the SSH path is the workstation
 dialling out.  Measure the path you deploy over, not a path that merely reaches
 the same two hosts.
+
+## Chat REPL: every turn prefills the new exchange, and the tool loop shares the chain (2026-11-09)
+
+Iris Xe (ADL GT2), Mesa 26.2.6, MiniMind3 q8, `GPU_LAYER=1 KV_PACK=16 SEQ=768`,
+greedy, `CHAT_CACHE=1 TIMING=1`, one engine process per run.  The prompt is a
+469-token system turn followed by eight short user lines, `--gen 8`:
+
+| turn | prompt tokens | cached | prefill tokens | prefill |
+|---:|---:|---:|---:|---:|
+| 1 | 469 | 0 | 469 | 3.79 s (compiles) |
+| 2 | 500 | 477 | 23 | 0.21 s |
+| 3 | 530 | 508 | 22 | 0.21 s |
+| 4 | 560 | 538 | 22 | 0.21 s |
+| 5 | 590 | 568 | 22 | 0.22 s |
+| 6 | 620 | 598 | 22 | 0.22 s |
+| 7 | 651 | 628 | 23 | 0.23 s |
+| 8 | 681 | 659 | 22 | 0.23 s |
+
+`cached` is the whole previous turn (prompt + reply), so the prefill does not
+grow with the conversation.  A cold `--worker` replay of turn 8 (681 tokens
+from zero) took 7.2 s and produced the same 8 greedy tokens; the warm turn took
+0.23 s of prefill.
+
+The tool loop (`--tools`, same model, a 233-token system + tools prompt) used to
+re-prefill from zero on every round and to drop the conversation after the first
+user line.  It now shares the same chain: a tool-response round caches the
+prompt and the generated tool call, and the next user turn caches the whole
+previous exchange:
+
+| call | prompt | cached | prefill | prefill |
+|---|---:|---:|---:|---:|
+| turn 1, round 0 (tool call) | 233 | 0 | 233 | 2.58 s (compiles) |
+| turn 1, round 1 (tool response) | 358 | 257 | 101 | 1.19 s |
+| turn 2, round 0 (new user line) | 406 | 382 | 24 | 0.26 s |
+| turn 2, round 1 (tool response) | 529 | 430 | 99 | 1.22 s |
+
+Before the change the second user line prefilled its whole prompt (1.53 s; the
+prompt contained no previous turn) and the first tool-response round prefilled
+its whole prompt (2.51 s).  The remaining ~100 tokens are the tool response
+itself plus the template markers, i.e. new content.
+
+The same change fixed a REPL-only abort: a Chinese reply cut mid-character by
+`--gen` used to put half a UTF-8 sequence into the next turn's re-rendered
+history, and `common_json::parse` terminated the process (exit 134).  The REPL
+now buffers the tail like the worker does and emits U+FFFD at a cut, so the
+third turn prefills that one token again instead of aborting.
