@@ -3949,3 +3949,152 @@ gives 6.9 s and 7.2 s on two consecutive runs, so every start pays the link.
 
 So the decode has no headroom worth chasing on this model; startup would need
 fewer or smaller programs, which is a project rather than a tweak.
+
+## The q16 decode flips the sign of the negative rail on VC4 (2026-11-09)
+
+A Pi-vs-Xe sweep over 13 containers, one prompt each, logits dumped after
+prefill (`LOGITS_OUT`), `GPU_LAYER=1 KV_PACK=16`, greedy, same container on both
+machines.  Most models agree; two do not, and the reason is a **decode bug, not
+a model bug**.
+
+| model | residual peak / rail | cosine(Pi, Xe) | max \|d\| logits | entropy Xe -> Pi |
+|---|---:|---:|---:|---|
+| MiniMind3 q8 | 0.36x | 0.9994 | 0.47 | 0.97 -> 1.00 |
+| MiniMind3 q4 | 0.36x | 0.9993 | 0.48 | 0.78 -> 0.77 |
+| supra2-medium q8 (q24 residual) | 3.94x | 0.9999 | 0.32 | 2.02 -> 2.07 |
+| stories15M q8 | 0.12x | 0.9999 | 1.36 | 4.16 -> 4.08 |
+| stories42M q8 | 0.59x | 0.9999 | 0.85 | 4.08 -> 3.87 |
+| Vertex-15M q4 | 0.21x | 0.9818 | 2.19 | 0.26 -> 0.43 |
+| Vertex-35M q4 | 0.83x | 0.9972 | 0.56 | 0.66 -> 0.82 |
+| Vertex-100M q4 | 1.14x | 0.9985 | 0.97 | 2.69 -> 2.74 |
+| feng-30m q4 | 1.65x | 0.9846 | 1.57 | 6.47 -> 5.92 |
+| **TinyBrainBot q4** | **2.96x** | **0.7233** | **6.16** | **0.75 -> 2.77** |
+| **PicoLM-85M q4 (q24 residual, FFN hid 1.07x)** | 1.07x on `hid` | 0.9966 | **13.96** | 0.16 -> 0.25 |
+
+Two rows matter.  Both are models whose residual reaches the q16 rail, and both
+are **machine dependent**, not merely degraded.
+
+### The mechanism: `x_i16raw` re-derives the sign from a float compare
+
+`STAGE_DUMP` on TinyBrainBot q4, same prompt, both machines, 779 stage lines in
+the same order.  Layers 0-3 agree (cosine 1.00000).  The first line that differs
+is the decoder's output at the start of layer 4:
+
+```
+line 19  hidA (end of layer 3)   Xe elem133 = -32768    Pi elem133 = -32768   cosine 1.00000
+line 20  xb   (rms_att, layer 4) Xe elem133 =   -683    Pi elem133 =   +683   cosine 0.10019
+```
+
+The stored value is identical and the norm cannot change a sign, so the sign is
+lost in the **read**.  `x_i16raw` reconstructs the 16-bit value as
+
+```glsl
+float u = c.x*65280.0 + c.y*255.0;
+if (u >= 32768.0) u -= 65536.0;
+```
+
+and the encoder clamps to `[-32768, 32767]`, so the most negative value is
+stored as bytes `(128, 0)`.  Reconstructing it needs `(128/255)*65280` to land
+on the *correct side* of 32768.0.  It does on Xe; on VC4 it lands at or below
+32768.0 in the other direction and the value reads back as **+32768 (+128)**.
+The next store clamps that to +32767, so the sign flip is permanent.
+
+Whole-dump census of values within 8 units of the rail, same two runs:
+
+| | values at the negative rail | values at the positive rail |
+|---|---:|---:|
+| Xe | 10 | 0 |
+| Pi | 1 | 7 |
+
+Line by line, every line where Xe holds `-32768` either holds nothing unusual on
+the Pi or holds `+32767`.  Nothing else in the dump is anywhere near the rail.
+
+### Ruled out, one at a time
+
+| hypothesis | result |
+|---|---|
+| the Pi's numbers are nondeterministic | two runs, same bytes: `elem133` = 32749 and 32736 both times |
+| the store clamps differently | the encoder is identical code and its output is the dump's `hidA` line, which matches exactly |
+| the model is just too weak | the **CPU path** on the same container and prompt: cosine **0.9994**, max \|d\| 0.30 (it clamps in `add_q16` and decodes with integers) |
+| it is the attention or FFN kernel | the first divergence is the *norm's input*, before any kernel runs again |
+| the q24 path has the same bug | `x_q24raw` decodes with `float(int(c.g*255.0+0.5))*65536.0 + ...`, i.e. rounded integers, and is immune — which is why `--res q24` "fixed" supra2 |
+
+So: **the engine's q16 rail is real in the encoder and broken in the decoder on
+one driver.**  A model that saturates at the negative rail is not slowly worse on
+VC4; it is a different model.
+
+### What it costs, and the patch
+
+Nothing has to change for models that never saturate: every pin in this file is
+below 1x the rail (MiniMind3 peaks at 46).  What changes is the advice: a model
+at >1x cannot be compared across machines, and `--res q24` is not a luxury, it is
+the only correct choice (its decoder is the robust form).
+
+The decode should not re-derive a sign from a float compare.  The robust form is
+the one `x_i8q` already uses — round the two channels to integers first, then the
+compare is exact:
+
+```glsl
+float x_i16raw(vec2 c){
+  float hi = floor(c.x*255.0+0.5);
+  float lo = floor(c.y*255.0+0.5);
+  float u  = hi*256.0 + lo;          // exact for 0..65535
+  if (u >= 32768.0) u -= 65536.0;
+  return u;
+}
+```
+
+The same applies to `x_i16pairq` and `x_i16quadq`.  On Xe this is a no-op (the
+present form already decodes 0x8000 correctly there), and on VC4 it changes only
+the values that are wrong today, so `scripts/regression.sh` should stay on its
+pins on both machines; a model that saturates needs its own pin either way.
+
+### The other matrix variables (2026-11-09)
+
+One variable at a time, same container and prompt on both machines.  Numbers are
+the cosine and the max |logit difference| between the Pi and the Xe run.
+
+| variable | settings | Pi vs Xe |
+|---|---|---|
+| FFN kernel | fused (default) vs `FFN_FUSE=0` | same machine: Xe **bit-identical** on both models; Pi q8 max\|d\| **0.19**, q4 bit-identical. Cross-machine: MiniMind3 0.47 -> 0.48, TinyBrainBot 6.160 -> 6.160 (no change) |
+| `SEQ` | 256 / 768 / 2048 | 0.9994 / 0.4727 for all three |
+| KV format | 24-bit / 16-bit / 8-bit at scale 8 | MiniMind3: 0.9994 / 0.51, 0.9994 / 0.47, **0.9902 / 1.82**. Vertex-100M: 0.9990 / 0.81, **0.9956 / 1.81** |
+| path | `GPU_LAYER=1` vs `GPU_LAYER=0` | TinyBrainBot: 0.7233 / 6.16 vs **0.9994 / 0.30** |
+| precision | q8 vs q4 vs i16 | MiniMind3 q8 0.9994 vs q4 0.9993; MiniMind2 q8 0.9930 vs i16 **0.9965** |
+
+What that says:
+
+- **The FFN kernel is a VC4-only rounding difference, and a small one.** On Xe
+  the fused and two-pass paths are bit-identical; on the Pi the q8 fused kernel
+  moves the logits by up to 0.19 (the q4 fused path is bit-identical by
+  construction, which `gpu.cpp` states: "same group order, same qz/sl
+  rounding").  It explains nothing about the instability — TinyBrainBot's
+  cross-machine numbers do not move at all, MiniMind3's move 0.47 -> 0.48 — but
+  it does mean a Pi q8 run cannot be made to match an Xe q8 run by switching
+  kernels.
+- **`SEQ` is numerically inert** at a fixed prompt: the prefill positions and
+  the arithmetic are the same, the window is allocation only.  (PPL still must
+  not be compared across `SEQ` — the scored window changes; that is a different
+  statement from this one.)
+- **8-bit KV costs reproducibility, not just quality.**  A 1/16 grid turns every
+  disagreement near a rounding boundary into a full step (16 q16 units), so the
+  Pi-vs-Xe spread roughly quadruples (0.47 -> 1.82 on MiniMind3, 0.81 -> 1.81 on
+  Vertex-100M).  24-bit and 16-bit are a wash.  If the board has to agree with a
+  desktop, keep `KV_PACK=16`.
+- **i16 weights are the most portable**, but the difference is small and only
+  shows on a model that is already borderline (MiniMind2 0.9930 -> 0.9965).
+  MiniMind3's i16 container is 137 MB and cannot be loaded on this board
+  (CmaFree ~70 MB), so that cell of the matrix stays empty.
+
+Measured, not argued: with that patch applied to the laptop build, MiniMind3 q8
+gives the same PPL to four decimals (199.2005 on the 766-token corpus used here,
+not the 293-token `data/ppl_test.txt`), the same pinned string, and TinyBrainBot's
+logits are **bit-identical** to the unpatched run.  So the change is a no-op where
+the decode already worked, which is the shape a fix for this should have.
+
+Not applied yet: it is a numerics change in a header every shader consumes, so
+it wants the full gate on both machines (`Q8_EXPECT`, `Q4_EXPECT`, `PPL_EXPECT`,
+`shader_hashes.sh`) before it lands.  The Pi side is the one that matters: until
+a VC4 build of this patch has run `scripts/regression.sh`, the pins there are
+unverified, and a model that saturates (TinyBrainBot) needs its own pin either
+way.

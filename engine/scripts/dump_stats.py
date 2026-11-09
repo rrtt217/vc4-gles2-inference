@@ -13,9 +13,12 @@ def q16(b0, b1):
 
 i = 0
 for line in open(sys.argv[1], errors="replace"):
-    if "DUMP " not in line:
-        continue
     f = line.split()
+    # The engine prints the reply without a trailing newline before a dump, so
+    # a line can read "Assistant: HiDUMP xb ...": test the token, not the
+    # substring, or index() throws on the first such line.
+    if "DUMP" not in f:
+        continue
     k = f.index("DUMP")
     name = f[k + 1]
     hexs = f[k + 3:]
