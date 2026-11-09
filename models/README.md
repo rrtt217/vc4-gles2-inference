@@ -329,7 +329,7 @@ Character for character, on the board.  Two toolchain bugs had to be fixed
 before it could run at all:
 
 - its tokenizer puts `<|im_start|>` at **16384**, above a 16384-token BPE, and
-  `make_tokenizer.py` only wrote `model["vocab"]`, so the engine split the chat
+  the tokenizer builder only wrote `model["vocab"]`, so the engine split the chat
   markers into characters;
 - its embedding is **16408** rows (HF padding) against a 16384-token tokenizer,
   and the packer claimed the embedding's count, so the engine read past the end

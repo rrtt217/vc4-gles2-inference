@@ -17,7 +17,7 @@ if [ ! -f tokenizer.json ]; then
   echo "tokenizer.json is not tracked; place the MiniMind3 tokenizer source in minimind3/ first" >&2
   exit 1
 fi
-python3 make_tokenizer.py --input tokenizer.json --output "$MODELS/minimind3.tok"
+python3 "$(dirname "$0")/../engine/tools/make_tok.py" --input tokenizer.json --output "$MODELS/minimind3.tok"
 
 pack() {  # $1 quant, $2 seq
   python3 "$PACK" --in "$MODELS" --quant "$1" --seq "$2" \
