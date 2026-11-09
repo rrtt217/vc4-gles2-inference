@@ -419,6 +419,27 @@ Checked against `nkthebass/tinybrainbot-100m-v5.1-instruct`:
 
       "Is 2 < 3 true?"  ->  Yes, 2 < 3 is true.
 
+### 2026-11-09: that Pi/desktop split was the q16 decode, not a sampling draw
+
+The reading below ("the two runs simply take different paths from a near-tie")
+was measured on a build whose q16 decode rebuilt every value from an 8-bit
+texture sample, which VC4 does not return exactly (see docs/performance.md,
+2026-11-09).  With the integer decode (`6234328`) the same container and prompt
+give logits cosine 0.9971 and top-5 5/5 against Xe, where it was 0.7233 and 1 of
+5, and the card sampler now produces the same text on both machines:
+
+| prompt | Pi Zero | Xe |
+|---|---|---|
+| What is the capital of France? | The capital of France is Paris. | same |
+| Tell me a short joke. | Why don't scientists trust atoms? Because they make up everything. | same |
+| How's it going? | I'm doing well, thanks for asking. How about you? | same |
+| packing list, 40 tokens | `1. Pack snacks and water for the trip` | `1. Pack snacks and a small backpack for the hike.` |
+
+Greedy agrees as well (both print `The capital of France is Paris.`).  The one
+row that splits is a sampling draw at temp 0.4 on a distribution that is now
+nearly identical, which is what a 0.9971 cosine allows; it is no longer a path
+difference.  On the board: prefill 17-21 s, decode **537 ms/token** at 100M q4.
+
 ### Why the Pi and a desktop disagree on TinyBrainBot (2026-11-08)
 
 Same container, same flags, wildly different text.  Measured on `"What is AI?"`
