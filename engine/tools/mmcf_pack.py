@@ -445,6 +445,10 @@ def main():
     ap.add_argument("--bos", type=int, help="BOS id (-1 for none); default: derived from the tokenizer")
     ap.add_argument("--eos", type=int, help="EOS id; default: derived")
     ap.add_argument("--stop", type=int, help="extra stop id (e.g. <|im_end|>); default: derived")
+    ap.add_argument("--q8-row-scale", action="store_true",
+                    help="q8 with one scale per output row (a plane per matrix) "
+                         "instead of one per matrix; for a model whose weight "
+                         "rows span more than ~100:1")
     ap.add_argument("--quant", choices=["i16", "q8", "q4"], default="i16",
                     help="precision to build when --in is a HuggingFace directory (default i16)")
     ap.add_argument("--seq", type=int, default=512,
@@ -463,9 +467,12 @@ def main():
             print("note: config says rms_norm_eps %g, the engine default is 1e-05; "
                   "pass --rms-eps %g to use the model's value" % (_want, _want))
         _ntok = tok_entry_count(args.tok) if args.tok else 0
+        if args.q8_row_scale and args.quant != "q8":
+            raise SystemExit("--q8-row-scale only applies to --quant q8")
         meta, tensors = tensors_from_hf(args.src, args.quant, args.seq,
                                         rail_check=not args.no_rail_check,
-                                        vocab_limit=_ntok or None)
+                                        vocab_limit=_ntok or None,
+                                        q8_row=args.q8_row_scale)
         if _cfg.get("tie_word_embeddings") is False:
             # load_minimind refuses a false tie with no lm_head, so reaching here
             # means the head really is the checkpoint's own matrix.

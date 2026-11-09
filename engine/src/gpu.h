@@ -152,9 +152,9 @@ public:
 private:
     AttnConfig att_cfg() const;
     GLuint x_prog(const string& key, const string& src);
-    GLuint x_q8(int rows, int cols);
-    GLuint x_q8_pair(int rows, int cols);
-    GLuint x_q8_pair_swiglu(int rows, int cols);
+    GLuint x_q8(int rows, int cols, bool wrow = false);
+    GLuint x_q8_pair(int rows, int cols, bool wrow = false);
+    GLuint x_q8_pair_swiglu(int rows, int cols, bool wrow = false);
     GLuint x_q8_gate2(int rows, int cols);
     GLuint x_q8_p2(int rows, int cols);
     GLuint x_rms_stats2();
@@ -163,11 +163,11 @@ private:
     GLuint x_q8_p2_add_p2(int rows, int cols);
     GLuint x_q8_p2_add(int rows, int cols);
     GLuint x_p2_split(int rows);
-    GLuint x_q8_pair_fused(int rows, int cols);
+    GLuint x_q8_pair_fused(int rows, int cols, bool wrow = false);
     GLuint x_i4_pair(int rows, int cols);
     GLuint x_i4_pair_swiglu(int rows, int cols);
-    GLuint x_q8_add(int rows, int cols, XFormat xf);
-    GLuint x_q8_add_pair(int rows, int cols, XFormat xf);
+    GLuint x_q8_add(int rows, int cols, XFormat xf, bool wrow = false);
+    GLuint x_q8_add_pair(int rows, int cols, XFormat xf, bool wrow = false);
     GLuint x_i4_add_pair(int rows, int cols, XFormat xf);
     GLuint x_i16(int rows, int cols);
     GLuint x_i16_add(int rows, int cols, XFormat xf);
@@ -189,7 +189,7 @@ private:
     GLuint x_prob();
     GLuint x_top2_fast(int rows, int chunk);
     GLuint x_top2(int rows, int chunk);
-    GLuint x_q8_pair_logits(int rows, int cols);
+    GLuint x_q8_pair_logits(int rows, int cols, bool wrow = false);
     GLuint x_top2_fast_packed(int rows, int chunk);
     GLuint x_top2_packed(int rows, int chunk);
     bool logits_pair() const;

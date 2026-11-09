@@ -94,6 +94,32 @@ void GPU::upload(Mat& m){
         // Weights may be borrowed straight from the checkpoint mmap, so every
         // reader goes through the w8()/w16()/w4() accessors; the +128 bias of INT8
         // cannot be applied in place to a read-only map.
+        //
+        // Per-row q8 scales (MMCF tensor id part 3) travel as one 24-bit value
+        // per row: the row's scale divided by the matrix's unit `scale`, which
+        // the shader multiplies back.  24 bits put the smallest row within
+        // 6e-8 of the largest, far below the 0.79% weight error this exists to
+        // remove.  Uploaded before the type branches because the prebiased q8
+        // path returns early.
+        if (!m.row_scale.empty()) {
+                // The plane already holds s_row / unit; `scale` is the unit, and
+                // the shader multiplies it back.  Dividing again here would put
+                // every row past 2^24 and clamp the whole plane to 1.0, which
+                // looks exactly like "per-row scales do nothing".
+                const double S = m.scale > 0.0f ? (double)m.scale : 1.0;
+                vector<uint8_t> rs((size_t)m.rows * 4);
+                for (int r = 0; r < m.rows; ++r) {
+                        double v = (double)m.row_scale[(size_t)r];
+                        long q = lrint(v * 16777216.0);
+                        if (q < 0) q = 0;
+                        if (q > 16777215) q = 16777215;
+                        rs[(size_t)r * 4 + 0] = (uint8_t)(q >> 16);
+                        rs[(size_t)r * 4 + 1] = (uint8_t)(q >> 8);
+                        rs[(size_t)r * 4 + 2] = (uint8_t)q;
+                        rs[(size_t)r * 4 + 3] = 255;
+                }
+                m.row_scale_tex = make_texture(1, m.rows, rs.data());
+        }
         if (m.type == WeightType::INT8) {
             const int8_t* src = m.w8();
             const size_t n = (size_t)m.rows * m.cols;
@@ -218,7 +244,8 @@ GLuint GPU::ffn_fused(const Mat& w13, GLuint x, int hidden){
             const int aw = x_texels(hidden, ffn_fmt_);
             if (ffn_pair_a_.tex == 0 || ffn_pair_a_.w != hidden) ffn_pair_a_ = make_target(hidden, 1);
             if (ffn_h_a_.tex == 0 || ffn_h_a_.w != aw) ffn_h_a_ = make_target(aw, 1);
-            GLuint p = x_q8_pair_fused(hidden, w13.cols);
+            const bool wr = w13.has_row_scale();
+            GLuint p = x_q8_pair_fused(hidden, w13.cols, wr);
             bind_fbo(ffn_pair_a_.fbo);
             glViewport(0, 0, hidden, 1);
             use_program(p);
@@ -227,6 +254,7 @@ GLuint GPU::ffn_fused(const Mat& w13, GLuint x, int hidden){
             bind_tex(1, x);
             set_sampler(p, "X", 1);
             glUniform1f(uloc(p, "ws"), w13.scale);
+            if (wr) { bind_tex(2, w13.row_scale_tex); set_sampler(p, "WS", 2); }
             setup_attrib(p);
             glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
             GLuint ps = x_swiglu_pair(hidden);
@@ -252,7 +280,8 @@ GLuint GPU::ffn_fused(const Mat& w13, GLuint x, int hidden){
         const int aw = x_texels(hidden, ffn_fmt_);
         if (out.tex == 0 || out.w != aw) out = make_target(aw, 1);
         const bool i4 = (w1.type == WeightType::INT4);
-        GLuint pp = i4 ? x_i4_pair(hidden, w1.cols) : x_q8_pair(hidden, w1.cols);
+        const bool wr = !i4 && w1.has_row_scale() && w3.has_row_scale();
+        GLuint pp = i4 ? x_i4_pair(hidden, w1.cols) : x_q8_pair(hidden, w1.cols, wr);
         bind_fbo(pair_buf.fbo);
         glViewport(0, 0, hidden, 1);
         use_program(pp);
@@ -272,6 +301,10 @@ GLuint GPU::ffn_fused(const Mat& w13, GLuint x, int hidden){
         } else {
             glUniform1f(uloc(pp, "ws1"), w1.scale);
             glUniform1f(uloc(pp, "ws2"), w3.scale);
+            if (wr) {
+                bind_tex(3, w1.row_scale_tex); set_sampler(pp, "WS1", 3);
+                bind_tex(4, w3.row_scale_tex); set_sampler(pp, "WS2", 4);
+            }
         }
         setup_attrib(pp);
         glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
@@ -416,12 +449,14 @@ void GPU::logits_pass(const vector<Mat>& tiles, GLuint x){
             logits_packed_ = true;
             for (int i = 0; i < rows; ++i) {
                 const Mat& m = tiles[i];
-                GLuint p = x_q8_pair_logits(m.rows, m.cols);
+                const bool wr = m.has_row_scale();
+                GLuint p = x_q8_pair_logits(m.rows, m.cols, wr);
                 bind_fbo(logits_target_.fbo);
                 use_program(p);
                 bind_tex(0, m.tex); set_sampler(p, "W", 0);
                 bind_tex(1, x); set_sampler(p, "X", 1);
                 glUniform1f(uloc(p, "ws"), m.scale);
+                if (wr) { bind_tex(2, m.row_scale_tex); set_sampler(p, "WS", 2); }
                 setup_attrib(p);
                 glViewport(0, i, (m.rows + 1) / 2, 1);
                 glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
@@ -704,16 +739,18 @@ GLuint GPU::attention_block(const Mat& qkv, GLuint x, int layer, int pos){
         // same values.
         auto draw_qkv = [&]{
             if (att_qkv_pair_ && qkv.type == WeightType::INT8) {
+                const bool wr = qkv.has_row_scale();
                 const int pairs = (qkv.rows + 1) / 2;
                 GLuint p = x_prog("xqkvp_" + to_string(qkv.rows) + "_" + to_string(qkv.cols) +
-                                  "_" + x_format_name(act_fmt_),
-                                  matvec_q8_pair_logits(qkv.rows, qkv.cols, act_fmt_));
+                                  "_" + x_format_name(act_fmt_) + (wr ? "_wr" : ""),
+                                  matvec_q8_pair_logits(qkv.rows, qkv.cols, act_fmt_, wr));
                 bind_fbo(qkv_target_.fbo);
                 glViewport(0, 0, pairs, 1);
                 use_program(p);
                 bind_tex(0, qkv.tex); set_sampler(p, "W", 0);
                 bind_tex(1, x); set_sampler(p, "X", 1);
                 glUniform1f(uloc(p, "ws"), qkv.scale);
+                if (wr) { bind_tex(2, qkv.row_scale_tex); set_sampler(p, "WS", 2); }
                 setup_attrib(p);
                 glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
             } else {
@@ -856,9 +893,14 @@ void GPU::matvec_add(const Mat& m, GLuint x, GLuint residual, Target& out, XForm
         const bool pair4 = res_pack_ && m.type == WeightType::INT4;
         const int ow = (pair || pair4) ? (m.rows + 1) / 2 : m.rows;
         if (out.tex == 0 || out.w != ow) out = make_target(ow, 1);
+        // The packed residual layout is a property of the model, not of the
+        // weight format: a row-scale q8 matrix must still write the packed
+        // texel the rmsnorm reads, so the paired kernel grows a wrow variant
+        // rather than the writer switching layouts.
+        const bool wr = m.type == WeightType::INT8 && m.has_row_scale();
         GLuint p = pair4 ? x_i4_add_pair(m.rows, m.cols, xf)
-                  : pair ? x_q8_add_pair(m.rows, m.cols, xf)
-                  : (m.type == WeightType::INT8) ? x_q8_add(m.rows, m.cols, xf)
+                  : pair ? x_q8_add_pair(m.rows, m.cols, xf, wr)
+                  : (m.type == WeightType::INT8) ? x_q8_add(m.rows, m.cols, xf, wr)
                   : (m.type == WeightType::INT4) ? x_i4_add(m.rows, m.cols, xf)
                                                  : x_i16_add(m.rows, m.cols, xf);
         bind_fbo(out.fbo);
@@ -880,6 +922,7 @@ void GPU::matvec_add(const Mat& m, GLuint x, GLuint residual, Target& out, XForm
         }
         // The q4 kernels take their scale as "ps"; "ws" does not exist there.
         if (m.type != WeightType::INT4) glUniform1f(uloc(p, "ws"), m.scale);
+        if (wr) { bind_tex(3, m.row_scale_tex); set_sampler(p, "WS", 3); }
         setup_attrib(p);
         // Same rule as draw(): a single draw never exceeds 1024 fragments.  A
         // full-target-width draw is what gets dropped (docs/engine-internals.md
@@ -1104,25 +1147,27 @@ GLuint GPU::x_prog(const string& key, const string& src){
         return p;
     }
 
-GLuint GPU::x_q8(int rows, int cols){
-        return x_prog("xq8_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(act_fmt_),
-                      matvec_q8(rows, cols, act_fmt_));
+GLuint GPU::x_q8(int rows, int cols, bool wrow){
+        return x_prog("xq8_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(act_fmt_) +
+                      (wrow ? "_wr" : ""),
+                      matvec_q8(rows, cols, act_fmt_, wrow));
     }
 
-GLuint GPU::x_q8_pair(int rows, int cols){
-        return x_prog("xq8p_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(act_fmt_),
-                      matvec_q8_pair(rows, cols, act_fmt_));
+GLuint GPU::x_q8_pair(int rows, int cols, bool wrow){
+        return x_prog("xq8p_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(act_fmt_) +
+                      (wrow ? "_wr" : ""),
+                      matvec_q8_pair(rows, cols, act_fmt_, wrow));
     }
 
-GLuint GPU::x_q8_pair_swiglu(int rows, int cols){
+GLuint GPU::x_q8_pair_swiglu(int rows, int cols, bool wrow){
         // Inline I16_2 decode is the default; FFN_SW_INLINE=0 restores the
         // generic X4Q form in the same binary, so both can be A/B-ed
         // interleaved on one binary.
         const char* v = getenv("FFN_SW_INLINE");
         const bool inl = !(v && strcmp(v, "0") == 0);
         return x_prog("xq8ps_" + to_string(rows) + "_" + to_string(cols) + "_" +
-                      x_format_name(act_fmt_) + (inl ? "" : "_gen"),
-                      matvec_q8_pair_swiglu(rows, cols, act_fmt_, inl));
+                      x_format_name(act_fmt_) + (inl ? "" : "_gen") + (wrow ? "_wr" : ""),
+                      matvec_q8_pair_swiglu(rows, cols, act_fmt_, inl, wrow));
     }
 
 // Gate pair matvec for two rows per fragment plus swiglu, straight into a q16
@@ -1130,7 +1175,8 @@ GLuint GPU::x_q8_pair_swiglu(int rows, int cols){
 GLuint GPU::ffn_pair_swiglu_chunk(const Mat& w1, const Mat& w3, GLuint x, int rows, Target& out){
         const int aw = x_texels(rows, ffn_fmt_);
         if (out.tex == 0 || out.w != aw) out = make_target(aw, 1);
-        GLuint p = x_q8_pair_swiglu(rows, w1.cols);
+        const bool wr = w1.has_row_scale() && w3.has_row_scale();
+        GLuint p = x_q8_pair_swiglu(rows, w1.cols, wr);
         bind_fbo(out.fbo);
         glViewport(0, 0, aw, 1);
         use_program(p);
@@ -1139,6 +1185,10 @@ GLuint GPU::ffn_pair_swiglu_chunk(const Mat& w1, const Mat& w3, GLuint x, int ro
         bind_tex(2, x); set_sampler(p, "X", 2);
         glUniform1f(uloc(p, "ws1"), w1.scale);
         glUniform1f(uloc(p, "ws2"), w3.scale);
+        if (wr) {
+            bind_tex(3, w1.row_scale_tex); set_sampler(p, "WS1", 3);
+            bind_tex(4, w3.row_scale_tex); set_sampler(p, "WS2", 4);
+        }
         setup_attrib(p);
         glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
@@ -1396,9 +1446,10 @@ GLuint GPU::ffn_pair_i4_swiglu_chunk(const Mat& w1, const Mat& w3, GLuint x, int
         return out.tex;
 }
 
-GLuint GPU::x_q8_pair_fused(int rows, int cols){
-        return x_prog("xq8pf_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(act_fmt_),
-                      matvec_q8_pair_fused(rows, cols, act_fmt_));
+GLuint GPU::x_q8_pair_fused(int rows, int cols, bool wrow){
+        return x_prog("xq8pf_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(act_fmt_) +
+                      (wrow ? "_wr" : ""),
+                      matvec_q8_pair_fused(rows, cols, act_fmt_, wrow));
     }
 
 GLuint GPU::x_i4_pair(int rows, int cols){
@@ -1506,20 +1557,21 @@ GLint GPU::uloc(GLuint prog, const char* name) {
         return loc;
     }
 
-GLuint GPU::x_q8_add(int rows, int cols, XFormat xf){
-        return x_prog("xq8a_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(xf) + "_" + x_format_name(res_fmt_),
-                      matvec_q8_add(rows, cols, xf, res_fmt_));
+GLuint GPU::x_q8_add(int rows, int cols, XFormat xf, bool wrow){
+        return x_prog("xq8a_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(xf) + "_" +
+                      x_format_name(res_fmt_) + (wrow ? "_wr" : ""),
+                      matvec_q8_add(rows, cols, xf, res_fmt_, wrow));
     }
 
-GLuint GPU::x_q8_add_pair(int rows, int cols, XFormat xf){
+GLuint GPU::x_q8_add_pair(int rows, int cols, XFormat xf, bool wrow){
         // The inline I16_2 decode is the default; Q8AP_INLINE=0 restores the
         // generic X4Q form in the same binary, so the two can be A/B-ed
         // interleaved without a second build.
         const char* v = getenv("Q8AP_INLINE");
         const bool inl = !(v && strcmp(v, "0") == 0);
         return x_prog("xq8ap_" + to_string(rows) + "_" + to_string(cols) + "_" +
-                      x_format_name(xf) + (inl ? "" : "_gen"),
-                      matvec_q8_add_pair(rows, cols, xf, inl));
+                      x_format_name(xf) + (inl ? "" : "_gen") + (wrow ? "_wr" : ""),
+                      matvec_q8_add_pair(rows, cols, xf, inl, wrow));
     }
 
 GLuint GPU::x_i4_add_pair(int rows, int cols, XFormat xf){
@@ -1612,9 +1664,10 @@ GLuint GPU::x_top2(int rows, int chunk){
         return x_prog("xt2_" + to_string(rows) + "_" + to_string(chunk), top2(rows, chunk));
     }
 
-GLuint GPU::x_q8_pair_logits(int rows, int cols){
-        return x_prog("xq8pl_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(act_fmt_),
-                      matvec_q8_pair_logits(rows, cols, act_fmt_));
+GLuint GPU::x_q8_pair_logits(int rows, int cols, bool wrow){
+        return x_prog("xq8pl_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(act_fmt_) +
+                      (wrow ? "_wr" : ""),
+                      matvec_q8_pair_logits(rows, cols, act_fmt_, wrow));
     }
 
 GLuint GPU::x_top2_fast_packed(int rows, int chunk){
@@ -2030,7 +2083,8 @@ void GPU::att_v(int layer, int pos){
     }
 
 void GPU::draw(const Mat& m, GLuint x, Target& t, int row ){
-        GLuint p = (m.type == WeightType::INT8) ? x_q8(m.rows, m.cols)
+        const bool wr = m.type == WeightType::INT8 && m.has_row_scale();
+        GLuint p = (m.type == WeightType::INT8) ? x_q8(m.rows, m.cols, wr)
                   : (m.type == WeightType::INT4) ? x_i4(m.rows, m.cols)
                                                  : x_i16(m.rows, m.cols);
         bind_fbo(t.fbo);
@@ -2051,6 +2105,7 @@ void GPU::draw(const Mat& m, GLuint x, Target& t, int row ){
             glUniform1f(uloc(p, "ps"), m.q4_param_scale);
         } else {
             glUniform1f(uloc(p, "ws"), m.scale);
+            if (wr) { bind_tex(3, m.row_scale_tex); set_sampler(p, "WS", 3); }
         }
         setup_attrib(p);
         // A single draw must stay below GL_MAX_TEXTURE_SIZE: at exactly 2048

@@ -420,6 +420,10 @@ GLuint Session::forward_gpu_hidden(int token, int pos, bool want_logits){
 // q4 / ACT8 / int16 / fused-w13 models keep the serial loop.
 bool Session::pair_ok() const {
         if (!gpu_layer_) return false;
+        // The two-position kernels read one scale per matrix; a per-row plane
+        // would be ignored there, so prefill stays on the single-position path
+        // (which covers every row-scale kernel).  Slower prefill, same numbers.
+        if (m_.row_scale) return false;
         const char* e = getenv("PREFILL_PAIR");
         if (e && strcmp(e, "0") == 0) return false;
         // The packed kernels are INT8-only and read and write I16_2 activations.

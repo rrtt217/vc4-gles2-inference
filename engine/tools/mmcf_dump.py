@@ -125,6 +125,12 @@ def main():
         scale, = struct.unpack_from("<f", r, 34)
         rows.append((tid, dt, rws, cls, off, blen, crc, scale))
     total = sum(t[5] for t in rows)
+    # part 3 of a tensor id is a per-row q8 scale plane: one f32 per output row,
+    # the row's scale divided by the matrix unit the record carries.
+    rplanes = [t for t in rows if (t[0] >> 14) == 3]
+    if rplanes:
+        print(f"q8 rows     {len(rplanes)} per-row scale plane(s), {sum(t[5] for t in rplanes)} B "
+              f"({sum(t[2] for t in rplanes)} rows total)")
     print(f"tensor data {total} B in {n} tensors, {len(raw) - total - table} B of headers/padding")
     if args.tensors:
         for tid, dt, rws, cls, off, blen, crc, scale in rows:

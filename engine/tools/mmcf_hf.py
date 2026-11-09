@@ -420,7 +420,8 @@ def tok_entry_count(path):
     return n
 
 
-def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit=None):
+def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit=None,
+                    q8_row=False):
     """Build the tensor list directly from an HF safetensors directory.
 
     Same list shape the legacy reader produces, so build() cannot tell them
@@ -469,6 +470,21 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
         q, s = i16_pair(w)
         return q8mat(q.astype(np.float32) * s)
 
+    def q8_row(w):
+        """One scale per output row instead of one per matrix.
+
+        A 640x1440 matrix whose weights span 500:1 loses 58-66% of its entries
+        to zero at a single scale (void.1 layer 0); per row the median relative
+        error falls from 2.36% to 0.79% and the worst matrix from 16.6% to 1.9%.
+        Returns (q, unit, per_row) where unit is the largest row scale, so the
+        plane the container carries is unit-relative and fits 24 bits.
+        """
+        w = np.asarray(w, np.float32)
+        s = np.abs(w).max(axis=1, keepdims=True) / 127.0
+        s[s == 0] = 1.0
+        q = np.clip(np.rint(w / s), -127, 127).astype(np.int8)
+        return q, float(s.max()), s[:, 0].astype(np.float32)
+
     if scheme == 'i16':
         er = np.empty((vocab, dim), np.int16)
         es = np.empty(vocab, np.float32)
@@ -499,6 +515,13 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
         if scheme == 'i16':
             q, s = i16_pair(w)
             T.append((base, DT_I16, rows, cols, 0, q.astype('<i2').tobytes(), float(s)))
+        elif scheme == 'q8' and q8_row:
+            q, unit, srow = q8_row(w)
+            T.append((base, DT_Q8I8, rows, cols, 0, q.tobytes(), float(unit)))
+            # part 3 is the per-row plane: one f32 per output row, the row's
+            # scale divided by the matrix unit the record already carries.
+            T.append((base | (3 << 14), DT_F32, rows, 1, 0,
+                      (srow / unit).astype('<f4').tobytes(), 0.0))
         elif scheme == 'q8':
             q, s = q8_from_i16(w)
             T.append((base, DT_Q8I8, rows, cols, 0, q.tobytes(), float(s)))

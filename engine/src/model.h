@@ -14,6 +14,10 @@ public:
     bool rope_half = false;
     bool shared_embeddings = true;
     bool qk_norm = false;
+    // The container carries per-row q8 scale planes (tensor id part 3).  The
+    // two-position prefill kernels have no wrow variant yet, so the session
+    // falls back to the single-position path when this is set.
+    bool row_scale = false;
     uint64_t source_size = 0, source_mtime = 0;
 
     vector<float> emb_f32, rms_att, rms_ffn, rms_final;

@@ -4300,3 +4300,36 @@ matters together with `--top-k-candidates`.
 Historical commands above that say `TOPK=...` were measured with the old
 switch; the candidate pass is the same one `--top-k-candidates` selects, but
 the new flag also applies the hard top-k truncation.
+
+## per-row q8 scales: void.1 becomes usable at q8 size (2026-11-09, Xe)
+
+void.1 (dotlabs, 90.1M params, 259-entry byte tokenizer, 24x640/1440, qk-norm,
+theta 1e5) is the first model whose q8 container had to be thrown away: one
+scale per matrix leaves its layer-0 FFN with 58-66% of the weights at zero, and
+the model answers `everythinteresting` where f32 writes `everything`.  A part-3
+plane (one f32 per output row, 486 KB for the whole model) fixes it.
+
+| void.1, Xe/GLES2, seq 1024 | q8 | q8 per row | i16 |
+|---|---:|---:|---:|
+| logits vs f32 at the prompt that diverged (T=47) | 14.44, top-1 wrong | **1.11, top-1 right** | 0.93 |
+| English PPL (1022 tokens) | 3.9017 | **3.7979** | 3.7824 |
+| greedy 400 B | misspells | clean | clean |
+| decode, ms/token | 21-27 | 19-33 | 37-54 |
+| file | 86 MB | 87 MB | 172 MB |
+
+Decode was measured on a contended laptop (host load 2.0, run-to-run spread
+2x), so the ms column is a shape, not a baseline.  The MiniMind3 gate is
+unchanged (`ACCEPT`, PPL 270.3170, q8/q4 strings identical) and
+`shader_hashes.sh` still reports 117 programs: a model without the plane links
+exactly the GLSL it linked before.
+
+The two-position prefill kernels have no row-scale variant yet, so a file with
+planes prefills on the single-position path (`Session::pair_ok()`); its prefill
+is slower than a plain q8 file's, which the table above does not separate.
+
+Two bugs on the way, both worth recognising: the upload divided the plane by
+the unit a second time, which clamped every row to 1.0 and made per-row scales
+look like a no-op (found by replacing the read with `ws` and getting
+bit-identical stage dumps); and disabling the packed residual add for these
+matrices changed the *residual layout* the rmsnorm reads, which corrupted every
+layer after the first.

@@ -31,7 +31,13 @@ struct Mat {
     int group = 32, groups = 0;
     float q4_param_scale = 1.0f;
     float scale = 1.0f;
-    GLuint tex = 0, q4_param_tex = 0;
+    // One weight scale per output row (MMCF tensor id part 3).  Empty when the
+    // matrix has a single per-matrix scale, which is every container written
+    // before this existed.  The plane is uploaded as one 24-bit value per row
+    // and the shader multiplies the row's dot product by it instead of `scale`.
+    vector<float> row_scale;
+    bool has_row_scale() const { return !row_scale.empty(); }
+    GLuint tex = 0, q4_param_tex = 0, row_scale_tex = 0;
     // Borrowed weights: when one of these is set the matching vector above is
     // empty and the bytes live in the checkpoint mmap (page cache) instead of
     // anonymous memory.  A 69 MB q8 checkpoint then costs no RAM, stays

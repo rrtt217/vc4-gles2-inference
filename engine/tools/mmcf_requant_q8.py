@@ -95,6 +95,28 @@ def quantize_matrix(buf, rec, off, s):
     return out.tobytes()
 
 
+def quantize_matrix_row(buf, rec, off):
+    """q8 with one scale per output row: (biased body, unit, plane).
+
+    Same arithmetic as the packer's --q8-row-scale, so rebuilding a container
+    this way gives the bytes the packer would have written.  The plane travels
+    unit-relative because the record's scale field is the unit.
+    """
+    C = rec['cols']
+    out = np.empty((rec['rows'], C), dtype=np.uint8)
+    sc = np.empty(rec['rows'], dtype=np.float32)
+    for r0 in range(0, rec['rows'], 128):
+        n = min(128, rec['rows'] - r0)
+        w = block_rows(buf, rec, off, r0, n)
+        rs = np.abs(w).max(axis=1) / 127.0
+        rs[rs == 0] = 1e-6
+        sc[r0:r0 + n] = rs
+        out[r0:r0 + n] = (np.clip(np.rint(w / rs[:, None]), -127, 127)
+                          .astype(np.int32) + 128).astype(np.uint8)
+    unit = float(sc.max())
+    return out.tobytes(), unit, (sc / unit).astype('<f4')
+
+
 def quantize_emb(buf, rec, off, rowscale):
     """Signed int8 body (id 1) plus the per-row f32 scales it was built with."""
     rows, C = rec['rows'], rec['cols']
@@ -116,6 +138,9 @@ def main():
     ap.add_argument('--out', dest='dst', required=True)
     ap.add_argument('--clip', type=float, default=None)
     ap.add_argument('--emb', choices=('keep', 'q8'), default='keep')
+    ap.add_argument('--row-scale', action='store_true',
+                    help='one q8 scale per output row (a part-3 plane per matrix) '
+                         'instead of one per matrix')
     args = ap.parse_args()
 
     src = parse(args.src)
@@ -132,7 +157,7 @@ def main():
 
     meta = patch_scheme(src['meta'], 1, 0, 1)
     table_off = (64 + len(meta) + ALIGN - 1) // ALIGN * ALIGN
-    data_off = table_off + src['n'] * REC_SIZE
+    data_off = table_off + src['n'] * REC_SIZE   # patched below once n is known
 
     bodies = []
     emb_scale = None
@@ -147,14 +172,21 @@ def main():
             s = clip_scale(buf, r, off0 + r['off'], args.clip)
             if not (s > 0):
                 s = 1e-6
+            if args.row_scale:
+                body, unit, plane = quantize_matrix_row(buf, r, off0 + r['off'])
+                bodies.append((body, tid, 2, unit, r['rows'], r['cols'], r['flags'], r['group']))
+                bodies.append((plane.tobytes(), tid | (3 << 14), 0, 0.0, r['rows'], 1, 0, 0))
+                continue
             body = quantize_matrix(buf, r, off0 + r['off'], s)
             dt, scale = 2, s
         elif r['dt'] == 0 and base == 2 and emb_scale is not None:
             body = emb_scale.tobytes()
-        bodies.append((body, tid, dt, scale, r))
+        bodies.append((body, tid, dt, scale, r['rows'], r['cols'], r['flags'], r['group']))
 
+    n_out = len(bodies)
+    data_off = table_off + n_out * REC_SIZE
     out = bytearray(b'MMCF')
-    out += struct.pack('<HHII', 2, 64, src['n'], src['caps'])
+    out += struct.pack('<HHII', 2, 64, n_out, src['caps'])
     out += struct.pack('<II', 64, len(meta))
     out += struct.pack('<QQ', data_off, 0)
     out += b'\0' * 24
@@ -164,14 +196,14 @@ def main():
         out += b'\0'
     table = bytearray()
     data = bytearray()
-    for body, tid, dt, scale, r in bodies:
+    for body, tid, dt, scale, brows, bcols, bflags, bgroup in bodies:
         while (data_off + len(data)) % ALIGN:
             data.append(0)
         off = len(data)
         data += body
         crc = zlib.crc32(body) & 0xFFFFFFFF
-        b = struct.pack('<HBBBB', tid, dt, r['flags'], r['group'], 0)
-        b += struct.pack('<II', r['rows'], r['cols'])
+        b = struct.pack('<HBBBB', tid, dt, bflags, bgroup, 0)
+        b += struct.pack('<II', brows, bcols)
         b += struct.pack('<QQ', off, len(body))
         b += struct.pack('<I', crc)
         b += struct.pack('<f', float(scale))
@@ -184,7 +216,7 @@ def main():
     with open(args.dst, 'wb') as f:
         f.write(out)
     print('wrote %s: %d tensors, %d bytes (source %d)' %
-          (args.dst, src['n'], file_size, src['file_size']))
+          (args.dst, n_out, file_size, src['file_size']))
 
 
 main()

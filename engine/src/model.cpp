@@ -439,6 +439,10 @@ bool Model::load_mmcf(){
         // sharing one id with `part` in the top two bits.
         struct Q4Parts { const MmcfRec* body = nullptr; const MmcfRec* scl = nullptr; const MmcfRec* mn = nullptr; };
         std::map<uint16_t, Q4Parts> q4map;
+        // A q8 matrix may carry one f32 scale per output row instead of a
+        // single per-matrix scale (part 3).  void.1 needs it: one scale leaves
+        // 58-66% of layer 0's FFN weights at zero.
+        std::map<uint16_t, const MmcfRec*> rowmap;
 
         auto as_mat = [&](const MmcfRec& r, Mat& m) { if (r.dtype == 1) as_i16(r, m); else as_q8(r, m); };
 
@@ -449,6 +453,10 @@ bool Model::load_mmcf(){
 
         for (const MmcfRec& r : recs) {
                 const int base = r.id & 0xFF, layer = (r.id >> 8) & 0x3F, part = r.id >> 14;
+                if (part == 3) {   // per-row q8 scale plane
+                        rowmap[r.id & 0x3FFF] = &r;
+                        continue;
+                }
                 if (part != 0) {   // q4 scale/min plane
                         Q4Parts& q = q4map[r.id & 0x3FFF];
                         if (part == 1) q.scl = &r; else q.mn = &r;
@@ -496,6 +504,26 @@ bool Model::load_mmcf(){
                 default: break;  // tokenizer blob, template, unknown ids
                 }
         }
+        for (auto& kv : rowmap) {
+                const MmcfRec& r = *kv.second;
+                const int kind = r.id & 0xFF, layer = (r.id >> 8) & 0x3F;
+                Mat* m = nullptr;
+                if (kind == 0x10 && layer < (int)layers_qkv.size()) m = &layers_qkv[layer];
+                else if (kind == 0x11 && layer < (int)layers_wo.size()) m = &layers_wo[layer];
+                else if (kind == 0x12 && layer < (int)layers_w1.size()) m = &layers_w1[layer];
+                else if (kind == 0x13 && layer < (int)layers_w3.size()) m = &layers_w3[layer];
+                else if (kind == 0x14 && layer < (int)layers_w13.size()) m = &layers_w13[layer];
+                else if (kind == 0x15 && layer < (int)layers_w2.size()) m = &layers_w2[layer];
+                else if (kind == 0x20 && layer < (int)logits_tiles.size()) m = &logits_tiles[layer];
+                if (!m || m->rows != (int)r.rows || r.bytes != (size_t)r.rows * 4) {
+                        cerr << "mmcf: row scale plane 0x" << std::hex << r.id << std::dec
+                             << " does not match its matrix\n";
+                        return false;
+                }
+                const float* p = (const float*)(fbase_ + data_off + r.off);
+                m->row_scale.assign(p, p + r.rows);
+        }
+        row_scale = !rowmap.empty();
         for (auto& kv : q4map) {
                 const uint16_t id = kv.first;
                 Q4Parts& q = kv.second;
@@ -587,6 +615,11 @@ bool Model::load_mmcf(){
 Mat Model::slice_rows(const Mat& src, int r0, int r1){
         Mat m; m.rows = r1 - r0; m.cols = src.cols; m.type = src.type; m.scale = src.scale;
         m.prebiased = src.prebiased;
+        // A per-row scale plane follows the rows it belongs to: the FFN gate is
+        // drawn from these two halves, and a copy that dropped the plane would
+        // silently fall back to one scale for the whole chunk.
+        if (!src.row_scale.empty())
+                m.row_scale.assign(src.row_scale.begin() + r0, src.row_scale.begin() + r1);
         if (src.type == WeightType::INT8) {
             if (src.ext8) {
                 m.ext8 = src.ext8 + (size_t)r0 * m.cols;
@@ -622,6 +655,7 @@ Mat Model::slice_rows(const Mat& src, int r0, int r1){
 Mat Model::slice_cols(const Mat& src, int c0, int c1){
         Mat m; m.rows = src.rows; m.cols = c1 - c0; m.type = src.type; m.scale = src.scale;
         m.prebiased = src.prebiased;
+        m.row_scale = src.row_scale;   // a column slice keeps every row
         if (src.type == WeightType::INT8) {
             m.q8.resize((size_t)m.rows * m.cols);
             for (int r = 0; r < m.rows; ++r)

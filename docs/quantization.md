@@ -17,6 +17,37 @@ because they are visible in the output:
   half keeps its own q8 scale and takes the paired q16 FFN path.  The runtime
   still handles fused q8 W13 through `matvec_q8_pair_fused`.
 
+### When one scale per matrix is not enough
+
+`ws` is one number per matrix, so the whole matrix shares the range of its
+largest weight.  A matrix whose rows differ by more than ~100:1 then loses most
+of its small weights: void.1's layer-0 `down_proj` has max/median 521, and 66%
+of its entries round to zero (58% for `gate_proj`).  That model answers with
+misspelled bytes at q8 and is fine at q4 or i16, and a p99.9-clipped scale makes
+it *worse* — the outliers are signal, not noise.
+
+`--q8-row-scale` writes one scale per output row instead (a `f32` plane per
+matrix, tensor id part 3; see [checkpoint-container.md](checkpoint-container.md)):
+
+| void.1, 640/1440/24 layers | q8 (one scale) | q8 per row | i16 |
+|---|---:|---:|---:|
+| median relative weight error | 2.36% | 0.79% | 0.001% |
+| worst matrix | 16.56% | 1.91% | — |
+| logits vs f32, the diverging prompt | 14.44 (wrong top-1) | **1.11 (right)** | 0.93 |
+| English PPL, seq 1024 | 3.9017 | **3.7979** | 3.7824 |
+| greedy 400 B | `everythinteresting` | clean | clean |
+
+Use it when a q8 container is coherent but misspells, and check the packer's
+per-matrix error first: `mmcf_pack.py` prints the residual, not the weight
+error, so the number to look at is `max|w| / median|w|` per matrix.
+`mmcf_requant_q8.py --row-scale` rebuilds the same planes from an i16
+container; on void.1 it reproduces the packer's greedy text.
+
+The cost is one texel fetch per fragment in the q8 kernels and a plane of
+`rows` 24-bit values (486 KB for the whole of void.1, 0.5%).  The two-position
+prefill kernels have no row-scale variant, so such a model prefills on the
+single-position path (`Session::pair_ok()` returns false).
+
 ## Weight quantization experiments
 
 The NumPy reference (`minimind3/ref_numpy.py`) supports symmetric and

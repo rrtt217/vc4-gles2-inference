@@ -153,6 +153,23 @@ tokenizer blob.  Per-layer tensors carry the layer in the high byte
 (`id | layer << 8`).  q4 needs three tensors per matrix (nibbles, group scale,
 group min) sharing one id.
 
+The top two id bits are a plane index.  `1` and `2` are the q4 group scale and
+group min; **`3` is a per-row q8 scale plane**: `f32`, `rows x 1`, one value per
+output row, the row's scale *divided by the matrix unit* the record's own
+`scale` field carries (`f32` there is the largest row scale).  The engine
+uploads it as one 24-bit value per row and every q8 kernel multiplies the row's
+dot product by it instead of by a single `ws`
+(`wrow_scale()` in `engine/src/shaders.cpp`).  A container either has a plane
+for every q8 matrix or for none: a matrix that keeps its per-matrix scale while
+the file says otherwise is silently wrong, which is why the reader refuses a
+plane whose `rows` or byte count does not match its matrix.
+
+Why it exists: void.1's weight rows span 500:1 within one matrix, so a single
+scale leaves 58-66% of layer 0's FFN weights at zero.  Per row the median
+relative error falls 2.36% -> 0.79% and the worst matrix 16.6% -> 1.9%; on the
+engine the model goes from unusable (logits 14.4 off f32, misspelled bytes) to
+i16 quality (max 1.1 off, top-1 the same, PPL 3.80 vs i16's 3.78).
+
 The vocabulary (`0x20`) is stored as several tiles of at most **1536 rows**
 (`LOGITS_GRID` in `engine/tools/mmcf_grid.py`, `kLogitsGrid` in
 `engine/src/logits_grid.h`), and the last tile is short: MiniMind3's 6400 rows
