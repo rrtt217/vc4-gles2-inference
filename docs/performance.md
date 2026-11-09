@@ -4175,3 +4175,45 @@ pays for in three byte conversions.
 
 Until then, the pins are per machine, and a 0.5% PPL difference between the
 board and the desktop is the floor, not a defect.
+
+## The card under the models: 7.4 MB/s write, 11.4 MB/s read (2026-11-09)
+
+A 64 MiB file on the root filesystem of this Pi Zero (card reports `SD32G`,
+08/2024, no speed class), `dd` with `conv=fsync` for writes and `iflag=direct`
+to bypass the page cache:
+
+| operation | block | throughput |
+|---|---|---:|
+| write | 1 MiB | 7.4 MB/s |
+| write | 128 KiB | 7.1 MB/s |
+| write | 4 KiB | 6.7 MB/s |
+| read (O_DIRECT) | 1 MiB | 11.4 MB/s |
+| read (O_DIRECT) | 128 KiB | 10.6 MB/s |
+| read (O_DIRECT) | 4 KiB | 3.2-3.7 MB/s |
+| read (page cache) | 1 MiB | 299 MB/s |
+
+**`/tmp` on this board is a 214 MB tmpfs**, so a card test written there measures
+RAM: it reported 107 MB/s write and 178 MB/s read.  The root filesystem is
+`/dev/mmcblk0p2`, 87% full (3.6 GB free), which is also the state in which SD
+write throughput is worst.
+
+### What it costs per model load
+
+MiniMind3 q8, 65 MiB container, `UPLOAD_TIME=1`, one run with the file's pages
+dropped (`posix_fadvise(DONTNEED)`) and one straight after:
+
+| | wall | `UPLOAD` line | texture time |
+|---|---:|---:|---:|
+| cold (pages dropped) | 46.2 s | 16.00 s | 4.94 s |
+| warm (page cache) | 28.6 s | 8.45 s | 1.40 s |
+
+So the 65 MiB read costs **7.6 s of the 16 s upload**, i.e. ~9 MB/s effective —
+the sequential figure, because mmap plus the kernel's readahead does the right
+thing even though the engine walks the container tensor by tensor.  The rest of
+the cold start (about 10 s of the wall-clock difference) is the other pages the
+run touches, and the texture work is 5 s of it.
+
+Practical consequences: a cold start pays roughly 8 s per 65 MiB of container
+(the 87 MB Vertex-100M q4 costs ~10 s before the GPU does anything), and a
+deploy over the network is bounded by the 7.4 MB/s write.  `--prefix-cache`
+saves the prefill but not this.
