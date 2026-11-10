@@ -520,6 +520,10 @@ bool Model::load_mmcf(){
                              << " does not match its matrix\n";
                         return false;
                 }
+                // A fused W13 (id 0x14, split=0) is the one matrix whose two
+                // rows per fragment sit rows apart, so its plane is paired the
+                // way the kernel reads it.
+                m->row_scale_hi = (kind == 0x14 && !split);
                 const float* p = (const float*)(fbase_ + data_off + r.off);
                 m->row_scale.assign(p, p + r.rows);
         }

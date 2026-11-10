@@ -254,7 +254,7 @@ static string q4_h(const string& w) {
 // row a fragment writes is the texel it reads.  Emitted only when the matrix
 // has one: a model without it links exactly the text it linked before.
 string wrow_scale(int rows, const char* smp = "WS", const char* fn = "wsr",
-                  const char* unit = "ws") {
+                  const char* unit = "ws", bool hi = false) {
     // One texel per *pair* of rows: .rg holds row 2t, .ba holds row 2t+1, each
     // 16 bits of the row scale divided by the matrix unit (which travels in
     // the kernel's existing scale uniform).  A kernel that needs both rows of
@@ -268,6 +268,17 @@ string wrow_scale(int rows, const char* smp = "WS", const char* fn = "wsr",
     // qkv and logits pass through that kernel, which is why the whole model
     // answered with <pad> and invalid bytes on the card and was correct on Xe.
     const int np = (rows + 1) / 2;
+    if (hi) {
+        // hi pairs (t, t+rows/2): the fused W13 kernel writes row r and row
+        // r+rows from one fragment, so those are the two the texel carries.
+        // One fetch, same as the (2t, 2t+1) form.
+        return string("uniform sampler2D ") + smp +
+               ";vec2 " + fn + "2(int t){vec4 c=texture2D(" + smp +
+               ",vec2(0.125,(float(t)+0.5)/float(" + to_string(np) + ")));"
+               "return vec2(c.r*65280.0+c.g*255.0,c.b*65280.0+c.a*255.0)*" + unit +
+               "*(1.0/65536.0);}"
+               "float " + fn + "(int r){return 0.0;}\n";
+    }
     return string("uniform sampler2D ") + smp +
            ";vec4 " + fn + "p(int r){return texture2D(" + smp +
            ",vec2(0.125,(float(r/2)+0.5)/float(" + to_string(np) + ")));}"
@@ -527,13 +538,19 @@ string matvec_q8_gate2(int rows, int cols) {
 // for the same column, so a four-weight texel needs four P2 texels and feeds
 // eight MACs (four per position): the weight byte is used twice.  The output
 // is the P2 layout, which the CPU read-back deinterleaves.
-string matvec_q8_p2(int rows, int cols) {
+string matvec_q8_p2(int rows, int cols, bool wrow) {
     need_shape("matvec_q8_p2", rows, cols, 4);
     const string ROWS = to_string(rows), COLS4 = to_string(cols / 4);
     const string CW = to_string(cols);
+    // One fragment is one output row for BOTH positions, so the row scale is a
+    // single value and one fetch; there is no row pair to read here.
+    const string WD = wrow ? wrow_scale(rows) : "";
+    const string SP = wrow ? "float s0=wsr(r);" : "";
+    const string SC = wrow ? "s0" : "ws";
     return head(XFormat::I16_2) + x_pair2_glsl() +
         "uniform sampler2D W,X;uniform float ws;"
-        "void main(){int r=int(gl_FragCoord.x);float sa=0.0,sb=0.0;"
+        + (wrow ? "\n" : "") + WD +
+        "void main(){int r=int(gl_FragCoord.x);" + SP + "float sa=0.0,sb=0.0;"
         "for(int q=0;q<" + COLS4 + ";q++){"
         "vec4 c=texture2D(W,vec2((float(q)+0.5)/float(" + COLS4 + "),"
         "(float(r)+0.5)/float(" + ROWS + ")));"
@@ -546,7 +563,7 @@ string matvec_q8_p2(int rows, int cols) {
         "float b0=x_p2_b(t0),b1=x_p2_b(t1),b2=x_p2_b(t2),b3=x_p2_b(t3);"
         "sa+=w.x*a0+w.y*a1+w.z*a2+w.w*a3;"
         "sb+=w.x*b0+w.y*b1+w.z*b2+w.w*b3;}"
-        "gl_FragColor=x_p2_stq(sa*ws,sb*ws);}";
+        "gl_FragColor=x_p2_stq(sa*" + SC + ",sb*" + SC + ");}";
 }
 
 // Prefill batching, step 7d.  Step 7c needed a pack pass because the FFN input
@@ -607,16 +624,23 @@ string rms_norm_pair2(int dim, XFormat rf, bool use_eps_uniform) {
 // The packed gate on the P2 FFN input: four activation texels per iteration,
 // each carrying one value per position, so the fetch count and the MAC order
 // are exactly those of matvec_q8_gate2 and the output bytes match it.
-string matvec_q8_gate2_p2(int rows, int cols) {
+string matvec_q8_gate2_p2(int rows, int cols, bool wrow) {
     need_shape("matvec_q8_gate2_p2", rows, cols, 4);
     const string ROWS = to_string(rows), COLS4 = to_string(cols / 4);
     const string CW = to_string(cols);
     const string WR = "vec2((float(q)+0.5)/float(" + COLS4 + ")," 
                       "(float(r)+0.5)/float(" + ROWS + "))";
+    // Two different planes, i.e. two samplers: that is fine on VC4 (the
+    // undefined case is two fetches from the *same* sampler).
+    const string WD = wrow ? (wrow_scale(rows, "WS1", "wsr1", "ws1") +
+                              wrow_scale(rows, "WS2", "wsr2", "ws2")) : "";
+    const string SP = wrow ? "float s1=wsr1(r),s2=wsr2(r);" : "";
+    const string C1 = wrow ? "s1" : "ws1", C2 = wrow ? "s2" : "ws2";
+    // The scale uniforms have to be declared before the helpers that read
+    // them (GLSL is not hoisted), which is why WD comes after this string.
     return head(XFormat::I16_2) + x_pair2_glsl() +
-        "uniform sampler2D W1,W2,X;uniform float ws1,ws2;"
-               + kQzSl +
-        "void main(){int r=int(gl_FragCoord.x);"
+        "uniform sampler2D W1,W2,X;uniform float ws1,ws2;" + WD + kQzSl +
+        "void main(){int r=int(gl_FragCoord.x);" + SP + 
         "float s10=0.0,s20=0.0,s11=0.0,s21=0.0;"
         "for(int q=0;q<" + COLS4 + ";q++){"
         "vec4 t0=texture2D(X,vec2((float(4*q)+0.5)/float(" + CW + "),0.5));"
@@ -631,19 +655,23 @@ string matvec_q8_gate2_p2(int rows, int cols) {
         "c=texture2D(W2," + WR + ");w=c*255.0-128.0;"
         "s20+=w.x*a0+w.y*a1+w.z*a2+w.w*a3;"
         "s21+=w.x*b0+w.y*b1+w.z*b2+w.w*b3;}"
-        "gl_FragColor=x_p2_st(sl(qz(s10*ws1),qz(s20*ws2)),"
-        "sl(qz(s11*ws1),qz(s21*ws2)));}";
+        "gl_FragColor=x_p2_st(sl(qz(s10*" + C1 + "),qz(s20*" + C2 + ")),"
+        "sl(qz(s11*" + C1 + "),qz(s21*" + C2 + ")));}";
 }
 
 // Two-position w2 whose residual is the previous w2 chunk output, which is
 // already P2: one texel carries both positions value r, so the add reads one
 // texel instead of two and the add itself is the same expression.
-string matvec_q8_p2_add_p2(int rows, int cols) {
+string matvec_q8_p2_add_p2(int rows, int cols, bool wrow) {
     need_shape("matvec_q8_p2_add_p2", rows, cols, 4);
     const string ROWS = to_string(rows), COLS4 = to_string(cols / 4), CW = to_string(cols);
+    const string WD = wrow ? wrow_scale(rows) : "";
+    const string SP = wrow ? "float s0=wsr(r);" : "";
+    const string SC = wrow ? "s0" : "ws";
     return head(XFormat::I16_2) + x_pair2_glsl() +
         "uniform sampler2D W,X,RA;uniform float ws;"
-        "void main(){int r=int(gl_FragCoord.x);float sa=0.0,sb=0.0;"
+        + (wrow ? "\n" : "") + WD +
+        "void main(){int r=int(gl_FragCoord.x);" + SP + "float sa=0.0,sb=0.0;"
         "for(int q=0;q<" + COLS4 + ";q++){"
         "vec4 c=texture2D(W,vec2((float(q)+0.5)/float(" + COLS4 + ")," 
         "(float(r)+0.5)/float(" + ROWS + ")));"
@@ -657,7 +685,7 @@ string matvec_q8_p2_add_p2(int rows, int cols) {
         "sa+=w.x*a0+w.y*a1+w.z*a2+w.w*a3;"
         "sb+=w.x*b0+w.y*b1+w.z*b2+w.w*b3;}"
         "vec4 rc=texture2D(RA,vec2((float(r)+0.5)/float(" + ROWS + "),0.5));"
-        "gl_FragColor=x_p2_stq(sa*ws+x_p2_a(rc),sb*ws+x_p2_b(rc));}";
+        "gl_FragColor=x_p2_stq(sa*" + SC + "+x_p2_a(rc),sb*" + SC + "+x_p2_b(rc));}";
 }
 
 
@@ -667,13 +695,17 @@ string matvec_q8_p2_add_p2(int rows, int cols) {
 // layer 0 of MiniMind3 (token 0) 2 of 768 q16 values moved by one LSB, where
 // the float sum lands inside one ULP of a 0.5 boundary.  So the add has to
 // happen inside the kernel, in the same expression order as the serial path.
-string matvec_q8_p2_add(int rows, int cols, XFormat rf) {
+string matvec_q8_p2_add(int rows, int cols, XFormat rf, bool wrow) {
     need_shape("matvec_q8_p2_add", rows, cols, 4);
     const string ROWS = to_string(rows), COLS4 = to_string(cols / 4), CW = to_string(cols);
     const string RW = to_string(x_texels(rows, rf));
+    const string WD = wrow ? wrow_scale(rows) : "";
+    const string SP = wrow ? "float s0=wsr(r);" : "";
+    const string SC = wrow ? "s0" : "ws";
     return head(XFormat::I16_2) + x_pair2_glsl() + x_residual_glsl(rf) +
         "uniform sampler2D W,X,RA,RB;uniform float ws;"
-        "void main(){int r=int(gl_FragCoord.x);float sa=0.0,sb=0.0;"
+        + (wrow ? "\n" : "") + WD +
+        "void main(){int r=int(gl_FragCoord.x);" + SP + "float sa=0.0,sb=0.0;"
         "for(int q=0;q<" + COLS4 + ";q++){"
         "vec4 c=texture2D(W,vec2((float(q)+0.5)/float(" + COLS4 + ")," 
         "(float(r)+0.5)/float(" + ROWS + ")));"
@@ -687,7 +719,7 @@ string matvec_q8_p2_add(int rows, int cols, XFormat rf) {
         "sa+=w.x*a0+w.y*a1+w.z*a2+w.w*a3;"
         "sb+=w.x*b0+w.y*b1+w.z*b2+w.w*b3;}"
         "float ra=R1Q(RA,r," + RW + ".0),rb=R1Q(RB,r," + RW + ".0);"
-        "gl_FragColor=x_p2_stq(sa*ws+ra,sb*ws+rb);}";
+        "gl_FragColor=x_p2_stq(sa*" + SC + "+ra,sb*" + SC + "+rb);}";
 }
 
 // Split a P2 row back into one position residual stream.  The values are q16
@@ -721,8 +753,9 @@ string matvec_q8_pair_fused(int rows, int cols, XFormat xf, bool wrow) {
     const int rows2 = 2 * rows;
     // W13 holds the gate rows and then the up rows, so a fragment writes row r
     // and row r+rows of one plane.
-    const string WD = wrow ? wrow_scale(rows2) : "";
-    const string SC1 = wrow ? "wsr(r)" : "ws", SC2 = wrow ? "wsr(r+" + to_string(rows) + ")" : "ws";
+    const string WD = wrow ? wrow_scale(rows2, "WS", "wsr", "ws", /*hi=*/true) : "";
+    const string SP = wrow ? "vec2 s=wsr2(r);" : "";
+    const string SC1 = wrow ? "s.x" : "ws", SC2 = wrow ? "s.y" : "ws";
     // The FFN gate/swiglu kernel is the hottest matvec in the token (4864x768
     // per layer) and it was still decoding through the generic X4Q helper.
     // Inline I16_2 decode is the same arithmetic with the fetches emitted in
@@ -731,7 +764,7 @@ string matvec_q8_pair_fused(int rows, int cols, XFormat xf, bool wrow) {
         return "precision highp float;uniform sampler2D W,X;uniform float ws;" + WD
                + kDec16A + kDec16B
                + kEnc16Mul +
-               "void main(){int r=int(gl_FragCoord.x);float s1=0.0,s2=0.0;"
+               "void main(){int r=int(gl_FragCoord.x);" + SP + "float s1=0.0,s2=0.0;"
                "for(int q=0;q<" + to_string(cols / 4) + ";q++){"
                "vec4 xa=texture2D(X,vec2((float(2*q)+0.5)/float(" + to_string(axw) + "),0.5));"
                "vec4 xb=texture2D(X,vec2((float(2*q+1)+0.5)/float(" + to_string(axw) + "),0.5));"
@@ -748,7 +781,7 @@ string matvec_q8_pair_fused(int rows, int cols, XFormat xf, bool wrow) {
     }
     return head(xf) +
         "uniform sampler2D W,X;uniform float ws;" + WD +
-        "void main(){int r=int(gl_FragCoord.x);float s1=0.0,s2=0.0;"
+        "void main(){int r=int(gl_FragCoord.x);" + SP + "float s1=0.0,s2=0.0;"
         "for(int q=0;q<" + to_string(cols / 4) + ";q++){"
         "vec4 c1=texture2D(W,vec2((float(q)+0.5)/float(" + to_string(cols / 4) + "),"
         "(float(r)+0.5)/float(" + to_string(rows2) + ")));"

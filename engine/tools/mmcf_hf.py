@@ -455,6 +455,30 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
                 vocab=vocab, seq=seq, head_dim=head_dim,
                 theta=float(m['theta']), half=bool(m['half']), qk_norm=bool(qk),
                 scheme=scheme, group=(32 if scheme == 'q4' else 0), split=bool(split))
+    # One q8 scale per matrix spends its 127 levels on the largest weight, so a
+    # matrix whose rows differ by 500:1 keeps 127/500 of its detail and voids
+    # most small weights to zero (void.1 layer 0: 58-66% of the FFN).  Say which
+    # matrices are that skewed instead of leaving the reader to guess; a ratio
+    # over ~100 is where --q8-row-scale starts to pay.
+    skew = []
+    for key in ('wq', 'wk', 'wv', 'wo', 'w1', 'w3', 'w2', 'wcls'):
+        arr = m.get(key)
+        if arr is None:
+            continue
+        for l in range(int(getattr(arr, 'shape', (0,))[0])):
+            w = np.asarray(arr[l], np.float32)
+            med = float(np.median(np.abs(w)))
+            if med <= 0:
+                continue
+            skew.append((float(np.abs(w).max()) / med, key, l))
+    if skew:
+        skew.sort(reverse=True)
+        worst = skew[0]
+        print("q8 skew: worst %s[%d] max|w|/median|w| = %.0f (median over matrices %.0f)"
+              % (worst[1], worst[2], worst[0], float(np.median([x[0] for x in skew]))))
+        if scheme == 'q8' and not q8_row and worst[0] > 100:
+            print("note: that matrix loses most of its small weights at one scale; "
+                  "--q8-row-scale writes one scale per output row instead")
     if rail_check:
         meta['res_peaks'] = residual_peaks(m)
     T = []

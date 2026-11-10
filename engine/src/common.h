@@ -36,6 +36,10 @@ struct Mat {
     // before this existed.  The plane is uploaded as one 24-bit value per row
     // and the shader multiplies the row's dot product by it instead of `scale`.
     vector<float> row_scale;
+    // A fused W13 draw evaluates rows r and r+rows in one fragment, so its
+    // plane is packed as (t, t+rows/2) instead of (2t, 2t+1) and the kernel
+    // reads it once.  Two fetches from one sampler are undefined on VC4.
+    bool row_scale_hi = false;
     bool has_row_scale() const { return !row_scale.empty(); }
     GLuint tex = 0, q4_param_tex = 0, row_scale_tex = 0;
     // Borrowed weights: when one of these is set the matching vector above is

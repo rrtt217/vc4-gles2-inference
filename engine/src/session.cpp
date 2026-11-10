@@ -420,10 +420,18 @@ GLuint Session::forward_gpu_hidden(int token, int pos, bool want_logits){
 // q4 / ACT8 / int16 / fused-w13 models keep the serial loop.
 bool Session::pair_ok() const {
         if (!gpu_layer_) return false;
-        // The two-position kernels read one scale per matrix; a per-row plane
-        // would be ignored there, so prefill stays on the single-position path
-        // (which covers every row-scale kernel).  Slower prefill, same numbers.
-        if (m_.row_scale) return false;
+        // The two-position kernels have wrow variants (one fragment is one row
+        // for both positions, so the plane read is a single fetch) and they
+        // produce byte-identical tokens, but they are a LOSS on the row-scale
+        // path: the pair path adds three draws per layer (rmsnorm_pair2 plus
+        // the two p2_split passes) and the gate draw now fetches two plane
+        // textures, which on VC4 costs more than the weight traffic it saves.
+        // Measured on a Pi Zero, void.1 q8r, 17-byte prompt: pair 13.7/15.2 s
+        // against single 12.9/12.9 s.  Off by default, PAIR_WROW=1 to measure.
+        {
+                const char* w = getenv("PAIR_WROW");
+                if (m_.row_scale && !(w && atoi(w) != 0)) return false;
+        }
         const char* e = getenv("PREFILL_PAIR");
         if (e && strcmp(e, "0") == 0) return false;
         // The packed kernels are INT8-only and read and write I16_2 activations.

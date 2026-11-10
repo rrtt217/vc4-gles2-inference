@@ -156,12 +156,12 @@ private:
     GLuint x_q8_pair(int rows, int cols, bool wrow = false);
     GLuint x_q8_pair_swiglu(int rows, int cols, bool wrow = false);
     GLuint x_q8_gate2(int rows, int cols);
-    GLuint x_q8_p2(int rows, int cols);
+    GLuint x_q8_p2(int rows, int cols, bool wrow = false);
     GLuint x_rms_stats2();
     GLuint x_rms_norm_pair2(bool use_eps_uniform);
-    GLuint x_q8_gate2_p2(int rows, int cols);
-    GLuint x_q8_p2_add_p2(int rows, int cols);
-    GLuint x_q8_p2_add(int rows, int cols);
+    GLuint x_q8_gate2_p2(int rows, int cols, bool wrow = false);
+    GLuint x_q8_p2_add_p2(int rows, int cols, bool wrow = false);
+    GLuint x_q8_p2_add(int rows, int cols, bool wrow = false);
     GLuint x_p2_split(int rows);
     GLuint x_q8_pair_fused(int rows, int cols, bool wrow = false);
     GLuint x_i4_pair(int rows, int cols);

@@ -150,6 +150,21 @@ static const uint8_t* out_end(int w, int h_unused = 1) {
 // The exact encoding GPU::upload() uses for a part-3 plane: 24 bits are not
 // needed, 16 are plenty, and the texel lives in a 4-texel-wide texture exactly
 // as the engine builds it.
+// hi pairing: texel t = (scale[t], scale[t+half])
+static GLuint plane_tex_hi(const vector<float>& srow, int half, int width) {
+    vector<uint8_t> px((size_t)half * width * 4, 0);
+    for (size_t r = 0; r < srow.size(); ++r) {
+        long q = lrint((double)srow[r] * 65536.0);
+        if (q < 0) q = 0;
+        if (q > 65535) q = 65535;
+        int t = (int)r < half ? (int)r : (int)r - half;
+        uint8_t* o = &px[(size_t)t * width * 4];
+        if ((int)r < half) { o[0] = (uint8_t)(q >> 8); o[1] = (uint8_t)q; }
+        else               { o[2] = (uint8_t)(q >> 8); o[3] = (uint8_t)q; }
+    }
+    return tex(width, half, px);
+}
+
 static GLuint plane_tex(const vector<float>& srow, int width, int chan) {
     (void)chan;
     const int np = ((int)srow.size() + 1) / 2;
@@ -570,6 +585,72 @@ static void k_pair(int rows, int cols, bool wrow) {
     if (p2) glDeleteTextures(1, &p2);
 }
 
+// The fused W13 kernel: one fragment writes row r (gate) and row r+rows (up) of
+// the same matrix, so its plane is paired (t, t+rows/2) and read once.
+static void k_pair_fused(int rows, int cols, bool wrow) {
+    KIn k = make_in(2 * rows, cols, wrow);
+    GLuint wt = upload_w(k, 2 * rows, cols);
+    vector<uint8_t> xb = x_pack(k.x, XFormat::I16_2);
+    GLuint xt = tex(x_texels(cols, XFormat::I16_2), 1, xb);
+    GLuint pl = 0;
+    if (wrow) {
+        vector<float> rel(2 * rows);
+        for (int r = 0; r < 2 * rows; ++r) rel[r] = k.srow[r] / k.unit;
+        pl = plane_tex_hi(rel, rows, 4);
+    }
+    GLuint p = prog(matvec_q8_pair_fused(rows, cols, XFormat::I16_2, wrow));
+    if (!p) { printf("  pair_fused LINK_FAIL\n"); ++failures; return; }
+    out_begin(rows);
+    glUseProgram(p);
+    glUniform1i(glGetUniformLocation(p, "W"), 0); glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, wt);
+    glUniform1i(glGetUniformLocation(p, "X"), 1); glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, xt);
+    glUniform1f(glGetUniformLocation(p, "ws"), k.unit);
+    if (wrow) {
+        glUniform1i(glGetUniformLocation(p, "WS"), 2);
+        glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, pl);
+    }
+    tri(p);
+    glFinish();
+    glReadPixels(0, 0, rows, 1, GL_RGBA, GL_UNSIGNED_BYTE, got.data());
+    vector<int> gate(rows), up(rows);
+    for (int r = 0; r < rows; ++r) {
+        int q0 = (got[r * 4 + 0] << 8) | got[r * 4 + 1];
+        int q1 = (got[r * 4 + 2] << 8) | got[r * 4 + 3];
+        gate[r] = q0 >= 32768 ? q0 - 65536 : q0;
+        up[r] = q1 >= 32768 ? q1 - 65536 : q1;
+    }
+    vector<int> all = ref_plain(k, 2 * rows, cols, wrow);
+    vector<int> want_gate(rows), want_up(rows);
+    for (int r = 0; r < rows; ++r) { want_gate[r] = all[r]; want_up[r] = all[r + rows]; }
+    char nm[64];
+    snprintf(nm, sizeof nm, "C fused W13 gate %dx%d %s", rows, cols, wrow ? "wrow" : "plain");
+    report_rows(nm, gate, want_gate);
+    snprintf(nm, sizeof nm, "C fused W13 up %dx%d %s", rows, cols, wrow ? "wrow" : "plain");
+    report_rows(nm, up, want_up);
+    glDeleteProgram(p); glDeleteTextures(1, &wt); glDeleteTextures(1, &xt);
+    if (pl) glDeleteTextures(1, &pl);
+}
+
+// Compile-only check for a builder text: names the shader that fails and prints
+// the driver log, which is what turns "some P2 kernel is wrong" into a line.
+static void compile_only(const char* name, const string& src) {
+    GLuint sh = glCreateShader(GL_FRAGMENT_SHADER);
+    const char* p = src.c_str();
+    glShaderSource(sh, 1, &p, nullptr);
+    glCompileShader(sh);
+    GLint ok = 0;
+    glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
+    if (!ok) {
+        char log[2048] = {0};
+        glGetShaderInfoLog(sh, sizeof log - 1, nullptr, log);
+        printf("  %-34s COMPILE_FAIL  %s\n", name, log);
+        ++failures;
+    } else {
+        printf("  %-34s compile ok (%zu B)\n", name, src.size());
+    }
+    glDeleteShader(sh);
+}
+
 int main() {
     PFNGPD gpd = (PFNGPD)eglGetProcAddress("eglGetPlatformDisplayEXT");
     if (!gpd) { printf("no eglGetPlatformDisplayEXT\n"); return 1; }
@@ -624,6 +705,14 @@ int main() {
     k_pair_logits(896, 640, true);      // the qkv shape
     k_pair_logits(259, 640, true);      // void.1's single logits tile: odd rows
     k_pair(64, 64, false); k_pair(64, 64, true); k_pair(1440, 640, true);
+    k_pair_fused(64, 64, false); k_pair_fused(64, 64, true);
+    k_pair_fused(896, 640, true);      // feng's fused W13 shape
+    compile_only("p2 64x64 wrow",      matvec_q8_p2(64, 64, true));
+    compile_only("p2_add 64x64 wrow",  matvec_q8_p2_add(64, 64, XFormat::I16_2, true));
+    compile_only("p2_add_p2 64x64 wrow", matvec_q8_p2_add_p2(64, 64, true));
+    compile_only("gate2_p2 64x64 wrow", matvec_q8_gate2_p2(64, 64, true));
+    compile_only("p2 1440x640 wrow",   matvec_q8_p2(1440, 640, true));
+    compile_only("gate2_p2 1440x640 wrow", matvec_q8_gate2_p2(1440, 640, true));
 
     printf("\n%s (%d failing)\n", failures ? "FAIL" : "ALL PASS", failures);
     return failures ? 1 : 0;

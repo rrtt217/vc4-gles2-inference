@@ -96,6 +96,12 @@ binary.  They are measurement hooks, not production settings.
 - `PREFILL_PAIR=0` — disable the two-position prefill pair (the default since
   step 5 of the prefill-batching work).  `diff_paths.sh` sets it so both paths
   step every position through the same code.
+- `PAIR_WROW=1` — allow the two-position prefill path for a model with per-row
+  q8 scale planes.  The pair kernels have wrow variants and produce
+  byte-identical tokens, but on a row-scale model the pair path is **slower**
+  (Pi Zero, void.1 q8r: 13.7-15.2 s against 12.9-12.9 s) because it adds three
+  draws per layer and the gate draw fetches two planes.  Off by default; this
+  switch exists so the measurement can be repeated in one binary.
 - `PREFILL_REPEAT=n` — replay the prefill `n` times, for timing.
 - `FFN_FLUSH=0`, `FFN_SYNC=1`, `LAYER_SAFE_FINISH=1`, `FORCE_GLFINISH=1` —
   finish/flush policy.  `LAYER_SAFE_FINISH=1` restores the fully-finished

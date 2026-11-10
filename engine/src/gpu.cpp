@@ -121,9 +121,13 @@ void GPU::upload(Mat& m){
                         long q = lrint(v * 65536.0);
                         if (q < 0) q = 0;
                         if (q > 65535) q = 65535;
-                        uint8_t* o = &rs[((size_t)(r / 2) * W) * 4];
-                        if ((r & 1) == 0) { o[0] = (uint8_t)(q >> 8); o[1] = (uint8_t)q; }
-                        else              { o[2] = (uint8_t)(q >> 8); o[3] = (uint8_t)q; }
+                        // (2t, 2t+1) normally; (t, t+rows/2) for a fused W13
+                        const int t = m.row_scale_hi
+                                      ? (r < m.rows / 2 ? r : r - m.rows / 2) : r / 2;
+                        const bool second = m.row_scale_hi ? (r >= m.rows / 2) : ((r & 1) != 0);
+                        uint8_t* o = &rs[((size_t)t * W) * 4];
+                        if (!second) { o[0] = (uint8_t)(q >> 8); o[1] = (uint8_t)q; }
+                        else         { o[2] = (uint8_t)(q >> 8); o[3] = (uint8_t)q; }
                 }
                 m.row_scale_tex = make_texture(W, np, rs.data());
         }
@@ -1209,9 +1213,9 @@ GLuint GPU::x_q8_gate2(int rows, int cols){
                       matvec_q8_gate2(rows, cols));
     }
 
-GLuint GPU::x_q8_p2(int rows, int cols){
-        return x_prog("xq8p2_" + to_string(rows) + "_" + to_string(cols),
-                      matvec_q8_p2(rows, cols));
+GLuint GPU::x_q8_p2(int rows, int cols, bool wrow){
+        return x_prog("xq8p2_" + to_string(rows) + "_" + to_string(cols) + (wrow ? "_wr" : ""),
+                      matvec_q8_p2(rows, cols, wrow));
     }
 
 // Position A then position B in one texture, one row wide: the 2-position
@@ -1265,12 +1269,14 @@ GLuint GPU::ffn_pair_swiglu_chunk2(const Mat& w1, const Mat& w3, GLuint x2, int 
 // Two-position w2: reads the P2 gate output, writes one P2 q16 texel per row.
 void GPU::matvec_p2(const Mat& m, GLuint xp2, Target& out){
         if (out.tex == 0 || out.w != m.rows) out = make_target(m.rows, 1);
-        GLuint p = x_q8_p2(m.rows, m.cols);
+        const bool wr = m.has_row_scale();
+        GLuint p = x_q8_p2(m.rows, m.cols, wr);
         bind_fbo(out.fbo);
         use_program(p);
         bind_tex(0, m.tex); set_sampler(p, "W", 0);
         bind_tex(1, xp2); set_sampler(p, "X", 1);
         glUniform1f(uloc(p, "ws"), m.scale);
+        if (wr) { bind_tex(3, m.row_scale_tex); set_sampler(p, "WS", 3); }
         setup_attrib(p);
         for (int x0 = 0; x0 < m.rows; x0 += 1024) {
             const int w = min(1024, m.rows - x0);
@@ -1293,19 +1299,19 @@ GLuint GPU::x_rms_norm_pair2(bool use_eps_uniform){
                       ::rms_norm_pair2(att_dim_, res_fmt_, use_eps_uniform));
     }
 
-GLuint GPU::x_q8_gate2_p2(int rows, int cols){
-        return x_prog("xq8g2p2_" + to_string(rows) + "_" + to_string(cols),
-                      ::matvec_q8_gate2_p2(rows, cols));
+GLuint GPU::x_q8_gate2_p2(int rows, int cols, bool wrow){
+        return x_prog("xq8g2p2_" + to_string(rows) + "_" + to_string(cols) + (wrow ? "_wr" : ""),
+                      ::matvec_q8_gate2_p2(rows, cols, wrow));
     }
 
-GLuint GPU::x_q8_p2_add_p2(int rows, int cols){
-        return x_prog("xq8p2a2_" + to_string(rows) + "_" + to_string(cols),
-                      ::matvec_q8_p2_add_p2(rows, cols));
+GLuint GPU::x_q8_p2_add_p2(int rows, int cols, bool wrow){
+        return x_prog("xq8p2a2_" + to_string(rows) + "_" + to_string(cols) + (wrow ? "_wr" : ""),
+                      ::matvec_q8_p2_add_p2(rows, cols, wrow));
     }
 
-GLuint GPU::x_q8_p2_add(int rows, int cols){
-        return x_prog("xq8p2a_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(res_fmt_),
-                      ::matvec_q8_p2_add(rows, cols, res_fmt_));
+GLuint GPU::x_q8_p2_add(int rows, int cols, bool wrow){
+        return x_prog("xq8p2a_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(res_fmt_) + (wrow ? "_wr" : ""),
+                      ::matvec_q8_p2_add(rows, cols, res_fmt_, wrow));
     }
 
 GLuint GPU::x_p2_split(int rows){
@@ -1345,7 +1351,8 @@ GLuint GPU::rmsnorm_pair2(GLuint xa, GLuint xb, GLuint w, Target& out){
 
 GLuint GPU::ffn_pair_swiglu_chunk2_p2(const Mat& w1, const Mat& w3, GLuint xp2, int rows, Target& out){
         if (out.tex == 0 || out.w != rows) out = make_target(rows, 1);
-        GLuint p = x_q8_gate2_p2(rows, w1.cols);
+        const bool wr = w1.has_row_scale() && w3.has_row_scale();
+        GLuint p = x_q8_gate2_p2(rows, w1.cols, wr);
         bind_fbo(out.fbo);
         use_program(p);
         bind_tex(0, w1.tex); set_sampler(p, "W1", 0);
@@ -1353,6 +1360,10 @@ GLuint GPU::ffn_pair_swiglu_chunk2_p2(const Mat& w1, const Mat& w3, GLuint xp2, 
         bind_tex(2, xp2); set_sampler(p, "X", 2);
         glUniform1f(uloc(p, "ws1"), w1.scale);
         glUniform1f(uloc(p, "ws2"), w3.scale);
+        if (wr) {
+            bind_tex(3, w1.row_scale_tex); set_sampler(p, "WS1", 3);
+            bind_tex(4, w3.row_scale_tex); set_sampler(p, "WS2", 4);
+        }
         setup_attrib(p);
         for (int x0 = 0; x0 < rows; x0 += 1024) {
             const int w = min(1024, rows - x0);
@@ -1371,13 +1382,15 @@ GLuint GPU::ffn_pair_swiglu_chunk2_p2(const Mat& w1, const Mat& w3, GLuint xp2, 
 // serial one that step 7c had to preserve.
 void GPU::matvec_p2_add_p2(const Mat& m, GLuint xp2, GLuint rp2, Target& out){
         if (out.tex == 0 || out.w != m.rows) out = make_target(m.rows, 1);
-        GLuint p = x_q8_p2_add_p2(m.rows, m.cols);
+        const bool wr = m.has_row_scale();
+        GLuint p = x_q8_p2_add_p2(m.rows, m.cols, wr);
         bind_fbo(out.fbo);
         use_program(p);
         bind_tex(0, m.tex); set_sampler(p, "W", 0);
         bind_tex(1, xp2); set_sampler(p, "X", 1);
         bind_tex(2, rp2); set_sampler(p, "RA", 2);
         glUniform1f(uloc(p, "ws"), m.scale);
+        if (wr) { bind_tex(4, m.row_scale_tex); set_sampler(p, "WS", 4); }
         setup_attrib(p);
         for (int x0 = 0; x0 < m.rows; x0 += 1024) {
             const int w = min(1024, m.rows - x0);
@@ -1393,7 +1406,8 @@ void GPU::matvec_p2_add_p2(const Mat& m, GLuint xp2, GLuint rp2, Target& out){
 // positions, reading each position residual stream (step 7c).
 void GPU::matvec_p2_add(const Mat& m, GLuint xp2, GLuint ra, GLuint rb, Target& out){
         if (out.tex == 0 || out.w != m.rows) out = make_target(m.rows, 1);
-        GLuint p = x_q8_p2_add(m.rows, m.cols);
+        const bool wr = m.has_row_scale();
+        GLuint p = x_q8_p2_add(m.rows, m.cols, wr);
         bind_fbo(out.fbo);
         use_program(p);
         bind_tex(0, m.tex); set_sampler(p, "W", 0);
@@ -1401,6 +1415,7 @@ void GPU::matvec_p2_add(const Mat& m, GLuint xp2, GLuint ra, GLuint rb, Target& 
         bind_tex(2, ra); set_sampler(p, "RA", 2);
         bind_tex(3, rb); set_sampler(p, "RB", 3);
         glUniform1f(uloc(p, "ws"), m.scale);
+        if (wr) { bind_tex(4, m.row_scale_tex); set_sampler(p, "WS", 4); }
         setup_attrib(p);
         for (int x0 = 0; x0 < m.rows; x0 += 1024) {
             const int w = min(1024, m.rows - x0);
