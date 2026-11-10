@@ -44,13 +44,19 @@ error, so the number to look at is `max|w| / median|w|` per matrix.
 container; on void.1 it reproduces the packer's greedy text.
 
 The cost is one texel fetch per fragment in the q8 kernels and a plane of
-`rows` 16-bit values (486 KB for the whole of void.1, 0.5%).  The plane texture
-is **4 texels wide** and only the first is read: a 1-texel-wide texture is the
-one shape VC4 has never had to sample, and void.1 answered with `<pad>` and
-invalid bytes on the Pi while the same file was clean on Xe.  16 bits also keep
-the decoded value under 2^16, so the decode stays exact even if a backend
-demotes the fragment stage to mediump; the same change moved the desktop error
-from 1.11 to 0.67 logits, which is better than i16's 0.93.  The two-position
+`rows` 16-bit values (486 KB for the whole of void.1, 0.5%).  The texture holds
+**one row pair per texel** (`.rg` = row 2t, `.ba` = row 2t+1) and is 4 texels
+wide.
+
+Both of those are VC4 requirements, measured with `engine/probes/wrow_probe`:
+one fragment asking the same sampler for two different texels returns undefined
+data once the matrix is tall (88 of 896 rows wrong on the qkv shape, 40 of 259
+on the logits tile), and a 1-texel-wide texture is a shape that board had never
+been asked for.  The probe drives the engine's own `matvec_q8_add`,
+`matvec_q8_pair` and `matvec_q8_pair_logits` against a CPU reference, so it is
+the check to run before adding any sampler to a shader.  16 bits also keep the
+decoded value under 2^16, so the decode stays exact even if a backend demotes
+the fragment stage to mediump.  The two-position
 prefill kernels have no row-scale variant, so such a model prefills on the
 single-position path (`Session::pair_ok()` returns false).
 

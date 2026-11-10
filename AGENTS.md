@@ -223,6 +223,7 @@ Pick the tool that answers the question before writing a new probe:
 | is a row saturating / clamping? | `dump_stats.py` on a `STAGE_DUMP` file |
 | is one pass expensive? | `ATTN_DUP`, `PASS_DUP`, `DRAWCOUNT`, `LAYER_PROFILE` |
 | is the attention block internally consistent? | `ATT_DUMP` + `check_att.py` |
+| does a new sampler / texture fetch work on the target? | `probes/wrow_probe` (and `_pi`): drives the engine's own q8 kernels against a CPU reference and names the rows that differ.  It is how the per-row scale plane's two fetches from one sampler were found to be undefined on VC4 |
 | did my change alter numerics? | `regression.sh`, and PPL rather than one string |
 | did my change move the emitted GLSL? | `scripts/shader_hashes.sh` (no GPU needed); `--dump-shaders` / `--dump-shaders=raw` to look |
 

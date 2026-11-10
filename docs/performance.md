@@ -4341,3 +4341,34 @@ look like a no-op (found by replacing the read with `ws` and getting
 bit-identical stage dumps); and disabling the packed residual add for these
 matrices changed the *residual layout* the rmsnorm reads, which corrupted every
 layer after the first.
+
+## per-row q8 on VC4: two fetches from one sampler (2026-11-10, Pi Zero)
+
+The plane shipped correct on Xe and produced `<pad>` plus invalid bytes on the
+Pi, with two runs of one binary giving different tokens.  `engine/probes/wrow_probe`
+drives each engine kernel that carries a plane against a CPU reference, on the
+target, and reports the rows that differ:
+
+| kernel, wrow, on the Pi | before | after |
+|---|---|---|
+| `matvec_q8_add` 640x640 | pass | pass |
+| `matvec_q8_pair` 1440x640 | pass | pass |
+| `matvec_q8_pair_logits` 64x64 | pass | pass |
+| `matvec_q8_pair_logits` 896x640 (qkv) | **88 of 896 rows, worst 33126** | pass |
+| `matvec_q8_pair_logits` 259x640 (void.1's logits tile) | **40 of 259, worst 30835** | pass |
+
+The failing kernel was the only one that fetched the plane twice in one
+fragment (row r0 and row r1), and the same shader shape reading *two* textures
+is exact at 1440 rows, so the trigger is two `texture2D` fetches from one
+sampler, not the fetch count.  qkv and the logits pass both go through it, which
+is why the whole model was wrong while its arithmetic was fine.
+
+Fix: the plane holds a row pair per texel, so a paired kernel reads once.  void.1
+q8r on the Pi then prints ` there was a little girl named Lily who loved to play
+with her friends. One day,` and is byte-identical across runs; MiniMind3's gate
+string and PPL are unchanged, and `shader_hashes.sh` still reports 117 programs
+because a model without planes links the same GLSL as before.
+
+Prefill on the card is 13-16 s for the 17-byte prompt (1.1 s/token) because a
+file with planes prefills on the single-position path; decode settles at
+417-466 ms/token against q8's 380.

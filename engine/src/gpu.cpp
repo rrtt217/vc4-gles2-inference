@@ -102,28 +102,30 @@ void GPU::upload(Mat& m){
         // remove.  Uploaded before the type branches because the prebiased q8
         // path returns early.
         if (!m.row_scale.empty()) {
-                // The plane already holds s_row / unit; `scale` is the unit, and
+                // The plane already holds s_row / unit; `scale` is the unit and
                 // the shader multiplies it back.  Dividing again here would put
-                // every row past 2^16 and clamp the whole plane to 1.0, which
-                // looks exactly like "per-row scales do nothing".
+                // every row past 2^16 and clamp the plane to 1.0, which looks
+                // exactly like "per-row scales do nothing".
                 //
-                // Two bytes per row, and four texels wide: a 1-texel-wide
-                // texture is the one shape VC4 never had to sample, and void.1
-                // came back as <pad> plus invalid bytes on the Pi while the same
-                // file was clean on Xe.
+                // Two rows per texel, 16 bits each: .rg is row 2t and .ba is
+                // row 2t+1.  A paired kernel then reads the texel once, because
+                // two fetches from one sampler in one fragment come back
+                // undefined on VC4 (probes/wrow_probe: 88 of 896 rows wrong on
+                // the qkv shape, exact on Xe).  Four texels wide keeps the
+                // texture out of the 1-texel-wide corner as well.
                 const int W = 4;
-                vector<uint8_t> rs((size_t)m.rows * W * 4, 0);
+                const int np = (m.rows + 1) / 2;
+                vector<uint8_t> rs((size_t)np * W * 4, 0);
                 for (int r = 0; r < m.rows; ++r) {
                         double v = (double)m.row_scale[(size_t)r];
                         long q = lrint(v * 65536.0);
                         if (q < 0) q = 0;
                         if (q > 65535) q = 65535;
-                        uint8_t* o = &rs[(size_t)r * W * 4];
-                        o[0] = (uint8_t)(q >> 8);
-                        o[1] = (uint8_t)q;
-                        o[3] = 255;
+                        uint8_t* o = &rs[((size_t)(r / 2) * W) * 4];
+                        if ((r & 1) == 0) { o[0] = (uint8_t)(q >> 8); o[1] = (uint8_t)q; }
+                        else              { o[2] = (uint8_t)(q >> 8); o[3] = (uint8_t)q; }
                 }
-                m.row_scale_tex = make_texture(W, m.rows, rs.data());
+                m.row_scale_tex = make_texture(W, np, rs.data());
         }
         if (m.type == WeightType::INT8) {
             const int8_t* src = m.w8();

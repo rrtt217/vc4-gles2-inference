@@ -255,24 +255,30 @@ static string q4_h(const string& w) {
 // has one: a model without it links exactly the text it linked before.
 string wrow_scale(int rows, const char* smp = "WS", const char* fn = "wsr",
                   const char* unit = "ws") {
-    // One 16-bit value per row: the row scale divided by the matrix's unit,
-    // which travels in the kernel's existing scale uniform (ws, or ws1/ws2
-    // where one draw covers two matrices).  The W fetches are already per row,
-    // so this adds one texel read per fragment.
+    // One texel per *pair* of rows: .rg holds row 2t, .ba holds row 2t+1, each
+    // 16 bits of the row scale divided by the matrix unit (which travels in
+    // the kernel's existing scale uniform).  A kernel that needs both rows of
+    // a fragment therefore reads the texel once.
     //
-    // 16 bits, not 24: the plane is 4 texels wide and only the first is read,
-    // because a 1-texel-wide texture is exactly the shape VC4 had never been
-    // asked for -- void.1 answered with <pad> and invalid bytes on the Pi while
-    // the same file was clean on Xe.  The value also stays below 2^16, so a
-    // backend whose fragment stage demotes precision still decodes it exactly;
-    // 1/65536 of the unit is 7.6e-5 relative on a row at 0.2, against the 0.79%
-    // weight error this exists to remove.
+    // Pairing is not an optimisation.  Asking VC4 for two texture2D fetches
+    // from the same sampler in one fragment returns undefined data once the
+    // matrix is tall: probes/wrow_probe measures matvec_q8_pair_logits with
+    // wrow off by 33126 at 88 of 896 rows, while the same shader shape reading
+    // two different textures (matvec_q8_pair) is exact at 1440 rows.  void.1's
+    // qkv and logits pass through that kernel, which is why the whole model
+    // answered with <pad> and invalid bytes on the card and was correct on Xe.
+    const int np = (rows + 1) / 2;
     return string("uniform sampler2D ") + smp +
-           ";float " + fn + "(int r){vec4 c=texture2D(" + smp +
-           ",vec2(0.125,(float(r)+0.5)/float(" + to_string(rows) + ")));"
-           "return (c.r*65280.0+c.g*255.0)*" + unit +
+           ";vec4 " + fn + "p(int r){return texture2D(" + smp +
+           ",vec2(0.125,(float(r/2)+0.5)/float(" + to_string(np) + ")));}"
+           "float " + fn + "(int r){vec4 c=" + string(fn) + "p(r);"
+           "return (mod(float(r),2.0)<0.5?c.r*65280.0+c.g*255.0:c.b*65280.0+c.a*255.0)*"
+           + unit + "*(1.0/65536.0);}"
+           "vec2 " + fn + "2(int r){vec4 c=" + string(fn) + "p(r);"
+           "return vec2(c.r*65280.0+c.g*255.0,c.b*65280.0+c.a*255.0)*" + unit +
            "*(1.0/65536.0);}";
 }
+
 
 string matvec_q8(int rows, int cols, XFormat xf, bool wrow) {
     need_shape("matvec_q8", rows, cols, 4);
@@ -369,7 +375,10 @@ string matvec_q8_pair_logits(int rows, int cols, XFormat xf, bool wrow) {
     const string WR0 = "vec2((float(q)+0.5)/float(" + COLS4 + "),(float(r0)+0.5)/float(" + ROWS + "))";
     const string WR1 = "vec2((float(q)+0.5)/float(" + COLS4 + "),(float(r1)+0.5)/float(" + ROWS + "))";
     const string WD = wrow ? wrow_scale(rows) : "";
-    const string SC0 = wrow ? "wsr(r0)" : "ws", SC1 = wrow ? "wsr(r1)" : "ws";
+    // One texel holds both rows of the fragment; two fetches from the same
+    // sampler are what VC4 gets wrong (probes/wrow_probe).
+    const string SC0 = wrow ? "s.x" : "ws", SC1 = wrow ? "s.y" : "ws";
+    const string SP = wrow ? "vec2 s=wsr2(r0);" : "";
     // Inline I16_2 decode.  The generic X4Q helper takes two texel fetches as
     // arguments and VC4 compiles that loop much slower (matvec_probe measured
     // 177 vs 283 MMAC/s at 1536x768).  Decode, arithmetic and the q16 rounding
@@ -378,7 +387,8 @@ string matvec_q8_pair_logits(int rows, int cols, XFormat xf, bool wrow) {
         return "precision highp float;uniform sampler2D W,X;uniform float ws;" + WD
                + kDec16A + kDec16B
                + kEnc16Mul +
-               "void main(){int t=int(gl_FragCoord.x);int r0=2*t;int r1=r0+1;float s0=0.0,s1=0.0;"
+               "void main(){int t=int(gl_FragCoord.x);int r0=2*t;int r1=r0+1;" + SP +
+        "float s0=0.0,s1=0.0;"
                "for(int q=0;q<" + COLS4 + ";q++){"
                "vec4 xa=texture2D(X,vec2((float(2*q)+0.5)/float(" + AXW + "),0.5));"
                "vec4 xb=texture2D(X,vec2((float(2*q+1)+0.5)/float(" + AXW + "),0.5));"
@@ -392,7 +402,8 @@ string matvec_q8_pair_logits(int rows, int cols, XFormat xf, bool wrow) {
     }
     return head(xf) +
         "uniform sampler2D W,X;uniform float ws;" + WD +
-        "void main(){int t=int(gl_FragCoord.x);int r0=2*t;int r1=r0+1;float s0=0.0,s1=0.0;"
+        "void main(){int t=int(gl_FragCoord.x);int r0=2*t;int r1=r0+1;" + SP +
+        "float s0=0.0,s1=0.0;"
         "for(int q=0;q<" + COLS4 + ";q++){"
         "vec4 x=X4Q(X,q*4," + AXW + ".0);"
         "vec4 c=texture2D(W," + WR0 + ");vec4 w=c*255.0-128.0;"
@@ -415,8 +426,10 @@ string matvec_q8_pair_swiglu(int rows, int cols, XFormat xf, bool inl, bool wrow
     const string ROWS = to_string(rows), COLS4 = to_string(cols / 4), AXW = to_string(axw);
     const string WD = wrow ? (wrow_scale(rows, "WS1", "wsr1", "ws1") +
                               wrow_scale(rows, "WS2", "wsr2", "ws2")) : "";
-    const string A10 = wrow ? "wsr1(r0)" : "ws1", A20 = wrow ? "wsr2(r0)" : "ws2";
-    const string A11 = wrow ? "wsr1(r1)" : "ws1", A21 = wrow ? "wsr2(r1)" : "ws2";
+    // r0 is even and r1 is r0+1, so one plane texel carries both rows.
+    const string A10 = wrow ? "s1.x" : "ws1", A20 = wrow ? "s2.x" : "ws2";
+    const string A11 = wrow ? "s1.y" : "ws1", A21 = wrow ? "s2.y" : "ws2";
+    const string SP = wrow ? "vec2 s1=wsr12(r0),s2=wsr22(r0);" : "";
     const string WR0 = "vec2((float(q)+0.5)/float(" + COLS4 + "),(float(r0)+0.5)/float(" + ROWS + "))";
     const string WR1 = "vec2((float(q)+0.5)/float(" + COLS4 + "),(float(r1)+0.5)/float(" + ROWS + "))";
     // Inline I16_2 decode.  The generic X4Q macro takes its two texel fetches as
@@ -430,7 +443,8 @@ string matvec_q8_pair_swiglu(int rows, int cols, XFormat xf, bool inl, bool wrow
                kDec16A + kDec16B
                + kQzSl +
                "void main(){int t=int(gl_FragCoord.x);int r0=2*t;"
-               "int r1=min(r0+1," + to_string(rows - 1) + ");float s10=0.0,s20=0.0,s11=0.0,s21=0.0;"
+               "int r1=min(r0+1," + to_string(rows - 1) + ");" + SP +
+               "float s10=0.0,s20=0.0,s11=0.0,s21=0.0;"
                "for(int q=0;q<" + COLS4 + ";q++){"
                "vec4 xa=texture2D(X,vec2((float(2*q)+0.5)/float(" + AXW + "),0.5));"
                "vec4 xb=texture2D(X,vec2((float(2*q+1)+0.5)/float(" + AXW + "),0.5));"
@@ -450,7 +464,8 @@ string matvec_q8_pair_swiglu(int rows, int cols, XFormat xf, bool inl, bool wrow
         "uniform sampler2D W1,W2,X;uniform float ws1,ws2;" + WD +
                kQzSl +
         "void main(){int t=int(gl_FragCoord.x);int r0=2*t;"
-        "int r1=min(r0+1," + to_string(rows - 1) + ");float s10=0.0,s20=0.0,s11=0.0,s21=0.0;"
+        "int r1=min(r0+1," + to_string(rows - 1) + ");" + SP +
+        "float s10=0.0,s20=0.0,s11=0.0,s21=0.0;"
         "for(int q=0;q<" + COLS4 + ";q++){"
         "vec4 x=X4Q(X,q*4," + AXW + ".0);"
         "vec4 c=texture2D(W1," + WR0 + ");vec4 w=c*255.0-128.0;"
@@ -795,7 +810,8 @@ string matvec_q8_add_pair(int rows, int cols, XFormat xf, bool inl, bool wrow) {
     // Two rows per fragment, so two scale rows: r0 even, r1 odd, exactly the
     // rows the packed residual texel carries.
     const string WD = wrow ? wrow_scale(rows) : "";
-    const string SC0 = wrow ? "wsr(r0)" : "ws", SC1 = wrow ? "wsr(min(r1," + to_string(rows - 1) + "))" : "ws";
+    const string SP = wrow ? "vec2 sc=wsr2(r0);" : "";
+    const string SC0 = wrow ? "sc.x" : "ws", SC1 = wrow ? "sc.y" : "ws";
     // Inline I16_2 decode, the form matvec_q8_pair already uses: the generic
     // X4Q helper takes its two texel fetches as macro arguments and VC4 compiles
     // that loop measurably slower.  r0 is always even and r1 always odd, so the
@@ -805,7 +821,7 @@ string matvec_q8_add_pair(int rows, int cols, XFormat xf, bool inl, bool wrow) {
         return "precision highp float;uniform sampler2D W,X,R;uniform float ws;" + WD +
                kDec16A + kDec16B
                + kEnc16Raw +
-               "void main(){int t=int(gl_FragCoord.x);int r0=2*t;int r1=r0+1;"
+               "void main(){int t=int(gl_FragCoord.x);int r0=2*t;int r1=r0+1;" + SP +
                "vec4 rc=texture2D(R,vec2((float(t)+0.5)/float(" + to_string(rw) + "),0.5));"
                "float res0=dA(rc),res1=dB(rc);"
                "float s0=0.0,s1=0.0;"
@@ -825,7 +841,7 @@ string matvec_q8_add_pair(int rows, int cols, XFormat xf, bool inl, bool wrow) {
     }
     return head(xf) + x_residual_glsl(XFormat::I16_2) +
         "uniform sampler2D W,X,R;uniform float ws;" + WD +
-        "void main(){int t=int(gl_FragCoord.x);int r0=2*t;int r1=r0+1;"
+        "void main(){int t=int(gl_FragCoord.x);int r0=2*t;int r1=r0+1;" + SP +
         "float res0=R1Q(R,r0," + to_string(rw) + ".0);"
         "float res1=R1Q(R,r1," + to_string(rw) + ".0);"
         "float s0=0.0,s1=0.0;"
