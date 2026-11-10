@@ -4428,3 +4428,10 @@ Two things were learned on the way and are worth keeping:
   cases: B2 and the two 64x64 pair cases, all at row 0), while every larger
   shape passed.  That was the second reason not to ship it: a probe case that
   fails for a reason nobody has explained is a defect, not a size limit.
+
+The obvious explanation - a 4x32 plane texture is too small or too narrow for
+VC4's TMU - was then tested and is **false**: A8-A12 in `probes/wrow_probe`
+read a 4x8, 4x16, 4x32, 4x320 and 64x32 plane one row at a time and every value
+comes back exact on both machines (33 cases, ALL PASS).  So the 64-row failure
+in the atlas build was in that build's uniform plumbing, not in the card's
+texture handling, and the size hypothesis is closed rather than left hanging.

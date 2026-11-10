@@ -20,6 +20,10 @@
 //   A4  A2 after a 160-iteration fetch loop         (long-shader scheduling)
 //   A5  A2 with a 640-wide plane texture            (width, not NPOT narrow)
 //   A6  A2 with the plane data in .ba instead of .rg (channel order)
+//   A8-A12  a plane texture on its own, at the sizes the engine uses (4 wide,
+//           8..320 rows) and 64 wide: does a small or narrow texture read back
+//           exactly?  (It does, on both machines - so a wrong scale is never
+//           "the texture is too small".)
 //   B1  the engine's own matvec_q8_add(640,640,...) with wrow, vs the CPU
 //   B2  the same with wrow=false, as the control
 //
@@ -651,6 +655,44 @@ static void compile_only(const char* name, const string& src) {
     glDeleteShader(sh);
 }
 
+// A texture read is tested on its own before any kernel is blamed.  This draws
+// one row of fragments over a plane of `n` texels and compares each against the
+// value the CPU wrote, so a small texture that VC4 misreads says so directly.
+static void k_plane_size(int w, int h, const char* name) {
+    vector<uint8_t> px((size_t)w * h * 4, 0);
+    vector<int> want(h);
+    for (int r = 0; r < h; ++r) {
+        const int v = 100 + r;                 // .rg, 16 bits
+        want[r] = v;
+        uint8_t* o = &px[(size_t)r * w * 4];
+        o[0] = (uint8_t)(v >> 8); o[1] = (uint8_t)v;
+    }
+    GLuint t = tex(w, h, px);
+    const string fs = "precision highp float;uniform sampler2D WS;"
+        "void main(){int r=int(gl_FragCoord.x);"
+        "vec4 c=texture2D(WS,vec2(" + std::to_string(0.5 / w) +
+        ",(float(r)+0.5)/" + std::to_string(h) + ".0));"
+        "gl_FragColor=vec4((c.r*65280.0+c.g*255.0)/(100.0+float(r)),0.0,0.0,1.0);}";
+    GLuint p = prog(fs);
+    if (!p) { printf("  %-22s LINK_FAIL\n", name); ++failures; return; }
+    out_begin(h);
+    glUseProgram(p);
+    glUniform1i(glGetUniformLocation(p, "WS"), 0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, t);
+    tri(p);
+    glFinish();
+    glReadPixels(0, 0, h, 1, GL_RGBA, GL_UNSIGNED_BYTE, got.data());
+    // the shader normalises by the expected value, so 255 means exact
+    int bad = 0;
+    for (int r = 0; r < h; ++r)
+        if (got[r * 4] != 255) ++bad;
+    printf("  %-22s %s  bad=%d/%d  first=%d\n", name, bad ? "FAIL" : "PASS", bad, h,
+           bad ? got[0] : 255);
+    if (bad) ++failures;
+    glDeleteProgram(p); glDeleteTextures(1, &t);
+}
+
 int main() {
     PFNGPD gpd = (PFNGPD)eglGetProcAddress("eglGetPlatformDisplayEXT");
     if (!gpd) { printf("no eglGetPlatformDisplayEXT\n"); return 1; }
@@ -707,6 +749,11 @@ int main() {
     k_pair(64, 64, false); k_pair(64, 64, true); k_pair(1440, 640, true);
     k_pair_fused(64, 64, false); k_pair_fused(64, 64, true);
     k_pair_fused(896, 640, true);      // feng's fused W13 shape
+    k_plane_size(4, 32, "A8 plane 4x32");
+    k_plane_size(4, 320, "A9 plane 4x320");
+    k_plane_size(4, 16, "A10 plane 4x16");
+    k_plane_size(64, 32, "A11 plane 64x32");
+    k_plane_size(4, 8, "A12 plane 4x8");
     compile_only("p2 64x64 wrow",      matvec_q8_p2(64, 64, true));
     compile_only("p2_add 64x64 wrow",  matvec_q8_p2_add(64, 64, XFormat::I16_2, true));
     compile_only("p2_add_p2 64x64 wrow", matvec_q8_p2_add_p2(64, 64, true));
