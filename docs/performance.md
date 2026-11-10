@@ -4373,23 +4373,26 @@ Prefill on the card is 13-16 s for the 17-byte prompt (1.1 s/token) because a
 file with planes prefills on the single-position path; decode settles at
 417-466 ms/token against q8's 380.
 
-## Two-position prefill for a per-row scale model: correct, slower (2026-11-10)
+## Two-position prefill for a per-row scale model: 15% faster, once it is warm (2026-11-10)
 
 The pair kernels got wrow variants (`matvec_q8_p2`, `matvec_q8_p2_add`,
-`matvec_q8_p2_add_p2`, `matvec_q8_gate2_p2`), so `Session::pair_ok()` can accept a
-model with planes.  The tokens are **byte-identical** to the single-position
-path on both machines, which is what the kernel comments promise.
+`matvec_q8_p2_add_p2`, `matvec_q8_gate2_p2`), so `pair_ok()` accepts a model with
+planes.  Tokens are byte-identical to the single-position path on both machines.
 
-It is also slower, so it stays off (`PAIR_WROW=1` enables it):
+| void.1 q8r, Pi Zero, 17-byte prompt | first prefill | warm prefill |
+|---|---:|---:|
+| single-position (`PAIR_WROW=0`) | 14.1 s | 8.36, 8.18 s |
+| two-position, wrow (default) | 15.9 s | **7.15, 6.97 s** |
 
-| void.1 q8r, Pi Zero, 17-byte prompt | prefill |
-|---|---:|
-| single-position (default) | 12.9, 12.9 s |
-| two-position, wrow | 13.7, 15.2 s |
+**The first numbers are a trap, and this entry first recorded them the wrong
+way.**  Comparing two modes on their first prefill measures which program set
+each one compiles - the pair path links the P2 kernels, the single path does
+not - and on VC4 that is seconds.  The first version of this entry concluded
+"correct but slower, 13.7-15.2 s against 12.9-12.9 s" from exactly that
+artefact, which is the mistake `engine.cpp` warns about under
+`PREFILL_REPEAT`.  Warm, the paired path wins by 15%, so it is the default and
+`PAIR_WROW=0` exists for the A/B.
 
-Three draws per layer explain it: `rmsnorm_pair2` plus the two `p2_split` passes
-the paired residual layout needs, and the gate draw now fetches two plane
-textures where the single-position kernel fetches one.  On a q8 model the same
-path is a win because it halves the weight traffic; with planes the margin is
-gone.  If the planes ever move to one atlas texture this should be re-measured
-before it is enabled.
+Startup still matters for a one-shot CLI run: the paired path pays about 1.8 s
+more compilation than the single path and never gets it back in 17 tokens.  A
+server that keeps one process pays it once.

@@ -421,16 +421,16 @@ GLuint Session::forward_gpu_hidden(int token, int pos, bool want_logits){
 bool Session::pair_ok() const {
         if (!gpu_layer_) return false;
         // The two-position kernels have wrow variants (one fragment is one row
-        // for both positions, so the plane read is a single fetch) and they
-        // produce byte-identical tokens, but they are a LOSS on the row-scale
-        // path: the pair path adds three draws per layer (rmsnorm_pair2 plus
-        // the two p2_split passes) and the gate draw now fetches two plane
-        // textures, which on VC4 costs more than the weight traffic it saves.
-        // Measured on a Pi Zero, void.1 q8r, 17-byte prompt: pair 13.7/15.2 s
-        // against single 12.9/12.9 s.  Off by default, PAIR_WROW=1 to measure.
+        // for both positions, so the plane read is a single fetch) and produce
+        // byte-identical tokens.  Measured with PREFILL_REPEAT on a Pi Zero,
+        // void.1 q8r, 17-byte prompt: warm prefill 7.0-7.2 s paired against
+        // 8.2-8.4 s single, so the paired path is the faster one.  Its first
+        // prefill is dearer (15.9 against 14.1 s) because it compiles the P2
+        // program set; that is startup, not per-token work.  PAIR_WROW=0 keeps
+        // the single path for an A/B inside one binary.
         {
                 const char* w = getenv("PAIR_WROW");
-                if (m_.row_scale && !(w && atoi(w) != 0)) return false;
+                if (m_.row_scale && w && atoi(w) == 0) return false;
         }
         const char* e = getenv("PREFILL_PAIR");
         if (e && strcmp(e, "0") == 0) return false;
