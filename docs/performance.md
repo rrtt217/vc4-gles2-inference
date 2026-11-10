@@ -4396,3 +4396,35 @@ artefact, which is the mistake `engine.cpp` warns about under
 Startup still matters for a one-shot CLI run: the paired path pays about 1.8 s
 more compilation than the single path and never gets it back in 17 tokens.  A
 server that keeps one process pays it once.
+
+## One small plane atlas is correct and buys nothing (2026-11-10, rejected)
+
+The per-row scale planes were folded into a few atlas textures (four texels wide,
+one texel used per row, 2048 rows per texture, a per-draw `woff` row offset and a
+`wsh` height), which cuts a token's plane binds from one per matrix to one per
+2048-row slab: 121 textures became 38 for void.1.  It is exact - the probe passes
+every kernel on Xe, and on the Pi every shape the engine actually uses (640,
+896, 1440 and 259 rows) - and it is **not in the tree**, because it does not pay:
+
+| void.1 q8r, Pi Zero, warm prefill | run 1 | run 2 |
+|---|---|---|
+| planes in 38 atlas textures | 7.02, 7.11 s | 7.48, 6.97 s |
+| one texture per matrix | 8.22, 7.07 s | 9.32, 7.08 s |
+
+The second repeat of each run agrees to 1% (7.0 s either way), so the bind count
+is not what prefill costs on this board - the first repeat is where the variance
+sits.  Complexity without a number is not worth carrying.
+
+Two things were learned on the way and are worth keeping:
+
+* **A 2D grid address is wrong on VC4 from the second grid row on.**  Addressing
+  the atlas as `(mod(t, W) + 0.5) / W, (floor(t / W) + 0.5) / H` is exact on Xe
+  and returns other rows' data on the card: B2/B4 and every C case in
+  `probes/wrow_probe` fail there with it, and pass with a constant column and a
+  row offset.  Whatever the driver is doing with `mod`/`floor` on a texture
+  coordinate, it is not what the GLSL says, so the atlas form that shipped in
+  the experiments keeps `u = 0.125` and varies only `v`.
+* **A 64-row toy shape still failed on the Pi** with that form (3 of 22 probe
+  cases: B2 and the two 64x64 pair cases, all at row 0), while every larger
+  shape passed.  That was the second reason not to ship it: a probe case that
+  fails for a reason nobody has explained is a defect, not a size limit.
