@@ -4435,3 +4435,24 @@ read a 4x8, 4x16, 4x32, 4x320 and 64x32 plane one row at a time and every value
 comes back exact on both machines (33 cases, ALL PASS).  So the 64-row failure
 in the atlas build was in that build's uniform plumbing, not in the card's
 texture handling, and the size hypothesis is closed rather than left hanging.
+
+### Where q8r ended up, after the four experiments (2026-11-10)
+
+The engine is commit 52b52c0 for everything below; the per-row plane layout and
+the two paired-row kernels that were tried on top of it are described in the two
+sections above and are not in the tree.
+
+| | Xe | Pi Zero |
+|---|---|---|
+| `probes/wrow_probe` (33 cases: plane fetches, per-row pairing, fused W13, two-position compile) | ALL PASS | ALL PASS |
+| void.1 q8r, `--prompt "Once upon a time,"`, greedy | ` in a small town named Harmonyville...` | ` in a small town` (24 tokens, identical to the single-position path) |
+| feng q8r, fused W13 **with** planes | `我是 feng，一个由个人开发者 jiaheng 独立开发训练的 AI。` | same text |
+| warm prefill, void.1 q8r, `PREFILL_REPEAT=3` | - | 7.0 s paired / 8.2 s single, 17-byte prompt |
+| decode, void.1 q8r | 16-18 ms/token | 415-430 ms/token |
+| `regression.sh` | ACCEPT (PPL 270.3170) | q8 pin `我是MiniMind，一个由jingyaogong` |
+| `shader_hashes.sh` | 117 programs, unchanged | - |
+
+Three things from the four experiments are in the tree (fused W13 reads its
+plane once and the split guard is gone; the two-position kernels have wrow and
+are the default for a row-scale model; the packer reports max|w|/median|w|).
+The fourth, one small plane atlas, is measured at no gain and left out.
