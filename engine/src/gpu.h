@@ -117,12 +117,17 @@ public:
     // LFM2 conv block.  The three in_proj row slices are drawn into their own
     // 1024-wide targets (a 3072-wide draw would exceed VC4's 2048), the gates
     // and the 3-tap convolution are elementwise passes, and the k-1 rows of
-    // state live in two targets per conv layer.
+    // state live in three rotating targets per conv layer: the newest row is
+    // written straight into the slot that held x[pos-k+1], which is dead, so a
+    // token costs no state copies at all (it used to be two fullscreen draws
+    // per conv layer).  conv_cur_ names the slot holding x[pos-1].
     void init_conv(int layers, int dim);
-    Target conv_t_b_, conv_t_c_, conv_t_x_, conv_gated_, conv_cv_, conv_y_;
-    std::vector<Target> conv_s0_, conv_s1_;
+    Target conv_t_b_, conv_t_c_, conv_t_x_, conv_cv_, conv_y_;
+    std::vector<Target> conv_state_;        // [layer*3 + slot]
+    std::vector<uint8_t> conv_cur_;         // newest slot per layer
     std::vector<GLuint> conv_k_tex_;
     int conv_texels_ = 0;
+    Target& conv_slot(int layer, int slot) { return conv_state_[(size_t)layer * 3 + slot]; }
     GLuint conv_mul(GLuint a, GLuint b, Target& out);
     GLuint conv3(GLuint s0, GLuint s1, GLuint g, GLuint ktex, Target& out);
     // Per-channel depthwise kernel as q16: width dim/2, height k, row t holds

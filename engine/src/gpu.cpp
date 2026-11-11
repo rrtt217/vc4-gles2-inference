@@ -206,22 +206,26 @@ void GPU::upload(Mat& m){
 
 void GPU::init_conv(int layers, int dim){
         const int tw = x_texels(dim, act_fmt_);
-        conv_s0_.assign(layers, Target());
-        conv_s1_.assign(layers, Target());
-        for (int l = 0; l < layers; ++l) {
-                // The state starts at zero; a texture's contents are undefined,
-                // so clear both rows through the FBO.
-                conv_s0_[l] = make_target(tw, 1);
-                conv_s1_[l] = make_target(tw, 1);
-        }
+        conv_state_.assign((size_t)layers * 3, Target());
+        conv_cur_.assign(layers, 0);
+        for (int l = 0; l < layers; ++l)
+                for (int s = 0; s < 3; ++s) {
+                        // The state starts at zero; a texture's contents are
+                        // undefined, so clear every slot through the FBO.
+                        conv_slot(l, s) = make_target(tw, 1);
+                }
         clear_conv_state();
-        conv_t_b_ = conv_t_c_ = conv_t_x_ = conv_gated_ = conv_cv_ = conv_y_ = Target();
+        conv_t_b_ = conv_t_c_ = conv_t_x_ = conv_cv_ = conv_y_ = Target();
         conv_texels_ = tw;
 }
 
 bool GPU::read_conv_state(int layer, int which, vector<uint8_t>& out){
-        if (layer < 0 || layer >= (int)conv_s0_.size() || conv_texels_ <= 0) return false;
-        const Target& t = which == 0 ? conv_s0_[layer] : conv_s1_[layer];
+        if (layer < 0 || (size_t)layer * 3 + 2 >= conv_state_.size() || conv_texels_ <= 0) return false;
+        // which 0 is x[pos-2] (the older row), which 1 is x[pos-1].  The slot
+        // that holds x[pos-1] is conv_cur_; the rotation writes forward, so the
+        // older row is the next slot around.
+        const int slot = which == 0 ? (conv_cur_[layer] + 2) % 3 : conv_cur_[layer];
+        const Target& t = conv_slot(layer, slot);
         if (t.tex == 0) return false;
         out.resize((size_t)conv_texels_ * 4);
         glFinish();
@@ -233,9 +237,14 @@ bool GPU::read_conv_state(int layer, int which, vector<uint8_t>& out){
 }
 
 bool GPU::write_conv_state(int layer, int which, const vector<uint8_t>& in){
-        if (layer < 0 || layer >= (int)conv_s0_.size() || conv_texels_ <= 0) return false;
+        if (layer < 0 || (size_t)layer * 3 + 2 >= conv_state_.size() || conv_texels_ <= 0) return false;
         if (in.size() != (size_t)conv_texels_ * 4) return false;
-        const Target& t = which == 0 ? conv_s0_[layer] : conv_s1_[layer];
+        // A reload puts the history where a fresh sequence would start: slot 0
+        // is x[pos-1] and slot 2 is x[pos-2], so the rotation continues from 0.
+        // Slot 1 is stale and is the first one the next token overwrites.
+        const int slot = which == 0 ? 2 : 0;
+        conv_cur_[layer] = 0;
+        const Target& t = conv_slot(layer, slot);
         if (t.tex == 0) return false;
         glBindTexture(GL_TEXTURE_2D, t.tex);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
@@ -248,18 +257,13 @@ void GPU::clear_conv_state(){
         // Alpha must be 0 too: I16_2 stores the second value in .ba, so a 1.0
         // alpha clear leaves that value at 255 (0.996) and the conv starts from
         // a state that is not zero -- measured as layer 0 cv = 62 instead of 0.
-        for (auto& v : conv_s0_) {
+        for (auto& v : conv_state_) {
                 if (!v.tex) continue;
                 bind_fbo(v.fbo);
                 glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
                 glClear(GL_COLOR_BUFFER_BIT);
         }
-        for (auto& v : conv_s1_) {
-                if (!v.tex) continue;
-                bind_fbo(v.fbo);
-                glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
-                glClear(GL_COLOR_BUFFER_BIT);
-        }
+        for (auto& c : conv_cur_) c = 0;
         // The clears bind FBOs behind the engine's back; a stale binding would
         // make the first draw of the next prefill read the wrong target.
         gl_state_forget_bindings();
@@ -346,11 +350,18 @@ GLuint GPU::conv_block(const Mat& in_b, const Mat& in_c, const Mat& in_x,
         matvec_to(in_b, xb, conv_t_b_);
         matvec_to(in_c, xb, conv_t_c_);
         matvec_to(in_x, xb, conv_t_x_);
-        const GLuint gated = conv_mul(conv_t_b_.tex, conv_t_x_.tex, conv_gated_);
-        const GLuint cv = conv3(conv_s0_[layer].tex, conv_s1_[layer].tex, gated,
+        // Three rotating state slots: conv_cur_ is x[pos-1], the slot one step
+        // further round is x[pos-2], and the third (x[pos-3]) is dead.  The
+        // gate's output *is* x[pos] for this layer, so it is written straight
+        // into that dead slot and the shift costs nothing.  Indices are
+        // distinct mod 3, so no draw reads a target another one writes.
+        const int cur = conv_cur_[layer];
+        const int prev = (cur + 2) % 3;
+        const int nxt = (cur + 1) % 3;
+        const GLuint gated = conv_mul(conv_t_b_.tex, conv_t_x_.tex, conv_slot(layer, nxt));
+        const GLuint cv = conv3(conv_slot(layer, prev).tex, conv_slot(layer, cur).tex, gated,
                                 conv_k_tex_[layer], conv_cv_);
-        conv_copy(conv_s1_[layer].tex, conv_s0_[layer]);   // shift: s0 <- s1
-        conv_copy(gated, conv_s1_[layer]);                 //        s1 <- gated
+        conv_cur_[layer] = (uint8_t)nxt;
         const GLuint y = conv_mul(conv_t_c_.tex, cv, conv_y_);
         matvec_add(out_proj, y, residual, out, act_fmt_);
         return out.tex;
