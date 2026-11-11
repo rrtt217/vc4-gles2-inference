@@ -2,10 +2,11 @@
 
 Two layers of format live in this repository, and they are easy to confuse:
 
-1. **What the engine loads — exactly one thing: an MMCF v2 container.**  See
+1. **What the engine loads — exactly one thing: an MMCF container.**  See
    [`checkpoint-container.md`](checkpoint-container.md).  `Model::load()`
    accepts `"MMCF"` and refuses everything else, naming the packer in the
-   message.
+   message.  Version 2 is dense, version 3 adds the mixture-of-experts block;
+   one reader takes both.
 2. **What the packer consumes — the legacy layouts.**  `Q8M1`, `Q8M2`,
    `I16M1`, `I16M2`, `Q4M1` and llama2.c fp32 are *conversion inputs*.  They
    are documented below because `engine/tools/mmcf_pack.py` reads them, not
@@ -20,6 +21,7 @@ container and the packer.
 | model | family | notes |
 |---|---|---|
 | MiniMind3 64M | Qwen3-style dense, tied embedding | 8 layers, 768 hidden, 2432 FFN, 8 Q / 4 KV heads, head_dim 96, vocab 6400, theta 1e6, per-head Q/K RMSNorm, ChatML + `<think>` |
+| MiniMind3-MoE 198M-A64M | Qwen3-MoE (container v3) | the same attention and tokenizer, FFN replaced by 4 experts of width 2432 and a 4x768 router, top-1 with a normalised gate; only one expert is read per token, so decode is dense-speed and the cost is 3x the memory |
 | MiniMind2 Small | Qwen-style | i16/q8/q4; weaker instruction following |
 | Supra2-100M | Qwen3-shaped | see `models/supra2` |
 | Feng30M | Llama-shaped | see `models/feng30m` |
@@ -224,7 +226,7 @@ the answers were wrong, which is the worst failure mode this tool has.
 | `rope_scaling` other than default | the container carries a theta and a half/plain convention, nothing else |
 | `head_dim` that is not `hidden_size / num_attention_heads` | both numbers — the engine derives the head width |
 | `tie_word_embeddings: false` with no `lm_head.weight` | refuses rather than use the embedding as the head |
-| a mixture-of-experts config (`num_local_experts`, `num_experts_per_tok`, …) | one dense FFN per layer, no routing |
+| a mixture-of-experts block that is not the supported one: Mixtral, a shared expert, `num_experts_per_tok > 1`, `norm_topk_prob: false`, or sparse layers that are not every layer | names the condition.  The one MoE the engine runs is the Qwen3-MoE layout with top-1 and a normalised gate (`minimind-3-moe`: 4 experts, expert_hidden 2432); see `docs/checkpoint-container.md`, "MoE" |
 
 What is still accepted but warned about: `sliding_window` (the attention is
 dense, so keep `SEQ` inside the window).  What is accepted because the engine

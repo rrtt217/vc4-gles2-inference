@@ -51,6 +51,47 @@ static inline float kv8_round(float v, float s){
     return q / s;
 }
 
+// The FFN matrices one layer dispatch uses: the dense layer's, or one expert's.
+// Pointers, so the CPU and GPU FFN paths below stay a single copy of the
+// chunked/whole logic.
+struct FfnMats {
+    const Mat* w1 = nullptr; const Mat* w3 = nullptr; const Mat* w2 = nullptr;
+    const Mat* w13 = nullptr;
+    const Mat* w1a = nullptr; const Mat* w3a = nullptr; const Mat* w2a = nullptr;
+    const Mat* w1b = nullptr; const Mat* w3b = nullptr; const Mat* w2b = nullptr;
+    int width = 0;
+};
+
+static FfnMats ffn_mats(const Model& m, int l, int expert){
+    FfnMats f;
+    if (expert >= 0) {
+        const Model::MoeExpert& e = m.moe[l][expert];
+        f.w1 = &e.w1; f.w3 = &e.w3; f.w2 = &e.w2;
+        f.w1a = &e.w1a; f.w3a = &e.w3a; f.w2a = &e.w2a;
+        f.w1b = &e.w1b; f.w3b = &e.w3b; f.w2b = &e.w2b;
+        f.width = m.moe_hidden;
+    } else {
+        f.w1 = &m.w1[l]; f.w3 = &m.w3[l]; f.w2 = &m.w2[l];
+        if (!m.w13.empty()) f.w13 = &m.w13[l];
+        if (!m.w1a.empty()) {
+            f.w1a = &m.w1a[l]; f.w3a = &m.w3a[l]; f.w2a = &m.w2a[l];
+            f.w1b = &m.w1b[l]; f.w3b = &m.w3b[l]; f.w2b = &m.w2b[l];
+        }
+        f.width = m.hidden;
+    }
+    return f;
+}
+
+// Top-1 routing.  norm_topk_prob is enforced by the loader, so the selected
+// expert's output is used with weight exactly 1.0 and the argmax of the router
+// logits is the whole decision (softmax is monotone).
+static int pick_expert(const vector<float>& gate){
+    int best = 0;
+    for (size_t i = 1; i < gate.size(); ++i)
+        if (gate[i] > gate[best]) best = (int)i;
+    return best;
+}
+
 Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
         gpu_layer_ = gpu_.gpu_layer_enabled();
         gpu_attn_ = gpu_layer_ || gpu_.gpu_attn_enabled();
@@ -286,49 +327,61 @@ vector<float> Session::forward(int token, int pos){
             vector<float> xbf = rms_norm(x1, m_.rms_ffn.data() + (size_t)l * m_.dim);
             if (getenv("STAGE_DUMP")) gpu_.dump_cpu_row(xbf, gpu_.act_fmt_, "xbf", 4096);
             vector<float> o2;
-            bool gpu_ffn = !m_.w1.empty();
+            int expert = -1;
+            if (m_.is_moe() && getenv("MOE_FIXED")) {
+                // Probe: skip the router and its read-back, pin one expert.
+                expert = atoi(getenv("MOE_FIXED"));
+            } else if (m_.is_moe()) {
+                vector<float> gate = gpu_.matvec(m_.router[l], xbf);
+                expert = pick_expert(gate);
+                if (getenv("MOE_DUMP"))
+                    cerr << "MOE l=" << l << " route=" << expert << " gate="
+                         << gate[0] << "," << gate[1] << "," << gate[2] << "," << gate[3] << "\n";
+            }
+            const FfnMats f = ffn_mats(m_, l, expert);
+            bool gpu_ffn = m_.is_moe() || !m_.w1.empty();
             if (getenv("CPU_FFN")) gpu_ffn = false;
             else if (getenv("GPU_FFN")) gpu_ffn = atoi(getenv("GPU_FFN")) != 0;
             if (!gpu_ffn) {
                 vector<float> h;
                 if (m_.ffn_chunked) {
-                    vector<float> h1 = gpu_.matvec(m_.w1a[l], xbf);
-                    vector<float> h3 = gpu_.matvec(m_.w3a[l], xbf);
+                    vector<float> h1 = gpu_.matvec(*f.w1a, xbf);
+                    vector<float> h3 = gpu_.matvec(*f.w3a, xbf);
                     vector<float> hh;
                     hh.reserve(2 * m_.ffn_chunk);
                     hh.insert(hh.end(), h1.begin(), h1.end());
                     hh.insert(hh.end(), h3.begin(), h3.end());
                     vector<float> ha = swiglu(hh, m_.ffn_chunk);
-                    h1 = gpu_.matvec(m_.w1b[l], xbf);
-                    h3 = gpu_.matvec(m_.w3b[l], xbf);
-                    hh.clear(); hh.reserve(2 * (m_.hidden - m_.ffn_chunk));
+                    h1 = gpu_.matvec(*f.w1b, xbf);
+                    h3 = gpu_.matvec(*f.w3b, xbf);
+                    hh.clear(); hh.reserve(2 * (f.width - m_.ffn_chunk));
                     hh.insert(hh.end(), h1.begin(), h1.end());
                     hh.insert(hh.end(), h3.begin(), h3.end());
-                    vector<float> hb = swiglu(hh, m_.hidden - m_.ffn_chunk);
-                    o2 = add_q16(gpu_.matvec(m_.w2a[l], ha), gpu_.matvec(m_.w2b[l], hb));
+                    vector<float> hb = swiglu(hh, f.width - m_.ffn_chunk);
+                    o2 = add_q16(gpu_.matvec(*f.w2a, ha), gpu_.matvec(*f.w2b, hb));
                 } else {
-                    if (!m_.w1.empty()) {
-                        vector<float> h1 = gpu_.matvec(m_.w1[l], xbf);
-                        vector<float> h3 = gpu_.matvec(m_.w3[l], xbf);
-                        h.reserve(2 * m_.hidden);
+                    if (f.w1->rows) {
+                        vector<float> h1 = gpu_.matvec(*f.w1, xbf);
+                        vector<float> h3 = gpu_.matvec(*f.w3, xbf);
+                        h.reserve(2 * f.width);
                         h.insert(h.end(), h1.begin(), h1.end());
                         h.insert(h.end(), h3.begin(), h3.end());
                     } else {
-                        h = gpu_.matvec(m_.w13[l], xbf);
+                        h = gpu_.matvec(*f.w13, xbf);
                     }
-                    o2 = gpu_.matvec(m_.w2[l], swiglu(h));
+                    o2 = gpu_.matvec(*f.w2, swiglu(h));
                 }
             } else {
                 GLuint xtex = gpu_.upload_input(xbf);
                 GLuint htex = 0;
                 if (m_.ffn_chunked) {
                     GLuint ha, hb;
-                    gpu_.ffn_split_chunked(m_.w1a[l], m_.w3a[l], m_.w1b[l], m_.w3b[l], xtex,
-                                           m_.ffn_chunk, m_.hidden - m_.ffn_chunk, ha, hb);
-                    o2 = add_q16(gpu_.matvec_from(m_.w2a[l], ha), gpu_.matvec_from(m_.w2b[l], hb));
-                } else if (!m_.w1.empty()) htex = gpu_.ffn_split(m_.w1[l], m_.w3[l], xtex, m_.hidden);
-                else htex = gpu_.ffn_fused(m_.w13[l], xtex, m_.hidden);
-                if (!m_.ffn_chunked) o2 = gpu_.matvec_from(m_.w2[l], htex);
+                    gpu_.ffn_split_chunked(*f.w1a, *f.w3a, *f.w1b, *f.w3b, xtex,
+                                           m_.ffn_chunk, f.width - m_.ffn_chunk, ha, hb);
+                    o2 = add_q16(gpu_.matvec_from(*f.w2a, ha), gpu_.matvec_from(*f.w2b, hb));
+                } else if (f.w1->rows) htex = gpu_.ffn_split(*f.w1, *f.w3, xtex, f.width);
+                else htex = gpu_.ffn_fused(*f.w13, xtex, f.width);
+                if (!m_.ffn_chunked) o2 = gpu_.matvec_from(*f.w2, htex);
             }
             x = add_q16(x1, o2);
             if (getenv("HIDDEN_DUMP")) gpu_.dump_cpu_row(x, gpu_.act_fmt_, "hidA", 4096);
@@ -367,18 +420,32 @@ GLuint Session::forward_gpu_hidden(int token, int pos, bool want_logits){
             if (getenv("STAGE_DUMP")) gpu_.dump_target(gpu_.xbf_, "xbf", 4096);
             if (pass_dup("rms_ffn")) xbf = gpu_.rmsnorm(x1, gpu_.rms_ffn_tex_[l], gpu_.xbf_);
             mark("rms_ffn", l);
+            int expert = -1;
+            if (m_.is_moe() && getenv("MOE_FIXED")) {
+                // Probe: skip the router and its read-back, pin one expert.
+                expert = atoi(getenv("MOE_FIXED"));
+            } else if (m_.is_moe()) {
+                // The route is a 4-value read-back: one sync per layer per
+                // token, the price of a discrete choice on a GLES2 pipeline.
+                vector<float> gate = gpu_.matvec_from(m_.router[l], xbf);
+                expert = pick_expert(gate);
+                if (getenv("MOE_DUMP"))
+                    cerr << "MOE l=" << l << " route=" << expert << " gate="
+                         << gate[0] << "," << gate[1] << "," << gate[2] << "," << gate[3] << "\n";
+            }
+            const FfnMats f = ffn_mats(m_, l, expert);
             if (m_.ffn_chunked) {
                 GLuint ha, hb;
-                gpu_.ffn_split_chunked(m_.w1a[l], m_.w3a[l], m_.w1b[l], m_.w3b[l], xbf,
-                                       m_.ffn_chunk, m_.hidden - m_.ffn_chunk, ha, hb);
+                gpu_.ffn_split_chunked(*f.w1a, *f.w3a, *f.w1b, *f.w3b, xbf,
+                                       m_.ffn_chunk, f.width - m_.ffn_chunk, ha, hb);
                 if (getenv("FFN_DUMP") && l == 0) {
                     gpu_.sync();
                     gpu_.dump_target(gpu_.ffn_h_a_, "ha", 8);
                     gpu_.dump_target(gpu_.ffn_h_b_, "hb", 8);
                 }
                 mark("ffn", l);
-                gpu_.matvec_add(m_.w2a[l], ha, x1, gpu_.hidden_a_, gpu_.ffn_fmt_);
-                gpu_.matvec_add(m_.w2b[l], hb, gpu_.hidden_a_.tex, gpu_.hidden_b_, gpu_.ffn_fmt_);
+                gpu_.matvec_add(*f.w2a, ha, x1, gpu_.hidden_a_, gpu_.ffn_fmt_);
+                gpu_.matvec_add(*f.w2b, hb, gpu_.hidden_a_.tex, gpu_.hidden_b_, gpu_.ffn_fmt_);
                 mark("w2", l);
                 h = gpu_.hidden_b_.tex;
             if (getenv("HIDDEN_DUMP")) {
@@ -387,10 +454,10 @@ GLuint Session::forward_gpu_hidden(int token, int pos, bool want_logits){
             }
             } else {
                 GLuint hffn;
-                if (!m_.w1.empty()) hffn = gpu_.ffn_split(m_.w1[l], m_.w3[l], xbf, m_.hidden);
-                else hffn = gpu_.ffn_fused(m_.w13[l], xbf, m_.hidden);
+                if (f.w1->rows) hffn = gpu_.ffn_split(*f.w1, *f.w3, xbf, f.width);
+                else hffn = gpu_.ffn_fused(*f.w13, xbf, f.width);
                 mark("ffn", l);
-                gpu_.matvec_add(m_.w2[l], hffn, x1, gpu_.hidden_a_, gpu_.ffn_fmt_);
+                gpu_.matvec_add(*f.w2, hffn, x1, gpu_.hidden_a_, gpu_.ffn_fmt_);
                 mark("w2", l);
                 h = gpu_.hidden_a_.tex;
             if (getenv("HIDDEN_DUMP")) {
@@ -420,6 +487,11 @@ GLuint Session::forward_gpu_hidden(int token, int pos, bool want_logits){
 // q4 / ACT8 / int16 / fused-w13 models keep the serial loop.
 bool Session::pair_ok() const {
         if (!gpu_layer_) return false;
+        // The paired path runs one FFN for two positions.  A MoE layer routes
+        // each position on its own (and the chosen expert is a host-side
+        // uniform), so the pair cannot share the FFN; the serial loop costs
+        // the ~17% measured in the comment above, not 2x.
+        if (m_.is_moe()) return false;
         // The two-position kernels have wrow variants (one fragment is one row
         // for both positions, so the plane read is a single fetch) and produce
         // byte-identical tokens.  Measured with PREFILL_REPEAT on a Pi Zero,

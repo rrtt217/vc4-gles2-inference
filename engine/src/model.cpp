@@ -101,6 +101,28 @@ void Model::materialize(Mat& m){
 }
 
 void Model::split_ffn(){
+        if (is_moe()) {
+                // The 2048-row texture/viewport limit applies to the expert FFN,
+                // not to the (unused) dense width.  Each expert is chunked on
+                // its own; the sliced Mats share the mapping, so this only adds
+                // texture descriptors.
+                if (moe_hidden <= 2048) return;
+                if (moe_hidden > 4096) { cerr << "expert hidden too large for two FFN chunks\n"; exit(1); }
+                ffn_chunked = true;
+                ffn_chunk = (moe_hidden + 1) / 2;
+                for (auto& layer : moe) {
+                        for (auto& e : layer) {
+                                e.w1a = slice_rows(e.w1, 0, ffn_chunk);
+                                e.w1b = slice_rows(e.w1, ffn_chunk, moe_hidden);
+                                e.w3a = slice_rows(e.w3, 0, ffn_chunk);
+                                e.w3b = slice_rows(e.w3, ffn_chunk, moe_hidden);
+                                e.w2a = slice_cols(e.w2, 0, ffn_chunk);
+                                e.w2b = slice_cols(e.w2, ffn_chunk, moe_hidden);
+                                e.w1 = Mat(); e.w3 = Mat(); e.w2 = Mat();
+                        }
+                }
+                return;
+        }
         if (hidden <= 2048) return;
         if (hidden > 4096) { cerr << "hidden too large for two FFN chunks\n"; exit(1); }
         ffn_chunked = true;
@@ -171,6 +193,24 @@ bool Model::quantize_q4_weights(const string& scope){
         bool attn = scope.empty() || scope == "all" || scope == "attn";
         bool ffn = scope.empty() || scope == "all" || scope == "ffn";
         bool ok = true;
+        if (ffn && is_moe()) {
+                // Before split_ffn() the whole expert is here, after it the two
+                // chunks are; quantize whichever exists.
+                for (auto& layer : moe) {
+                        for (auto& e : layer) {
+                                if (e.w1.rows) {
+                                        ok &= quantize_q4(e.w1); ok &= quantize_q4(e.w3);
+                                        ok &= quantize_q4(e.w2);
+                                }
+                                if (e.w1a.rows) {
+                                        ok &= quantize_q4(e.w1a); ok &= quantize_q4(e.w3a);
+                                        ok &= quantize_q4(e.w2a);
+                                        ok &= quantize_q4(e.w1b); ok &= quantize_q4(e.w3b);
+                                        ok &= quantize_q4(e.w2b);
+                                }
+                        }
+                }
+        }
         for (int l = 0; l < layers; ++l) {
             if (attn) { ok &= quantize_q4(qkv[l]); ok &= quantize_q4(wo[l]); }
             if (ffn) {
@@ -189,6 +229,12 @@ bool Model::quantize_q4_weights(const string& scope){
     }
 
 void Model::apply_precision(const string& layers_spec, const string& parts_spec){
+        if (is_moe()) {
+                cerr << "Q8_PARTS: per-part precision is not implemented for a MoE "
+                        "container; the expert FFNs carry their own precision from the "
+                        "packer (re-pack with --quant)\n";
+                exit(1);
+        }
         auto has_part = [&](const char* name) {
             if (parts_spec.empty() || parts_spec == "all") return true;
             string needle(name);
@@ -261,7 +307,7 @@ void Model::read_exact(void* p, size_t n){
 
 
 
-// MMCF v2 container.  Layout and field list: docs/checkpoint-container.md.
+// MMCF container.  Layout and field list: docs/checkpoint-container.md.
 namespace {
 struct MmcfRec {
         uint16_t id = 0;
@@ -270,9 +316,13 @@ struct MmcfRec {
         uint64_t off = 0, bytes = 0;
         uint32_t crc = 0;
         float scale = 0.0f;
+        uint16_t aux = 0;     // v3: the expert index; v2 records have none
 };
 
-constexpr int MMCF_REC_SIZE = 48;
+// v2 records are 48 B; v3 (expert tensors) is 64 B with `aux` in the tail
+// padding, so the v2 field offsets are unchanged.
+constexpr int MMCF_REC_V2 = 48;
+constexpr int MMCF_REC_V3 = 64;
 
 static uint16_t rd16(const uint8_t* p){ uint16_t v; memcpy(&v, p, 2); return v; }
 static uint32_t rd32(const uint8_t* p){ uint32_t v; memcpy(&v, p, 4); return v; }
@@ -283,7 +333,12 @@ static float rdf(const uint8_t* p){ float v; memcpy(&v, p, 4); return v; }
 bool Model::load_mmcf(){
         if (fsize_ < 64) { cerr << "mmcf: truncated header\n"; return false; }
         const uint8_t* h = fbase_;
-        if (rd16(h + 4) != 2) { cerr << "mmcf: unsupported version " << rd16(h + 4) << "\n"; return false; }
+        const uint16_t mmcf_version = rd16(h + 4);
+        if (mmcf_version != 2 && mmcf_version != 3) {
+                cerr << "mmcf: unsupported version " << mmcf_version << "\n";
+                return false;
+        }
+        const int rec_size = mmcf_version >= 3 ? MMCF_REC_V3 : MMCF_REC_V2;
         if (rd16(h + 6) != 64) { cerr << "mmcf: bad header size\n"; return false; }
         const uint32_t n_tensors = rd32(h + 8);
         const uint32_t caps = rd32(h + 12);
@@ -309,11 +364,15 @@ bool Model::load_mmcf(){
                 if (stored && stored != crc) { cerr << "mmcf: header crc mismatch\n"; return false; }
         }
         if ((uint64_t)meta_off + meta_size > fsize_ || data_off > fsize_ ||
-            data_off < (uint64_t)n_tensors * MMCF_REC_SIZE) { cerr << "mmcf: bad section offsets\n"; return false; }
+            data_off < (uint64_t)n_tensors * rec_size) { cerr << "mmcf: bad section offsets\n"; return false; }
 
         bool have_model = false, have_rope = false, have_quant = false;
         int scheme = 1, group = 0, split = 0;
-        const uint64_t table_off = data_off - (uint64_t)n_tensors * MMCF_REC_SIZE;
+        const uint64_t table_off = data_off - (uint64_t)n_tensors * rec_size;
+        if (table_off < (uint64_t)meta_off + meta_size || (table_off % 16) != 0) {
+                cerr << "mmcf: tensor table does not follow the metadata block\n";
+                return false;
+        }
         for (uint64_t p = meta_off; p + 8 <= (uint64_t)meta_off + meta_size; ) {
                 const uint16_t key = rd16(fbase_ + p), type = rd16(fbase_ + p + 2);
                 const uint32_t len = rd32(fbase_ + p + 4);
@@ -381,6 +440,11 @@ bool Model::load_mmcf(){
                                 chat_template = chat_templates.front().second;
                 } else if (key == 12 && type == 1 && len >= 1) {
                         res_q24 = payload[0] == 1;
+                } else if (key == 13 && type == 1 && len >= 16) {
+                        experts = (int)rd32(payload);
+                        top_k = (int)rd32(payload + 4);
+                        moe_hidden = (int)rd32(payload + 8);
+                        moe_norm_topk = (rd32(payload + 12) & 1) != 0;
                 } else if (key == 11 && type == 1 && len >= 4) {
                         float e; memcpy(&e, payload, 4);
                         if (e > 0.0f) { rms_eps = e; rms_eps_stated = true; }
@@ -403,12 +467,13 @@ bool Model::load_mmcf(){
         vector<MmcfRec> recs;
         recs.reserve(n_tensors);
         for (uint32_t i = 0; i < n_tensors; ++i) {
-                const uint8_t* r = fbase_ + table_off + (uint64_t)i * MMCF_REC_SIZE;
+                const uint8_t* r = fbase_ + table_off + (uint64_t)i * rec_size;
                 MmcfRec m;
                 m.id = rd16(r); m.dtype = r[2]; m.flags = r[3]; m.group = r[4];
                 m.rows = rd32(r + 6); m.cols = rd32(r + 10);
                 m.off = rd64(r + 14); m.bytes = rd64(r + 22);
                 m.crc = rd32(r + 30); m.scale = rdf(r + 34);
+                m.aux = mmcf_version >= 3 ? rd16(r + 38) : 0;
                 if (data_off + m.off + m.bytes > fsize_) { cerr << "mmcf: tensor " << i << " overruns the file\n"; return false; }
                 recs.push_back(m);
         }
@@ -436,13 +501,17 @@ bool Model::load_mmcf(){
         };
 
         // q4 matrices arrive as three tensors (nibbles, group scale, group min)
-        // sharing one id with `part` in the top two bits.
+        // sharing one id with `part` in the top two bits.  `aux` (the expert) is
+        // part of the key: without it four experts would resolve to one Mat.
         struct Q4Parts { const MmcfRec* body = nullptr; const MmcfRec* scl = nullptr; const MmcfRec* mn = nullptr; };
-        std::map<uint16_t, Q4Parts> q4map;
+        std::map<uint32_t, Q4Parts> q4map;
         // A q8 matrix may carry one f32 scale per output row instead of a
         // single per-matrix scale (part 3).  void.1 needs it: one scale leaves
         // 58-66% of layer 0's FFN weights at zero.
-        std::map<uint16_t, const MmcfRec*> rowmap;
+        std::map<uint32_t, const MmcfRec*> rowmap;
+        auto rec_key = [](const MmcfRec& r) -> uint32_t {
+                return ((uint32_t)r.aux << 16) | (uint32_t)(r.id & 0x3FFF);
+        };
 
         auto as_mat = [&](const MmcfRec& r, Mat& m) { if (r.dtype == 1) as_i16(r, m); else as_q8(r, m); };
 
@@ -450,15 +519,23 @@ bool Model::load_mmcf(){
         layers_qkv.resize(layers); layers_wo.resize(layers); layers_w2.resize(layers);
         if (split) { layers_w1.resize(layers); layers_w3.resize(layers); }
         else layers_w13.resize(layers);
+        vector<Mat> layers_router;
+        vector<vector<MoeExpert>> layers_moe;
+        if (experts > 0) {
+                layers_router.resize(layers);
+                layers_moe.resize(layers);
+                for (auto& v : layers_moe) v.resize(experts);
+        }
 
         for (const MmcfRec& r : recs) {
                 const int base = r.id & 0xFF, layer = (r.id >> 8) & 0x3F, part = r.id >> 14;
+                const int expert = (int)r.aux;
                 if (part == 3) {   // per-row q8 scale plane
-                        rowmap[r.id & 0x3FFF] = &r;
+                        rowmap[rec_key(r)] = &r;
                         continue;
                 }
                 if (part != 0) {   // q4 scale/min plane
-                        Q4Parts& q = q4map[r.id & 0x3FFF];
+                        Q4Parts& q = q4map[rec_key(r)];
                         if (part == 1) q.scl = &r; else q.mn = &r;
                         continue;
                 }
@@ -468,8 +545,34 @@ bool Model::load_mmcf(){
                              << " has unknown dtype " << (int)r.dtype << "\n";
                         return false;
                 }
+                if (r.aux != 0 && !(experts > 0 && (base == 0x12 || base == 0x13 || base == 0x15))) {
+                        cerr << "mmcf: tensor 0x" << std::hex << r.id << std::dec
+                             << " carries expert index " << expert << " on a kind that "
+                             << "cannot be per-expert\n";
+                        return false;
+                }
                 if (r.dtype == 4) {   // q4 body: remember it, resolve after the loop
-                        q4map[r.id].body = &r;
+                        q4map[rec_key(r)].body = &r;
+                        continue;
+                }
+                if (base == 0x16) {   // MoE router
+                        if (layer >= layers || expert != 0) {
+                                cerr << "mmcf: router tensor for layer " << layer << "\n";
+                                return false;
+                        }
+                        as_mat(r, layers_router[layer]);
+                        continue;
+                }
+                if (experts > 0 && (base == 0x12 || base == 0x13 || base == 0x15)) {
+                        if (expert >= experts || layer >= layers) {
+                                cerr << "mmcf: expert " << expert << " of layer " << layer
+                                     << " is outside the block (" << experts << " experts, "
+                                     << layers << " layers)\n";
+                                return false;
+                        }
+                        MoeExpert& e = layers_moe[layer][expert];
+                        Mat* dst = base == 0x12 ? &e.w1 : base == 0x13 ? &e.w3 : &e.w2;
+                        as_mat(r, *dst);
                         continue;
                 }
                 switch (base) {
@@ -507,8 +610,23 @@ bool Model::load_mmcf(){
         for (auto& kv : rowmap) {
                 const MmcfRec& r = *kv.second;
                 const int kind = r.id & 0xFF, layer = (r.id >> 8) & 0x3F;
+                const int expert = (int)(kv.first >> 16);
+                // aux = 0 is the first expert, so "is this an expert tensor" is
+                // decided by the container being MoE and the kind, never by aux.
+                const bool is_expert = experts > 0 &&
+                        (kind == 0x12 || kind == 0x13 || kind == 0x15);
                 Mat* m = nullptr;
-                if (kind == 0x10 && layer < (int)layers_qkv.size()) m = &layers_qkv[layer];
+                if (is_expert) {
+                        if (layer >= layers || expert >= experts) {
+                                cerr << "mmcf: row scale plane for expert " << expert
+                                     << " of layer " << layer << " is out of range\n";
+                                return false;
+                        }
+                        MoeExpert& e = layers_moe[layer][expert];
+                        if (kind == 0x12) m = &e.w1;
+                        else if (kind == 0x13) m = &e.w3;
+                        else if (kind == 0x15) m = &e.w2;
+                } else if (kind == 0x10 && layer < (int)layers_qkv.size()) m = &layers_qkv[layer];
                 else if (kind == 0x11 && layer < (int)layers_wo.size()) m = &layers_wo[layer];
                 else if (kind == 0x12 && layer < (int)layers_w1.size()) m = &layers_w1[layer];
                 else if (kind == 0x13 && layer < (int)layers_w3.size()) m = &layers_w3[layer];
@@ -517,7 +635,7 @@ bool Model::load_mmcf(){
                 else if (kind == 0x20 && layer < (int)logits_tiles.size()) m = &logits_tiles[layer];
                 if (!m || m->rows != (int)r.rows || r.bytes != (size_t)r.rows * 4) {
                         cerr << "mmcf: row scale plane 0x" << std::hex << r.id << std::dec
-                             << " does not match its matrix\n";
+                             << " expert " << expert << " does not match its matrix\n";
                         return false;
                 }
                 // A fused W13 (id 0x14, split=0) is the one matrix whose two
@@ -529,10 +647,13 @@ bool Model::load_mmcf(){
         }
         row_scale = !rowmap.empty();
         for (auto& kv : q4map) {
-                const uint16_t id = kv.first;
+                const uint32_t key = kv.first;
+                const uint16_t id = (uint16_t)(key & 0xFFFF);
+                const int expert = (int)(key >> 16);
                 Q4Parts& q = kv.second;
                 if (!q.body || !q.scl || !q.mn) {
-                        cerr << "mmcf: incomplete q4 tensor 0x" << std::hex << id << std::dec << "\n";
+                        cerr << "mmcf: incomplete q4 tensor 0x" << std::hex << id << std::dec
+                             << " expert " << expert << "\n";
                         return false;
                 }
                 Mat m;
@@ -554,6 +675,18 @@ bool Model::load_mmcf(){
                         m.ext_min4 = (const int16_t*)(fbase_ + data_off + q.mn->off);
                 }
                 const int kind = id & 0xFF, layer = (id >> 8) & 0x3F;
+                if (experts > 0 && (kind == 0x12 || kind == 0x13 || kind == 0x15)) {
+                        if (layer >= layers || expert >= experts) {
+                                cerr << "mmcf: q4 expert tensor 0x" << std::hex << id
+                                     << std::dec << " expert " << expert << " has no home\n";
+                                return false;
+                        }
+                        MoeExpert& e = layers_moe[layer][expert];
+                        if (kind == 0x12) e.w1 = m;
+                        else if (kind == 0x13) e.w3 = m;
+                        else e.w2 = m;
+                        continue;
+                }
                 // only the vector that exists for this file's `split` flag is
                 // sized, so index by its own size (an empty vector would be UB)
                 if (kind == 0x10 && layer < (int)layers_qkv.size()) layers_qkv[layer] = m;
@@ -563,12 +696,80 @@ bool Model::load_mmcf(){
                 else if (kind == 0x14 && layer < (int)layers_w13.size()) layers_w13[layer] = m;
                 else if (kind == 0x15 && layer < (int)layers_w2.size()) layers_w2[layer] = m;
         }
+        if (experts > 0) {
+                // What the runtime has: one router per layer, top-1 with a
+                // normalised gate (so the selected expert is used with weight
+                // 1.0), every layer sparse, expert FFNs as w1/w3/w2 pairs.
+                if (top_k != 1) {
+                        cerr << "mmcf: top_k " << top_k << " is not implemented; the "
+                             << "engine routes top-1\n";
+                        return false;
+                }
+                if (!moe_norm_topk) {
+                        cerr << "mmcf: the MoE gate is not normalised (norm_topk_prob); "
+                             << "top-1 without it needs the expert scaled by its softmax "
+                             << "weight, which the runtime does not apply\n";
+                        return false;
+                }
+                if (!split) {
+                        cerr << "mmcf: MoE container with a fused W13; expert FFNs are "
+                             << "w1/w3/w2\n";
+                        return false;
+                }
+                if (moe_hidden <= 0 || moe_hidden > 4096) {
+                        cerr << "mmcf: expert FFN width " << moe_hidden << " is out of range\n";
+                        return false;
+                }
+                for (int l = 0; l < layers; ++l) {
+                        if (layers_router[l].rows != experts || layers_router[l].cols != dim) {
+                                cerr << "mmcf: layer " << l << " router is "
+                                     << layers_router[l].rows << "x" << layers_router[l].cols
+                                     << ", the block wants " << experts << "x" << dim << "\n";
+                                return false;
+                        }
+                        for (int e = 0; e < experts; ++e) {
+                                const MoeExpert& x = layers_moe[l][e];
+                                if (!x.w1.rows || !x.w3.rows || !x.w2.rows) {
+                                        cerr << "mmcf: layer " << l << " expert " << e
+                                             << " is incomplete (w1/w3/w2)\n";
+                                        return false;
+                                }
+                                if (x.w1.rows != moe_hidden || x.w1.cols != dim ||
+                                    x.w3.rows != moe_hidden || x.w3.cols != dim ||
+                                    x.w2.rows != dim || x.w2.cols != moe_hidden) {
+                                        cerr << "mmcf: layer " << l << " expert " << e
+                                             << " has the wrong shape\n";
+                                        return false;
+                                }
+                        }
+                }
+                for (int l = 0; l < layers; ++l) {
+                        if (layers_qkv[l].rows == 0 || layers_wo[l].rows == 0) {
+                                cerr << "mmcf: layer " << l << " is missing qkv/wo\n";
+                                return false;
+                        }
+                }
+        } else {
+                for (const MmcfRec& r : recs) {
+                        const int base = r.id & 0xFF;
+                        if (base == 0x16) {
+                                cerr << "mmcf: a router tensor in a container without the "
+                                     << "MoE metadata (key 13)\n";
+                                return false;
+                        }
+                }
+        }
         for (int l = 0; l < layers; ++l) {
                 qkv.push_back(layers_qkv[l]);
                 wo.push_back(layers_wo[l]);
                 if (split) { w1.push_back(layers_w1[l]); w3.push_back(layers_w3[l]); }
                 else w13.push_back(layers_w13[l]);
                 w2.push_back(layers_w2[l]);
+        }
+        if (experts > 0) {
+                router = std::move(layers_router);
+                moe = std::move(layers_moe);
+                w1.clear(); w3.clear(); w2.clear(); w13.clear();
         }
         if (getenv("MMCF_DEBUG")) {
                 cerr << "MMCF dim=" << dim << " layers=" << layers << " hidden=" << hidden

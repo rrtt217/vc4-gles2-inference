@@ -27,6 +27,7 @@ DT_F32, DT_I16, DT_Q8I8, DT_Q4 = 0, 1, 3, 4
 T_EMB, T_EMB_SCALE, T_RMS_ATT, T_RMS_FFN, T_RMS_FINAL = 1, 2, 3, 4, 5
 T_Q_NORM, T_K_NORM = 6, 7
 T_QKV, T_WO, T_W1, T_W3, T_W13, T_W2 = 0x10, 0x11, 0x12, 0x13, 0x14, 0x15
+T_ROUTER = 0x16   # the per-layer MoE gate: rows = experts, cols = dim
 T_LOGITS = 0x20
 T_EMB_I16 = 8
 
@@ -123,7 +124,6 @@ def check_source(cfg, hdr):
         'falcon': "the Falcon block (parallel attention/FFN with LayerNorm, alibi or multiquery)",
         'gemma': "the Gemma block (a 256k vocabulary and a scaled embedding)",
         'mixtral': "a mixture-of-experts block",
-        'qwen3_moe': "a mixture-of-experts block",
     }
     for key, what in blocks.items():
         if kind == key or kind.startswith(key + '_') or key in arch.lower():
@@ -138,13 +138,45 @@ def check_source(cfg, hdr):
            if '.experts.' in k or 'block_sparse_moe' in k or '.router.' in k
            or k.endswith('gate_inp.weight')]
     if moe:
-        raise SystemExit(
-            "%s: the checkpoint has mixture-of-experts tensors (%s%s).  The engine "
-            "runs one dense FFN per layer; there is no routing path."
-            % (arch, ', '.join(sorted(moe)[:2]), ', ...' if len(moe) > 2 else ''))
+        # One MoE block is implemented: the Qwen3-MoE layout, every layer
+        # sparse, one router per layer, top-1 with a normalised gate (so the
+        # selected expert's output is used with weight exactly 1.0), no shared
+        # expert.  Everything else stops here, where the reason can name the
+        # model: a wrong MoE is a checkpoint that packs and answers nonsense.
+        if kind != 'qwen3_moe' and 'qwen3moe' not in arch.lower():
+            raise SystemExit(
+                "%s: the checkpoint has mixture-of-experts tensors (%s%s), but the "
+                "engine implements one MoE block - the Qwen3-MoE layout.  See "
+                "docs/checkpoint-container.md."
+                % (arch, ', '.join(sorted(moe)[:2]), ', ...' if len(moe) > 2 else ''))
+        n_exp = int(cfg.get('num_experts') or 0)
+        top_k = int(cfg.get('num_experts_per_tok') or 0)
+        if n_exp < 2:
+            raise SystemExit("%s: expert tensors but num_experts=%r"
+                             % (arch, cfg.get('num_experts')))
+        if top_k != 1:
+            raise SystemExit(
+                "%s: num_experts_per_tok is %r and the engine routes top-1 only.  "
+                "A top-k>1 model needs a weighted sum of k expert FFNs, which the "
+                "runtime does not have." % (arch, top_k))
+        if not cfg.get('norm_topk_prob'):
+            raise SystemExit(
+                "%s: norm_topk_prob is false, so the expert output would have to be "
+                "scaled by its softmax gate; the runtime applies weight 1.0." % arch)
+        if cfg.get('shared_expert_intermediate_size') or any('shared_expert' in k for k in hdr):
+            raise SystemExit("%s: this MoE has a shared expert; the engine's block "
+                             "is routed experts only." % arch)
+        if int(cfg.get('decoder_sparse_step', 1) or 1) != 1 or (cfg.get('mlp_only_layers') or []):
+            raise SystemExit(
+                "%s: sparse layers are not every layer (decoder_sparse_step=%r, "
+                "mlp_only_layers=%r); the container is all-MoE or all-dense."
+                % (arch, cfg.get('decoder_sparse_step'), cfg.get('mlp_only_layers')))
+        if not int(cfg.get('moe_intermediate_size') or 0):
+            raise SystemExit("%s: the expert FFN width (moe_intermediate_size) is "
+                             "missing" % arch)
     moe_cfg = [k for k in ('num_experts', 'num_local_experts', 'n_routed_experts',
                            'moe_layer_freq', 'num_experts_per_tok') if cfg.get(k)]
-    if moe_cfg:
+    if moe_cfg and not moe:
         print("note: config declares %s but the checkpoint has no expert tensors; "
               "treating it as dense" % ', '.join(moe_cfg))
     biases = sorted(k for k in hdr if k.endswith('.bias'))
@@ -184,9 +216,12 @@ def check_source(cfg, hdr):
             'model.layers.0.input_layernorm.weight',
             'model.layers.0.post_attention_layernorm.weight',
             'model.layers.0.self_attn.q_proj.weight',
-            'model.layers.0.self_attn.o_proj.weight',
-            'model.layers.0.mlp.gate_proj.weight',
-            'model.layers.0.mlp.down_proj.weight']
+            'model.layers.0.self_attn.o_proj.weight']
+    need += (['model.layers.0.mlp.gate.weight',
+              'model.layers.0.mlp.experts.0.gate_proj.weight',
+              'model.layers.0.mlp.experts.0.down_proj.weight'] if moe else
+             ['model.layers.0.mlp.gate_proj.weight',
+              'model.layers.0.mlp.down_proj.weight'])
     missing = [n for n in need if n not in hdr]
     if missing:
         raise SystemExit(
@@ -246,9 +281,42 @@ def load_minimind(model_dir, seq=512):
     wk = np.stack([get(f'model.layers.{l}.self_attn.k_proj.weight') for l in range(layers)])
     wv = np.stack([get(f'model.layers.{l}.self_attn.v_proj.weight') for l in range(layers)])
     wo = np.stack([get(f'model.layers.{l}.self_attn.o_proj.weight') for l in range(layers)])
-    w1 = np.stack([get(f'model.layers.{l}.mlp.gate_proj.weight') for l in range(layers)])
-    w2 = np.stack([get(f'model.layers.{l}.mlp.down_proj.weight') for l in range(layers)])
-    w3 = np.stack([get(f'model.layers.{l}.mlp.up_proj.weight') for l in range(layers)])
+    # A mixture-of-experts checkpoint has no dense mlp.{gate,down,up}_proj at
+    # all: the FFN lives under mlp.experts.E.* and the router under mlp.gate.
+    # check_source() has already refused every shape this reader cannot carry.
+    is_moe = any('.experts.' in k for k in hdr)
+    moe = None
+    expert_w1 = expert_w2 = expert_w3 = router = None
+    if is_moe:
+        n_exp = int(cfg['num_experts'])
+        moe_hidden = int(cfg['moe_intermediate_size'])
+        expert_w1 = [[get(f'model.layers.{l}.mlp.experts.{e}.gate_proj.weight')
+                      for e in range(n_exp)] for l in range(layers)]
+        expert_w2 = [[get(f'model.layers.{l}.mlp.experts.{e}.down_proj.weight')
+                      for e in range(n_exp)] for l in range(layers)]
+        expert_w3 = [[get(f'model.layers.{l}.mlp.experts.{e}.up_proj.weight')
+                      for e in range(n_exp)] for l in range(layers)]
+        router = np.stack([get(f'model.layers.{l}.mlp.gate.weight')
+                           for l in range(layers)])
+        for l in range(layers):
+            for e in range(n_exp):
+                for arr, shape, what in ((expert_w1[l][e], (moe_hidden, dim), 'gate_proj'),
+                                         (expert_w3[l][e], (moe_hidden, dim), 'up_proj'),
+                                         (expert_w2[l][e], (dim, moe_hidden), 'down_proj')):
+                    if arr.shape != shape:
+                        raise SystemExit(
+                            "layer %d expert %d %s is %s, the block wants %s"
+                            % (l, e, what, list(arr.shape), list(shape)))
+        if router.shape != (layers, n_exp, dim):
+            raise SystemExit("router is %s, expected %s"
+                             % (list(router.shape), [layers, n_exp, dim]))
+        moe = dict(n_experts=n_exp, top_k=int(cfg['num_experts_per_tok']),
+                   hidden=moe_hidden, norm_topk=bool(cfg.get('norm_topk_prob')))
+        w1 = w2 = w3 = None
+    else:
+        w1 = np.stack([get(f'model.layers.{l}.mlp.gate_proj.weight') for l in range(layers)])
+        w2 = np.stack([get(f'model.layers.{l}.mlp.down_proj.weight') for l in range(layers)])
+        w3 = np.stack([get(f'model.layers.{l}.mlp.up_proj.weight') for l in range(layers)])
     rms_att = np.stack([get(f'model.layers.{l}.input_layernorm.weight') for l in range(layers)])
     rms_ffn = np.stack([get(f'model.layers.{l}.post_attention_layernorm.weight') for l in range(layers)])
     rms_final = get('model.norm.weight')
@@ -260,7 +328,9 @@ def load_minimind(model_dir, seq=512):
                 emb=emb, rms_att=rms_att, rms_ffn=rms_ffn, rms_final=rms_final,
                 wq=wq, wk=wk, wv=wv, wo=wo, w1=w1, w2=w2, w3=w3, wcls=wcls,
                 theta=theta, half=half, qk_norm=1 if qk else 0,
-                q_norm=q_norm, k_norm=k_norm, untied='lm_head.weight' in hdr)
+                q_norm=q_norm, k_norm=k_norm, untied='lm_head.weight' in hdr,
+                moe=moe, router=router, expert_w1=expert_w1, expert_w2=expert_w2,
+                expert_w3=expert_w3)
 
 
 def load_llama2c(path):
@@ -392,9 +462,21 @@ def residual_peaks(m, seq=8):
                     out[t, hh] = pr @ v[: t + 1, kh]
             x1 = x + out.reshape(T, dim) @ m['wo'][l].T
             h2 = x1 / np.sqrt((x1 * x1).mean(-1, keepdims=True) + eps) * fn
-            g = h2 @ m['w1'][l].T
-            u = h2 @ m['w3'][l].T
-            x = x1 + ((g / (1 + np.exp(-g))) * u) @ m['w2'][l].T
+            if m.get('moe'):
+                # Top-1 with a normalised gate is exactly the selected expert's
+                # FFN (weight 1.0), so the router only has to pick the expert.
+                scores = h2 @ m['router'][l].T
+                for t in range(T):
+                    e = int(np.argmax(scores[t]))
+                    w1e, w3e, w2e = (m['expert_w1'][l][e], m['expert_w3'][l][e],
+                                     m['expert_w2'][l][e])
+                    g = h2[t:t + 1] @ w1e.T
+                    u = h2[t:t + 1] @ w3e.T
+                    x[t] = x1[t] + ((g / (1 + np.exp(-g))) * u) @ w2e.T
+            else:
+                g = h2 @ m['w1'][l].T
+                u = h2 @ m['w3'][l].T
+                x = x1 + ((g / (1 + np.exp(-g))) * u) @ m['w2'][l].T
             mx = float(np.abs(x).max())
             if not np.isfinite(mx):
                 raise SystemExit("residual calibration produced %s at layer %d; the "
@@ -450,11 +532,20 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
         m['dim'], m['hidden'], m['layers'], m['heads'], m['kv'], m['vocab'], m['seq'])
     head_dim = dim // heads
     qk = int(m.get('qk_norm', 0))
-    split = 1 if 2 * hidden > 2048 else 0
+    moe = m.get('moe')
+    # The FFN width that is written to the file is the expert width for a MoE
+    # container: the dense mlp does not exist there.
+    ffn_w = moe['hidden'] if moe else hidden
+    split = 1 if 2 * ffn_w > 2048 else 0
     meta = dict(dim=dim, hidden=hidden, layers=layers, heads=heads, kv_heads=kv,
                 vocab=vocab, seq=seq, head_dim=head_dim,
                 theta=float(m['theta']), half=bool(m['half']), qk_norm=bool(qk),
                 scheme=scheme, group=(32 if scheme == 'q4' else 0), split=bool(split))
+    if moe:
+        meta['experts'] = int(moe['n_experts'])
+        meta['top_k'] = int(moe['top_k'])
+        meta['moe_hidden'] = int(moe['hidden'])
+        meta['norm_topk'] = bool(moe['norm_topk'])
     # One q8 scale per matrix spends its 127 levels on the largest weight, so a
     # matrix whose rows differ by 500:1 keeps 127/500 of its detail and voids
     # most small weights to zero (void.1 layer 0: 58-66% of the FFN).  Say which
@@ -494,7 +585,7 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
         q, s = i16_pair(w)
         return q8mat(q.astype(np.float32) * s)
 
-    def q8_row(w):
+    def q8_per_row(w):
         """One scale per output row instead of one per matrix.
 
         A 640x1440 matrix whose weights span 500:1 loses 58-66% of its entries
@@ -533,37 +624,49 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
         T.append((T_Q_NORM, DT_F32, layers, head_dim, 0, f32(m['q_norm']), 0.0))
         T.append((T_K_NORM, DT_F32, layers, head_dim, 0, f32(m['k_norm']), 0.0))
 
-    def mat(tid, layer, w):
+    def mat(tid, layer, w, aux=0):
         rows, cols = int(w.shape[0]), int(w.shape[1])
         base = tid | (layer << 8)
         if scheme == 'i16':
             q, s = i16_pair(w)
-            T.append((base, DT_I16, rows, cols, 0, q.astype('<i2').tobytes(), float(s)))
+            T.append((base, DT_I16, rows, cols, 0, q.astype('<i2').tobytes(), float(s), aux))
         elif scheme == 'q8' and q8_row:
-            q, unit, srow = q8_row(w)
-            T.append((base, DT_Q8I8, rows, cols, 0, q.tobytes(), float(unit)))
+            q, unit, srow = q8_per_row(w)
+            T.append((base, DT_Q8I8, rows, cols, 0, q.tobytes(), float(unit), aux))
             # part 3 is the per-row plane: one f32 per output row, the row's
             # scale divided by the matrix unit the record already carries.
             T.append((base | (3 << 14), DT_F32, rows, 1, 0,
-                      (srow / unit).astype('<f4').tobytes(), 0.0))
+                      (srow / unit).astype('<f4').tobytes(), 0.0, aux))
         elif scheme == 'q8':
             q, s = q8_from_i16(w)
-            T.append((base, DT_Q8I8, rows, cols, 0, q.tobytes(), float(s)))
+            T.append((base, DT_Q8I8, rows, cols, 0, q.tobytes(), float(s), aux))
         else:
             packed, s16, mn, ps, groups = q4mat(np.asarray(w, np.float32))
-            T.append((base, DT_Q4, rows, cols, 0, packed.tobytes(), float(ps)))
-            T.append((base | (1 << 14), DT_I16, rows, groups, 0, s16.tobytes(), 0.0))
-            T.append((base | (2 << 14), DT_I16, rows, groups, 0, mn.tobytes(), 0.0))
+            T.append((base, DT_Q4, rows, cols, 0, packed.tobytes(), float(ps), aux))
+            T.append((base | (1 << 14), DT_I16, rows, groups, 0, s16.tobytes(), 0.0, aux))
+            T.append((base | (2 << 14), DT_I16, rows, groups, 0, mn.tobytes(), 0.0, aux))
 
     for l in range(layers):
         mat(T_QKV, l, np.concatenate([m['wq'][l], m['wk'][l], m['wv'][l]], axis=0))
         mat(T_WO, l, m['wo'][l])
-        if split:
+        if moe:
+            # The router stays i16 in every container, q4 included: it is
+            # 4x768 values and a route flip is not a rounding error, it is a
+            # different FFN.  Top-1 with norm_topk_prob needs only the argmax.
+            q, s = i16_pair(m['router'][l])
+            T.append((T_ROUTER | (l << 8), DT_I16, moe['n_experts'], dim, 0,
+                      q.astype('<i2').tobytes(), float(s), 0))
+            for e in range(moe['n_experts']):
+                mat(T_W1, l, m['expert_w1'][l][e], aux=e)
+                mat(T_W3, l, m['expert_w3'][l][e], aux=e)
+                mat(T_W2, l, m['expert_w2'][l][e], aux=e)
+        elif split:
             mat(T_W1, l, m['w1'][l])
             mat(T_W3, l, m['w3'][l])
         else:
             mat(T_W13, l, np.concatenate([m['w1'][l], m['w3'][l]], axis=0))
-        mat(T_W2, l, m['w2'][l])
+        if not moe:
+            mat(T_W2, l, m['w2'][l])
     # Logits: q8 from the float weights in a q4 container (the vocabulary head
     # stays 8-bit there), but i16-then-q8 in a q8 container -- the two-step order
     # again, and it is visible in the shipped files.

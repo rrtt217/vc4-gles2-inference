@@ -76,7 +76,7 @@ per-tensor `scale`.  See "Tensor record" below.)
 | offset | size | field | notes |
 |---:|---:|---|---|
 | 0 | 4 | `magic` | `"MMCF"` |
-| 4 | 2 | `version` | 2 |
+| 4 | 2 | `version` | 2 (dense) or 3 (mixture of experts, "MoE" below) |
 | 6 | 2 | `header_size` | 64, so a future header can grow |
 | 8 | 4 | `n_tensors` | |
 | 12 | 4 | `capability flags` | bit 0 chat, bit 1 tools, bit 2 vision, bit 3 reserved |
@@ -111,6 +111,7 @@ Each record is `<HHI>` (key, type, length) followed by the payload; `type` is 1
 | 10 | `<BB` add_bos, add_eos (`255` = not stated; `-1` in memory) |
 | 12 | `<B` residual width: absent or 0 = q16 (the historical grid), 1 = q24 |
 | 11 | `<f` `rms_norm_eps`.  Absent = the engine's historical 1e-5, compiled as a literal.  A file that states one switches the norm shader to a uniform, which is **not** numerically neutral on this driver (MiniMind3 PPL 270.3170 -> 269.9303 with the same value), so the default path stays literal |
+| 13 | `<4i` mixture of experts: `n_experts`, `top_k`, `expert_hidden`, flags.  Absent = dense.  Flags bit 0 = `norm_topk_prob`.  Present means the container is version 3 and every layer is sparse (see "MoE") |
 
 Key 9 is the model's own `chat_template` from HuggingFace, stored **verbatim**:
 the same text a GGUF file carries in `tokenizer.chat_template`.  A reader that
@@ -125,11 +126,13 @@ The original proposal used one JSON document here.  The TLV block replaced it:
 same "absent is expressible" property, no parser, and 154 bytes for MiniMind3.
 The full block is printed by `engine/tools/mmcf_dump.py` from the file alone.
 
-### Tensor record (48 B)
+### Tensor record (48 B in v2, 64 B in v3)
 
 Built by explicit concatenation, not a struct format — an earlier
 `"<HBBBBIIQQIIf"` layout is **42 bytes**, not 40 or 48, and shifted every later
-offset by 6 bytes per tensor.
+offset by 6 bytes per tensor.  Version 3 appends `aux` (the expert index) inside
+v2's tail padding and pads the record to 64 bytes, so every field above keeps
+its offset and a v2 file still parses with `aux = 0`:
 
 | offset | size | field |
 |---:|---:|---|
@@ -144,14 +147,21 @@ offset by 6 bytes per tensor.
 | 22 | 8 | bytes |
 | 30 | 4 | crc32 of the tensor body |
 | 34 | 4 | `f32` scale (the per-matrix `ws`; the first draft dropped it and every dot product ran with scale 0) |
-| 38 | 10 | pad to 48 |
+| 38 | 2 | **v3:** `aux` — the expert index; 0 in a dense tensor.  v2: pad |
+| 40 | 24 | pad to 64 |
+
+The record size is not a header field: the table starts at the first 16-byte
+boundary after the metadata, so `rec_size = (data_offset - table_start) /
+n_tensors` is 48 or 64 and a reader that knows the version can validate it.
+64 is a multiple of 16, so appending 16 bytes per record keeps `data_offset`
+16-aligned without a second pad.
 
 Tensor ids: `1` embedding, `2` embedding scale, `3` rms_att, `4` rms_ffn,
 `5` rms_final, `6` q_norm, `7` k_norm, `8` embedding_i16, `0x10` qkv, `0x11`
-wo, `0x12` w1, `0x13` w3, `0x14` w13, `0x15` w2, `0x20` logits tile, `0x30`
-tokenizer blob.  Per-layer tensors carry the layer in the high byte
-(`id | layer << 8`).  q4 needs three tensors per matrix (nibbles, group scale,
-group min) sharing one id.
+wo, `0x12` w1, `0x13` w3, `0x14` w13, `0x15` w2, `0x16` router (MoE), `0x20`
+logits tile, `0x30` tokenizer blob.  Per-layer tensors carry the layer in the
+high byte (`id | layer << 8`).  q4 needs three tensors per matrix (nibbles,
+group scale, group min) sharing one id.
 
 The top two id bits are a plane index.  `1` and `2` are the q4 group scale and
 group min; **`3` is a per-row q8 scale plane**: `f32`, `rows x 1`, one value per
@@ -205,6 +215,55 @@ dtypes: `0` f32, `1` i16, `2` q8u8 (biased, so the upload is a copy), `3` q8i8,
 two values of one enum, so the upload path picks "copy straight from the map" or
 "flip the sign bit" per tensor without a format branch.
 
+## MoE (version 3)
+
+A version-3 container carries a mixture-of-experts block instead of the dense
+FFN.  Version 2 files are byte-identical to what they were and the engine reads
+both; the packer writes v3 only when it writes expert tensors, so every existing
+container is untouched.
+
+Metadata key 13 is the switch.  When it is present:
+
+- every layer is sparse.  `mlp_only_layers` and `decoder_sparse_step != 1` are
+  refused at pack time: a container is all-dense or all-MoE.
+- each layer has a router tensor (`0x16`, layer in the high byte, `aux = 0`,
+  `rows = n_experts`, `cols = dim`).  It stays i16 in every container, q4
+  included: the router is 4x768 values and a route flip is not a rounding
+  error, it is a different FFN.
+- each layer has `n_experts` w1/w3/w2 triples with the dense FFN's kinds and
+  the expert index in the record's `aux`.  `split_w13` must be 1; a fused W13
+  is not a MoE tensor.  The q4 group scale/min planes (id parts 1 and 2) and
+  the per-row q8 scale plane (part 3) carry the same `aux`, or four experts
+  would resolve to one matrix.
+- `expert_hidden` is the expert FFN width and may differ from key 1's `hidden`
+  (the config's dense width, unused when key 13 is present).  Every expert's
+  w1/w3 is `expert_hidden x dim`, w2 is `dim x expert_hidden`.
+- `top_k` must be 1 and bit 0 of the flags must be set (`norm_topk_prob`).
+  With top-1 and a normalised gate the selected expert's output is used with
+  weight exactly 1.0, so the runtime needs neither a softmax nor a weighted
+  combine.  Both the packer and the loader refuse the rest.
+
+The runtime for this block is the dense one.  The router is an
+`n_experts x dim` matvec whose logits are read back (one sync per layer per
+token: a discrete choice on a GLES2 pipeline has to come back to the host), and
+the selected expert's w1/w3/w2 go through the same `ffn_split` /
+`ffn_split_chunked` kernels as a dense layer.  The FFN chunks are per expert
+(`expert_hidden > 2048` splits it in two), so a 2432-wide expert costs the same
+per token as a 2432-wide dense FFN: only one expert's weights are read.
+
+The exception is prefill: the two-position pair path runs one FFN for two
+positions, and the two positions route independently (to different experts in
+general).  `pair_ok()` therefore refuses MoE, and prefill falls back to the
+serial loop — the difference measured in `session.cpp` (7.0-7.2 s paired
+against 8.2-8.4 s serial on a 17-byte prompt), not a factor of two.
+
+Consequence for the model store: MiniMind3-MoE is 198M parameters (397 MB of
+F16, ~204 MB as q8, ~138 MB as q4) against the dense 64M model's 66 MB at q8.
+Per token it reads one expert, so decode is dense-speed; what MoE costs on this
+stack is *memory*, and the engine keeps every expert resident.  A board whose
+CMA cannot hold all of them needs a smaller expert count or width — not a
+different kernel.  `docs/performance.md` has the measurements.
+
 ## Loader rules
 
 - `version` unknown -> refuse with the version number in the message.
@@ -213,6 +272,11 @@ two values of one enum, so the upload path picks "copy straight from the map" or
 - Unknown `dtype` -> refuse, naming the tensor id and the dtype.  Guessing here
   would turn a future fp8 file into silent q8 arithmetic.
 - Unknown *tensor id* -> ignore (forward compat).
+- MoE, in a v3 file: `top_k != 1`, a gate without `norm_topk_prob`, a fused
+  W13, an incomplete or wrongly shaped expert, an expert index outside
+  `n_experts`, or a router tensor in a container without key 13 -> refuse with
+  the layer/expert in the message.  A file that loads must be runnable; the
+  alternative is an answer computed from three of four experts.
 - Missing tokenizer blob -> fall back to `TOKENIZER=`, warn once.
 - Missing template -> the compiled default; there is no `--template` flag.
 - `capabilities & 1 == 0` and `--chat` -> refuse with a clear message (exit 2).

@@ -4456,3 +4456,67 @@ Three things from the four experiments are in the tree (fused W13 reads its
 plane once and the split guard is gone; the two-position kernels have wrow and
 are the default for a row-scale model; the packer reports max|w|/median|w|).
 The fourth, one small plane atlas, is measured at no gain and left out.
+
+## MoE, first run: MiniMind3-MoE on Xe (2026-11-11)
+
+The engine gained one MoE block (container v3, `docs/checkpoint-container.md`):
+a per-layer router and top-1 expert FFNs.  The model is
+`jingyaogong/minimind-3-moe`, 198M parameters, 4 experts of width 2432, top-1
+with a normalised gate, so the runtime needs no softmax and no weighted combine
+— the selected expert's FFN is the layer.
+
+Container sizes from the same F16 source (396.85 MB):
+
+| container | size | tensors |
+|---|---:|---:|
+| i16 | 406.8 MB | 133 |
+| q8 | 203.5 MB | 133 |
+| q4 | 131.0 MB | 357 (2 planes per matrix) |
+
+The dense 64M MiniMind3 q8 is 66 MB, so the 198M MoE is 3.1x the file at q8 and
+2x at q4.
+
+**Routes and logits against a float32 forward** (`ref_forward.py`, now with
+`--routes` and MoE):
+
+| | routes, "Hello" (16 layer-positions) | logits max|d| | mean |d| | top-1 |
+|---|---|---:|---:|---|
+| i16 | 16/16 identical | 0.70 | 0.13 | same (36) |
+| q8 | 16/16 identical | 0.87 | 0.17 | 2968 vs 36, 0.08 apart |
+| q4 | 15/16 (l5 flips 2 -> 1) | 7.34 | 1.76 | 37 |
+
+The q8 top-1 flip is a 0.08 margin on 13.7, i.e. inside the q8 error — it is
+not a routing bug, and the routes (the discrete part) are identical.  q4's
+logits error is an order of magnitude larger, as it is on the dense model.
+
+PPL, `engine/data/ppl_test.txt` (293 tokens), `SEQ=768`, Xe:
+
+| i16 | q8 | q4 |
+|---:|---:|---:|
+| 389.3532 | 350.8860 | 437.7821 |
+
+q8 below i16 is the same inversion the dense model shows (280.2156 i16 against
+270.3170 q8 in the container table), so it is the quantiser, not the MoE path.
+The dense 64M model's 270 is a different model on an out-of-domain corpus; do
+not read the 350 as "MoE is worse".
+
+**Decode, Xe, chat prompt, 32 greedy tokens:**
+
+| model | decode |
+|---|---:|
+| dense q8 | 10.9 ms/token |
+| MoE q8 | 29.3 ms/token |
+| MoE q8, `MOE_FIXED=1` (router skipped) | 10.5 ms/token |
+| MoE q4 | 37.2 ms/token |
+
+So the routing costs ~19 ms/token on this machine: eight `glReadPixels` calls of
+four texels per token, one per layer, ~2.4 ms each.  The matvec is 4x768; the
+read-back is the price, and it is the same on any GLES2 pipeline (the route is a
+host-side uniform).  With the router pinned the MoE costs what the dense model
+of the same expert width costs, which is the property that matters: only one
+expert's weights are streamed.
+
+Whether that is affordable on the Pi is the open question — 8 syncs against a
+252 ms dense decode is a smaller fraction than against 10.9 ms — and so is
+memory: 131 MB at q4 against a board that runs the 66 MB dense q8 with ~50 MB
+of `CmaFree` left.  Both are measured on the board, not inferred from Xe.

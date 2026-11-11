@@ -32,6 +32,23 @@ public:
     bool ffn_chunked = false;
     int ffn_chunk = 0; // first hidden chunk; second is hidden - ffn_chunk
 
+    // Mixture of experts (MMCF v3, metadata key 13).  `hidden` stays the
+    // config's dense FFN width; every layer's FFN is one of `experts` blocks of
+    // width `moe_hidden`, selected per token by `router[l]` (rows = experts),
+    // top-1.  A container is either all-dense or all-MoE: a mixed block has no
+    // representation here.
+    int experts = 0, top_k = 0, moe_hidden = 0;
+    bool moe_norm_topk = false;
+    struct MoeExpert {
+        Mat w1, w3, w2;        // moe_hidden <= 2048: the whole expert FFN
+        Mat w1a, w3a, w2a;     // chunk 0 of a chunked expert FFN
+        Mat w1b, w3b, w2b;     // chunk 1
+    };
+    vector<Mat> router;                // [layers]
+    vector<vector<MoeExpert>> moe;     // [layers][experts]
+    bool is_moe() const { return experts > 0; }
+    int ffn_width() const { return is_moe() ? moe_hidden : hidden; }
+
     // Filled by the MMCF reader: the tokenizer blob lives inside the file and
     // the chat template / default system prompt come from its metadata.
     const void* tok_blob = nullptr;

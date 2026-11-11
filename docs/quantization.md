@@ -43,6 +43,12 @@ error, so the number to look at is `max|w| / median|w|` per matrix.
 `mmcf_requant_q8.py --row-scale` rebuilds the same planes from an i16
 container; on void.1 it reproduces the packer's greedy text.
 
+The flag is a flag again: the helper that computes the per-row scales was also
+named `q8_row`, which shadowed the parameter, so for one commit window every q8
+pack wrote a plane per matrix whether asked or not.  Renamed
+(`q8_per_row`); a container's tensor count says which one it is — one tensor per
+matrix, or two.
+
 The cost is one texel fetch per fragment in the q8 kernels and a plane of
 `rows` 16-bit values (486 KB for the whole of void.1, 0.5%).  The texture holds
 **one row pair per texel** (`.rg` = row 2t, `.ba` = row 2t+1) and is 4 texels

@@ -37,6 +37,8 @@ exist.
 | `TOKENS_OUT=path` | prompt + generated token ids (int32).  A tool turn rewrites it after each model round, so a watcher sees every round |
 | `MODEL_DUMP=1` | the parsed model metadata, right after load |
 | `MMCF_DEBUG=1` | per-tensor detail while walking the container table |
+| `MOE_DUMP=1` | the route of every MoE layer/position: `MOE l=<layer> route=<expert> gate=<logits>`.  The gate values are the q16 read-back, which is what the argmax saw — compare them with `ref_forward.py --routes` rather than judging a route by the text |
+| `MOE_FIXED=<e>` | pin every MoE layer to expert `e` and skip the router matvec and its read-back.  Prices the routing: on Xe q8 29.3 ms/token against 10.5 pinned, i.e. the eight per-token syncs are most of the difference.  Output is a different model, so it is a measurement switch only |
 
 `engine/scripts/dump_stats.py` turns a `STAGE_DUMP`/`HIDDEN_DUMP` file into
 `max|x| / mean|x| / clamped-count` per row, which is how a saturating

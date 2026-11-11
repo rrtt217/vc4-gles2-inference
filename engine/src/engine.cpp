@@ -385,6 +385,16 @@ int main(int argc, char** argv) {
     for (auto& m : model.w3b) gpu.upload(m);
     for (auto& m : model.w2a) gpu.upload(m);
     for (auto& m : model.w2b) gpu.upload(m);
+    for (auto& m : model.router) gpu.upload(m);
+    for (auto& layer : model.moe) {
+        for (auto& e : layer) {
+            // A MoeExpert holds the whole FFN or its two chunks, never both:
+            // the unused Mats are empty and must not reach make_texture.
+            Mat* mats[] = {&e.w1, &e.w3, &e.w2, &e.w1a, &e.w1b,
+                           &e.w3a, &e.w3b, &e.w2a, &e.w2b};
+            for (Mat* m : mats) if (m->rows > 0) gpu.upload(*m);
+        }
+    }
     for (auto& m : model.logits_tiles) gpu.upload(m);
     model.release_map();
     if (getenv("SHADER_TIME") || getenv("UPLOAD_TIME"))

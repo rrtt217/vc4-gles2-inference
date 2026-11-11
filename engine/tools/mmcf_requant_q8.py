@@ -17,7 +17,8 @@ import zlib
 import numpy as np
 
 ALIGN = 16
-REC_SIZE = 48
+REC_SIZE_V2 = 48
+REC_SIZE_V3 = 64
 MAT_BASES = (0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x20)
 EMB_BASES = (1, 8)
 
@@ -27,25 +28,30 @@ def parse(path):
         head = f.read(64)
         if head[:4] != b'MMCF':
             raise SystemExit('%s: not an MMCF container' % path)
+        version, = struct.unpack_from('<H', head, 4)
+        if version not in (2, 3):
+            raise SystemExit('%s: unsupported MMCF version %d' % (path, version))
+        rec_size = REC_SIZE_V3 if version >= 3 else REC_SIZE_V2
         n, caps = struct.unpack_from('<II', head, 8)
         meta_off, meta_size = struct.unpack_from('<II', head, 16)
         data_off, file_size = struct.unpack_from('<QQ', head, 24)
         f.seek(meta_off)
         meta = bytearray(f.read(meta_size))
-        f.seek(data_off - n * REC_SIZE)
+        f.seek(data_off - n * rec_size)
         recs = []
         for _ in range(n):
-            b = f.read(REC_SIZE)
+            b = f.read(rec_size)
             tid, dt, flags, group, _pad = struct.unpack_from('<HBBBB', b, 0)
             rows, cols = struct.unpack_from('<II', b, 6)
             off, blen = struct.unpack_from('<QQ', b, 14)
             crc, = struct.unpack_from('<I', b, 30)
             scale, = struct.unpack_from('<f', b, 34)
+            aux = struct.unpack_from('<H', b, 38)[0] if version >= 3 else 0
             recs.append(dict(tid=tid, dt=dt, flags=flags, group=group,
                              rows=rows, cols=cols, off=off, blen=blen,
-                             crc=crc, scale=scale))
-    return dict(n=n, caps=caps, meta=meta, data_off=data_off,
-                file_size=file_size, recs=recs)
+                             crc=crc, scale=scale, aux=aux))
+    return dict(n=n, caps=caps, meta=meta, data_off=data_off, version=version,
+                rec_size=rec_size, file_size=file_size, recs=recs)
 
 
 def patch_scheme(meta, scheme, group, pre_biased, split=None):
@@ -157,7 +163,7 @@ def main():
 
     meta = patch_scheme(src['meta'], 1, 0, 1)
     table_off = (64 + len(meta) + ALIGN - 1) // ALIGN * ALIGN
-    data_off = table_off + src['n'] * REC_SIZE   # patched below once n is known
+    data_off = table_off + src['n'] * src['rec_size']   # patched below once n is known
 
     bodies = []
     emb_scale = None
@@ -174,19 +180,20 @@ def main():
                 s = 1e-6
             if args.row_scale:
                 body, unit, plane = quantize_matrix_row(buf, r, off0 + r['off'])
-                bodies.append((body, tid, 2, unit, r['rows'], r['cols'], r['flags'], r['group']))
-                bodies.append((plane.tobytes(), tid | (3 << 14), 0, 0.0, r['rows'], 1, 0, 0))
+                bodies.append((body, tid, 2, unit, r['rows'], r['cols'], r['flags'], r['group'], r['aux']))
+                bodies.append((plane.tobytes(), tid | (3 << 14), 0, 0.0, r['rows'], 1, 0, 0, r['aux']))
                 continue
             body = quantize_matrix(buf, r, off0 + r['off'], s)
             dt, scale = 2, s
         elif r['dt'] == 0 and base == 2 and emb_scale is not None:
             body = emb_scale.tobytes()
-        bodies.append((body, tid, dt, scale, r['rows'], r['cols'], r['flags'], r['group']))
+        bodies.append((body, tid, dt, scale, r['rows'], r['cols'], r['flags'], r['group'], r['aux']))
 
     n_out = len(bodies)
-    data_off = table_off + n_out * REC_SIZE
+    rec_size = src['rec_size']
+    data_off = table_off + n_out * rec_size
     out = bytearray(b'MMCF')
-    out += struct.pack('<HHII', 2, 64, n_out, src['caps'])
+    out += struct.pack('<HHII', src['version'], 64, n_out, src['caps'])
     out += struct.pack('<II', 64, len(meta))
     out += struct.pack('<QQ', data_off, 0)
     out += b'\0' * 24
@@ -196,7 +203,7 @@ def main():
         out += b'\0'
     table = bytearray()
     data = bytearray()
-    for body, tid, dt, scale, brows, bcols, bflags, bgroup in bodies:
+    for body, tid, dt, scale, brows, bcols, bflags, bgroup, aux in bodies:
         while (data_off + len(data)) % ALIGN:
             data.append(0)
         off = len(data)
@@ -207,7 +214,9 @@ def main():
         b += struct.pack('<QQ', off, len(body))
         b += struct.pack('<I', crc)
         b += struct.pack('<f', float(scale))
-        table += b.ljust(REC_SIZE, b'\0')
+        if rec_size >= 64:
+            b += struct.pack('<H', aux)
+        table += b.ljust(rec_size, b'\0')
     file_size = data_off + len(data)
     struct.pack_into('<Q', out, 32, file_size)
     struct.pack_into('<I', out, 40, zlib.crc32(bytes(out[:40])) & 0xFFFFFFFF)

@@ -16,7 +16,7 @@ Layout
 
     0   header 64 B
     64  metadata: TLV records (u16 key, u16 type, u32 len, payload)
-        tensor table: n * 48 B
+        tensor table: n * 48 B (v2, dense) or n * 64 B (v3, MoE)
         data: every tensor 16-byte aligned
 
 This tool also verifies itself: `--verify` re-reads the file and compares every
@@ -37,34 +37,48 @@ from mmcf_hf import (RESIDUAL_RAIL, RESIDUAL_WARN, is_llama2c, load_llama2c,
                      tensors_from_hf, tok_entry_count)
 
 # tensor table record: id, dtype, flags, group, pad, rows, cols, offset, bytes,
-# crc32, pad, scale, pad  -> exactly 48 bytes, no implicit padding with "<"
-# tensor table record, built by explicit concatenation so its size is exact:
-#   id u16 | dtype u8 | flags u8 | group u8 | pad u8 | rows u32 | cols u32
-#   offset u64 | bytes u64 | crc32 u32 | scale f32 | pad to 48
-REC_SIZE = 48
+# crc32, scale, aux -> exactly 64 bytes in v3, no implicit padding with "<".
+# v2 records are 48 bytes with the same fields in the same places; v3 only adds
+# `aux` (the expert index) inside v2's tail padding, so a v2 file still parses
+# with aux = 0.  A container with expert tensors is version 3; a dense one stays
+# version 2 and keeps its 48-byte table.
+REC_SIZE_V2 = 48
+REC_SIZE_V3 = 64
 
 
-def pack_rec(tid, dt, flags, group, rows, cols, off, blen, crc, scale):
-    b = struct.pack("<HBBBB", tid, dt, flags, group, 0)
-    b += struct.pack("<II", rows, cols)
-    b += struct.pack("<QQ", off, blen)
-    b += struct.pack("<I", crc)
-    b += struct.pack("<f", float(scale))
-    return b.ljust(REC_SIZE, b"\0")
+def rec_size(version):
+    return REC_SIZE_V3 if version >= 3 else REC_SIZE_V2
 
 
-def unpack_rec(rec):
+def rec_unpack(rec):
+    """(id, dtype, flags, group, rows, cols, off, bytes, crc, scale, aux)."""
     tid, dt, flags, group, _pad = struct.unpack("<HBBBB", rec[:6])
     rows, cols = struct.unpack("<II", rec[6:14])
     off, blen = struct.unpack("<QQ", rec[14:30])
     crc, = struct.unpack("<I", rec[30:34])
     scale, = struct.unpack("<f", rec[34:38])
+    aux, = struct.unpack("<H", rec[38:40]) if len(rec) >= 40 else (0,)
+    return tid, dt, flags, group, rows, cols, off, blen, crc, scale, aux
+
+
+def pack_rec(tid, dt, flags, group, rows, cols, off, blen, crc, scale, aux=0, size=REC_SIZE_V3):
+    b = struct.pack("<HBBBB", tid, dt, flags, group, 0)
+    b += struct.pack("<II", rows, cols)
+    b += struct.pack("<QQ", off, blen)
+    b += struct.pack("<I", crc)
+    b += struct.pack("<f", float(scale))
+    b += struct.pack("<H", aux)
+    return b.ljust(size, b"\0")
+
+
+def unpack_rec(rec):
+    tid, dt, _flags, _group, rows, cols, off, blen, crc, scale, _aux = rec_unpack(rec)
     return tid, dt, rows, cols, off, blen, crc, scale
 import sys
 from pathlib import Path
 
 MAGIC = b"MMCF"
-VERSION = 2
+VERSION = 3          # newest this writer emits; a dense container is still v2
 HEADER_SIZE = 64
 ALIGN = 16
 
@@ -80,6 +94,7 @@ DT_BLOB = 5
 T_EMB, T_EMB_SCALE, T_RMS_ATT, T_RMS_FFN, T_RMS_FINAL = 1, 2, 3, 4, 5
 T_Q_NORM, T_K_NORM = 6, 7
 T_QKV, T_WO, T_W1, T_W3, T_W13, T_W2 = 0x10, 0x11, 0x12, 0x13, 0x14, 0x15
+T_ROUTER = 0x16   # MoE gate, rows = experts, cols = dim (v3 containers only)
 T_LOGITS = 0x20
 T_TOKENIZER = 0x30
 T_EMB_I16 = 8
@@ -339,6 +354,13 @@ def build(meta, tensors, tok_blob, args):
     if args.add_bos is not None or args.add_eos is not None:
         md += tlv(10, 1, struct.pack("<BB", 255 if args.add_bos is None else args.add_bos,
                                      255 if args.add_eos is None else args.add_eos))
+    # key 13: the mixture-of-experts block.  Absent means dense (every existing
+    # container).  flags bit 0 says the top-k gate is normalised, which is what
+    # lets top-1 use the selected expert with weight 1.0.
+    if meta.get("experts"):
+        md += tlv(13, 1, struct.pack("<4i", int(meta["experts"]), int(meta["top_k"]),
+                                     int(meta["moe_hidden"]),
+                                     1 if meta.get("norm_topk") else 0))
     specials = (-1, -1, -1, -1, -1, -1)
     if tok_blob is not None:
         vocab = vocab_of(tok_blob, len(tok_blob) and 200000 or 0)
@@ -352,10 +374,16 @@ def build(meta, tensors, tok_blob, args):
     meta_off = HEADER_SIZE
     table_off = meta_off + len(md)
     table_off = (table_off + ALIGN - 1) // ALIGN * ALIGN
+    version = 3 if meta.get("experts") else 2
+    rsize = rec_size(version)
     table = bytearray()
     data = bytearray()
-    data_off = table_off + len(tensors) * REC_SIZE
-    for tid, dt, rows, cols, group, payload, scale in tensors:
+    data_off = table_off + len(tensors) * rsize
+    for rec in tensors:
+        # dense producers append 7-tuples; an expert tensor carries an 8th
+        # element, the expert index, which lands in the v3 aux field.
+        tid, dt, rows, cols, group, payload, scale = rec[:7]
+        aux = rec[7] if len(rec) > 7 else 0
         # +128 is a bit flip.  Texture tensors (the per-layer matrices and the
         # logits tiles) are stored biased so the upload is a copy; the embedding
         # stays signed because the CPU reads it.
@@ -367,10 +395,11 @@ def build(meta, tensors, tok_blob, args):
         off = len(data)
         data += payload
         crc = zlib.crc32(payload) & 0xFFFFFFFF
-        table += pack_rec(tid, dt, 0, group, rows, cols, off, len(payload), crc, scale)
-    data_off_final = table_off + len(tensors) * REC_SIZE
+        table += pack_rec(tid, dt, 0, group, rows, cols, off, len(payload), crc, scale,
+                          aux=aux, size=rsize)
+    data_off_final = table_off + len(tensors) * rsize
     file_size = data_off_final + len(data)
-    body = MAGIC + struct.pack("<HHIIIIQQ", VERSION, HEADER_SIZE, len(tensors),
+    body = MAGIC + struct.pack("<HHIIIIQQ", version, HEADER_SIZE, len(tensors),
                                caps_val, meta_off, len(md), data_off_final, file_size)
     assert len(body) == 40
     head = body + struct.pack("<I", zlib.crc32(body) & 0xFFFFFFFF)
@@ -388,16 +417,18 @@ def verify(path, tensors):
     if raw[:4] != MAGIC:
         raise SystemExit("verify: bad magic")
     ver, hsz, n, caps, mo, ms, doff, fsz, _crc = struct.unpack("<HHIIIIQQI", raw[4:44])
-    if ver != VERSION or hsz != HEADER_SIZE:
+    if ver not in (2, 3) or hsz != HEADER_SIZE:
         raise SystemExit("verify: header mismatch")
     hcrc, = struct.unpack("<I", raw[40:44])
     if zlib.crc32(raw[:40]) & 0xFFFFFFFF != hcrc:
         raise SystemExit("verify: header crc mismatch")
     if fsz != len(raw):
         raise SystemExit("verify: file size field %d != %d" % (fsz, len(raw)))
+    rsize = rec_size(ver)
+    table = doff - n * rsize
     bad = 0
     for i in range(n):
-        rec = raw[doff - n * REC_SIZE + i * REC_SIZE: doff - n * REC_SIZE + (i + 1) * REC_SIZE]
+        rec = raw[table + i * rsize: table + (i + 1) * rsize]
         tid, dt, rows, cols, off, blen, crc, _sc = unpack_rec(rec)
         body = raw[doff + off: doff + off + blen]
         if zlib.crc32(body) & 0xFFFFFFFF != crc:
@@ -581,11 +612,12 @@ def main():
         if bad:
             raise SystemExit("verify failed")
         # weights must match the source bit for bit (after the bias)
-        for tid, dt, rows, cols, group, payload, scale in tensors:
-            if dt == DT_Q8I8 and tid != T_EMB:
+        for rec in tensors:
+            tid, dt, payload = rec[0], rec[1], rec[5]
+            if dt == DT_Q8I8 and (tid & 0xFF) != T_EMB:
                 payload = bytes((b ^ 0x80) for b in payload)
             if payload not in Path(args.out).read_bytes():
-                raise SystemExit("verify: tensor %d not found verbatim" % tid)
+                raise SystemExit("verify: tensor 0x%x not found verbatim" % tid)
         print("verify: every tensor present verbatim")
 
 
