@@ -351,7 +351,8 @@ static vector<int> make_act(int dim, int seed) {
     return q;
 }
 
-// B. The shipped conv3_act: out_raw24[i] = round((k0*a + k1*b + k2*c)/256)
+// B. The shipped conv3_act: one q16 pair per texel, two channels per fragment.
+//    cv[2q], cv[2q+1] = the three taps' raw products, /256, then x_q16enc.
 static void test_conv3(int dim) {
     const int tw = (dim + 1) / 2;
     Kernel kn = make_kernel(dim, 3, 3);
@@ -362,7 +363,7 @@ static void test_conv3(int dim) {
 
     GLuint p = prog(conv3_act(dim, XFormat::I16_2));
     if (!p) { printf("  conv3 LINK_FAIL\n"); ++failures; return; }
-    out_begin(dim);
+    out_begin(tw);
     glUseProgram(p);
     const char* nm[4] = {"S0", "S1", "G", "K"};
     GLuint tx[4] = {at, bt, ct, kt};
@@ -372,52 +373,63 @@ static void test_conv3(int dim) {
         glBindTexture(GL_TEXTURE_2D, tx[u]);
     }
     tri(p);
-    vector<int> g = read_q24(dim);
+    vector<int> g = read_q16(tw);
 
-    // CPU: the same three taps, in the same order, in float32 - a q16 product
-    // reaches 8e8, which float32 cannot hold exactly, so emulating the shader's
-    // own precision is what makes the comparison a test of the fetch and not of
-    // the arithmetic.
     vector<int> want(dim);
     for (int i = 0; i < dim; ++i) {
-        float s = (float)kn.q[0 * dim + i] * (float)a[i] +
-                  (float)kn.q[1 * dim + i] * (float)b[i] +
-                  (float)kn.q[2 * dim + i] * (float)c[i];
-        want[i] = (int)floorf(s / 256.0f + 0.5f);   // x_i24encq: floor(x+0.5)
+        // float32 with the shader's own order: a q16 product reaches 8e8, which
+        // float32 cannot hold exactly, so emulating that precision is what makes
+        // this a test of the fetch and not of the arithmetic.
+        float cv = ((float)kn.q[0 * dim + i] * (float)a[i] +
+                    (float)kn.q[1 * dim + i] * (float)b[i] +
+                    (float)kn.q[2 * dim + i] * (float)c[i]) * 0.00390625f;
+        long q = (long)floorf(cv + 0.5f);       // x_q16enc
+        want[i] = (int)std::max(-32768L, std::min(32767L, q));
     }
     char nameb[64];
     snprintf(nameb, sizeof nameb, "B conv3_act(%d) shipped", dim);
-    // tol 1: the emulation above matches the shader's expression order; one
-    // unit absorbs a driver that keeps the accumulate in a different order.
-    report(nameb, g, want, 1);
+    report(nameb, g, want, 0);
     glDeleteProgram(p);
     glDeleteTextures(1, &at); glDeleteTextures(1, &bt);
     glDeleteTextures(1, &ct); glDeleteTextures(1, &kt);
 }
 
-// C. The shipped mul_act: inputs are 24-bit q24 raw, output a q16 pair.
-static void test_mul(int dim) {
+// A 24-bit texture holding value v[i] (x_i24enc's layout: top byte 0).
+static GLuint tex24(const vector<int>& raw) {
+    vector<uint8_t> px((size_t)raw.size() * 4, 0);
+    for (size_t i = 0; i < raw.size(); ++i) {
+        long q = (long)raw[i] + 8388608L;
+        px[i * 4 + 0] = 0;
+        px[i * 4 + 1] = (uint8_t)((q >> 16) & 0xFF);
+        px[i * 4 + 2] = (uint8_t)((q >> 8) & 0xFF);
+        px[i * 4 + 3] = (uint8_t)(q & 0xFF);
+    }
+    return tex((int)raw.size(), 1, px);
+}
+
+// C. The shipped mul_act, both operand mixes: 24-bit x 24-bit (the in_proj
+//    gate) and 24-bit x q16 (the gate that reads the convolution).
+static void test_mul(int dim, bool b_q16) {
     const int tw = x_texels(dim, XFormat::I16_2);
     vector<int> a24(dim), b24(dim);
     for (int i = 0; i < dim; ++i) {
         a24[i] = (int)lrint(1.7 * sin(i * 0.021 + 0.3) * 256.0);
         b24[i] = (int)lrint(1.1 * cos(i * 0.013 + 1.1) * 256.0);
     }
-    auto pack24 = [](const vector<int>& v) {
-        vector<uint8_t> px((size_t)v.size() * 4, 0);
-        for (size_t i = 0; i < v.size(); ++i) {
-            long q = (long)v[i] + 8388608L;
-            px[i * 4 + 0] = 0;
-            px[i * 4 + 1] = (uint8_t)((q >> 16) & 0xFF);
-            px[i * 4 + 2] = (uint8_t)((q >> 8) & 0xFF);
-            px[i * 4 + 3] = (uint8_t)(q & 0xFF);
-        }
-        return px;
-    };
-    vector<uint8_t> ap = pack24(a24), bp = pack24(b24);
-    GLuint at = tex(dim, 1, ap), bt = tex(dim, 1, bp);
+    GLuint at = tex24(a24);
+    GLuint bt = 0;
+    vector<int> bq(dim);
+    if (b_q16) {
+        // Raw q16 (the convention the conv output uses).
+        for (int i = 0; i < dim; ++i) bq[i] = b24[i] * 8;
+        vector<uint8_t> bp = pack_q16(bq);
+        bt = tex(tw, 1, bp);
+    } else {
+        bt = tex24(b24);
+    }
 
-    GLuint p = prog(mul_act(dim, XFormat::I16_2));
+    const XFormat bf = b_q16 ? XFormat::I16_2 : XFormat::I24_1;
+    GLuint p = prog(mul_act(dim, XFormat::I16_2, XFormat::I24_1, bf));
     if (!p) { printf("  mul LINK_FAIL\n"); ++failures; return; }
     out_begin(tw);
     glUseProgram(p);
@@ -425,21 +437,19 @@ static void test_mul(int dim) {
     glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, at);
     glUniform1i(glGetUniformLocation(p, "B"), 1);
     glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, bt);
-    glUniform1f(glGetUniformLocation(p, "aw"), (float)dim);
     tri(p);
     vector<int> g = read_q16(tw);
 
-    // a and b are q24 raw (real*256); their product is real^2*65536, which the
-    // shader stores as a q16 pair (real*256) -> raw = round(a*b/256).
     vector<int> want(dim);
     for (int i = 0; i < dim; ++i) {
-        // x_st2 -> x_i16enc(v) -> x_q16enc(v*256) -> clamp(floor(x+0.5))
-        float v = ((float)a24[i] * (float)b24[i]) / 65536.0f;
-        long q = (long)floorf(v * 256.0f + 0.5f);
+        // a is real (= a24/256); b is real either way (b24/256, or bq/256).
+        float av = (float)a24[i] / 256.0f;
+        float bv = b_q16 ? (float)(b24[i] * 8) / 256.0f : (float)b24[i] / 256.0f;
+        long q = (long)floorf(av * bv * 256.0f + 0.5f);   // x_st2 -> x_q16enc
         want[i] = (int)std::max(-32768L, std::min(32767L, q));
     }
     char nameb[64];
-    snprintf(nameb, sizeof nameb, "C mul_act(%d) shipped", dim);
+    snprintf(nameb, sizeof nameb, "C mul_act(%d) 24x%s shipped", dim, b_q16 ? "16" : "24");
     report(nameb, g, want, 0);
     glDeleteProgram(p);
     glDeleteTextures(1, &at); glDeleteTextures(1, &bt);
@@ -482,7 +492,8 @@ int main() {
 
     printf("\nB/C. the shipped conv kernels vs a CPU reference\n");
     test_conv3(1024);
-    test_mul(1024);
+    test_mul(1024, false);
+    test_mul(1024, true);
 
     printf("\n%s (%d failing)\n", failures ? "FAIL" : "ALL PASS", failures);
     return failures ? 1 : 0;

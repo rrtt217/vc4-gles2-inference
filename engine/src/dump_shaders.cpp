@@ -150,6 +150,17 @@ vector<Case> cases() {
     add(v, "top2_fast_packed_6400_256", [] { return top2_fast_packed(6400, 256); });
     add(v, "top2_packed_6400_256", [] { return top2_packed(6400, 256); });
 
+    // --- the hybrid (conv) block.  Its three elementwise passes are the only
+    // shaders whose text decides the conv numerics, and they were not in this
+    // dump: a change to conv3_act's tap order or to the gate's operand layouts
+    // moved the model without moving a digest.
+    add(v, "conv3_1024", [] { return conv3_act(1024, XFormat::I16_2); });
+    add(v, "mul_act_1024_24_24",
+        [] { return mul_act(1024, XFormat::I16_2, XFormat::I24_1, XFormat::I24_1); });
+    add(v, "mul_act_1024_24_16",
+        [] { return mul_act(1024, XFormat::I16_2, XFormat::I24_1, XFormat::I16_2); });
+    add(v, "conv_copy_1024", [] { return copy_act(1024, XFormat::I16_2); });
+
     // --- attention, one tag per layout the container can ask for
     add(v, "att_helpers", [] { return att_helpers(); });
 

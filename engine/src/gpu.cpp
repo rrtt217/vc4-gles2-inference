@@ -269,10 +269,13 @@ void GPU::clear_conv_state(){
         gl_state_forget_bindings();
 }
 
-GLuint GPU::conv_mul(GLuint a, GLuint b, Target& out){
+GLuint GPU::conv_mul(GLuint a, XFormat af, GLuint b, XFormat bf, Target& out){
         const int tw = x_texels(att_dim_, act_fmt_);
         if (out.tex == 0 || out.w != tw) out = make_target(tw, 1);
-        GLuint p = x_prog("conv_mul", mul_act(att_dim_, act_fmt_));
+        // The program text carries both source layouts, so the cache key must
+        // too (and the width is a literal in the text, not a uniform).
+        GLuint p = x_prog(string("conv_mul_") + x_format_name(af) + "_" + x_format_name(bf),
+                          mul_act(att_dim_, act_fmt_, af, bf));
         bind_fbo(out.fbo);
         glViewport(0, 0, tw, 1);
         use_program(p);
@@ -280,7 +283,6 @@ GLuint GPU::conv_mul(GLuint a, GLuint b, Target& out){
         set_sampler(p, "A", 0);
         bind_tex(1, b);
         set_sampler(p, "B", 1);
-        glUniform1f(uloc(p, "aw"), (float)att_dim_);
         setup_attrib(p);
         glDrawArrays(GL_TRIANGLES, 0, 3);
         ++draws_;
@@ -308,12 +310,14 @@ void GPU::set_conv_kernel(int layer, const float* w, int dim, int k){
 }
 
 GLuint GPU::conv3(GLuint s0, GLuint s1, GLuint g, GLuint ktex, Target& out){
-        // The output is 24-bit (one value per texel), the input of the second
-        // gate; the matvec_add that follows reads the gate's I16_2 output.
-        if (out.tex == 0 || out.w != att_dim_) out = make_target(att_dim_, 1);
+        // The output is a q16 pair (two channels per texel): the second gate
+        // reads it as I16_2, and the matvec_add after that reads the gate's own
+        // I16_2 output.
+        const int tw = x_texels(att_dim_, act_fmt_);
+        if (out.tex == 0 || out.w != tw) out = make_target(tw, 1);
         GLuint p = x_prog("conv3", conv3_act(att_dim_, act_fmt_));
         bind_fbo(out.fbo);
-        glViewport(0, 0, att_dim_, 1);
+        glViewport(0, 0, tw, 1);
         use_program(p);
         bind_tex(0, s0);
         set_sampler(p, "S0", 0);
@@ -358,11 +362,12 @@ GLuint GPU::conv_block(const Mat& in_b, const Mat& in_c, const Mat& in_x,
         const int cur = conv_cur_[layer];
         const int prev = (cur + 2) % 3;
         const int nxt = (cur + 1) % 3;
-        const GLuint gated = conv_mul(conv_t_b_.tex, conv_t_x_.tex, conv_slot(layer, nxt));
+        const GLuint gated = conv_mul(conv_t_b_.tex, XFormat::I24_1, conv_t_x_.tex,
+                                      XFormat::I24_1, conv_slot(layer, nxt));
         const GLuint cv = conv3(conv_slot(layer, prev).tex, conv_slot(layer, cur).tex, gated,
                                 conv_k_tex_[layer], conv_cv_);
         conv_cur_[layer] = (uint8_t)nxt;
-        const GLuint y = conv_mul(conv_t_c_.tex, cv, conv_y_);
+        const GLuint y = conv_mul(conv_t_c_.tex, XFormat::I24_1, cv, act_fmt_, conv_y_);
         matvec_add(out_proj, y, residual, out, act_fmt_);
         return out.tex;
 }

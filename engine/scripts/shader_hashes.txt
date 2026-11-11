@@ -61,6 +61,8 @@ a86b7577aff2ec6c    3586 attn_q8_kv16_unpaired/att_stats
 204748e3bd41b84f    7262 attn_q8_kv16_unpaired/att_v_i16_2
 8e05a211842557a3    7916 attn_q8_kv16_unpaired/att_v_i8_4
 b821845a2ef44b10    3108 attn_q8_kv16_unpaired/att_vscale
+79b35115d03069e8    4212 conv3_1024
+5674e5cb32288601    3178 conv_copy_1024
 090b127cb4af715a    4090 matvec_i16_6400x768_i16_2
 487e4b4ed69ecbcd    3649 matvec_i16_add_1536x768_i16_2_i16_1
 93324dbf110f8096     839 matvec_q8_1536x768_i16_2
@@ -82,6 +84,8 @@ f534dca13935a6b0    4149 matvec_q8_p2_add_p2_768x768
 055d9305b99a75c3     982 matvec_q8_pair_logits_6400x768_i16_2
 38af213c94e6877f    4034 matvec_q8_pair_swiglu_2432x768_i16_2_gen
 b0d0529d298fd9bc    4316 matvec_q8_pair_swiglu_2432x768_i16_2_inl
+c6015590c4d97d89    4072 mul_act_1024_24_16
+c42f778e21cf8c5b    4140 mul_act_1024_24_24
 24fbbbbe09358eb5    3815 p2_split_768_i16_1
 ea1f246b2151ea01    4140 p2_split_768_i16_2
 c0ebb8629554600f    4618 q4shift0/matvec_i4_6400x768_i16_2_gen

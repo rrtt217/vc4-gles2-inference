@@ -128,7 +128,7 @@ public:
     std::vector<GLuint> conv_k_tex_;
     int conv_texels_ = 0;
     Target& conv_slot(int layer, int slot) { return conv_state_[(size_t)layer * 3 + slot]; }
-    GLuint conv_mul(GLuint a, GLuint b, Target& out);
+    GLuint conv_mul(GLuint a, XFormat af, GLuint b, XFormat bf, Target& out);
     GLuint conv3(GLuint s0, GLuint s1, GLuint g, GLuint ktex, Target& out);
     // Per-channel depthwise kernel as q16: width dim/2, height k, row t holds
     // tap t for channels 2q and 2q+1.

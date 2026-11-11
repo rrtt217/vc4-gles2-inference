@@ -60,7 +60,10 @@ std::string swiglu_2row(int hidden, XFormat out);
 std::string swiglu(int hidden, bool fused, XFormat out);
 // LFM2 conv block: elementwise gate, 3-tap depthwise convolution, and a copy
 // (the state shift).  All three work in raw q16 units on I16_2 textures.
-std::string mul_act(int dim, XFormat xf);
+// One elementwise multiply of two conv-block activations.  A and B each
+// carry their own source layout: two matvec outputs are 24-bit, the
+// convolution result is q16, and the decoder follows the operand.
+std::string mul_act(int dim, XFormat xf, XFormat af, XFormat bf);
 std::string conv3_act(int dim, XFormat xf);
 std::string copy_act(int dim, XFormat xf);
 

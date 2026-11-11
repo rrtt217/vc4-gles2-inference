@@ -1262,51 +1262,68 @@ string rms_stats_reduce() {
         "gl_FragColor=encs(s);}";
 }
 
-string mul_act(int dim, XFormat xf) {
+// One elementwise multiply of two conv-block activations, two values per
+// fragment.  A and B are not always the same width: the in_proj gate reads two
+// matvec outputs (24-bit, one value per texel), while the second gate reads a
+// matvec output and the convolution's result (q16, two values per texel).  The
+// decoder is chosen per operand, so an I16_2 side costs one fetch where a
+// 24-bit side costs two.
+static string mul_act_read(const char* tex, const char* var, XFormat f, int dim, int tw) {
+    // GLSL for `vec2 var` = the two values at output texel q, in activation
+    // units: an I16_2 texel already holds the pair, a 24-bit one holds a value
+    // per texel, so it takes two fetches and no /256.
+    const string TW = to_string(tw), AW = to_string(dim);
+    if (f == XFormat::I16_2)
+        return string("vec2 ") + var + "=x_i16pairq(texture2D(" + tex +
+               ",vec2((float(q)+0.5)/" + TW + ".0,0.5)))/256.0;";
+    // Both operands can be 24-bit, so the coordinate gets a per-operand name.
+    return string("vec2 ") + var + "=vec2(0.0);{float t=(float(2*q)+0.5)/" + AW + ".0;"
+                  + var + "=vec2(x_i24q(texture2D(" + tex + ",vec2(t,0.5))),"
+               "x_i24q(texture2D(" + tex + ",vec2(t+1.0/" + AW + ".0,0.5))));}";
+}
+
+string mul_act(int dim, XFormat xf, XFormat af, XFormat bf) {
     if (xf != XFormat::I16_2)
         { fprintf(stderr, "shader mul_act: the conv block is q16 only\n"); exit(2); }
-    // Inputs are matvec outputs: one 24-bit value per texel.  The output is a
-    // q16 pair texture, which is what the next matvec_add reads.
     const int tw = x_texels(dim, xf);
+    // Output is the q16 pair the next matvec_add reads.  A 24-bit operand is
+    // real-valued (x_i24q), so the product is real and x_st2 is the right store
+    // for both mixes; an I16_2 operand is raw q16, hence the /256.
+    const string ra = mul_act_read("A", "av", af, dim, x_texels(dim, af));
+    const string rb = mul_act_read("B", "bv", bf, dim, x_texels(dim, bf));
     return head(xf) + q24_helpers() +
-        "uniform sampler2D A,B;uniform float aw;"
-        "void main(){int q=int(gl_FragCoord.x);float u=(float(2*q)+0.5)/aw;"
-        "float a0=x_i24q(texture2D(A,vec2(u,0.5)));"
-        "float a1=x_i24q(texture2D(A,vec2(u+1.0/aw,0.5)));"
-        "float b0=x_i24q(texture2D(B,vec2(u,0.5)));"
-        "float b1=x_i24q(texture2D(B,vec2(u+1.0/aw,0.5)));"
-        "gl_FragColor=x_st2(a0*b0,a1*b1);}";
+        "uniform sampler2D A,B;"
+        "void main(){int q=int(gl_FragCoord.x);" + ra + rb +
+        "gl_FragColor=x_st2(av.x*bv.x,av.y*bv.y);}";
 }
 
 string conv3_act(int dim, XFormat xf) {
     if (xf != XFormat::I16_2)
         { fprintf(stderr, "shader conv3_act: the conv block is q16 only\n"); exit(2); }
     const int tw = x_texels(dim, xf);
-    // One 24-bit value per fragment (the next stage is a gate that reads 24-bit
-    // matvec outputs), sampling one q16 value from each of the three I16_2
-    // textures at the same index.
+    // Two channels per fragment: every input is an I16_2 texel holding the pair
+    // (2q, 2q+1), and so is the depthwise kernel row, so each of the four
+    // textures is fetched once instead of once per channel.  The result is the
+    // q16 pair the second gate reads -- one rounding here instead of a 24-bit
+    // store and a decode in the gate, at the cost of the sub-q16 fraction that
+    // the gate then had to multiply anyway.
     return head(xf) + q24_helpers() +
         "uniform sampler2D S0,S1,G,K;"
-        "void main(){int i=int(gl_FragCoord.x);"
-        "float a=X1Q(S0,i,float(" + to_string(tw) + "));"
-        "float b=X1Q(S1,i,float(" + to_string(tw) + "));"
-        "float c=X1Q(G,i,float(" + to_string(tw) + "));"
-        "float u=(float(i/2)+0.5)/float(" + to_string(tw) + ");"
-        // The depthwise kernel is per channel: row t of K holds tap t for
-        // channels 2q and 2q+1, so one fetch per tap, picking the q16 half.
-        // The kernel height is fixed here (3): a float uniform for it was the
-        // one value that could silently fail a location lookup and turn every
-        // tap into a NaN sample.
-        "int evn=(i/2)*2==i ? 1 : 0;"
-        "vec4 kk0=texture2D(K,vec2(u,0.5/3.0));"
-        "vec4 kk1=texture2D(K,vec2(u,1.5/3.0));"
-        "vec4 kk2=texture2D(K,vec2(u,2.5/3.0));"
-        "float k0=evn==1 ? x_i16raw(kk0.rg) : x_i16raw(kk0.ba);"
-        "float k1=evn==1 ? x_i16raw(kk1.rg) : x_i16raw(kk1.ba);"
-        "float k2=evn==1 ? x_i16raw(kk2.rg) : x_i16raw(kk2.ba);"
-        // Raw q16 units: a raw product is real*256, so the sum of three raw
-        // products must come back down by 256 to stay raw.
-        "gl_FragColor=x_i24encq((k0*a+k1*b+k2*c)/256.0);}";
+        "void main(){int q=int(gl_FragCoord.x);"
+        "float u=(float(q)+0.5)/float(" + to_string(tw) + ");"
+        "vec2 a=x_i16pairq(texture2D(S0,vec2(u,0.5)));"
+        "vec2 b=x_i16pairq(texture2D(S1,vec2(u,0.5)));"
+        "vec2 c=x_i16pairq(texture2D(G,vec2(u,0.5)));"
+        // Row t of K holds tap t for channels 2q and 2q+1, so the pair decode
+        // is the kernel row's own layout.
+        "vec2 k0=x_i16pairq(texture2D(K,vec2(u,0.5/3.0)));"
+        "vec2 k1=x_i16pairq(texture2D(K,vec2(u,1.5/3.0)));"
+        "vec2 k2=x_i16pairq(texture2D(K,vec2(u,2.5/3.0)));"
+        // Raw q16 units: a raw product is real*256, so three of them come back
+        // down by 256; 0.00390625 is exact scaling (a power of two), and it
+        // avoids the reciprocal the driver emits for a division.
+        "vec2 cv=(k0*a+k1*b+k2*c)*0.00390625;"
+        "gl_FragColor=x_st2q(cv.x,cv.y);}";
 }
 
 string copy_act(int dim, XFormat xf) {
