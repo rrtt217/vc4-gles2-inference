@@ -196,6 +196,12 @@ the FFN are unchanged, so the dense path runs it unmodified once the layer loop
 knows the type.  A reader that predates key 14 sees attention on a conv layer
 and refuses on the missing qkv rather than answering wrongly.
 
+The vocabulary (`0x20`) may be **absent** when the head is tied
+(`mmcf_pack.py --head-dedup`): the embedding rows already carry one scale each,
+so the engine builds the tiles as views into the embedding bytes with that
+plane (`matvec_q8_pair_logits` with `wrow`).  A container with neither tiles
+nor a q8 embedding is refused.
+
 The vocabulary (`0x20`) is stored as several tiles of at most **1536 rows**
 (`LOGITS_GRID` in `engine/tools/mmcf_grid.py`, `kLogitsGrid` in
 `engine/src/logits_grid.h`), and the last tile is short: MiniMind3's 6400 rows

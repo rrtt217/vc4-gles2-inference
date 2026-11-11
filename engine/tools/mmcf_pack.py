@@ -480,6 +480,10 @@ def main():
     ap.add_argument("--bos", type=int, help="BOS id (-1 for none); default: derived from the tokenizer")
     ap.add_argument("--eos", type=int, help="EOS id; default: derived")
     ap.add_argument("--stop", type=int, help="extra stop id (e.g. <|im_end|>); default: derived")
+    ap.add_argument("--head-dedup", action="store_true",
+                    help="tied embedding: write no logits tiles and let the engine "
+                         "render them from the embedding rows with their per-row "
+                         "scales (saves one full copy of the vocabulary head)")
     ap.add_argument("--q8-row-scale", action="store_true",
                     help="q8 with one scale per output row (a plane per matrix) "
                          "instead of one per matrix; for a model whose weight "
@@ -507,7 +511,8 @@ def main():
         meta, tensors = tensors_from_hf(args.src, args.quant, args.seq,
                                         rail_check=not args.no_rail_check,
                                         vocab_limit=_ntok or None,
-                                        q8_row=args.q8_row_scale)
+                                        q8_row=args.q8_row_scale,
+                                        head_dedup=args.head_dedup)
         if _cfg.get("tie_word_embeddings") is False:
             # load_minimind refuses a false tie with no lm_head, so reaching here
             # means the head really is the checkpoint's own matrix.

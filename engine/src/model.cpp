@@ -867,6 +867,33 @@ bool Model::load_mmcf(){
                      << " logits=" << logits_tiles.size() << " " << logits_tiles[0].rows << "x" << logits_tiles[0].cols
                      << " emb=" << emb_q8.size() << " embs=" << emb_scale.size() << "\n";
         }
+        // A container written with --head-dedup has no T_LOGITS tiles: a tied
+        // head *is* the embedding matrix, whose rows already carry one scale
+        // each.  Build the tiles as views into the embedding bytes and keep the
+        // per-row plane, which is exactly what the logits kernel's wrow variant
+        // reads (matvec_q8_pair_logits with `WS`).
+        if (logits_tiles.empty() && has_q8_emb && !emb_scale.empty()) {
+                float unit = 0.0f;
+                for (int v = 0; v < (int)emb_scale.size() && v < vocab; ++v)
+                        if (emb_scale[v] > unit) unit = emb_scale[v];
+                if (unit <= 0.0f) {
+                        cerr << "mmcf: a dedup head needs embedding scales\n";
+                        return false;
+                }
+                for (int st = 0; st < vocab; st += kLogitsGrid) {
+                        const int rows = (vocab - st < kLogitsGrid) ? vocab - st : kLogitsGrid;
+                        Mat m;
+                        m.rows = rows; m.cols = dim;
+                        m.type = WeightType::INT8;
+                        m.scale = unit;
+                        m.prebiased = false;   // the embedding body stays signed
+                        m.ext8 = emb_q8.data() + (size_t)st * dim;
+                        m.row_scale.assign(emb_scale.begin() + st,
+                                           emb_scale.begin() + st + rows);
+                        for (float& f : m.row_scale) f /= unit;
+                        logits_tiles.push_back(std::move(m));
+                }
+        }
         if ((!has_q8_emb && !has_i16_emb) || (int)rms_att.size() != layers * dim || logits_tiles.empty()) {
                 cerr << "mmcf: missing required tensors\n";
                 return false;

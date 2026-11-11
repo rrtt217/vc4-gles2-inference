@@ -4576,6 +4576,8 @@ opt-in through `CONV_GPU=1`.
 | prefill, 6-token prompt, serial | ~1.15 s |
 | packer's residual calibration (rail 128) | peak 33.7 at layer 5 |
 | engine q4 logits vs numpy f32 reference (`The capital of France is`) | cos 0.948, top-1 same |
+| q4 container, tiled head vs `--head-dedup` | 234.9 MB / 168.9 MB, PPL 111.83 / 112.15 |
+| MiniMind3 q8 tiled vs dedup (SEQ=768) | 68.98 MB / 64.07 MB, PPL 271.19 / 270.28, golden string unmoved |
 
 The PPL is not comparable with MiniMind's 270 — different model, tokenizer and
 corpus length.  It is a baseline for this container, and the number a change to

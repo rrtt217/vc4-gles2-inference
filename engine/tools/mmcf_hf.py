@@ -220,10 +220,9 @@ def check_source(cfg, hdr):
     # load_lfm2() checks every tensor it reads with the expected shape.  The
     # checks above still apply: no biases, silu FFN, default rope, matched
     # head_dim.
-    if cfg.get('model_type') == 'lfm2' or 'layer_types' in cfg:
-        if cfg.get('model_type') != 'lfm2':
-            raise SystemExit("%s: layer_types without model_type lfm2; this "
-                             "loader only knows Liquid's hybrid block" % arch)
+    if cfg.get('model_type') == 'lfm2':
+        # Qwen3 configs also carry `layer_types` (all full_attention), so the
+        # hybrid block is keyed on model_type, never on the key's presence.
         return
     # The loader maps Llama/Qwen names only.  A BERT/ModernBERT encoder, a
     # Tinyllm or a MiniMind fork passes every check above (no biases, silu) and
@@ -718,7 +717,7 @@ def tok_entry_count(path):
 
 
 def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit=None,
-                    q8_row=False):
+                    q8_row=False, head_dedup=False):
     """Build the tensor list directly from an HF safetensors directory.
 
     Same list shape the legacy reader produces, so build() cannot tell them
@@ -903,14 +902,23 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
     # Logits: q8 from the float weights in a q4 container (the vocabulary head
     # stays 8-bit there), but i16-then-q8 in a q8 container -- the two-step order
     # again, and it is visible in the shipped files.
-    for i, st in enumerate(range(0, vocab, LOGITS_GRID)):
-        w = m['wcls'][st:st + LOGITS_GRID]
-        if scheme != 'q4':
-            mat(T_LOGITS, i, w)
-        else:
-            q, sc = q8mat(np.asarray(w, np.float32))
-            T.append((T_LOGITS | (i << 8), DT_Q8I8, int(w.shape[0]), int(w.shape[1]),
-                      0, q.tobytes(), float(sc)))
+    #
+    # --head-dedup writes none: a tied head is the embedding matrix, the
+    # embedding rows already carry one scale each, and the engine can render
+    # the logits from those rows (and their plane) instead of a second copy.
+    if head_dedup and m.get('untied'):
+        raise SystemExit("--head-dedup needs a tied head: this checkpoint ships a "
+                         "separate lm_head, so the logits cannot reuse the "
+                         "embedding rows")
+    if not head_dedup:
+        for i, st in enumerate(range(0, vocab, LOGITS_GRID)):
+            w = m['wcls'][st:st + LOGITS_GRID]
+            if scheme != 'q4':
+                mat(T_LOGITS, i, w)
+            else:
+                q, sc = q8mat(np.asarray(w, np.float32))
+                T.append((T_LOGITS | (i << 8), DT_Q8I8, int(w.shape[0]), int(w.shape[1]),
+                          0, q.tobytes(), float(sc)))
     return meta, T
 
 
