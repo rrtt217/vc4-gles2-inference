@@ -5025,3 +5025,41 @@ Three things follow, and they change conclusions this file drew before:
 What is still true from the earlier section: an **i16 container on the fused
 path** is broken (PPL 1.4e7), and that is pre-existing at `f22bb76`.  The i16
 *serial* path is the 15.97 above.
+
+### The same fix on the board (2026-11-11, Pi Zero)
+
+`bin/engine_mm3_pi.bos`, cross-built from `4771eac`, same container
+(`lfm2.5.qad.q4.mmcf`), `SEQ=256 KV_PACK=16`, `GPU_LAYER=1 CONV_GPU=1`, greedy,
+24 tokens.
+
+What the two binaries answer, same prompts, same seed-free path:
+
+| prompt | before (no BOS in the template) | after |
+|---|---|---|
+| What is C. elegans? | "a type of insect that belongs to the order Coleoptera" | **"a small, round, worm-like organism that is commonly used in research to study genetics"** |
+| Write a haiku about rain. | "A gentle rain, a quiet moment." (one line, not a haiku) | **"Rain whispers softly,"** |
+| 用一句话介绍你自己。 | **echoed the prompt**: "用一句话介绍你自己。" | **"我是一个AI助手，帮助您理解和交流。"** |
+| Compute 12345\*6789. | "To compute 12345 * 6789, follow these steps:" | "12345 \* 6,789 = …" (both wrong; a 230M model) |
+| List three uses of a paperclip. | "Three uses of a paperclip are:" | "Here are three common uses of a paperclip:" |
+
+The echo of the Chinese prompt is the clearest symptom the missing BOS caused:
+with no `<|startoftext|>` the model treats the first line as a continuation and
+repeats it.  Three of five prompts change for the better, two are neutral.
+
+Board PPL, `SEQ=256`, `data/ppl_test.txt` (334 scored tokens, two windows --
+not comparable with the `SEQ=512` rows above):
+
+| path | PPL |
+|---|---:|
+| fused (`GPU_LAYER=1 CONV_GPU=1`) | 45.52 |
+| serial (with `matvec_s`) | **43.91** |
+
+Serial is 3.7% better, which is the same direction as on Xe (`18.73` against
+`19.52`); the old board numbers had it the other way round for the same reason
+the absolute values were wrong.
+
+The fused path gets the BOS fix but **not** `matvec_s`: that scales the
+*serial* path's matvex inputs, while the fused path uploads through its own
+I16_2 targets, which still have no scale.  Making the fused path's targets
+carry one is the next step, and it is the difference between the board's
+quality today and the serial path's.
