@@ -206,7 +206,11 @@ void GPU::init_conv(int layers, int dim){
                 conv_s1_[l] = make_target(tw, 1);
                 for (Target* t : {&conv_s0_[l], &conv_s1_[l]}) {
                         bind_fbo(t->fbo);
-                        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+                        // Alpha must be 0 too: I16_2 stores the second value in
+                        // .ba, so a 1.0 alpha clear leaves that value at 255
+                        // (0.996) and the conv starts from a state that is not
+                        // zero -- measured as layer 0 cv = 62 instead of 0.
+                        glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
                         glClear(GL_COLOR_BUFFER_BIT);
                 }
         }
@@ -774,12 +778,17 @@ bool GPU::gpu_layer_enabled() const{
 void GPU::init_attention(int dim, int kv_dim, int heads, int kv_heads, int head_dim,
                         int seq, bool rope_half, bool qk_norm, int layers,
                         const vector<float>& qn, const vector<float>& kn,
-                        const vector<float>& rcos, const vector<float>& rsin, bool qkv_pair){
+                        const vector<float>& rcos, const vector<float>& rsin, bool qkv_pair,
+                        bool hybrid){
         att_dim_ = dim; att_kv_dim_ = kv_dim; att_heads_ = heads;
         att_kv_heads_ = kv_heads; att_head_dim_ = head_dim; att_seq_ = seq;
         att_rope_half_ = rope_half; att_qk_norm_ = qk_norm;
         att_qkv_pair_ = qkv_pair && ((dim + 2 * kv_dim) % 2 == 0);
-        att_kv_bits_ = getenv("KV_PACK") ? atoi(getenv("KV_PACK")) : 0;
+        // A hybrid model defaults to the packed 16-bit KV: the 24-bit path
+        // produces garbage on LFM2.5's shape (kv_dim 512, head_dim 64) while
+        // the packed one is correct, and the packed layout is the canonical
+        // Pi/Xe setting anyway.  KV_PACK overrides either way.
+        att_kv_bits_ = getenv("KV_PACK") ? atoi(getenv("KV_PACK")) : (hybrid ? 16 : 0);
         if (att_kv_bits_ == 1) att_kv_bits_ = 16;
         if (att_kv_bits_ != 0 && att_kv_bits_ != 8 && att_kv_bits_ != 16) att_kv_bits_ = 0;
         att_kv_packed_ = att_kv_bits_ != 0;

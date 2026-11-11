@@ -177,7 +177,8 @@ Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
         if (gpu_attn_)
             gpu_.init_attention(m_.dim, m_.kv_dim, m_.heads, m_.kv_heads, m_.head_dim,
                                 m_.seq, m_.rope_half, m_.qk_norm, m_.layers,
-                                m_.q_norm, m_.k_norm, rope_cos_, rope_sin_, qkv_pair);
+                                m_.q_norm, m_.k_norm, rope_cos_, rope_sin_, qkv_pair,
+                                m_.hybrid);
         if (gpu_layer_)
             gpu_.init_persistent(m_.dim, m_.layers, m_.rms_att, m_.rms_ffn, m_.rms_final);
     }

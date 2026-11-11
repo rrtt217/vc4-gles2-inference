@@ -4591,10 +4591,30 @@ Write a haiku about rain.         -> Rain whispers softly, / A gentle breeze ...
 chat, "What is the capital of France?" -> Assistant: The capital of France is Paris.
 ```
 
-The GPU path (`GPU_LAYER=1 CONV_GPU=1`) decodes at **24 ms/token** but answers
-` is is is`: the fused conv block disagrees with the CPU reference at layer 0
-(`x1` differs by more than the conv contribution), and the same path with the
-conv layers reduced to identity (`CONV_SKIP=1`) degenerates too, so the
-attention/FFN half of the fused path for this shape (head_dim 64, GQA 2,
-qk-norm) is not proven either.  Do not treat 24 ms as a result until the
-output matches the serial path.
+The GPU path (`GPU_LAYER=1 CONV_GPU=1`) now runs the conv block on the GPU and
+decodes at **24 ms/token** (7x the serial path), but it is **not** the default:
+it costs quality.  Same corpus, same SEQ:
+
+| path | PPL | decode |
+|---|---:|---:|
+| serial (`GPU_LAYER=0`, CPU attention + CPU conv) | **111.83** | 172–180 ms |
+| GPU attention, CPU layer loop (`GPU_LAYER=0 GPU_ATTN=1`) | 119.82 | — |
+| fused layer (`GPU_LAYER=1 CONV_GPU=1`) | 126.67 | 24 ms |
+
+So the attention block alone costs ~6% PPL on this model and the fused
+residual/conv sequencing another ~6%.  The fused path also ends some plain
+prompts on the first token (`Write a haiku about rain.` prints nothing) while
+the chat template works, which is the profile of logits that are off enough to
+make EOS win, not of a broken kernel.
+
+Two findings worth keeping:
+
+* **The conv block's zero state was not zero.** `init_conv` cleared the state
+  targets with alpha 1.0, and I16_2 stores the second value in `.ba`, so every
+  state started at 255 (0.996).  The first conv output at layer 0 was 62
+  instead of 0.  Clearing alpha to 0 makes layer 0's `x1`/`xbf` byte-identical
+  to the CPU path.
+* **The 24-bit KV layout is wrong for this shape** (kv_dim 512, head_dim 64):
+  the fused path answers garbage with it and is correct with `KV_PACK=16`.  A
+  hybrid model now defaults to 16; `KV_PACK` still overrides.  Dense models are
+  unaffected (MiniMind3 answers the same with either).

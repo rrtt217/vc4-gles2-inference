@@ -98,7 +98,8 @@ public:
     void init_attention(int dim, int kv_dim, int heads, int kv_heads, int head_dim,
                         int seq, bool rope_half, bool qk_norm, int layers,
                         const vector<float>& qn, const vector<float>& kn,
-                        const vector<float>& rcos, const vector<float>& rsin, bool qkv_pair);
+                        const vector<float>& rcos, const vector<float>& rsin, bool qkv_pair,
+                        bool hybrid = false);
 
     GLuint attention_block(const Mat& qkv, GLuint x, int layer, int pos);
 
