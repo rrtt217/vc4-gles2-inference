@@ -74,6 +74,15 @@ probes/texsize_probe: probes/texsize_probe.cpp $(SRC)/common.cpp $(SRC)/common.h
 probes/wrow_probe: probes/wrow_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp
 	$(CXX) $(CXXFLAGS) -I$(SRC) -o $@ probes/wrow_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(LDLIBS)
 
+# Do the conv block's fetches work on this driver?  Links the engine's own
+# shader builders, so sections B and C run the shipped text.
+probes/conv_probe: probes/conv_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp
+	$(CXX) $(CXXFLAGS) -I$(SRC) -o $@ probes/conv_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(LDLIBS)
+
+probes/conv_probe_pi: probes/conv_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp
+	@test -d "$(CROSS_SYSROOT)" || { echo "missing CROSS_SYSROOT=$(CROSS_SYSROOT)" >&2; exit 2; }
+	$(CROSS_CXX) $(CROSS_CXXFLAGS) -I$(SRC) -o $@ probes/conv_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(CROSS_LDLIBS)
+
 probes/wrow_probe_pi: probes/wrow_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp
 	@test -d "$(CROSS_SYSROOT)" || { echo "missing CROSS_SYSROOT=$(CROSS_SYSROOT)" >&2; exit 2; }
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -I$(SRC) -o $@ probes/wrow_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(CROSS_LDLIBS)
@@ -92,7 +101,7 @@ probes/load_probe_pi: probes/load_probe.cpp
 clean:
 	rm -f engine engine_mm3 engine_mm3_pi
 	rm -f probes/vc4_probe probes/vc4_ffn_probe probes/vc4_topk_probe probes/load_probe_pi
-	rm -f probes/matvec_probe probes/texsize_probe probes/q4fmt_probe_pi probes/glsl_probe_pi probes/q4mv_probe_pi probes/draw_probe_pi probes/packunpack_probe probes/packunpack_probe_pi probes/logits_grid_probe probes/wrow_probe probes/wrow_probe_pi
+	rm -f probes/matvec_probe probes/texsize_probe probes/q4fmt_probe_pi probes/glsl_probe_pi probes/q4mv_probe_pi probes/draw_probe_pi probes/packunpack_probe probes/packunpack_probe_pi probes/logits_grid_probe probes/wrow_probe probes/wrow_probe_pi probes/conv_probe probes/conv_probe_pi
 
 probes/glsl_probe_pi: probes/glsl_probe.cpp
 	@test -d "$(CROSS_SYSROOT)" || { echo "missing CROSS_SYSROOT=$(CROSS_SYSROOT)" >&2; exit 2; }
