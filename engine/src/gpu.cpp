@@ -267,7 +267,6 @@ GLuint GPU::conv3(GLuint s0, GLuint s1, GLuint g, GLuint ktex, Target& out){
         set_sampler(p, "G", 2);
         bind_tex(3, ktex);
         set_sampler(p, "K", 3);
-        glUniform1f(uloc(p, "k"), 3.0f);
         setup_attrib(p);
         glDrawArrays(GL_TRIANGLES, 0, 3);
         ++draws_;
@@ -301,13 +300,6 @@ GLuint GPU::conv_block(const Mat& in_b, const Mat& in_c, const Mat& in_x,
         conv_copy(conv_s1_[layer].tex, conv_s0_[layer]);   // shift: s0 <- s1
         conv_copy(gated, conv_s1_[layer]);                 //        s1 <- gated
         const GLuint y = conv_mul(conv_t_c_.tex, cv, conv_y_);
-        if (getenv("CONV_DUMP") && layer == 0) {
-                dump_target(conv_t_b_, "cvB", 8);
-                dump_target(conv_t_x_, "cvX", 8);
-                dump_target(conv_gated_, "cvG", 8);
-                dump_target(conv_cv_, "cvC", 8);
-                dump_target(conv_y_, "cvY", 8);
-        }
         matvec_add(out_proj, y, residual, out, act_fmt_);
         return out.tex;
 }

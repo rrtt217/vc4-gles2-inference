@@ -44,8 +44,9 @@ models/
 
   lfm2.5-230m/                   LFM2.5-230M (hybrid: 8 conv + 6 attention layers):
                                  lfm2.5.q4.mmcf (235 MB) runs the serial path on
-                                 Xe; the GPU layer path and the conv kernels are
-                                 not written yet.
+                                 Xe: PPL 111.83 (data/ppl_test.txt, 333 tokens),
+                                 172-180 ms/token.  GPU_LAYER=1 is not usable for
+                                 this model yet (see docs/performance.md).
                                  probe_residuals.py is the numpy f32 forward behind
                                  docs/lfm2.5-230m-assessment.zh-CN.md (residual peak
                                  29.5, 0.23x the q16 rail -> q16 path is enough);

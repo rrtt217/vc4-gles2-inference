@@ -4560,3 +4560,41 @@ What a Pi-sized MoE would need: 100M parameters or less at q4, or an expert
 count of 2 with a width near 1216.  Nothing in that shape is published for this
 family; `stories15M_MOE` is 36M but Mixtral top-2, which needs the weighted
 combine the runtime does not have.
+
+## LFM2.5-230M: first numbers (2026-11-11, Xe)
+
+The first hybrid (conv + attention) model this engine runs.  Container
+`models/lfm2.5-230m/lfm2.5.q4.mmcf` (235 MB, vocab 64402, `SEQ` 512, tied head
+stored twice — see the assessment doc).  The serial path is the acceptance
+reference; `GPU_LAYER=1` runs but is **wrong** for this model today and is
+opt-in through `CONV_GPU=1`.
+
+| measurement | Xe |
+|---|---:|
+| PPL (`data/ppl_test.txt`, 333 tokens, q4, serial) | **111.83** |
+| decode, serial path (`GPU_LAYER=0` kernels, CPU layer loop) | 172–180 ms/token |
+| prefill, 6-token prompt, serial | ~1.15 s |
+| packer's residual calibration (rail 128) | peak 33.7 at layer 5 |
+| engine q4 logits vs numpy f32 reference (`The capital of France is`) | cos 0.948, top-1 same |
+
+The PPL is not comparable with MiniMind's 270 — different model, tokenizer and
+corpus length.  It is a baseline for this container, and the number a change to
+the conv block has to hold.
+
+Behaviour (serial path, greedy, `--system "You are a helpful assistant trained
+by Liquid AI."`):
+
+```
+The capital of France is          -> Paris, and it is a major cultural
+What is C. elegans?               -> C. elegans is a well-studied model organism ...
+Write a haiku about rain.         -> Rain whispers softly, / A gentle breeze ...
+chat, "What is the capital of France?" -> Assistant: The capital of France is Paris.
+```
+
+The GPU path (`GPU_LAYER=1 CONV_GPU=1`) decodes at **24 ms/token** but answers
+` is is is`: the fused conv block disagrees with the CPU reference at layer 0
+(`x1` differs by more than the conv contribution), and the same path with the
+conv layers reduced to identity (`CONV_SKIP=1`) degenerates too, so the
+attention/FFN half of the fused path for this shape (head_dim 64, GQA 2,
+qk-norm) is not proven either.  Do not treat 24 ms as a result until the
+output matches the serial path.

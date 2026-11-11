@@ -183,6 +183,11 @@ Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
     }
 
 bool Session::save_prefix_cache(const string& path, const vector<int>& toks){
+        // A hybrid model's conv state is not part of the cache format yet:
+        // replaying a cache without it would resume from the wrong history, so
+        // refuse instead of loading a prompt that silently loses its conv
+        // history.
+        if (m_.hybrid) return false;
         if (!gpu_attn_ || gpu_.kv_cache_.empty() || toks.empty() || (int)toks.size() > m_.seq) return false;
         ofstream f(path, ios::binary);
         if (!f) return false;
@@ -228,6 +233,7 @@ bool Session::save_prefix_cache(const string& path, const vector<int>& toks){
     }
 
 bool Session::load_prefix_cache(const string& path, vector<int>& toks){
+        if (m_.hybrid) return false;
         if (!gpu_attn_ || gpu_.kv_cache_.empty()) return false;
         ifstream f(path, ios::binary);
         if (!f) return false;
@@ -472,7 +478,9 @@ GLuint Session::forward_gpu_hidden(int token, int pos, bool want_logits){
             if (pass_dup("rms_att")) xb = gpu_.rmsnorm(h, gpu_.rms_att_tex_[l], gpu_.xb_);
             mark("rms_att", l);
             if (getenv("STAGE_DUMP")) gpu_.dump_target(gpu_.xb_, "xb", 4096);
-            if (m_.is_conv(l)) {
+            if (m_.is_conv(l) && getenv("CONV_SKIP")) {
+                gpu_.conv_copy(h, gpu_.hidden_b_);   // probe: conv layer = identity
+            } else if (m_.is_conv(l)) {
                 gpu_.conv_block(m_.conv_in_b[l], m_.conv_in_c[l], m_.conv_in_x[l],
                                 m_.conv_out[l], xb, h, l, gpu_.hidden_b_);
                 if (getenv("STAGE_DUMP")) gpu_.dump_target(gpu_.hidden_b_, "x1", 4096);

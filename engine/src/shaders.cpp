@@ -1245,7 +1245,7 @@ string conv3_act(int dim, XFormat xf) {
     // matvec outputs), sampling one q16 value from each of the three I16_2
     // textures at the same index.
     return head(xf) + q24_helpers() +
-        "uniform sampler2D S0,S1,G,K;uniform float k;"
+        "uniform sampler2D S0,S1,G,K;"
         "void main(){int i=int(gl_FragCoord.x);"
         "float a=X1Q(S0,i,float(" + to_string(tw) + "));"
         "float b=X1Q(S1,i,float(" + to_string(tw) + "));"
@@ -1253,12 +1253,16 @@ string conv3_act(int dim, XFormat xf) {
         "float u=(float(i/2)+0.5)/float(" + to_string(tw) + ");"
         // The depthwise kernel is per channel: row t of K holds tap t for
         // channels 2q and 2q+1, so one fetch per tap, picking the q16 half.
-        "float k0=(i/2)*2==i ? x_i16raw(texture2D(K,vec2(u,0.5/k)).rg) "
-        ": x_i16raw(texture2D(K,vec2(u,0.5/k)).ba);"
-        "float k1=(i/2)*2==i ? x_i16raw(texture2D(K,vec2(u,1.5/k)).rg) "
-        ": x_i16raw(texture2D(K,vec2(u,1.5/k)).ba);"
-        "float k2=(i/2)*2==i ? x_i16raw(texture2D(K,vec2(u,2.5/k)).rg) "
-        ": x_i16raw(texture2D(K,vec2(u,2.5/k)).ba);"
+        // The kernel height is fixed here (3): a float uniform for it was the
+        // one value that could silently fail a location lookup and turn every
+        // tap into a NaN sample.
+        "int evn=(i/2)*2==i ? 1 : 0;"
+        "vec4 kk0=texture2D(K,vec2(u,0.5/3.0));"
+        "vec4 kk1=texture2D(K,vec2(u,1.5/3.0));"
+        "vec4 kk2=texture2D(K,vec2(u,2.5/3.0));"
+        "float k0=evn==1 ? x_i16raw(kk0.rg) : x_i16raw(kk0.ba);"
+        "float k1=evn==1 ? x_i16raw(kk1.rg) : x_i16raw(kk1.ba);"
+        "float k2=evn==1 ? x_i16raw(kk2.rg) : x_i16raw(kk2.ba);"
         // Raw q16 units: a raw product is real*256, so the sum of three raw
         // products must come back down by 256 to stay raw.
         "gl_FragColor=x_i24encq((k0*a+k1*b+k2*c)/256.0);}";
