@@ -122,11 +122,17 @@ public:
     Target conv_t_b_, conv_t_c_, conv_t_x_, conv_gated_, conv_cv_, conv_y_;
     std::vector<Target> conv_s0_, conv_s1_;
     std::vector<GLuint> conv_k_tex_;
+    int conv_texels_ = 0;
     GLuint conv_mul(GLuint a, GLuint b, Target& out);
     GLuint conv3(GLuint s0, GLuint s1, GLuint g, GLuint ktex, Target& out);
     // Per-channel depthwise kernel as q16: width dim/2, height k, row t holds
     // tap t for channels 2q and 2q+1.
     void set_conv_kernel(int layer, const float* w, int dim, int k);
+    // The prefix cache carries the conv history: one row per state texture.
+    int conv_state_row_bytes() const { return conv_texels_ * 4; }
+    bool read_conv_state(int layer, int which, vector<uint8_t>& out);
+    bool write_conv_state(int layer, int which, const vector<uint8_t>& in);
+    void clear_conv_state();
     GLuint conv_copy(GLuint src, Target& out);
     GLuint conv_block(const Mat& in_b, const Mat& in_c, const Mat& in_x,
                       const Mat& out_proj, GLuint xb, GLuint residual,

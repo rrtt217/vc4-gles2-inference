@@ -146,3 +146,27 @@ python3 server.py --seq 768 --kv-pack 16 \
 
 The cache header records the packing mode and the `KV_SCALE` grid; loading
 with a different `--kv-pack` or `KV_SCALE` is rejected.
+
+## Version 4: the hybrid conv history (2026-11-11)
+
+A hybrid model (LFM2) keeps `k-1` gated rows per conv layer; without them a
+reloaded cache resumes from a state that never existed.  Version 4 adds them
+after the KV rows (and the optional V-step plane): two rows per conv layer,
+`x_texels(dim)` texels each, written in layer order.  Flag bit 32 marks the
+file, and a reader refuses a version 4 file when the flag and the model
+disagree.
+
+Two rules come with it, both measured:
+
+* a cache whose token prefix is **not fully reused** must have its conv state
+  zeroed before the prefill (`zero_conv_state()`), or the first two tokens see
+  a history from another token stream.  The single-shot path and the chat REPL
+  both do this; the CLI cache build (`--build-prefix-cache`) bumps `SEQ` to
+  1024 unless `SEQ` is set, so build and load must agree on `SEQ` or the header
+  is rejected.
+* `load_prefix_cache` ends with `forget_state()`: its uploads bypass the
+  engine's texture cache, and a stale binding showed up as the next draw
+  sampling the last uploaded row.
+
+Round-trip is byte-identical (`PREFIX_CACHE_RESAVE` and `cmp`), and a loaded
+cache with a non-matching prefix produces the same text as no cache.

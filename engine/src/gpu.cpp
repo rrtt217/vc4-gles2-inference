@@ -204,17 +204,56 @@ void GPU::init_conv(int layers, int dim){
                 // so clear both rows through the FBO.
                 conv_s0_[l] = make_target(tw, 1);
                 conv_s1_[l] = make_target(tw, 1);
-                for (Target* t : {&conv_s0_[l], &conv_s1_[l]}) {
-                        bind_fbo(t->fbo);
-                        // Alpha must be 0 too: I16_2 stores the second value in
-                        // .ba, so a 1.0 alpha clear leaves that value at 255
-                        // (0.996) and the conv starts from a state that is not
-                        // zero -- measured as layer 0 cv = 62 instead of 0.
-                        glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
-                        glClear(GL_COLOR_BUFFER_BIT);
-                }
         }
+        clear_conv_state();
         conv_t_b_ = conv_t_c_ = conv_t_x_ = conv_gated_ = conv_cv_ = conv_y_ = Target();
+        conv_texels_ = tw;
+}
+
+bool GPU::read_conv_state(int layer, int which, vector<uint8_t>& out){
+        if (layer < 0 || layer >= (int)conv_s0_.size() || conv_texels_ <= 0) return false;
+        const Target& t = which == 0 ? conv_s0_[layer] : conv_s1_[layer];
+        if (t.tex == 0) return false;
+        out.resize((size_t)conv_texels_ * 4);
+        glFinish();
+        bind_fbo(t.fbo);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(0, 0, conv_texels_, 1, GL_RGBA, GL_UNSIGNED_BYTE, out.data());
+        gl_state_forget_bindings();
+        return true;
+}
+
+bool GPU::write_conv_state(int layer, int which, const vector<uint8_t>& in){
+        if (layer < 0 || layer >= (int)conv_s0_.size() || conv_texels_ <= 0) return false;
+        if (in.size() != (size_t)conv_texels_ * 4) return false;
+        const Target& t = which == 0 ? conv_s0_[layer] : conv_s1_[layer];
+        if (t.tex == 0) return false;
+        glBindTexture(GL_TEXTURE_2D, t.tex);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, conv_texels_, 1, GL_RGBA, GL_UNSIGNED_BYTE, in.data());
+        gl_state_forget_bindings();
+        return true;
+}
+
+void GPU::clear_conv_state(){
+        // Alpha must be 0 too: I16_2 stores the second value in .ba, so a 1.0
+        // alpha clear leaves that value at 255 (0.996) and the conv starts from
+        // a state that is not zero -- measured as layer 0 cv = 62 instead of 0.
+        for (auto& v : conv_s0_) {
+                if (!v.tex) continue;
+                bind_fbo(v.fbo);
+                glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+                glClear(GL_COLOR_BUFFER_BIT);
+        }
+        for (auto& v : conv_s1_) {
+                if (!v.tex) continue;
+                bind_fbo(v.fbo);
+                glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+                glClear(GL_COLOR_BUFFER_BIT);
+        }
+        // The clears bind FBOs behind the engine's back; a stale binding would
+        // make the first draw of the next prefill read the wrong target.
+        gl_state_forget_bindings();
 }
 
 GLuint GPU::conv_mul(GLuint a, GLuint b, Target& out){

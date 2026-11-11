@@ -547,6 +547,10 @@ int main(int argc, char** argv) {
             int common = 0;
             while (common < (int)cache_tokens.size() && common < (int)tokens.size() &&
                    cache_tokens[common] == tokens[common]) ++common;
+            // Same rule as the CLI: a partial prefix reuse invalidates the
+            // loaded conv history.
+            if (common < (int)cache_tokens.size() && model.hybrid)
+                session.zero_conv_state();
             int prefill_from = common;
             if (prefill_from >= (int)tokens.size()) prefill_from = (int)tokens.size() - 1;
             int prefill_tokens = (int)tokens.size() - prefill_from;
@@ -780,6 +784,11 @@ int main(int argc, char** argv) {
         auto tokens = parts.empty() ? tokenizer.encode(text, enc_bos, enc_bos)
                                     : tokenizer.encode_parts(parts, enc_bos, enc_bos);
         int skip = (first && !cli_cache_tokens.empty()) ? cache_prefix_len(tokens) : 0;
+        // A hybrid model that only reuses part of the cache must not keep the
+        // loaded conv history: the history is a running state, and the tokens
+        // that produced it are not the ones about to be prefilled.
+        if (first && !cli_cache_tokens.empty() && skip < (int)cli_cache_tokens.size())
+            session.zero_conv_state();
         if (hist) {
             size_t n = 0;
             while (n < kv_tokens.size() && n < tokens.size() && kv_tokens[n] == tokens[n]) ++n;
@@ -1125,6 +1134,9 @@ int main(int argc, char** argv) {
     }
 
     auto tokens = tokenizer.encode(prompt, true, true);
+    // The single-shot path never reuses a loaded prefix, so a hybrid model must
+    // not keep the conv history that came with the cache file.
+    if (!cli_cache_tokens.empty()) session.zero_conv_state();
     cout << "tokens:";
     for (int t : tokens) cout << " " << t;
     cout << "\n";

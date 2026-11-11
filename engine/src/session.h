@@ -10,6 +10,11 @@ class Session {
 public:
     Session(Model& model, GPU& gpu);
 
+    // A cache whose token prefix is not fully reused must not leave its conv
+    // history behind: the history is a running state, and replaying the prompt
+    // from token 0 with a history from another token stream is wrong.
+    void zero_conv_state();
+
     bool save_prefix_cache(const string& path, const vector<int>& toks);
 
     bool load_prefix_cache(const string& path, vector<int>& toks);

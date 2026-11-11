@@ -183,12 +183,18 @@ Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
             gpu_.init_persistent(m_.dim, m_.layers, m_.rms_att, m_.rms_ffn, m_.rms_final);
     }
 
+void Session::zero_conv_state(){
+        if (!m_.hybrid) return;
+        if (gpu_layer_) { gpu_.clear_conv_state(); return; }
+        for (auto& v : conv_state_)
+                for (float& f : v) f = 0.0f;
+}
+
 bool Session::save_prefix_cache(const string& path, const vector<int>& toks){
-        // A hybrid model's conv state is not part of the cache format yet:
-        // replaying a cache without it would resume from the wrong history, so
-        // refuse instead of loading a prompt that silently loses its conv
-        // history.
-        if (m_.hybrid) return false;
+        // A hybrid model's cache carries the conv history too (version 4, flag
+        // bit 32); without it a reload would resume from a state that never
+        // existed.  That needs the GPU conv path, which owns the state textures.
+        if (m_.hybrid && (!gpu_layer_ || gpu_.conv_state_row_bytes() == 0)) return false;
         if (!gpu_attn_ || gpu_.kv_cache_.empty() || toks.empty() || (int)toks.size() > m_.seq) return false;
         ofstream f(path, ios::binary);
         if (!f) return false;
@@ -200,17 +206,21 @@ bool Session::save_prefix_cache(const string& path, const vector<int>& toks){
         // KV_VSTEP); without it the file is byte-for-byte a version 2 file
         // with a new version number, so the default path keeps writing 2.
         const int vsw = gpu_.att_kv_vstep_ ? gpu_.att_kv_heads_ : 0;
-        u32(vsw > 0 ? 3u : 2u);
+        u32(m_.hybrid ? 4u : vsw > 0 ? 3u : 2u);
         u64(m_.source_size); u64(m_.source_mtime);
         u32(m_.dim); u32(m_.hidden); u32(m_.layers); u32(m_.heads);
         u32(m_.kv_heads); u32(m_.vocab); u32(m_.seq); u32(m_.head_dim);
         f.write((char*)&m_.rope_theta, 4);
         u32((m_.qk_norm ? 1u : 0u) | (m_.rope_half ? 2u : 0u) |
             (gpu_.att_kv_bits_ == 16 ? 4u : gpu_.att_kv_bits_ == 8 ? 8u : 0u) |
-            (gpu_.act_fmt_ == XFormat::I8_4 ? 16u : 0u));
+            (gpu_.act_fmt_ == XFormat::I8_4 ? 16u : 0u) |
+            (m_.hybrid ? 32u : 0u));
         u32((uint32_t)toks.size());
         u32((uint32_t)gpu_.att_kv_width_);
-        if (vsw > 0) u32((uint32_t)vsw);
+        // The field exists in every version >= 3 file, so a version 4 file
+        // (hybrid) writes it even when the V-step plane is absent -- otherwise
+        // the load's read shifts and the whole header mismatches.
+        if (m_.hybrid || vsw > 0) u32((uint32_t)vsw);
         f.write((char*)&gpu_.att_kv_scale_, 4);
         for (int t : toks) u32((uint32_t)t);
         gpu_.sync();
@@ -221,6 +231,17 @@ bool Session::save_prefix_cache(const string& path, const vector<int>& toks){
             glBindFramebuffer(GL_FRAMEBUFFER, gpu_.kv_cache_[l].fbo);
             glReadPixels(0, 0, width, n, GL_RGBA, GL_UNSIGNED_BYTE, data.data());
             f.write((char*)data.data(), data.size());
+        }
+        // The conv history: two q16 rows per conv layer (version 4 only).
+        if (m_.hybrid) {
+            vector<uint8_t> st;
+            for (int l = 0; l < m_.layers; ++l) {
+                if (!m_.is_conv(l)) continue;
+                for (int which = 0; which < 2; ++which) {
+                    if (!gpu_.read_conv_state(l, which, st)) return false;
+                    f.write((char*)st.data(), st.size());
+                }
+            }
         }
         // 8-bit per-head V steps: without this plane a reloaded cache would
         // dequantise every V row on the wrong grid, so the file must carry it.
@@ -234,7 +255,7 @@ bool Session::save_prefix_cache(const string& path, const vector<int>& toks){
     }
 
 bool Session::load_prefix_cache(const string& path, vector<int>& toks){
-        if (m_.hybrid) return false;
+        if (m_.hybrid && (!gpu_layer_ || gpu_.conv_state_row_bytes() == 0)) return false;
         if (!gpu_attn_ || gpu_.kv_cache_.empty()) return false;
         ifstream f(path, ios::binary);
         if (!f) return false;
@@ -253,7 +274,7 @@ bool Session::load_prefix_cache(const string& path, vector<int>& toks){
         u32(flags); u32(n); u32(width);
         if (version >= 3) u32(vsw);   // per-head V step plane present
         f.read((char*)&kscale, 4);
-        if (!f || (version != 2 && version != 3) || dim != (uint32_t)m_.dim ||
+        if (!f || (version != 2 && version != 3 && version != 4) || dim != (uint32_t)m_.dim ||
             hidden != (uint32_t)m_.hidden ||
             layers != (uint32_t)m_.layers || heads != (uint32_t)m_.heads ||
             kv_heads != (uint32_t)m_.kv_heads || vocab != (uint32_t)m_.vocab ||
@@ -264,7 +285,8 @@ bool Session::load_prefix_cache(const string& path, vector<int>& toks){
             n == 0 || n > (uint32_t)m_.seq ||
             flags != ((m_.qk_norm ? 1u : 0u) | (m_.rope_half ? 2u : 0u) |
                       (gpu_.att_kv_bits_ == 16 ? 4u : gpu_.att_kv_bits_ == 8 ? 8u : 0u) |
-                      (gpu_.act_fmt_ == XFormat::I8_4 ? 16u : 0u))) return false;
+                      (gpu_.act_fmt_ == XFormat::I8_4 ? 16u : 0u) |
+                      (m_.hybrid ? 32u : 0u))) return false;
         if (memcmp(&kscale, &gpu_.att_kv_scale_, sizeof(float)) != 0) {
             cerr << "PREFIX_CACHE KV_SCALE mismatch: cache " << kscale
                  << ", process " << gpu_.att_kv_scale_ << endl;
@@ -287,6 +309,17 @@ bool Session::load_prefix_cache(const string& path, vector<int>& toks){
                 if (!f) return false;
                 glBindTexture(GL_TEXTURE_2D, gpu_.vs_targets_[l].tex);
                 glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, vsw, n, GL_RGBA, GL_UNSIGNED_BYTE, data.data());
+            }
+        }
+        if (version == 4) {
+            vector<uint8_t> st((size_t)gpu_.conv_state_row_bytes());
+            for (int l = 0; l < m_.layers; ++l) {
+                if (!m_.is_conv(l)) continue;
+                for (int which = 0; which < 2; ++which) {
+                    f.read((char*)st.data(), st.size());
+                    if (!f) return false;
+                    if (!gpu_.write_conv_state(l, which, st)) return false;
+                }
             }
         }
         gpu_.forget_state();
