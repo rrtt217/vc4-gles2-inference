@@ -96,6 +96,7 @@ and that file is the authority — this table is a pointer, not a re-baseline.
 |---|---:|
 | MiniMind3 q8 | 252 ms/token |
 | MiniMind3 q4 | 388 ms/token |
+| MiniMind3-MoE q4 (131 MB) | 342 ms/token |
 | MiniMind2 q8 | 144 ms/token |
 | MiniMind2 q4 | 187 ms/token |
 | MiniMind2 i16 | 232 ms/token |
@@ -122,6 +123,28 @@ python3 engine/tools/mmcf_pack.py --in models/minimind3 \
   --name minimind3 --template minimind3 --chat \
   --chat-template minimind3/chat_template.jinja --verify
 ```
+
+A mixture-of-experts checkpoint (`Qwen3MoeForCausalLM`: top-1, normalised
+gate, no shared expert, every layer sparse) packs the same way and produces
+**version 3**: 64-byte records with an `aux` expert index, metadata key 13, and
+`0x16` router tensors.  Every other MoE shape is refused at pack time by name
+(Mixtral, top-k>1, an unnormalised gate, a shared expert, mixed sparse/dense
+layers).  The v2 reader is unchanged, so every existing container still loads:
+
+```bash
+python3 engine/tools/mmcf_pack.py --in models/minimind3-moe \
+  --quant q4 --seq 768 --tok models/minimind3-moe/minimind3-moe.tok \
+  --out models/minimind3-moe/minimind3-moe.q4.mmcf \
+  --name minimind3-moe --template minimind3 --chat \
+  --chat-template models/minimind3-moe/chat_template.jinja --rms-eps 1e-6 --verify
+```
+
+What it costs: the route is a 4x768 matvec whose logits are read back, so a
+token pays 8 host syncs (~29 ms on a Pi Zero, ~19 ms on Xe); the weight traffic
+is the dense model's, because only one expert is read.  The Pi Zero runs the
+198M-A64M model at q4 (131 MB, 342 ms/token) and cannot hold it at q8 (204 MB:
+the weights take the CMA and the session's FBOs fail).  `docs/performance.md`
+has the table; `MOE_DUMP=1` prints the routes and `MOE_FIXED=<e>` prices them.
 
 A legacy checkpoint (`Q8M1/Q8M2`, `Q4M1`, `I16M1/I16M2`) or a llama2.c `.bin`
 is still accepted by `--in`; `--quant` then has no effect and the source's own
@@ -261,6 +284,13 @@ These were paid for; do not relearn them.
   server, a benchmark); CMA is single-client on this board.
 
 ## Invariants
+
+- **MoE is top-1 only, and every expert is resident.**  A v3 container carries
+  one router plus `n_experts` w1/w3/w2 triples per layer; the runtime routes on
+  the host (one read-back per layer per token) and runs the dense FFN kernels on
+  the chosen expert, with weight 1.0 because the gate is normalised.  A
+  top-k>1 or shared-expert block is refused, never emulated, and the pair
+  prefill path is refused because two positions route independently.
 
 - **Container only**: the engine loads MMCF v2 and nothing else (see above).
 - **Q4 draw** output is 24-bit; **Q4 residual-add** output is q16. Do not

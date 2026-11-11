@@ -4520,3 +4520,43 @@ Whether that is affordable on the Pi is the open question — 8 syncs against a
 252 ms dense decode is a smaller fraction than against 10.9 ms — and so is
 memory: 131 MB at q4 against a board that runs the 66 MB dense q8 with ~50 MB
 of `CmaFree` left.  Both are measured on the board, not inferred from Xe.
+
+### The same model on the Pi Zero (2026-11-11)
+
+`GPU_LAYER=1 KV_PACK=16 SEQ=768`, greedy, 24 generated tokens, three runs
+interleaved on one board (the q4 container is 131.0 MB, the q8 is 203.5 MB):
+
+| run | prefill | decode |
+|---|---:|---:|
+| dense MiniMind3 q4 (45 MB) | 16.9 s | **323.8 ms/token** |
+| MiniMind3-MoE q4 (131 MB) | 21.3 s | **341.8 ms/token** |
+| MoE q4, `MOE_FIXED=1` (router skipped) | 23.2 s | **312.8 ms/token** |
+
+Three numbers:
+
+* **The routing costs ~29 ms/token**, 8 read-backs of four texels at ~3.6 ms
+  each (Xe pays 2.4 ms for the same read-back).  That is 9% of the MoE decode.
+  With the router pinned, the MoE is *dense q4 speed* (312.8 against 323.8,
+  inside the board's noise): one expert of width 2432 is the dense FFN, so the
+  3x parameter count is a memory cost only.
+* **Prefill is 26% slower** (21.3 against 16.9 s): the pair path is refused for
+  MoE (`pair_ok()`), and every position pays 8 route read-backs.  The
+  `pair_ok()` comment's 7.0-vs-8.2 s measurement is the serial penalty alone.
+* **q4 fits, q8 does not.**  The board's `CmaTotal` is 256 MB and the container
+  uploads are the real test:
+
+  | container | upload | result |
+  |---|---:|---|
+  | q4 (131.0 MB, 429 textures) | 25.6 s | runs, 342 ms/token |
+  | q8 (203.5 MB, 221 textures) | 48.6 s | `FBO incomplete` — the weights took the CMA and the session's KV/logits targets could not be created |
+
+  So a 198M-parameter MoE is q4-or-nothing on this board, and the q4 file is
+  2x the dense 64M q8 that is already the default.  The model itself is
+  coherent at q4 — `我是MiniMind，一个由jingyaogong创建的高效小参数AI模型。` —
+  and its upload is 6x the dense q4's 4 s, because 429 small textures cost more
+  per byte than 69 large ones (texture time 18.3 s of the 25.6 s wall).
+
+What a Pi-sized MoE would need: 100M parameters or less at q4, or an expert
+count of 2 with a width near 1216.  Nothing in that shape is published for this
+family; `stories15M_MOE` is 36M but Mixtral top-2, which needs the weighted
+combine the runtime does not have.

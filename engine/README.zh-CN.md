@@ -72,6 +72,21 @@ GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
 
 模型文件本身是 Q4M1 时，不要设置 `Q4_WEIGHTS`。
 
+MiniMind3-MoE（4 experts、top-1、容器 v3）——q4 的 131 MB 是 Pi Zero 装得下的
+上限，q8 的 204 MB 装不下（权重吃光 CMA，session 的 FBO 创建失败）。每个 token
+只读一个专家，所以解码约等于同宽度 dense 模型，另加一次路由回读：
+
+```bash
+MODEL=../models/minimind3-moe/minimind3-moe.q4.mmcf \
+GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
+  --system "You are a helpful assistant." \
+  --prompt "用一句话介绍你自己。" --gen 24 --greedy
+```
+
+`MOE_DUMP=1` 打印每层的路由和 gate logits；`MOE_FIXED=<e>` 固定专家以测量回读
+的开销。打包与格式见 [`../docs/checkpoint-container.md`](../docs/checkpoint-container.md)
+的 “MoE” 一节。
+
 ### MiniMind2 Small
 
 MiniMind2 使用 Qwen ChatML 模板（容器里的 template kind 1）。源 `Q8M1` 文件头

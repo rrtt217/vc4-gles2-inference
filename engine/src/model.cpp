@@ -775,7 +775,9 @@ bool Model::load_mmcf(){
                 cerr << "MMCF dim=" << dim << " layers=" << layers << " hidden=" << hidden
                      << " heads=" << heads << " kv=" << kv_heads << " vocab=" << vocab
                      << " seq=" << seq << " theta=" << rope_theta << " half=" << rope_half
-                     << " qknorm=" << qk_norm << " split=" << split << "\n";
+                     << " qknorm=" << qk_norm << " split=" << split
+                     << " experts=" << experts << " top_k=" << top_k
+                     << " moe_hidden=" << moe_hidden << "\n";
                 cerr << "MMCF qkv[0]=" << qkv[0].rows << "x" << qkv[0].cols << " scale=" << qkv[0].scale
                      << " prebiased=" << qkv[0].prebiased << " w2[0]=" << w2[0].rows << "x" << w2[0].cols
                      << " logits=" << logits_tiles.size() << " " << logits_tiles[0].rows << "x" << logits_tiles[0].cols

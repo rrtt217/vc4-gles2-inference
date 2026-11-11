@@ -87,6 +87,22 @@ GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
 
 Do not set `Q4_WEIGHTS` when the model file is already Q4M1.
 
+MiniMind3-MoE (4 experts, top-1, container v3) — 131 MB at q4 is what a Pi Zero
+can hold; 204 MB at q8 is not (the weights take the CMA and the session's FBOs
+fail).  Only one expert is read per token, so decode is dense-speed plus the
+route read-back:
+
+```bash
+MODEL=../models/minimind3-moe/minimind3-moe.q4.mmcf \
+GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
+  --system "You are a helpful assistant." \
+  --prompt "用一句话介绍你自己。" --gen 24 --greedy
+```
+
+`MOE_DUMP=1` prints each layer's route and gate logits; `MOE_FIXED=<e>` pins
+the expert to price the read-back.  Packing and the format are in
+[`../docs/checkpoint-container.md`](../docs/checkpoint-container.md) ("MoE").
+
 ### Interactive chat
 
 `--chat` without `--prompt` is a REPL: the model loads once and the prompt comes

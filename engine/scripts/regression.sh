@@ -38,6 +38,13 @@
 #   Q4_EXPECT    expected q4 prefix; empty = print only
 #   PPL_EXPECT   expected baseline q8 PPL; empty = print only
 #   Q4_PPL_EXPECT expected q4 PPL (same SEQ); empty = print only
+#   MOE          a MoE container (v3) to check as well; empty = skip.  It gets
+#                the determinism and behaviour checks and, when MOE_EXPECT is
+#                set, the same prefix pin.  No PPL by default: the q4 MoE runs
+#                at ~340 ms/token on a Pi Zero, so it is opt-in via MOE_PPL=1.
+#   MOE_EXPECT   expected MoE prefix; empty = print only
+#   MOE_PPL      compute the MoE container's PPL as well (=1; slow on the Pi)
+#   MOE_PPL_EXPECT expected MoE PPL; empty = print only
 #   PPL_TOL      relative tolerance for both (default 0.01)
 #   PPL_FILE     corpus (default data/ppl_test.txt)
 #   PPL_SEQ      SEQ used for the ppl runs (default 768; values are not
@@ -62,6 +69,10 @@ PPL_EXPECT="${PPL_EXPECT:-}"
 Q4_PPL_EXPECT="${Q4_PPL_EXPECT:-}"
 PPL_TOL="${PPL_TOL:-0.01}"
 PPL_SEQ="${PPL_SEQ:-768}"
+MOE="${MOE:-}"
+MOE_EXPECT="${MOE_EXPECT:-}"
+MOE_PPL="${MOE_PPL:-0}"
+MOE_PPL_EXPECT="${MOE_PPL_EXPECT:-}"
 PROMPT="用一句话介绍你自己。"
 PROMPT2="写一首关于春天的短诗。"
 
@@ -83,7 +94,10 @@ answer() {
     fi
 }
 
-text() { answer "$@" | sed -n 's/^Assistant: //p' | head -1; }
+# The engine appends its "[stopped at the --gen limit ...]" note to the same
+# line, so a run that does not emit EOS would otherwise fail the terminator
+# check; strip it before anything judges the text.
+text() { answer "$@" | sed -n 's/^Assistant: //p' | head -1 | sed 's/\[stopped.*//'; }
 
 check_prefix() {
     tag="$1" want="$2" got="$3"
@@ -155,6 +169,26 @@ check_prefix q4 "$Q4_EXPECT" "$q4"
 poem=$(text "$Q8" "$PROMPT2" 48 "$SYS")
 behaviour poem "$poem"
 
+# Mixture of experts: the route is a host-side argmax over a read-back, so the
+# thing to gate is that it is *deterministic* and that the answer is a sentence.
+# A route flip changes the whole text, which is why this is not compared with
+# the dense string.
+if [ -n "$MOE" ]; then
+    m1=$(text "$MOE" "$PROMPT" 24 "$SYS")
+    m2=$(text "$MOE" "$PROMPT" 24 "$SYS")
+    if [ "$m1" != "$m2" ]; then
+        echo "moe determinism FAIL: two runs of the same binary differ" >&2
+        echo "  run 1: $m1" >&2
+        echo "  run 2: $m2" >&2
+        exit 1
+    fi
+    echo "moe determinism OK"
+    check_prefix moe "$MOE_EXPECT" "$m1"
+    behaviour moe "$m1"
+else
+    echo "moe: skipped (set MOE=<container> to check a v3 model)"
+fi
+
 # SEQ is pinned: the ppl path chunks the corpus per window, so the token count
 # and the value both move with SEQ and are not comparable across settings.
 # $1 model, $2 ACT8 mode.  ACT8 only rewrites the all-INT8 activation feed,
@@ -189,6 +223,11 @@ if [ "${NO_PPL:-0}" != 1 ]; then
     echo "PPL q4:       $q4p"
     check_ppl PPL "$PPL_EXPECT" "$p0"
     check_ppl "PPL q4" "$Q4_PPL_EXPECT" "$q4p"
+    if [ -n "$MOE" ] && [ "$MOE_PPL" = 1 ]; then
+        moep=$(ppl "$MOE" 0)
+        echo "PPL moe:      $moep"
+        check_ppl "PPL moe" "$MOE_PPL_EXPECT" "$moep"
+    fi
 fi
 
 if [ "$REBASE" = 1 ]; then
@@ -199,6 +238,7 @@ Q8_EXPECT='$q8'
 Q4_EXPECT='$q4'
 PPL_EXPECT='${p0:-}'
 Q4_PPL_EXPECT='${q4p:-}'
+MOE_EXPECT='${m1:-}'
 EOF
 fi
 
