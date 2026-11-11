@@ -111,6 +111,7 @@ Each record is `<HHI>` (key, type, length) followed by the payload; `type` is 1
 | 10 | `<BB` add_bos, add_eos (`255` = not stated; `-1` in memory) |
 | 12 | `<B` residual width: absent or 0 = q16 (the historical grid), 1 = q24 |
 | 11 | `<f` `rms_norm_eps`.  Absent = the engine's historical 1e-5, compiled as a literal.  A file that states one switches the norm shader to a uniform, which is **not** numerically neutral on this driver (MiniMind3 PPL 270.3170 -> 269.9303 with the same value), so the default path stays literal |
+| 14 | one byte per layer: `0` attention, `1` the LFM2 conv block.  Absent = every layer is attention.  A file with conv tensors and no key 14 is refused, not guessed |
 | 13 | `<4i` mixture of experts: `n_experts`, `top_k`, `expert_hidden`, flags.  Absent = dense.  Flags bit 0 = `norm_topk_prob`.  Present means the container is version 3 and every layer is sparse (see "MoE") |
 
 Key 9 is the model's own `chat_template` from HuggingFace, stored **verbatim**:
@@ -158,7 +159,9 @@ n_tensors` is 48 or 64 and a reader that knows the version can validate it.
 
 Tensor ids: `1` embedding, `2` embedding scale, `3` rms_att, `4` rms_ffn,
 `5` rms_final, `6` q_norm, `7` k_norm, `8` embedding_i16, `0x10` qkv, `0x11`
-wo, `0x12` w1, `0x13` w3, `0x14` w13, `0x15` w2, `0x16` router (MoE), `0x20`
+wo, `0x12` w1, `0x13` w3, `0x14` w13, `0x15` w2, `0x16` router (MoE),
+`0x17` conv in_proj, `0x18` conv depthwise kernel (f32, dim x k), `0x19` conv
+out_proj (the LFM2 hybrid block; see "Hybrid layers"), `0x20`
 logits tile, `0x30` tokenizer blob.  Per-layer tensors carry the layer in the
 high byte (`id | layer << 8`).  q4 needs three tensors per matrix (nibbles,
 group scale, group min) sharing one id.
@@ -179,6 +182,19 @@ scale leaves 58-66% of layer 0's FFN weights at zero.  Per row the median
 relative error falls 2.36% -> 0.79% and the worst matrix 16.6% -> 1.9%; on the
 engine the model goes from unusable (logits 14.4 off f32, misspelled bytes) to
 i16 quality (max 1.1 off, top-1 the same, PPL 3.80 vs i16's 3.78).
+
+### Hybrid layers (LFM2)
+
+A layer typed `1` in key 14 has no qkv/wo.  It runs `0x17` (in_proj,
+`3*dim x dim`), a depthwise causal convolution `0x18` (`dim x k` floats, k =
+the block's `conv_L_cache`) and `0x19` (out_proj, `dim x dim`).  The gating
+splits the in_proj output: rows `0:dim` (B) times rows `2*dim:3*dim` (x), then
+the conv output times rows `dim:2*dim` (C).  The session keeps `k-1` gated rows
+per conv layer as state.  `q_norm`/`k_norm` still carry one row per layer; a
+conv layer's row is unused and packed as ones.  Embeddings, logits tiles and
+the FFN are unchanged, so the dense path runs it unmodified once the layer loop
+knows the type.  A reader that predates key 14 sees attention on a conv layer
+and refuses on the missing qkv rather than answering wrongly.
 
 The vocabulary (`0x20`) is stored as several tiles of at most **1536 rows**
 (`LOGITS_GRID` in `engine/tools/mmcf_grid.py`, `kLogitsGrid` in

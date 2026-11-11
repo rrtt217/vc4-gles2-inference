@@ -37,6 +37,9 @@ private:
     bool gpu_attn_ = false;
     bool gpu_layer_ = false;
     vector<vector<float>> kv_cache_k_, kv_cache_v_;
+    // The conv block's gated history: (k-1) rows of `dim` per conv layer, the
+    // oldest first.  Decode reads it and then shifts in the new row.
+    vector<vector<float>> conv_state_;
     vector<float> rope_cos_, rope_sin_;
 
     vector<float> rms_norm(const vector<float>& x, const float* w);

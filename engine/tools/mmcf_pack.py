@@ -354,6 +354,10 @@ def build(meta, tensors, tok_blob, args):
     if args.add_bos is not None or args.add_eos is not None:
         md += tlv(10, 1, struct.pack("<BB", 255 if args.add_bos is None else args.add_bos,
                                      255 if args.add_eos is None else args.add_eos))
+    # key 14: one byte per layer, 0 = attention, 1 = the LFM2 conv block.
+    # Absent means "every layer is attention", which is every other model.
+    if meta.get('layer_types'):
+        md += tlv(14, 1, bytes(1 if t == 'conv' else 0 for t in meta['layer_types']))
     # key 13: the mixture-of-experts block.  Absent means dense (every existing
     # container).  flags bit 0 says the top-k gate is normalised, which is what
     # lets top-1 use the selected expert with weight 1.0.

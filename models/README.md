@@ -42,6 +42,20 @@ models/
                                  the float reference on it -- see the note below
   feng30m/                       feng-30m (Qwen3-shaped, 11 layers): works
 
+  lfm2.5-230m/                   LFM2.5-230M (hybrid: 8 conv + 6 attention layers):
+                                 lfm2.5.q4.mmcf (235 MB) runs the serial path on
+                                 Xe; the GPU layer path and the conv kernels are
+                                 not written yet.
+                                 probe_residuals.py is the numpy f32 forward behind
+                                 docs/lfm2.5-230m-assessment.zh-CN.md (residual peak
+                                 29.5, 0.23x the q16 rail -> q16 path is enough);
+                                 probe_head_q4.py measured the q4 vocabulary head
+                                 (rejected: input-embedding side costs ~7.5 logits).
+                                 Also holds the official GGUFs (Q4_0, Q4_K_M,
+                                 QAD-Q4_0) and gguf_report.py, the tensor-type
+                                 inspector: all three keep token_embd at Q6_K and
+                                 store the tied head once
+
   survey_under_110m.csv          candidate survey
 ```
 

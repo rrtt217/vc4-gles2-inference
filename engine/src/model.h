@@ -68,6 +68,19 @@ public:
     // hardcode 1e-5, which is 10x MiniMind3's (and feng30m's, and supra2's)
     // 1e-6; that was invisible until a model turned out to be sensitive to it.
     float rms_eps = 1e-5f;
+    // Metadata key 14: one byte per layer, 0 = attention, 1 = the LFM2 conv
+    // block.  Empty means every layer is attention (every model before LFM2).
+    vector<uint8_t> layer_type;
+    bool hybrid = false;
+    // The conv block's per-layer pieces.  conv_in/conv_out are ordinary
+    // matrices (3*dim x dim, dim x dim); conv_w is the depthwise kernel,
+    // dim x k floats, kept on the host because the CPU path reads it and the
+    // GPU upload repacks it into a texture.  Empty on attention layers.
+    vector<Mat> conv_in, conv_out;
+    vector<vector<float>> conv_w;
+    int conv_k = 0;
+    bool is_conv(int l) const { return l >= 0 && l < (int)layer_type.size() && layer_type[l] != 0; }
+    int n_conv_layers() const { int n = 0; for (size_t i = 0; i < layer_type.size(); ++i) n += layer_type[i] != 0; return n; }
     // Metadata key 12: the residual stream's width.  False (or absent) keeps
     // the q16 grid every existing container was packed with.
     bool res_q24 = false;

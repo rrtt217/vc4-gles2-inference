@@ -29,6 +29,7 @@ Deep dives:
 | [deterministic-tools.md](deterministic-tools.md) | model-free tool routing, argument validation, cache interaction |
 | [future-optimization.md](future-optimization.md) | prioritized future work, measured dead ends, explicit non-goals |
 | [translation-decision-model-fit.zh-CN.md](translation-decision-model-fit.zh-CN.md) | 20–150M translation/decision model fit, Jev-like decisions, adaptation plan (中文) |
+| [lfm2.5-230m-assessment.zh-CN.md](lfm2.5-230m-assessment.zh-CN.md) | LFM2.5-230M 支持评估：架构事实、引擎差距、工作量分解与风险（评估，非实现） |
 
 Working on a numerics question?  `AGENTS.md` has the "Debugging protocol"
 table that maps a question to the tool that answers it — `mmcf_dump.py`,

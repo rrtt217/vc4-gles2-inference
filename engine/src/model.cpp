@@ -448,6 +448,8 @@ bool Model::load_mmcf(){
                 } else if (key == 11 && type == 1 && len >= 4) {
                         float e; memcpy(&e, payload, 4);
                         if (e > 0.0f) { rms_eps = e; rms_eps_stated = true; }
+                } else if (key == 14 && type == 1 && len >= 1) {
+                        layer_type.assign(payload, payload + len);
                 } else if (key == 10 && type == 1 && len >= 2) {
                         add_bos = payload[0] == 255 ? -1 : (int)payload[0];
                         add_eos = payload[1] == 255 ? -1 : (int)payload[1];
@@ -460,6 +462,15 @@ bool Model::load_mmcf(){
         if (getenv("SEQ")) seq = atoi(getenv("SEQ"));
         head_dim = dim / heads;
         kv_dim = kv_heads * head_dim;
+        if (!layer_type.empty() && (int)layer_type.size() != layers) {
+                cerr << "mmcf: layer types " << layer_type.size() << " for "
+                     << layers << " layers\n";
+                return false;
+        }
+        for (uint8_t t : layer_type) {
+                if (t > 1) { cerr << "mmcf: unknown layer type " << (int)t << "\n"; return false; }
+                hybrid = hybrid || t != 0;
+        }
         (void)caps;
 
         // One pass over the table, creating whatever the model needs.  Unknown
@@ -516,7 +527,11 @@ bool Model::load_mmcf(){
         auto as_mat = [&](const MmcfRec& r, Mat& m) { if (r.dtype == 1) as_i16(r, m); else as_q8(r, m); };
 
         vector<Mat> layers_qkv, layers_wo, layers_w1, layers_w3, layers_w13, layers_w2;
+        vector<Mat> layers_conv_in, layers_conv_out;
+        vector<vector<float>> layers_conv_w;
         layers_qkv.resize(layers); layers_wo.resize(layers); layers_w2.resize(layers);
+        layers_conv_in.resize(layers); layers_conv_out.resize(layers);
+        layers_conv_w.resize(layers);
         if (split) { layers_w1.resize(layers); layers_w3.resize(layers); }
         else layers_w13.resize(layers);
         vector<Mat> layers_router;
@@ -599,6 +614,25 @@ bool Model::load_mmcf(){
                 case 0x13: if (layer < (int)layers_w3.size()) as_mat(r, layers_w3[layer]); break;
                 case 0x14: if (layer < (int)layers_w13.size()) as_mat(r, layers_w13[layer]); break;
                 case 0x15: if (layer < (int)layers_w2.size()) as_mat(r, layers_w2[layer]); break;
+                case 0x17: if (layer < layers) as_mat(r, layers_conv_in[layer]); break;
+                case 0x18:  // depthwise conv kernel, f32: dim x k, ~12 KiB a layer
+                        if (layer < layers) {
+                                if (r.dtype != 0 || (uint64_t)r.bytes != (uint64_t)r.rows * r.cols * 4) {
+                                        cerr << "mmcf: conv kernel of layer " << layer
+                                             << " is not f32\n";
+                                        return false;
+                                }
+                                const float* p = (const float*)(fbase_ + data_off + r.off);
+                                layers_conv_w[layer].assign(p, p + (size_t)r.rows * r.cols);
+                                if (conv_k && conv_k != (int)r.cols) {
+                                        cerr << "mmcf: conv kernel width changes at layer "
+                                             << layer << "\n";
+                                        return false;
+                                }
+                                conv_k = (int)r.cols;
+                        }
+                        break;
+                case 0x19: if (layer < layers) as_mat(r, layers_conv_out[layer]); break;
                 case 0x20: { Mat m; as_mat(r, m); logits_tiles.push_back(m); break; }
                 case 0x30:   // tokenizer blob, borrowed from the mapping
                         tok_blob = fbase_ + data_off + r.off;
@@ -632,6 +666,8 @@ bool Model::load_mmcf(){
                 else if (kind == 0x13 && layer < (int)layers_w3.size()) m = &layers_w3[layer];
                 else if (kind == 0x14 && layer < (int)layers_w13.size()) m = &layers_w13[layer];
                 else if (kind == 0x15 && layer < (int)layers_w2.size()) m = &layers_w2[layer];
+                else if (kind == 0x17 && layer < (int)layers_conv_in.size()) m = &layers_conv_in[layer];
+                else if (kind == 0x19 && layer < (int)layers_conv_out.size()) m = &layers_conv_out[layer];
                 else if (kind == 0x20 && layer < (int)logits_tiles.size()) m = &logits_tiles[layer];
                 if (!m || m->rows != (int)r.rows || r.bytes != (size_t)r.rows * 4) {
                         cerr << "mmcf: row scale plane 0x" << std::hex << r.id << std::dec
@@ -695,7 +731,12 @@ bool Model::load_mmcf(){
                 else if (kind == 0x13 && layer < (int)layers_w3.size()) layers_w3[layer] = m;
                 else if (kind == 0x14 && layer < (int)layers_w13.size()) layers_w13[layer] = m;
                 else if (kind == 0x15 && layer < (int)layers_w2.size()) layers_w2[layer] = m;
+                else if (kind == 0x17 && layer < (int)layers_conv_in.size()) layers_conv_in[layer] = m;
+                else if (kind == 0x19 && layer < (int)layers_conv_out.size()) layers_conv_out[layer] = m;
         }
+        conv_in = layers_conv_in;
+        conv_out = layers_conv_out;
+        conv_w = layers_conv_w;
         if (experts > 0) {
                 // What the runtime has: one router per layer, top-1 with a
                 // normalised gate (so the selected expert is used with weight
@@ -765,6 +806,38 @@ bool Model::load_mmcf(){
                 if (split) { w1.push_back(layers_w1[l]); w3.push_back(layers_w3[l]); }
                 else w13.push_back(layers_w13[l]);
                 w2.push_back(layers_w2[l]);
+        }
+        if (hybrid) {
+                if (conv_k < 2) {
+                        cerr << "mmcf: a typed hybrid container with no conv kernel\n";
+                        return false;
+                }
+                for (int l = 0; l < layers; ++l) {
+                        if (layer_type[l]) {
+                                if (conv_in[l].rows != 3 * dim || conv_in[l].cols != dim ||
+                                    conv_out[l].rows != dim || conv_out[l].cols != dim ||
+                                    conv_w[l].size() != (size_t)dim * conv_k) {
+                                        cerr << "mmcf: layer " << l << " conv block is "
+                                             << "incomplete (in " << conv_in[l].rows << "x"
+                                             << conv_in[l].cols << ", out " << conv_out[l].rows
+                                             << "x" << conv_out[l].cols << ", kernel "
+                                             << conv_w[l].size() << ")\n";
+                                        return false;
+                                }
+                        } else if (!qkv[l].rows || !wo[l].rows) {
+                                cerr << "mmcf: layer " << l << " is typed attention but "
+                                     << "has no qkv/wo\n";
+                                return false;
+                        }
+                }
+        } else {
+                for (int l = 0; l < layers; ++l) {
+                        if (conv_in[l].rows || conv_out[l].rows) {
+                                cerr << "mmcf: conv tensors without the layer-type "
+                                     << "metadata (key 14)\n";
+                                return false;
+                        }
+                }
         }
         if (experts > 0) {
                 router = std::move(layers_router);

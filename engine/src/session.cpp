@@ -95,6 +95,17 @@ static int pick_expert(const vector<float>& gate){
 Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
         gpu_layer_ = gpu_.gpu_layer_enabled();
         gpu_attn_ = gpu_layer_ || gpu_.gpu_attn_enabled();
+        if (m_.hybrid) {
+            // No GPU kernel for the conv block yet: the serial path is the
+            // reference it will be compared against, and its matvecs are still
+            // the engine's GPU kernels.
+            gpu_layer_ = false;
+            gpu_attn_ = gpu_.gpu_attn_enabled();
+            conv_state_.assign(m_.layers, vector<float>());
+            for (int l = 0; l < m_.layers; ++l)
+                if (m_.is_conv(l))
+                    conv_state_[l].assign((size_t)(m_.conv_k - 1) * m_.dim, 0.0f);
+        }
         if (!gpu_attn_) {
             kv_cache_k_.resize(m_.layers, vector<float>((size_t)m_.seq * m_.kv_dim, 0));
             kv_cache_v_.resize(m_.layers, vector<float>((size_t)m_.seq * m_.kv_dim, 0));
@@ -299,7 +310,55 @@ vector<float> Session::forward(int token, int pos){
             vector<float> xb = rms_norm(x, m_.rms_att.data() + (size_t)l * m_.dim);
             if (getenv("STAGE_DUMP")) gpu_.dump_cpu_row(xb, gpu_.act_fmt_, "xb", 4096);
             vector<float> wo;
-            if (gpu_attn_) {
+            if (m_.is_conv(l)) {
+                // LFM2 conv block: in_proj -> gate -> depthwise causal conv
+                // (k taps, state in conv_state_) -> gate -> out_proj.  Every
+                // stage that the GPU stores as q16 is quantised here too, so
+                // this is the reference the GPU kernel must reproduce.
+                const int dim = m_.dim, k = m_.conv_k;
+                vector<float> g = gpu_.matvec(m_.conv_in[l], xb);   // B, C, x
+                vector<float> gated(dim), cv(dim);
+                for (int i = 0; i < dim; ++i)
+                    gated[i] = quantize_act_f(g[i] * g[2 * dim + i]);
+                vector<float>& st = conv_state_[l];
+                for (int i = 0; i < dim; ++i) {
+                    float acc = 0.0f;
+                    for (int j = 0; j < k; ++j) {
+                        const float v = (j + 1 < k) ? st[(size_t)j * dim + i] : gated[i];
+                        acc += m_.conv_w[l][(size_t)i * k + j] * v;
+                    }
+                    cv[i] = quantize_act_f(acc);
+                }
+                if (k > 1) {
+                    for (int j = 0; j + 2 < k; ++j)
+                        memcpy(st.data() + (size_t)j * dim, st.data() + (size_t)(j + 1) * dim,
+                               sizeof(float) * dim);
+                    memcpy(st.data() + (size_t)(k - 2) * dim, gated.data(), sizeof(float) * dim);
+                }
+                vector<float> y(dim);
+                for (int i = 0; i < dim; ++i)
+                    y[i] = quantize_act_f(g[dim + i] * cv[i]);
+                if (getenv("CONV_DEBUG") && l == 0) {
+                    cerr << "CV pos=" << pos << " xb";
+                    for (int i = 0; i < 5; ++i) cerr << " " << xb[i];
+                    cerr << " | g";
+                    for (int i = 0; i < 5; ++i) cerr << " " << g[i];
+                    cerr << " | C";
+                    for (int i = 0; i < 3; ++i) cerr << " " << g[dim + i];
+                    cerr << " | x";
+                    for (int i = 0; i < 3; ++i) cerr << " " << g[2 * dim + i];
+                    cerr << " | gated";
+                    for (int i = 0; i < 5; ++i) cerr << " " << gated[i];
+                    cerr << " | cv";
+                    for (int i = 0; i < 5; ++i) cerr << " " << cv[i];
+                    cerr << " | y";
+                    for (int i = 0; i < 5; ++i) cerr << " " << y[i];
+                    cerr << " | w0..2 " << m_.conv_w[l][0] << " " << m_.conv_w[l][1]
+                         << " " << m_.conv_w[l][2] << "\n";
+                }
+                if (getenv("STAGE_DUMP")) gpu_.dump_cpu_row(gated, gpu_.act_fmt_, "cvg", 4096);
+                wo = gpu_.matvec(m_.conv_out[l], y);
+            } else if (gpu_attn_) {
                 GLuint xtex = gpu_.upload_input(xb);
                 GLuint atex = gpu_.attention_block(m_.qkv[l], xtex, l, pos);
                 wo = gpu_.matvec_from(m_.wo[l], atex);

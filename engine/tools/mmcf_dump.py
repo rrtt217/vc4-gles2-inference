@@ -113,6 +113,10 @@ def main():
             has_moe = True
             print(f"moe         experts {ne} top_k {tk} expert_hidden {mh} "
                   f"norm_topk_prob {bool(mf & 1)}")
+        elif key == 14 and ln >= 1:
+            kinds = {0: "attn", 1: "conv"}
+            print(f"layers      {ln} typed: "
+                  + " ".join(kinds.get(b, "?%d" % b) for b in payload))
         elif key == 10 and ln >= 2:
             ab, ae = payload[0], payload[1]
             fmt = lambda v: "unset" if v == 255 else str(v)

@@ -28,6 +28,12 @@ T_EMB, T_EMB_SCALE, T_RMS_ATT, T_RMS_FFN, T_RMS_FINAL = 1, 2, 3, 4, 5
 T_Q_NORM, T_K_NORM = 6, 7
 T_QKV, T_WO, T_W1, T_W3, T_W13, T_W2 = 0x10, 0x11, 0x12, 0x13, 0x14, 0x15
 T_ROUTER = 0x16   # the per-layer MoE gate: rows = experts, cols = dim
+# LFM2's "conv" blocks (the Liquid implicit convolution): a 3*dim projection,
+# a depthwise causal kernel, and a dim projection back.  A reader that predates
+# them ignores the ids and runs attention on a conv layer, which fails on the
+# missing qkv instead of answering wrongly -- the layer-type metadata (key 14)
+# is what makes a hybrid file loadable at all.
+T_CONV_IN, T_CONV_W, T_CONV_OUT = 0x17, 0x18, 0x19
 T_LOGITS = 0x20
 T_EMB_I16 = 8
 
@@ -209,6 +215,16 @@ def check_source(cfg, hdr):
         raise SystemExit(
             "%s: head_dim %d does not match hidden_size/heads = %d/%d; the engine "
             "derives the head width from the two." % (arch, hd, dim, heads))
+    # LFM2's hybrid block is a different name tree (conv layers carry
+    # in_proj/conv/out_proj and no qkv, attention layers add q_layernorm), and
+    # load_lfm2() checks every tensor it reads with the expected shape.  The
+    # checks above still apply: no biases, silu FFN, default rope, matched
+    # head_dim.
+    if cfg.get('model_type') == 'lfm2' or 'layer_types' in cfg:
+        if cfg.get('model_type') != 'lfm2':
+            raise SystemExit("%s: layer_types without model_type lfm2; this "
+                             "loader only knows Liquid's hybrid block" % arch)
+        return
     # The loader maps Llama/Qwen names only.  A BERT/ModernBERT encoder, a
     # Tinyllm or a MiniMind fork passes every check above (no biases, silu) and
     # then dies on a KeyError halfway through the first tensor read.
@@ -333,6 +349,126 @@ def load_minimind(model_dir, seq=512):
                 expert_w3=expert_w3)
 
 
+def load_lfm2(model_dir, seq=512):
+    """Read a LiquidAI LFM2.x hybrid directory (8 conv + 6 attention layers).
+
+    The block is the same SwiGLU/RMSNorm/RoPE attention as the dense reader,
+    but the "conv" layers carry three tensors no other model has:
+    `conv.in_proj` (3*dim x dim), `conv.conv` (depthwise, dim x 1 x k) and
+    `conv.out_proj` (dim x dim).  Attention layers additionally carry per-head
+    q/k norms.  Everything is read as float32; the quantizer does the rest.
+    """
+    with open(model_dir + '/config.json') as f:
+        cfg = json.load(f)
+    with open(model_dir + '/model.safetensors', 'rb') as f:
+        n = struct.unpack('<Q', f.read(8))[0]
+        hdr = json.loads(f.read(n))
+        data = f.read()
+    check_source(cfg, hdr)
+
+    def get(name):
+        if name not in hdr:
+            raise SystemExit("%s: the checkpoint has no %s; this is not the LFM2 "
+                             "layout this loader maps" % (model_dir, name))
+        e = hdr[name]
+        a, b = e['data_offsets']
+        dt = st_dtype(e)
+        if dt is None:
+            raise SystemExit("%s: unsupported safetensors dtype %s"
+                             % (name, e.get('dtype')))
+        if e.get('dtype') == 'BF16':
+            bits = np.frombuffer(data[a:b], dtype='<u2').astype(np.uint32) << 16
+            return bits.view(np.float32).reshape(e['shape'])
+        return np.frombuffer(data[a:b], dtype=dt).astype(np.float32).reshape(e['shape'])
+
+    emb = get('model.embed_tokens.weight')
+    vocab, dim = emb.shape
+    layers = int(cfg['num_hidden_layers'])
+    heads = int(cfg['num_attention_heads'])
+    kv = int(cfg['num_key_value_heads'])
+    hidden = int(cfg['intermediate_size'])
+    lt = list(cfg['layer_types'])
+    if len(lt) != layers:
+        raise SystemExit("layer_types has %d entries for %d layers" % (len(lt), layers))
+    head_dim = dim // heads
+
+    rms_att = np.stack([get('model.layers.%d.operator_norm.weight' % l)
+                        for l in range(layers)])
+    rms_ffn = np.stack([get('model.layers.%d.ffn_norm.weight' % l)
+                        for l in range(layers)])
+    rms_final = get('model.embedding_norm.weight')
+    w1 = np.stack([get('model.layers.%d.feed_forward.w1.weight' % l)
+                   for l in range(layers)])
+    w2 = np.stack([get('model.layers.%d.feed_forward.w2.weight' % l)
+                   for l in range(layers)])
+    w3 = np.stack([get('model.layers.%d.feed_forward.w3.weight' % l)
+                   for l in range(layers)])
+
+    wq = [None] * layers
+    wk = [None] * layers
+    wv = [None] * layers
+    wo = [None] * layers
+    q_norm = [None] * layers
+    k_norm = [None] * layers
+    conv_in = [None] * layers
+    conv_w = [None] * layers
+    conv_out = [None] * layers
+    ksize = None
+    for l, t in enumerate(lt):
+        if t == 'conv':
+            conv_in[l] = get('model.layers.%d.conv.in_proj.weight' % l)
+            cw = get('model.layers.%d.conv.conv.weight' % l)
+            if cw.ndim == 3:
+                if cw.shape[1] != 1:
+                    raise SystemExit("layer %d conv.conv is %s; a depthwise conv "
+                                     "wants (dim, 1, k)" % (l, list(cw.shape)))
+                cw = cw[:, 0, :]
+            conv_w[l] = cw
+            conv_out[l] = get('model.layers.%d.conv.out_proj.weight' % l)
+            ksize = int(cw.shape[1])
+            if conv_in[l].shape != (3 * dim, dim):
+                raise SystemExit("layer %d conv.in_proj is %s, expected (%d, %d)"
+                                 % (l, list(conv_in[l].shape), 3 * dim, dim))
+            if conv_out[l].shape != (dim, dim):
+                raise SystemExit("layer %d conv.out_proj is %s, expected (%d, %d)"
+                                 % (l, list(conv_out[l].shape), dim, dim))
+        elif t in ('full_attention', 'attention'):
+            wq[l] = get('model.layers.%d.self_attn.q_proj.weight' % l)
+            wk[l] = get('model.layers.%d.self_attn.k_proj.weight' % l)
+            wv[l] = get('model.layers.%d.self_attn.v_proj.weight' % l)
+            wo[l] = get('model.layers.%d.self_attn.out_proj.weight' % l)
+            q_norm[l] = get('model.layers.%d.self_attn.q_layernorm.weight' % l)
+            k_norm[l] = get('model.layers.%d.self_attn.k_layernorm.weight' % l)
+            for arr, shape, what in ((wq[l], (dim, dim), 'q_proj'),
+                                     (wk[l], (kv * head_dim, dim), 'k_proj'),
+                                     (wv[l], (kv * head_dim, dim), 'v_proj'),
+                                     (wo[l], (dim, dim), 'out_proj')):
+                if arr.shape != shape:
+                    raise SystemExit("layer %d %s is %s, expected %s"
+                                     % (l, what, list(arr.shape), list(shape)))
+        else:
+            raise SystemExit("layer %d has unknown kind %r" % (l, t))
+    # The container stores q_norm/k_norm for every layer; the conv layers never
+    # run attention, so their rows are unused and must still be finite.
+    if any(x is not None for x in q_norm):
+        q_norm = np.stack([q_norm[l] if q_norm[l] is not None
+                           else np.ones(head_dim, np.float32) for l in range(layers)])
+        k_norm = np.stack([k_norm[l] if k_norm[l] is not None
+                           else np.ones(head_dim, np.float32) for l in range(layers)])
+        qk = 1
+    else:
+        q_norm = k_norm = None
+        qk = 0
+    theta, half = rope_of(cfg)
+    return dict(dim=dim, hidden=hidden, layers=layers, heads=heads, kv=kv,
+                vocab=vocab, seq=seq, emb=emb,
+                rms_att=rms_att, rms_ffn=rms_ffn, rms_final=rms_final,
+                wq=wq, wk=wk, wv=wv, wo=wo, w1=w1, w2=w2, w3=w3, wcls=emb,
+                theta=theta, half=half, qk_norm=qk, q_norm=q_norm, k_norm=k_norm,
+                layer_types=lt, conv_in=conv_in, conv_w=conv_w, conv_out=conv_out,
+                conv_k=ksize, untied=False, moe=None)
+
+
 def load_llama2c(path):
     """Read a llama2.c fp32 checkpoint (stories15M/42M, TinyChat, 260K)."""
     b = np.fromfile(path, dtype=np.uint8)
@@ -395,6 +531,83 @@ RESIDUAL_RAIL = 32767.0 / 256.0   # 127.996
 RESIDUAL_WARN = 96.0             # 75% of the rail
 
 
+def residual_peaks_lfm2(m, seq=8):
+    """max|x| per layer for a hybrid conv/attention block (LFM2).
+
+    Same sampling idea as residual_peaks(): a few contiguous vocabulary runs,
+    no tokenizer.  The conv layers are the part the dense calibration cannot
+    model, so this is the only rail check that covers LFM2.
+    """
+    dim, heads, kvh = m['dim'], m['heads'], m['kv']
+    layers, vocab = m['layers'], m['vocab']
+    hd = dim // heads
+    theta = float(m['theta'])
+    eps = float(m.get('rms_eps') or 1e-5)
+    lt = m['layer_types']
+    rep = heads // kvh
+    seq = max(1, min(seq, vocab))
+    peaks = [0.0] * layers
+
+    def rms(x, w):
+        v = (x * x).mean(-1, keepdims=True)
+        return x / np.sqrt(v + eps) * w
+
+    def rope(a, pos):
+        i = np.arange(hd // 2, dtype=np.float32)
+        ang = pos[:, None] / (theta ** (2.0 * i / hd))[None, :]
+        c, s = np.cos(ang)[:, None, :], np.sin(ang)[:, None, :]
+        x1, x2 = a[..., :hd // 2], a[..., hd // 2:]
+        return np.concatenate([x1 * c - x2 * s, x2 * c + x1 * s], axis=-1)
+
+    starts = [0, max(0, vocab // 2 - seq // 2), max(0, vocab - seq)]
+    for st in starts:
+        ids = list(range(st, st + seq))
+        x = m['emb'][ids].astype(np.float32)
+        T = len(ids)
+        pos = np.arange(T, dtype=np.float32)
+        for l in range(layers):
+            h = rms(x, m['rms_att'][l])
+            if lt[l] == 'conv':
+                g = h @ m['conv_in'][l].T
+                B, C, xh = g[:, :dim], g[:, dim:2 * dim], g[:, 2 * dim:]
+                gated = B * xh
+                cw = np.asarray(m['conv_w'][l], np.float32)
+                cv = np.zeros_like(gated)
+                for k in range(cw.shape[1]):
+                    sh = cw.shape[1] - 1 - k
+                    if sh == 0:
+                        cv += gated * cw[:, k]
+                    else:
+                        cv[sh:] += gated[:-sh] * cw[:, k]
+                out = (C * cv) @ m['conv_out'][l].T
+            else:
+                q = rms((h @ m['wq'][l].T).reshape(T, heads, hd), m['q_norm'][l])
+                k = rms((h @ m['wk'][l].T).reshape(T, kvh, hd), m['k_norm'][l])
+                v = (h @ m['wv'][l].T).reshape(T, kvh, hd)
+                q, k = rope(q, pos), rope(k, pos)
+                o = np.zeros((T, heads, hd), np.float32)
+                for hq in range(heads):
+                    kh = hq // rep
+                    raw = q[:, hq, :] @ k[:, kh, :].T / np.sqrt(hd)
+                    sc = np.where(np.triu(np.ones((T, T), bool), 1), -np.inf, raw)
+                    sc = sc - sc.max(-1, keepdims=True)
+                    pr = np.exp(sc)
+                    pr /= pr.sum(-1, keepdims=True)
+                    o[:, hq, :] = pr @ v[:, kh, :]
+                out = o.reshape(T, dim) @ m['wo'][l].T
+            x1 = x + out
+            h2 = rms(x1, m['rms_ffn'][l])
+            g1 = h2 @ m['w1'][l].T
+            g3 = h2 @ m['w3'][l].T
+            x = x1 + ((g1 / (1 + np.exp(-g1))) * g3) @ m['w2'][l].T
+            mx = float(np.abs(x).max())
+            if not np.isfinite(mx):
+                raise SystemExit("residual calibration produced %s at layer %d; "
+                                 "the check cannot vouch for this model" % (mx, l))
+            peaks[l] = max(peaks[l], mx)
+    return peaks
+
+
 def residual_peaks(m, seq=8):
     """max|x| of the residual stream per layer, for a few token samples.
 
@@ -403,6 +616,8 @@ def residual_peaks(m, seq=8):
     end), taking the maximum over both the samples and the positions.  It needs
     no tokenizer, so it works for every source the packer accepts.
     """
+    if m.get('layer_types'):
+        return residual_peaks_lfm2(m, seq)
     dim, hidden, layers = m['dim'], m['hidden'], m['layers']
     heads, kv, vocab = m['heads'], m['kv'], m['vocab']
     hd = dim // heads
@@ -514,7 +729,10 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
     """
     import numpy as np
     if m is None:
-        m = load_minimind(model_dir, seq)
+        with open(model_dir + '/config.json') as _f:
+            _cfg = json.load(_f)
+        m = load_lfm2(model_dir, seq) if _cfg.get('model_type') == 'lfm2' \
+            else load_minimind(model_dir, seq)
     # HF pads the embedding to a multiple of its own choosing (16408 for a
     # 16384-token tokenizer), so the *tokenizer* decides how many rows the
     # container may claim: a row the tokenizer cannot produce is dead weight,
@@ -541,6 +759,8 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
                 vocab=vocab, seq=seq, head_dim=head_dim,
                 theta=float(m['theta']), half=bool(m['half']), qk_norm=bool(qk),
                 scheme=scheme, group=(32 if scheme == 'q4' else 0), split=bool(split))
+    if m.get('layer_types'):
+        meta['layer_types'] = list(m['layer_types'])
     if moe:
         meta['experts'] = int(moe['n_experts'])
         meta['top_k'] = int(moe['top_k'])
@@ -556,7 +776,10 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
         arr = m.get(key)
         if arr is None:
             continue
-        for l in range(int(getattr(arr, 'shape', (0,))[0])):
+        n_rows = len(arr) if isinstance(arr, list) else int(getattr(arr, 'shape', (0,))[0])
+        for l in range(n_rows):
+            if arr[l] is None:
+                continue
             w = np.asarray(arr[l], np.float32)
             med = float(np.median(np.abs(w)))
             if med <= 0:
@@ -646,9 +869,19 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
             T.append((base | (1 << 14), DT_I16, rows, groups, 0, s16.tobytes(), 0.0, aux))
             T.append((base | (2 << 14), DT_I16, rows, groups, 0, mn.tobytes(), 0.0, aux))
 
+    ltypes = m.get('layer_types') or []
     for l in range(layers):
-        mat(T_QKV, l, np.concatenate([m['wq'][l], m['wk'][l], m['wv'][l]], axis=0))
-        mat(T_WO, l, m['wo'][l])
+        if ltypes and ltypes[l] == 'conv':
+            mat(T_CONV_IN, l, m['conv_in'][l])
+            # The depthwise kernel is dim x k floats (24 KiB at most): f32, no
+            # quantisation -- its per-channel scale is already the weight.
+            cw = np.asarray(m['conv_w'][l], np.float32)
+            T.append((T_CONV_W | (l << 8), DT_F32, int(cw.shape[0]), int(cw.shape[1]),
+                      0, cw.tobytes(), 0.0))
+            mat(T_CONV_OUT, l, m['conv_out'][l])
+        else:
+            mat(T_QKV, l, np.concatenate([m['wq'][l], m['wk'][l], m['wv'][l]], axis=0))
+            mat(T_WO, l, m['wo'][l])
         if moe:
             # The router stays i16 in every container, q4 included: it is
             # 4x768 values and a route flip is not a rounding error, it is a
