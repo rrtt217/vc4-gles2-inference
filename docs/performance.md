@@ -4783,45 +4783,51 @@ The fused number is identical to four decimals, and `regression.sh` is ACCEPT
 the one place the new path is *not* bit-exact by construction, because the 24-bit
 store used to keep 1/256 of a q16 unit -- moves nothing measurable.
 
-**Speed: about 1% on the board, and not more.**  Pi Zero, `SEQ=256 KV_PACK=16`,
+**Speed: not measurable on the board.**  Pi Zero, `SEQ=256 KV_PACK=16`,
 `lfm2.5.qad.q4.mmcf` (the only container on the board), `--gen 24`, greedy,
-steady state with `LAYER_PROFILE=1` (first token dropped, it carries the shader
-compile), two interleaved rounds:
+`LAYER_PROFILE=1`, first token dropped (it carries the shader compile), two
+interleaved rounds of each binary:
 
-| stage | older binary | this change |
+| stage | older binary r1 / r2 | this change r1 / r2 |
 |---|---:|---:|
-| `conv` (8 layers) | 205.3 | **200.0** |
-| `attn` (6 layers) | 213.9 | 198.5 |
-| `ffn` (14 layers) | 404.1 | 396.9 |
-| `w2` (14) | 186.2 | 183.9 |
-| `logits` | 231.3 | 175.1 |
-| fastest token | **1115.2** | 1119.6 |
+| `conv` (8 layers) | 205.3 / 172.8 | 200.0 / 184.9 |
+| `attn` (6 layers) | 213.9 / 156.3 | 198.5 / 133.1 |
+| `ffn` (14 layers) | 404.1 / 406.5 | 396.9 / 423.0 |
+| `logits` | 231.3 / 173.9 | 175.1 / 174.0 |
+| fastest token | **1115.2 / 1119.1** | 1119.6 / 1126.1 |
 
-The stages that were *not* touched move by 15-56 ms, so the noise floor on this
-board is ~±50 ms/token; the conv delta (5 ms) is inside it.  The single-layer
-`PROF l=13 conv` line is the sharper measurement: 22.60 -> 21.17 ms.
-
-On Xe the same change is **neutral** (conv 23.46 -> 23.53 of a 168 ms token).
+`attn` and `logits` were not touched and move by 14-58 ms, so the noise floor
+here is ~±50 ms on a 1.1 s token; `conv` moves 5 ms one way and 12 the other.
+The most stable statistic, the fastest token, is unchanged: 1115-1119 before,
+1120-1126 after.  On Xe the same change is neutral too (conv 23.46 -> 23.53 of a
+168 ms token).
 
 So the estimate this work started from -- "pairing the fetches should save
 80-100 ms/token on the Pi" -- was wrong, and the reason is worth keeping: the
-conv block's 200 ms is dominated by the three 1024-row **in_proj matvecs**
-(3.15 MMAC/layer), not by the three elementwise passes.  At the engine's q4 rate
-those matvecs alone are ~170 ms of it.  The elementwise passes were ~4.5 ms per
-layer and are now ~3 ms.  Anything that makes the elementwise side cheaper
-cannot win more than a few ms until the conv weights themselves get cheaper
-(fewer rows, or a fused B/C/X draw that does not hit the 2048 hazard), and
-`conv3`'s 2.4x fetch reduction is a precondition for that, not a win on its own.
+conv block's ~190 ms is dominated by the three 1024-row **in_proj matvecs**
+(3.15 MMAC per layer), not by the three elementwise passes.  At the engine's q4
+rate those matvecs are most of it; the elementwise passes were a few ms per
+layer and are now fewer.  Nothing on the elementwise side can win more than a
+few ms until the conv weights themselves get cheaper, and a fused B/C/X draw
+hits the 2048 hazard documented in `docs/engine-internals.md` section 5.  The
+fetch reduction is a precondition for that, not a win on its own -- keep it for
+being strictly less work at identical numerics, not for the clock.
 
 Two things the measurements also say, which cost time to learn:
 
-* **A single `decode avg` run cannot resolve a 1% change on this board.**  The
-  first generated token pays the shader compile of every program it touches --
+* **A single `decode avg` run cannot resolve 1% on this board.**  The first
+  generated token pays the shader compile of every program it touches --
   measured 443 ms of `logits` in one run and 2964 ms in another with a new
   conv program -- and the SD card (load average ~5, 90 MB available) adds
-  ±150 ms/token run to run.  Drop the first token and use `LAYER_PROFILE`'s
-  per-stage lines, which are taken across a `glFinish`.
+  ±150 ms/token run to run.  Drop the first token, prefer `LAYER_PROFILE`'s
+  per-stage lines (they are taken across a `glFinish`), and read the *fastest*
+  token rather than the mean.
 * **The 16 removed draws are not measurable on VC4.**  `DRAWCOUNT` shows 375 ->
+  353 per token, and the time does not move.  The fused path already skips the
+  per-pass finishes (`layer_fast_finish_`), so a draw on this board is ~10 us
+  and 16 of them are noise.
+
+The 16 removed draws are not measurable on VC4.**  `DRAWCOUNT` shows 375 ->
   353 per token, and the time does not move.  The fused path already skips the
   per-pass finishes (`layer_fast_finish_`), so a draw on this board is ~10 us
   and 16 of them are noise.
