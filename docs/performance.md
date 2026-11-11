@@ -5063,3 +5063,24 @@ The fused path gets the BOS fix but **not** `matvec_s`: that scales the
 I16_2 targets, which still have no scale.  Making the fused path's targets
 carry one is the next step, and it is the difference between the board's
 quality today and the serial path's.
+
+### Artifacts deleted after these measurements (2026-11-11)
+
+The containers a few numbers above were measured on are gone, to reclaim 1.6 GB:
+`lfm2.5.q4.mmcf` (tiled head, 235 MB), `base.i16.mmcf` and `qad.i16.mmcf`
+(563 MB each), and the two base GGUFs (Q4_0, Q4_K_M; the vendor *recipes* are
+in `docs/lfm2.5-230m-assessment.zh-CN.md`).  The surviving containers are
+`lfm2.5.q4.dedup.mmcf`, `lfm2.5.q4.q6.mmcf` and `qad/lfm2.5.qad.q4.mmcf`, plus
+the QAD-Q4_0 GGUF that llama.cpp is compared against.  Rebuild what is missing
+with
+
+```bash
+python3 engine/tools/mmcf_pack.py --in models/lfm2.5-230m --quant i16 --seq 512 \
+  --tok models/lfm2.5-230m/lfm2.5.tok --out models/lfm2.5-230m/base.i16.mmcf \
+  --name lfm2.5-base-i16 --template chatml --chat \
+  --chat-template models/lfm2.5-230m/chat_template.jinja --verify
+```
+
+(the `q4` recipe for the base container is the same command with `--quant q4`,
+`--head-dedup` dropped and a `q4` output name; the QAD one is quoted in the
+assessment doc).

@@ -43,9 +43,13 @@ models/
   feng30m/                       feng-30m (Qwen3-shaped, 11 layers): works
 
   lfm2.5-230m/                   LFM2.5-230M (hybrid: 8 conv + 6 attention layers):
-                                 lfm2.5.q4.mmcf (235 MB, tiled head),
                                  lfm2.5.q4.dedup.mmcf (169 MB, --head-dedup) and
-                                 lfm2.5.q4.q6.mmcf (152 MB, 6-bit head).
+                                 lfm2.5.q4.q6.mmcf (152 MB, 6-bit head).  The
+                                 tiled-head lfm2.q4.mmcf (235 MB) and the two
+                                 i16 reference containers (563 MB each) were
+                                 deleted on 2026-11-11 to reclaim 1.6 GB; rebuild
+                                 with `mmcf_pack.py --quant q4` (drop
+                                 --head-dedup) and `--quant i16`.
                                  Xe: 172-180 ms/token serial, 24 ms fused.
                                  Every PPL quoted for this model before
                                  2026-11-11 was measured without a BOS and is
@@ -64,10 +68,11 @@ models/
                                  29.5, 0.23x the q16 rail -> q16 path is enough);
                                  probe_head_q4.py measured the q4 vocabulary head
                                  (rejected: input-embedding side costs ~7.5 logits).
-                                 Also holds the official GGUFs (Q4_0, Q4_K_M,
-                                 QAD-Q4_0) and gguf_report.py, the tensor-type
-                                 inspector: all three keep token_embd at Q6_K and
-                                 store the tied head once
+                                 Also holds the official QAD-Q4_0 GGUF (the
+                                 llama.cpp reference; the base Q4_0 and Q4_K_M
+                                 copies were deleted after the vendor recipes
+                                 were written down in the assessment doc) and
+                                 gguf_report.py, the tensor-type inspector
 
   survey_under_110m.csv          candidate survey
 ```
