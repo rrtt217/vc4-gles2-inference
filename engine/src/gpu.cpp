@@ -827,7 +827,7 @@ void GPU::init_attention(int dim, int kv_dim, int heads, int kv_heads, int head_
                         int seq, bool rope_half, bool qk_norm, int layers,
                         const vector<float>& qn, const vector<float>& kn,
                         const vector<float>& rcos, const vector<float>& rsin, bool qkv_pair,
-                        bool hybrid){
+                        bool hybrid, const vector<uint8_t>* layer_type){
         att_dim_ = dim; att_kv_dim_ = kv_dim; att_heads_ = heads;
         att_kv_heads_ = kv_heads; att_head_dim_ = head_dim; att_seq_ = seq;
         att_rope_half_ = rope_half; att_qk_norm_ = qk_norm;
@@ -873,12 +873,22 @@ void GPU::init_attention(int dim, int kv_dim, int heads, int kv_heads, int head_
         att_stats_ = make_target(heads, 1);
         att_probs_ = make_target(seq, heads);
         att_out_ = make_target(x_texels(dim, act_fmt_), 1);
+        // Only attention layers carry a KV cache.  A hybrid model has 8 conv
+        // layers whose entries would never be read: at SEQ 2048 their share is
+        // 8 x 512 x 2048 x 4 = 33.5 MB of CMA, which is what kept SEQ above
+        // 1024 out of reach on the Pi.
+        auto is_attn = [&](int l) {
+                return !(layer_type && (int)layer_type->size() > l && (*layer_type)[l]);
+        };
         kv_cache_.clear();
         kv_cache_.reserve(layers);
-        for (int l = 0; l < layers; ++l) kv_cache_.push_back(make_target(att_kv_width_, seq));
-        if (att_kv_vstep_)
-            for (int l = 0; l < layers; ++l)
-                vs_targets_.push_back(make_target(att_kv_heads_, seq));
+        for (int l = 0; l < layers; ++l)
+                kv_cache_.push_back(is_attn(l) ? make_target(att_kv_width_, seq) : Target());
+        if (att_kv_vstep_) {
+                vs_targets_.clear();
+                for (int l = 0; l < layers; ++l)
+                        vs_targets_.push_back(is_attn(l) ? make_target(att_kv_heads_, seq) : Target());
+        }
         const int rw = 2 * half;
         vector<uint8_t> data((size_t)seq * rw * 4);
         for (int p = 0; p < seq; ++p) {

@@ -99,7 +99,7 @@ public:
                         int seq, bool rope_half, bool qk_norm, int layers,
                         const vector<float>& qn, const vector<float>& kn,
                         const vector<float>& rcos, const vector<float>& rsin, bool qkv_pair,
-                        bool hybrid = false);
+                        bool hybrid = false, const std::vector<uint8_t>* layer_type = nullptr);
 
     GLuint attention_block(const Mat& qkv, GLuint x, int layer, int pos);
 
