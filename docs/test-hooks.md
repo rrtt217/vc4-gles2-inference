@@ -33,6 +33,8 @@ exist.
 | `QKV_DUMP=1` | hashes every layer/position of the `qkv` matvec output; `2` also prints the first two rows.  Layout-agnostic, so `QKV_PAIR=0` and `QKV_PAIR=1` runs compare exactly |
 | `ATT_DUMP=<pos>` | the exact integers the score/softmax path consumed and produced, for every layer at one position.  Feed the log to `engine/scripts/check_att.py` |
 | `FFN_DUMP=1` | the first 8 texels of the layer-0 gate output, for bisecting a 1-LSB drift |
+| `CONV_GPU=1` | LFM2 hybrid only: run the conv block through its GPU passes instead of the serial reference path.  Experimental — the elementwise chain does not yet agree with the CPU path |
+| `CONV_DUMP=1` | LFM2 hybrid, `CONV_GPU=1`: dumps the `in_proj` slices, the gates and the conv output of layer 0 as packed texels |
 | `CONV_DEBUG=1` | prints the first values of the LFM2 conv block's stages (`xb`, `in_proj`, gates, conv output) for layer 0, next to the CPU reference |
 | `LOGITS_OUT=path` | float32 logits after prefill.  `engine/scripts/cmp_logits.py` compares two of them per tile |
 | `TOKENS_OUT=path` | prompt + generated token ids (int32).  A tool turn rewrites it after each model round, so a watcher sees every round |

@@ -77,6 +77,11 @@ public:
     // dim x k floats, kept on the host because the CPU path reads it and the
     // GPU upload repacks it into a texture.  Empty on attention layers.
     vector<Mat> conv_in, conv_out;
+    // conv_in split by output rows: B (0:dim), C (dim:2dim), x (2dim:3dim).
+    // The GPU path draws each slice into its own 1024-wide target; a single
+    // 3072-wide draw would exceed VC4's 2048.  The slices borrow the same
+    // bytes (row slices of a q4 matrix are contiguous).
+    vector<Mat> conv_in_b, conv_in_c, conv_in_x;
     vector<vector<float>> conv_w;
     int conv_k = 0;
     bool is_conv(int l) const { return l >= 0 && l < (int)layer_type.size() && layer_type[l] != 0; }

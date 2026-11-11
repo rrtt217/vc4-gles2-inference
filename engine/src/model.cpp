@@ -737,6 +737,17 @@ bool Model::load_mmcf(){
         conv_in = layers_conv_in;
         conv_out = layers_conv_out;
         conv_w = layers_conv_w;
+        if (hybrid) {
+                conv_in_b.assign(layers, Mat());
+                conv_in_c.assign(layers, Mat());
+                conv_in_x.assign(layers, Mat());
+                for (int l = 0; l < layers; ++l) {
+                        if (!layer_type.empty() && !layer_type[l]) continue;
+                        conv_in_b[l] = slice_rows(conv_in[l], 0, dim);
+                        conv_in_c[l] = slice_rows(conv_in[l], dim, 2 * dim);
+                        conv_in_x[l] = slice_rows(conv_in[l], 2 * dim, 3 * dim);
+                }
+        }
         if (experts > 0) {
                 // What the runtime has: one router per layer, top-1 with a
                 // normalised gate (so the selected expert is used with weight

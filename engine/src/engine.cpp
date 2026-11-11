@@ -375,7 +375,9 @@ int main(int argc, char** argv) {
     const auto up_t0 = Clock::now();
     for (auto& m : model.qkv) gpu.upload(m);
     for (auto& m : model.wo) gpu.upload(m);
-    for (auto& m : model.conv_in) if (m.rows) gpu.upload(m);
+    for (auto& m : model.conv_in_b) if (m.rows) gpu.upload(m);
+    for (auto& m : model.conv_in_c) if (m.rows) gpu.upload(m);
+    for (auto& m : model.conv_in_x) if (m.rows) gpu.upload(m);
     for (auto& m : model.conv_out) if (m.rows) gpu.upload(m);
     for (auto& m : model.w13) gpu.upload(m);
     for (auto& m : model.w1) gpu.upload(m);

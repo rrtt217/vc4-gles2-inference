@@ -1221,6 +1221,57 @@ string rms_stats_reduce() {
         "gl_FragColor=encs(s);}";
 }
 
+string mul_act(int dim, XFormat xf) {
+    if (xf != XFormat::I16_2)
+        { fprintf(stderr, "shader mul_act: the conv block is q16 only\n"); exit(2); }
+    // Inputs are matvec outputs: one 24-bit value per texel.  The output is a
+    // q16 pair texture, which is what the next matvec_add reads.
+    const int tw = x_texels(dim, xf);
+    return head(xf) + q24_helpers() +
+        "uniform sampler2D A,B;uniform float aw;"
+        "void main(){int q=int(gl_FragCoord.x);float u=(float(2*q)+0.5)/aw;"
+        "float a0=x_i24q(texture2D(A,vec2(u,0.5)));"
+        "float a1=x_i24q(texture2D(A,vec2(u+1.0/aw,0.5)));"
+        "float b0=x_i24q(texture2D(B,vec2(u,0.5)));"
+        "float b1=x_i24q(texture2D(B,vec2(u+1.0/aw,0.5)));"
+        "gl_FragColor=x_st2(a0*b0,a1*b1);}";
+}
+
+string conv3_act(int dim, XFormat xf) {
+    if (xf != XFormat::I16_2)
+        { fprintf(stderr, "shader conv3_act: the conv block is q16 only\n"); exit(2); }
+    const int tw = x_texels(dim, xf);
+    // One 24-bit value per fragment (the next stage is a gate that reads 24-bit
+    // matvec outputs), sampling one q16 value from each of the three I16_2
+    // textures at the same index.
+    return head(xf) + q24_helpers() +
+        "uniform sampler2D S0,S1,G,K;uniform float k;"
+        "void main(){int i=int(gl_FragCoord.x);"
+        "float a=X1Q(S0,i,float(" + to_string(tw) + "));"
+        "float b=X1Q(S1,i,float(" + to_string(tw) + "));"
+        "float c=X1Q(G,i,float(" + to_string(tw) + "));"
+        "float u=(float(i/2)+0.5)/float(" + to_string(tw) + ");"
+        // The depthwise kernel is per channel: row t of K holds tap t for
+        // channels 2q and 2q+1, so one fetch per tap, picking the q16 half.
+        "float k0=(i/2)*2==i ? x_i16raw(texture2D(K,vec2(u,0.5/k)).rg) "
+        ": x_i16raw(texture2D(K,vec2(u,0.5/k)).ba);"
+        "float k1=(i/2)*2==i ? x_i16raw(texture2D(K,vec2(u,1.5/k)).rg) "
+        ": x_i16raw(texture2D(K,vec2(u,1.5/k)).ba);"
+        "float k2=(i/2)*2==i ? x_i16raw(texture2D(K,vec2(u,2.5/k)).rg) "
+        ": x_i16raw(texture2D(K,vec2(u,2.5/k)).ba);"
+        // Raw q16 units: a raw product is real*256, so the sum of three raw
+        // products must come back down by 256 to stay raw.
+        "gl_FragColor=x_i24encq((k0*a+k1*b+k2*c)/256.0);}";
+}
+
+string copy_act(int dim, XFormat xf) {
+    const int tw = x_texels(dim, xf);
+    return head(xf) +
+        "uniform sampler2D A;"
+        "void main(){int q=int(gl_FragCoord.x);"
+        "gl_FragColor=texture2D(A,vec2((float(q)+0.5)/float(" + to_string(tw) + "),0.5));}";
+}
+
 string rms_norm(int dim, XFormat residual, XFormat out, bool fused_reduce,
                 bool use_eps_uniform) {
     need_dim("rms_norm", dim);

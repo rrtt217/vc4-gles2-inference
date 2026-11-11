@@ -195,6 +195,123 @@ void GPU::upload(Mat& m){
         }
     }
 
+void GPU::init_conv(int layers, int dim){
+        const int tw = x_texels(dim, act_fmt_);
+        conv_s0_.assign(layers, Target());
+        conv_s1_.assign(layers, Target());
+        for (int l = 0; l < layers; ++l) {
+                // The state starts at zero; a texture's contents are undefined,
+                // so clear both rows through the FBO.
+                conv_s0_[l] = make_target(tw, 1);
+                conv_s1_[l] = make_target(tw, 1);
+                for (Target* t : {&conv_s0_[l], &conv_s1_[l]}) {
+                        bind_fbo(t->fbo);
+                        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+                        glClear(GL_COLOR_BUFFER_BIT);
+                }
+        }
+        conv_t_b_ = conv_t_c_ = conv_t_x_ = conv_gated_ = conv_cv_ = conv_y_ = Target();
+}
+
+GLuint GPU::conv_mul(GLuint a, GLuint b, Target& out){
+        const int tw = x_texels(att_dim_, act_fmt_);
+        if (out.tex == 0 || out.w != tw) out = make_target(tw, 1);
+        GLuint p = x_prog("conv_mul", mul_act(att_dim_, act_fmt_));
+        bind_fbo(out.fbo);
+        glViewport(0, 0, tw, 1);
+        use_program(p);
+        bind_tex(0, a);
+        set_sampler(p, "A", 0);
+        bind_tex(1, b);
+        set_sampler(p, "B", 1);
+        glUniform1f(uloc(p, "aw"), (float)att_dim_);
+        setup_attrib(p);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        ++draws_;
+        return out.tex;
+}
+
+void GPU::set_conv_kernel(int layer, const float* w, int dim, int k){
+        if ((int)conv_k_tex_.size() <= layer) conv_k_tex_.resize(layer + 1, 0);
+        const int tw = (dim + 1) / 2;
+        vector<uint8_t> px((size_t)tw * k * 4, 0);
+        for (int t = 0; t < k; ++t) {
+                for (int i = 0; i < dim; ++i) {
+                        long q = lrintf(w[(size_t)i * k + t] * ACT_SCALE);
+                        if (q < -32768) q = -32768;
+                        if (q > 32767) q = 32767;
+                        const uint16_t u = (uint16_t)(int16_t)q;
+                        const size_t o = ((size_t)t * tw + (i / 2)) * 4 + (i % 2) * 2;
+                        px[o] = (uint8_t)(u >> 8);
+                        px[o + 1] = (uint8_t)(u & 0xFF);
+                }
+        }
+        GLuint t = make_texture(tw, k, px.data());
+        if (conv_k_tex_[layer]) glDeleteTextures(1, &conv_k_tex_[layer]);
+        conv_k_tex_[layer] = t;
+}
+
+GLuint GPU::conv3(GLuint s0, GLuint s1, GLuint g, GLuint ktex, Target& out){
+        // The output is 24-bit (one value per texel), the input of the second
+        // gate; the matvec_add that follows reads the gate's I16_2 output.
+        if (out.tex == 0 || out.w != att_dim_) out = make_target(att_dim_, 1);
+        GLuint p = x_prog("conv3", conv3_act(att_dim_, act_fmt_));
+        bind_fbo(out.fbo);
+        glViewport(0, 0, att_dim_, 1);
+        use_program(p);
+        bind_tex(0, s0);
+        set_sampler(p, "S0", 0);
+        bind_tex(1, s1);
+        set_sampler(p, "S1", 1);
+        bind_tex(2, g);
+        set_sampler(p, "G", 2);
+        bind_tex(3, ktex);
+        set_sampler(p, "K", 3);
+        glUniform1f(uloc(p, "k"), 3.0f);
+        setup_attrib(p);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        ++draws_;
+        return out.tex;
+}
+
+GLuint GPU::conv_copy(GLuint src, Target& out){
+        const int tw = x_texels(att_dim_, act_fmt_);
+        if (out.tex == 0 || out.w != tw) out = make_target(tw, 1);
+        GLuint p = x_prog("conv_copy", copy_act(att_dim_, act_fmt_));
+        bind_fbo(out.fbo);
+        glViewport(0, 0, tw, 1);
+        use_program(p);
+        bind_tex(0, src);
+        set_sampler(p, "A", 0);
+        setup_attrib(p);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        ++draws_;
+        return out.tex;
+}
+
+GLuint GPU::conv_block(const Mat& in_b, const Mat& in_c, const Mat& in_x,
+                       const Mat& out_proj, GLuint xb, GLuint residual,
+                       int layer, Target& out){
+        matvec_to(in_b, xb, conv_t_b_);
+        matvec_to(in_c, xb, conv_t_c_);
+        matvec_to(in_x, xb, conv_t_x_);
+        const GLuint gated = conv_mul(conv_t_b_.tex, conv_t_x_.tex, conv_gated_);
+        const GLuint cv = conv3(conv_s0_[layer].tex, conv_s1_[layer].tex, gated,
+                                conv_k_tex_[layer], conv_cv_);
+        conv_copy(conv_s1_[layer].tex, conv_s0_[layer]);   // shift: s0 <- s1
+        conv_copy(gated, conv_s1_[layer]);                 //        s1 <- gated
+        const GLuint y = conv_mul(conv_t_c_.tex, cv, conv_y_);
+        if (getenv("CONV_DUMP") && layer == 0) {
+                dump_target(conv_t_b_, "cvB", 8);
+                dump_target(conv_t_x_, "cvX", 8);
+                dump_target(conv_gated_, "cvG", 8);
+                dump_target(conv_cv_, "cvC", 8);
+                dump_target(conv_y_, "cvY", 8);
+        }
+        matvec_add(out_proj, y, residual, out, act_fmt_);
+        return out.tex;
+}
+
 vector<float> GPU::matvec(const Mat& m, const vector<float>& x){
         Target& t = target_for(m.rows);
         GLuint xt = upload_activations(x);

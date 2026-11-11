@@ -96,15 +96,17 @@ Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
         gpu_layer_ = gpu_.gpu_layer_enabled();
         gpu_attn_ = gpu_layer_ || gpu_.gpu_attn_enabled();
         if (m_.hybrid) {
-            // No GPU kernel for the conv block yet: the serial path is the
-            // reference it will be compared against, and its matvecs are still
-            // the engine's GPU kernels.
-            gpu_layer_ = false;
-            gpu_attn_ = gpu_.gpu_attn_enabled();
-            conv_state_.assign(m_.layers, vector<float>());
-            for (int l = 0; l < m_.layers; ++l)
-                if (m_.is_conv(l))
-                    conv_state_[l].assign((size_t)(m_.conv_k - 1) * m_.dim, 0.0f);
+            if (gpu_layer_) {
+                gpu_.init_conv(m_.layers, m_.dim);
+                for (int l = 0; l < m_.layers; ++l)
+                    if (m_.is_conv(l))
+                        gpu_.set_conv_kernel(l, m_.conv_w[l].data(), m_.dim, m_.conv_k);
+            } else {
+                conv_state_.assign(m_.layers, vector<float>());
+                for (int l = 0; l < m_.layers; ++l)
+                    if (m_.is_conv(l))
+                        conv_state_[l].assign((size_t)(m_.conv_k - 1) * m_.dim, 0.0f);
+            }
         }
         if (!gpu_attn_) {
             kv_cache_k_.resize(m_.layers, vector<float>((size_t)m_.seq * m_.kv_dim, 0));
@@ -316,10 +318,12 @@ vector<float> Session::forward(int token, int pos){
                 // stage that the GPU stores as q16 is quantised here too, so
                 // this is the reference the GPU kernel must reproduce.
                 const int dim = m_.dim, k = m_.conv_k;
-                vector<float> g = gpu_.matvec(m_.conv_in[l], xb);   // B, C, x
+                vector<float> gb = gpu_.matvec(m_.conv_in_b[l], xb);
+                vector<float> gc = gpu_.matvec(m_.conv_in_c[l], xb);
+                vector<float> gx = gpu_.matvec(m_.conv_in_x[l], xb);
                 vector<float> gated(dim), cv(dim);
                 for (int i = 0; i < dim; ++i)
-                    gated[i] = quantize_act_f(g[i] * g[2 * dim + i]);
+                    gated[i] = quantize_act_f(gb[i] * gx[i]);
                 vector<float>& st = conv_state_[l];
                 for (int i = 0; i < dim; ++i) {
                     float acc = 0.0f;
@@ -337,16 +341,16 @@ vector<float> Session::forward(int token, int pos){
                 }
                 vector<float> y(dim);
                 for (int i = 0; i < dim; ++i)
-                    y[i] = quantize_act_f(g[dim + i] * cv[i]);
+                    y[i] = quantize_act_f(gc[i] * cv[i]);
                 if (getenv("CONV_DEBUG") && l == 0) {
                     cerr << "CV pos=" << pos << " xb";
                     for (int i = 0; i < 5; ++i) cerr << " " << xb[i];
-                    cerr << " | g";
-                    for (int i = 0; i < 5; ++i) cerr << " " << g[i];
+                    cerr << " | B";
+                    for (int i = 0; i < 5; ++i) cerr << " " << gb[i];
                     cerr << " | C";
-                    for (int i = 0; i < 3; ++i) cerr << " " << g[dim + i];
+                    for (int i = 0; i < 3; ++i) cerr << " " << gc[i];
                     cerr << " | x";
-                    for (int i = 0; i < 3; ++i) cerr << " " << g[2 * dim + i];
+                    for (int i = 0; i < 3; ++i) cerr << " " << gx[i];
                     cerr << " | gated";
                     for (int i = 0; i < 5; ++i) cerr << " " << gated[i];
                     cerr << " | cv";
@@ -468,12 +472,19 @@ GLuint Session::forward_gpu_hidden(int token, int pos, bool want_logits){
             if (pass_dup("rms_att")) xb = gpu_.rmsnorm(h, gpu_.rms_att_tex_[l], gpu_.xb_);
             mark("rms_att", l);
             if (getenv("STAGE_DUMP")) gpu_.dump_target(gpu_.xb_, "xb", 4096);
-            GLuint att_tex = gpu_.attention_block(m_.qkv[l], xb, l, pos);
-            if (getenv("STAGE_DUMP")) gpu_.dump_target(gpu_.att_out_, "att", 4096);
-            mark("attn", l);
-            gpu_.matvec_add(m_.wo[l], att_tex, h, gpu_.hidden_b_, gpu_.act_fmt_);
-            if (getenv("STAGE_DUMP")) gpu_.dump_target(gpu_.hidden_b_, "x1", 4096);
-            mark("wo", l);
+            if (m_.is_conv(l)) {
+                gpu_.conv_block(m_.conv_in_b[l], m_.conv_in_c[l], m_.conv_in_x[l],
+                                m_.conv_out[l], xb, h, l, gpu_.hidden_b_);
+                if (getenv("STAGE_DUMP")) gpu_.dump_target(gpu_.hidden_b_, "x1", 4096);
+                mark("conv", l);
+            } else {
+                GLuint att_tex = gpu_.attention_block(m_.qkv[l], xb, l, pos);
+                if (getenv("STAGE_DUMP")) gpu_.dump_target(gpu_.att_out_, "att", 4096);
+                mark("attn", l);
+                gpu_.matvec_add(m_.wo[l], att_tex, h, gpu_.hidden_b_, gpu_.act_fmt_);
+                if (getenv("STAGE_DUMP")) gpu_.dump_target(gpu_.hidden_b_, "x1", 4096);
+                mark("wo", l);
+            }
             GLuint x1 = gpu_.hidden_b_.tex;
             GLuint xbf = gpu_.rmsnorm(x1, gpu_.rms_ffn_tex_[l], gpu_.xbf_);
             if (getenv("STAGE_DUMP")) gpu_.dump_target(gpu_.xbf_, "xbf", 4096);

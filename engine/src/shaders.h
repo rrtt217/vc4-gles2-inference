@@ -54,6 +54,11 @@ std::string matvec_i4_add_pair(int rows, int cols, XFormat xf, bool inl = true);
 std::string swiglu_pair(int hidden, XFormat out);
 std::string swiglu_2row(int hidden, XFormat out);
 std::string swiglu(int hidden, bool fused, XFormat out);
+// LFM2 conv block: elementwise gate, 3-tap depthwise convolution, and a copy
+// (the state shift).  All three work in raw q16 units on I16_2 textures.
+std::string mul_act(int dim, XFormat xf);
+std::string conv3_act(int dim, XFormat xf);
+std::string copy_act(int dim, XFormat xf);
 
 std::string rms_stats_split(int dim, XFormat residual);
 std::string rms_stats_reduce();
