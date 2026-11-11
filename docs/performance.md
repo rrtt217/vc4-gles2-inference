@@ -4971,3 +4971,57 @@ The instrumented comparison is `refs/llamacpp/scripts/bisect_stages.py DUMP
 --f32`, one line per (layer, position, stage) with cosine and relative error,
 and `refs/llamacpp/scripts/np_ppl.py IDS --q16` for the simulation above.
 `probe_logits.py` in the model store gives the float32 logits for any id list.
+
+## Correction: every LFM2.5 PPL above is 5x too high, because `--ppl` sent no BOS (2026-11-11)
+
+`--ppl` tokenised with `encode(text, false, false)`: no BOS, no dummy prefix.
+No template is involved in a perplexity run, so nothing else supplied the
+`<|startoftext|>` that LFM2.5's template starts with.  The model was being
+scored on a prompt it never sees.  On the same 334-token stream:
+
+| tokenisation | PPL (base i16, serial) |
+|---|---:|
+| without BOS (what every LFM2.5 number in this file used) | 98.10 |
+| **with BOS** (what the model expects, and what llama.cpp does) | **15.97** |
+| float32 numpy reference, without BOS | 85.44 |
+| **float32 numpy reference, with BOS** | **14.71** |
+
+So the engine was never 5x off the reference: **15.97 against 14.71 is 8.6%**,
+and the two sides agree on the token stream and on the first generated token.
+
+The corrected numbers, `SEQ=512`, `data/ppl_test.txt` (334 scored tokens):
+
+| container | path | before (no BOS) | **after (BOS)** |
+|---|---|---:|---:|
+| base i16 | serial | 98.10 | **15.97** |
+| base i16 | serial, `ACT_F32=1` | 107.88 | 15.20 |
+| QAD q4 | serial | 117.08 | **18.73** |
+| QAD q4 | serial, `ACT_F32=1` | 115.81 | 18.48 |
+| QAD q4 | fused (`GPU_LAYER=1 CONV_GPU=1`) | 114.53 | **19.52** |
+
+Three things follow, and they change conclusions this file drew before:
+
+* **The fused path is 4% worse than serial, not 2% better.**  `19.52` against
+  `18.73` is the physically expected direction; the old pair (`114.53` against
+  `117.08`) inverted it because both were dominated by the missing BOS.
+* **MiniMind3's pins do not move** (`270.3170` / `330.5302`): its container has
+  no BOS id, so `encode(text, true, false)` is byte-identical to before.  The
+  change only affects checkpoints that *have* a BOS.
+* **The "quality is bad" investigation had two real engine bugs in it anyway**,
+  found while chasing the phantom gap.  They are fixes, not noise:
+  * the chat template never received `bos_token`/`eos_token` (previous commit),
+    so chat prompts had no `<|startoftext|>` either;
+  * `gpu_.matvec()` uploads its activation as a q16 texture, and LFM2.5's conv
+    gate output at the start of a sequence is order 1e-4 -- a handful of grid
+    steps, often literally zero, so the conv layer contributed nothing.
+    `GPU::matvec_s()` picks a power-of-two scale from the input's own maximum,
+    uploads `x * 2^k` and divides the result back.  With the serial path routed
+    through it, layer-by-layer agreement with the float32 reference went from
+    6-11% to **0.2-1.4% per layer**, and the first generated token for
+    "What is C. elegans?" is now `544 "C"` at logprob -0.01, where the float32
+    reference says -0.042 and llama.cpp says -0.037 (the engine previously
+    answered `841 "ĠC"`).
+
+What is still true from the earlier section: an **i16 container on the fused
+path** is broken (PPL 1.4e7), and that is pre-existing at `f22bb76`.  The i16
+*serial* path is the 15.97 above.

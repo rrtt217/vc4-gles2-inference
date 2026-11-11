@@ -367,6 +367,32 @@ Rejected experiments:
 `GPU_LAYER=1` implies GPU attention and GPU FFN, and
 `--top-k 64 --top-k-candidates` still works on top of it.
 
+### 4e. The activation grid is absolute, so a matvec input carries its own scale
+
+`I16_2` stores q16: step 1/256, rail +-128.  That is an *absolute* resolution,
+and a model whose activations live at 1e-4 -- LFM2.5's conv gate output at the
+first position, its attention output at the second layer -- lands on a handful
+of levels or on zero.  The upload is the boundary where this bites, because
+every matvec reads its activation from a texture:
+
+```cpp
+vector<float> GPU::matvec_s(const Mat& m, const vector<float>& x);  // gpu.cpp
+```
+
+`matvec_s` takes the input's own maximum, picks the power of two that puts it
+near 64 on the grid, uploads `x * 2^k` and multiplies the result back.  Because
+`2^k` is exact and the hardware rounds on a lattice that scales with it,
+`q16(x * 2^k) / 2^k` equals `q16(x)` whenever `x` is already well scaled -- MiniMind3's
+perplexity is bit-identical with the serial path routed through it -- and only
+differs where the unscaled grid would have rounded the value away.  LFM2.5's
+layer-by-layer agreement with the float32 reference went from 6-11% to 0.2-1.4%,
+and its first generated token for "What is C. elegans?" became the one the
+reference predicts.
+
+The same argument applies to the I16_2 *targets* the fused path writes
+(`conv_mul`'s gate output, `conv3`'s result): they have no scale, so the fused
+path still loses small activations.  The serial path is the reference today.
+
 ## Hybrid (conv) block
 
 LFM2 alternates 8 short-convolution layers with 6 attention layers.  A conv

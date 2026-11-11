@@ -43,6 +43,9 @@ public:
     void upload(Mat& m);
 
     vector<float> matvec(const Mat& m, const vector<float>& x);
+    // Same, with the activation scaled by 2^k so a small input keeps its
+    // resolution on the q16 grid (see the comment in gpu.cpp).
+    vector<float> matvec_s(const Mat& m, const vector<float>& x);
 
     GLuint upload_input(const vector<float>& x);
     // Prefill batch: position A then position B in one texture (see upload_input2).

@@ -384,9 +384,9 @@ vector<float> Session::forward(int token, int pos){
                 // stage that the GPU stores as q16 is quantised here too, so
                 // this is the reference the GPU kernel must reproduce.
                 const int dim = m_.dim, k = m_.conv_k;
-                vector<float> gb = gpu_.matvec(m_.conv_in_b[l], xb);
-                vector<float> gc = gpu_.matvec(m_.conv_in_c[l], xb);
-                vector<float> gx = gpu_.matvec(m_.conv_in_x[l], xb);
+                vector<float> gb = gpu_.matvec_s(m_.conv_in_b[l], xb);
+                vector<float> gc = gpu_.matvec_s(m_.conv_in_c[l], xb);
+                vector<float> gx = gpu_.matvec_s(m_.conv_in_x[l], xb);
                 vector<float> gated(dim), cv(dim);
                 for (int i = 0; i < dim; ++i)
                     gated[i] = act_f32() ? gb[i] * gx[i] : quantize_act_f(gb[i] * gx[i]);
@@ -427,7 +427,7 @@ vector<float> Session::forward(int token, int pos){
                          << " " << m_.conv_w[l][2] << "\n";
                 }
                 if (getenv("STAGE_DUMP")) gpu_.dump_cpu_row(gated, gpu_.act_fmt_, "cvg", 4096);
-                wo = gpu_.matvec(m_.conv_out[l], y);
+                wo = gpu_.matvec_s(m_.conv_out[l], y);
             } else if (gpu_attn_) {
                 GLuint xtex = gpu_.upload_input(xb);
                 GLuint atex = gpu_.attention_block(m_.qkv[l], xtex, l, pos);
@@ -444,7 +444,7 @@ vector<float> Session::forward(int token, int pos){
                         wo = gpu_.matvec_from(m_.wo[l], atex);
                 }
             } else {
-                vector<float> qkv = gpu_.matvec(m_.qkv[l], xb);
+                vector<float> qkv = gpu_.matvec_s(m_.qkv[l], xb);
                 vector<float> q(qkv.begin(), qkv.begin() + m_.dim);
                 vector<float> k(qkv.begin() + m_.dim, qkv.begin() + m_.dim + m_.kv_dim);
                 vector<float> v(qkv.begin() + m_.dim + m_.kv_dim, qkv.begin() + m_.dim + 2 * m_.kv_dim);
@@ -461,7 +461,7 @@ vector<float> Session::forward(int token, int pos){
                 for (size_t i = 0; i < att.size(); ++i)
                     att_q16[i] = act_f32() ? att[i] : quantize_act_f(att[i]);
                 if (getenv("STAGE_DUMP")) gpu_.dump_cpu_row(att_q16, gpu_.act_fmt_, "att", 4096);
-                wo = gpu_.matvec(m_.wo[l], att_q16);
+                wo = gpu_.matvec_s(m_.wo[l], att_q16);
             }
             vector<float> x1 = add_q16(x, wo);
             if (getenv("STAGE_DUMP")) gpu_.dump_cpu_row(x1, gpu_.act_fmt_, "x1", 4096);
@@ -475,7 +475,7 @@ vector<float> Session::forward(int token, int pos){
                 // Probe: skip the router and its read-back, pin one expert.
                 expert = atoi(getenv("MOE_FIXED"));
             } else if (m_.is_moe()) {
-                vector<float> gate = gpu_.matvec(m_.router[l], xbf);
+                vector<float> gate = gpu_.matvec_s(m_.router[l], xbf);
                 expert = pick_expert(gate);
                 if (getenv("MOE_DUMP"))
                     cerr << "MOE l=" << l << " route=" << expert << " gate="
@@ -488,31 +488,31 @@ vector<float> Session::forward(int token, int pos){
             if (!gpu_ffn) {
                 vector<float> h;
                 if (m_.ffn_chunked) {
-                    vector<float> h1 = gpu_.matvec(*f.w1a, xbf);
-                    vector<float> h3 = gpu_.matvec(*f.w3a, xbf);
+                    vector<float> h1 = gpu_.matvec_s(*f.w1a, xbf);
+                    vector<float> h3 = gpu_.matvec_s(*f.w3a, xbf);
                     vector<float> hh;
                     hh.reserve(2 * m_.ffn_chunk);
                     hh.insert(hh.end(), h1.begin(), h1.end());
                     hh.insert(hh.end(), h3.begin(), h3.end());
                     vector<float> ha = swiglu(hh, m_.ffn_chunk);
-                    h1 = gpu_.matvec(*f.w1b, xbf);
-                    h3 = gpu_.matvec(*f.w3b, xbf);
+                    h1 = gpu_.matvec_s(*f.w1b, xbf);
+                    h3 = gpu_.matvec_s(*f.w3b, xbf);
                     hh.clear(); hh.reserve(2 * (f.width - m_.ffn_chunk));
                     hh.insert(hh.end(), h1.begin(), h1.end());
                     hh.insert(hh.end(), h3.begin(), h3.end());
                     vector<float> hb = swiglu(hh, f.width - m_.ffn_chunk);
-                    o2 = add_q16(gpu_.matvec(*f.w2a, ha), gpu_.matvec(*f.w2b, hb));
+                    o2 = add_q16(gpu_.matvec_s(*f.w2a, ha), gpu_.matvec_s(*f.w2b, hb));
                 } else {
                     if (f.w1->rows) {
-                        vector<float> h1 = gpu_.matvec(*f.w1, xbf);
-                        vector<float> h3 = gpu_.matvec(*f.w3, xbf);
+                        vector<float> h1 = gpu_.matvec_s(*f.w1, xbf);
+                        vector<float> h3 = gpu_.matvec_s(*f.w3, xbf);
                         h.reserve(2 * f.width);
                         h.insert(h.end(), h1.begin(), h1.end());
                         h.insert(h.end(), h3.begin(), h3.end());
                     } else {
-                        h = gpu_.matvec(*f.w13, xbf);
+                        h = gpu_.matvec_s(*f.w13, xbf);
                     }
-                    o2 = gpu_.matvec(*f.w2, swiglu(h));
+                    o2 = gpu_.matvec_s(*f.w2, swiglu(h));
                 }
             } else {
                 GLuint xtex = gpu_.upload_input(xbf);

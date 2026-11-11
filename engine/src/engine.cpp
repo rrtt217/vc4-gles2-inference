@@ -419,7 +419,14 @@ int main(int argc, char** argv) {
     if (!ppl_path.empty()) {
         string text;
         if (!read_text_file(ppl_path, text)) { cerr << "cannot read " << ppl_path << "\n"; return 1; }
-        auto tokens = tokenizer.encode(text, false, false);
+        // BOS, because this path feeds raw text to the model and no template is
+        // involved.  It used to pass false/false, which is what chat *without*
+        // a BOS policy means -- and for LFM2.5 (whose template supplies
+        // <|startoftext|>) it measured a prompt the model never sees: PPL 85.4
+        // without the BOS against 14.7 with it, nats 4.45 against 2.69.  It is
+        // also what llama.cpp's llama-perplexity does (add_special from the
+        // GGUF's add_bos_token).
+        auto tokens = tokenizer.encode(text, /*bos=*/true, /*dummy_prefix=*/false);
         if ((int)tokens.size() < 4) { cerr << "not enough tokens\n"; return 1; }
         // Score *every* window, not only the first.  A single window is what
         // this used to do: fine for A/B on a corpus shorter than SEQ (which is
@@ -429,6 +436,8 @@ int main(int argc, char** argv) {
         // unscored token is the very first one; each window gets a fresh
         // session, because the KV cache and the conv history are per-position.
         const int span = model.seq - 1;
+        FILE* ppl_dump = nullptr;
+        if (const char* dp = getenv("PPL_DUMP")) ppl_dump = fopen(dp, "w");
         double nll = 0.0;
         long cnt = 0;
         int windows = 0;
@@ -446,6 +455,10 @@ int main(int argc, char** argv) {
                 for (float v : lg) se += exp((double)v - mx);
                 double logp = ((double)lg[tokens[i + 1]] - mx) - log(se);
                 nll += -logp;
+                // PPL_DUMP=path writes one line per scored token.  The mean is
+                // not enough to see what a gap is made of: a handful of
+                // catastrophic positions and a uniform 2% error both raise PPL.
+                if (FILE* pf = ppl_dump) fprintf(pf, "%lld %d %.6f\n", (long long)i, tokens[i + 1], -logp);
                 ++cnt;
             }
             ++windows;

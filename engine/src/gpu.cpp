@@ -387,6 +387,32 @@ vector<float> GPU::matvec(const Mat& m, const vector<float>& x){
         return out;
     }
 
+// The same matvec, with the activation scaled by a power of two that puts its
+// largest component near 64 on the q16 grid, and the result scaled back.
+//
+// The grid is absolute (step 1/256, rail 128), so a matvec input of order 1e-3
+// -- LFM2.5's conv gate output at the start of a sequence, or its attention
+// output -- lands on a handful of levels or on zero, and the layer contributes
+// nothing.  Scaling by 2^k costs one multiply on the host, is exact (a power of
+// two), and the *result* keeps its own resolution because the readback is q16
+// at scale 1 after the divide.  This is the per-tensor scale the activation
+// format never had, applied where the engine crosses the grid.
+vector<float> GPU::matvec_s(const Mat& m, const vector<float>& x){
+        float mx = 0.0f;
+        for (float v : x) mx = std::max(mx, fabsf(v));
+        if (!(mx > 0.0f)) return matvec(m, x);
+        int e = 0;
+        frexpf(mx, &e);                 // mx = f * 2^e, f in [0.5, 1)
+        const int k = 6 - e;            // target 32..64
+        const float s = ldexpf(1.0f, k);
+        const float inv = ldexpf(1.0f, -k);
+        vector<float> xs(x.size());
+        for (size_t i = 0; i < x.size(); ++i) xs[i] = x[i] * s;
+        vector<float> out = matvec(m, xs);
+        for (float& v : out) v *= inv;
+        return out;
+    }
+
 GLuint GPU::upload_input(const vector<float>& x){ return upload_activations(x); }
 
 void GPU::matvec_to(const Mat& m, GLuint x, Target& out){
