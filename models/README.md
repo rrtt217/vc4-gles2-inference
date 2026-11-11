@@ -49,7 +49,10 @@ models/
                                  Xe: PPL 111.83 / 112.15 / 128.17 (333 tokens),
                                  172-180 ms/token serial, 24 ms fused.
                                  Pi Zero: dedup 1133 ms/token, q6 1371 ms, both
-                                 run (docs/performance.md, 2026-11-11).
+                                 run (docs/performance.md, 2026-11-11).  qad/ is
+                                 the QAD weights (FP32 source): q4 fused PPL
+                                 114.53 against the base 126.89, so the Pi
+                                 container to use is lfm2.5.qad.q4.mmcf.
                                  probe_residuals.py is the numpy f32 forward behind
                                  docs/lfm2.5-230m-assessment.zh-CN.md (residual peak
                                  29.5, 0.23x the q16 rail -> q16 path is enough);

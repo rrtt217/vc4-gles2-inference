@@ -4716,3 +4716,42 @@ norm; they sit in the fused loop's fixed-point handling of that channel and are
 not attributed to a single stage yet.
 
 Reproduce: `CPU_RMS_GPU=1`, `CPU_ADD_GPU=1` (docs/test-hooks.md).
+
+## The QAD weights (2026-11-11, Xe)
+
+Liquid publishes a quantization-aware-distillation checkpoint in
+`LiquidAI/LFM2.5-230M-GGUF/qad/` (FP32 safetensors, sha `1a55fc50...`, the
+provenance says the released QAD-Q4_0 GGUF is its byte-exact Q4_0 conversion).
+Packed with the same flags as the base container (`--quant q4 --head-dedup
+--seq 512`), it is the same 168.9 MB file format.
+
+| weights | i16 PPL | q4 serial | q4 fused |
+|---|---:|---:|---:|
+| base LFM2.5-230M | **98.10** | **112.15** | 126.89 |
+| QAD (qad/) | 109.56 | 117.08 | **114.53** |
+
+Three things follow:
+
+* QAD **trades full precision for robustness**: its i16 ceiling is 11.5 points
+  worse (109.56 against 98.10), and its q4 penalty is much smaller (+6.9%
+  against +14.3%).
+* On the **serial** path the base weights still win (112.15 against 117.08).
+* On the **fused** path QAD wins by **12.4 points** (114.53 against 126.89) and
+  lands within ~2% of the base serial reference.  That is the path the Pi runs
+  for speed (1133 against 1538 ms/token), so for the board the QAD container is
+  now the right one: same speed, PPL 114.5 instead of 126.9.
+
+The fused-vs-serial inversion for QAD (114.53 against 117.08) is inside what a
+333-token corpus can resolve; do not read it as "fused is better".
+
+Packing:
+
+```bash
+python3 engine/tools/mmcf_pack.py --in models/lfm2.5-230m/qad --quant q4 --seq 512 \
+  --head-dedup --tok models/lfm2.5-230m/qad/lfm2.5.tok \
+  --out models/lfm2.5-230m/qad/lfm2.5.qad.q4.mmcf \
+  --name lfm2.5-230m-qad --template chatml --chat \
+  --chat-template models/lfm2.5-230m/qad/chat_template.jinja \
+  --system "You are a helpful assistant trained by Liquid AI." \
+  --bos 1 --eos 7 --stop 7 --add-bos 0 --add-eos 0 --verify
+```
