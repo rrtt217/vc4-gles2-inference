@@ -5084,3 +5084,34 @@ python3 engine/tools/mmcf_pack.py --in models/lfm2.5-230m --quant i16 --seq 512 
 (the `q4` recipe for the base container is the same command with `--quant q4`,
 `--head-dedup` dropped and a `q4` output name; the QAD one is quoted in the
 assessment doc).
+
+### Open: our PPL degrades window by window (found 2026-11-11, not fixed)
+
+`--ppl` now scores every window, and on a 1134-token Markdown file
+(`docs/engine-internals.md`, first 3600 bytes, `SEQ=512`) the per-window NLL is
+not flat:
+
+| window | our mean NLL | llama.cpp's chunk |
+|---|---:|---:|
+| 0 | 4.23 | 3.96 |
+| 1 | 5.88 | 3.88 |
+| 2 (111 tokens) | 7.41 | — |
+
+Total: ours **197.67** (QAD q4) against llama.cpp's **48.28** on the same text
+at the same context.  The first window agrees to 7%; every later one is worse,
+and the degradation grows with the window index (4.23 -> 5.88 -> 7.41), which is
+the shape of state carried across windows, not of harder text -- llama.cpp's
+second chunk is *easier* than its first.
+
+This does not affect any number measured on a short corpus (every pinned PPL,
+and every engine-vs-numpy comparison in this file, is one window: `14.71` numpy
+against `15.97` engine is window 0).  It does affect long-context perplexity,
+and it is the next thing to chase: `--ppl` builds a fresh `Session` per window,
+so the suspects are the state that lives in `GPU` rather than in `Session`
+(the fused path's conv targets, the shared `Target` pool) and the rope/KV
+boundary itself.  Reproduce with
+
+```bash
+head -c 3600 docs/engine-internals.md > /tmp/c3.txt
+SEQ=512 GPU_LAYER=0 PPL_DUMP=/tmp/nll.txt ./engine_mm3 --ppl /tmp/c3.txt   # from engine/
+```
