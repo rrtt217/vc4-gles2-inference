@@ -1199,6 +1199,21 @@ void GPU::dump_target(const Target& t, const char* name, int n){
 // vector.  Pack it exactly as a GPU producer would (x_pack applies the same
 // q16 quantisation and the same layout) and print it with the same printer.
 void GPU::dump_cpu_row(const vector<float>& v, XFormat f, const char* name, int n){
+        // DUMP_F32 prints the raw IEEE bits instead of the q16 texels the GPU
+        // would hold.  The q16 form is the right thing to compare between two
+        // engine paths, but 1/256 is coarser than the interesting differences
+        // in this model's early layers (activations of order 0.01), so a
+        // numpy-vs-engine bisect needs the f32 form.
+        if (getenv("DUMP_F32")) {
+                static const bool on = true; (void)on;
+                fprintf(stderr, "DUMP %s w=%d h=0", name, (int)v.size());
+                for (float x : v) {
+                        uint32_t u; memcpy(&u, &x, 4);
+                        fprintf(stderr, " %08x", u);
+                }
+                fprintf(stderr, "\n");
+                return;
+        }
         const int w = x_texels((int)v.size(), f);
         vector<uint8_t> b = x_pack(v, f);
         if ((int)b.size() < w * 4) b.resize((size_t)w * 4, 0);

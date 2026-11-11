@@ -4927,3 +4927,47 @@ model is asked arithmetic, this matters, and it is not fixed yet.
 Reproduce: `models/lfm2.5-230m/probe_logits.py --ids <ids>` (float32 logits
 from the safetensors), `ACT_F32=1`, `CHAT_DUMP=1` (now also prints
 `PROMPT_IDS`).
+
+### The q16 grid is *not* the 6.7x (2026-11-11, Xe)
+
+The previous section named the activation grid as the first error and left it
+there.  A simulation settles how much of the gap it explains: run the float32
+numpy reference with `_q()` at every store the engine makes (embedding, every
+matvec result *and* input, the conv gate/cv/y, `att`, both residual adds, the
+SwiGLU product) and it costs almost nothing:
+
+| reference | PPL (`data/ppl_test.txt`, 334 tokens) |
+|---|---:|
+| numpy f32 | 14.71 |
+| numpy f32 + the engine's q16 stores everywhere | **15.78** |
+| this engine, QAD q4, serial | 117.08 |
+| this engine, base i16, serial | 98.10 |
+
+So the fixed-point format is worth 7% and the engine is 6.7x off: **the
+remaining error is in the engine's maths, not in the format.**  That is the
+opposite of what the section above implies, and it moves the search.
+
+Instrument first (`DUMP_F32=1` prints the raw IEEE bits instead of q16 texels;
+the q16 dump's 1/256 was coarser than the differences being hunted).  Then:
+
+* **The head is exact.**  Applying numpy's final norm and tied head to the
+  engine's *own* layer-13 output reproduces the engine's logits to cos
+  0.999999.  Every logit difference comes from the hidden state.
+* **The body drifts.**  On a 20-token prompt the engine's layer-13 output is
+  cos 0.86 against numpy at the last position (52% relative), and layer 0's
+  first position is already 68% off.
+* **Layer 0's conv output is quantised away.**  Its second gate is
+  `y = C * cv` with `cv ~ 1e-4` at the first position; `y` then goes through
+  `gpu_.matvec()`, which uploads it as a q16 texture (step 1/256), so `y`
+  becomes zero and the conv layer contributes nothing.  That is a real defect
+  and `ACT_F32` does not fix it (that flag only stops the CPU-side stores).
+* **Attention at the first position is 8.8% off**, although a single position
+  makes the softmax exactly 1 and so `att` must equal `v` (measured against `v`
+  recomputed from the engine's *own* `xb`, cos 0.9962).  `v` there is order
+  0.1, i.e. 4% per component on the 1/256 grid -- consistent, and not
+  explained by the grid alone.
+
+The instrumented comparison is `refs/llamacpp/scripts/bisect_stages.py DUMP
+--f32`, one line per (layer, position, stage) with cosine and relative error,
+and `refs/llamacpp/scripts/np_ppl.py IDS --q16` for the simulation above.
+`probe_logits.py` in the model store gives the float32 logits for any id list.
