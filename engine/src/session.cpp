@@ -179,7 +179,7 @@ Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
                                 m_.seq, m_.rope_half, m_.qk_norm, m_.layers,
                                 m_.q_norm, m_.k_norm, rope_cos_, rope_sin_, qkv_pair,
                                 m_.hybrid, m_.hybrid ? &m_.layer_type : nullptr);
-        if (gpu_layer_)
+        if (gpu_layer_ || getenv("CPU_RMS_GPU"))
             gpu_.init_persistent(m_.dim, m_.layers, m_.rms_att, m_.rms_ffn, m_.rms_final);
     }
 
@@ -361,7 +361,9 @@ vector<float> Session::forward(int token, int pos){
         vector<float> x = embedding(token);
         for (int l = 0; l < m_.layers; ++l) {
             if (g_stop) return x;
-            vector<float> xb = rms_norm(x, m_.rms_att.data() + (size_t)l * m_.dim);
+            vector<float> xb = getenv("CPU_RMS_GPU")
+                    ? rms_gpu(x, l, false)
+                    : rms_norm(x, m_.rms_att.data() + (size_t)l * m_.dim);
             if (getenv("STAGE_DUMP")) gpu_.dump_cpu_row(xb, gpu_.act_fmt_, "xb", 4096);
             vector<float> wo;
             if (m_.is_conv(l)) {
@@ -417,7 +419,18 @@ vector<float> Session::forward(int token, int pos){
             } else if (gpu_attn_) {
                 GLuint xtex = gpu_.upload_input(xb);
                 GLuint atex = gpu_.attention_block(m_.qkv[l], xtex, l, pos);
-                wo = gpu_.matvec_from(m_.wo[l], atex);
+                if (getenv("CPU_ADD_GPU")) {
+                        // Probe: the attention output's residual add with the
+                        // fused arithmetic (one rounding), like matvec_add.
+                        GLuint r = gpu_.upload_hidden(x);
+                        gpu_.matvec_add(m_.wo[l], atex, r, gpu_.hidden_a_, gpu_.ffn_fmt_);
+                        wo = read_hidden(gpu_.hidden_a_);
+                        wo.resize(x.size());
+                        x = wo;                     // already x + wo
+                        wo.assign(x.size(), 0.0f);
+                } else {
+                        wo = gpu_.matvec_from(m_.wo[l], atex);
+                }
             } else {
                 vector<float> qkv = gpu_.matvec(m_.qkv[l], xb);
                 vector<float> q(qkv.begin(), qkv.begin() + m_.dim);
@@ -439,7 +452,9 @@ vector<float> Session::forward(int token, int pos){
             }
             vector<float> x1 = add_q16(x, wo);
             if (getenv("STAGE_DUMP")) gpu_.dump_cpu_row(x1, gpu_.act_fmt_, "x1", 4096);
-            vector<float> xbf = rms_norm(x1, m_.rms_ffn.data() + (size_t)l * m_.dim);
+            vector<float> xbf = getenv("CPU_RMS_GPU")
+                    ? rms_gpu(x1, l, true)
+                    : rms_norm(x1, m_.rms_ffn.data() + (size_t)l * m_.dim);
             if (getenv("STAGE_DUMP")) gpu_.dump_cpu_row(xbf, gpu_.act_fmt_, "xbf", 4096);
             vector<float> o2;
             int expert = -1;
@@ -493,7 +508,20 @@ vector<float> Session::forward(int token, int pos){
                     GLuint ha, hb;
                     gpu_.ffn_split_chunked(*f.w1a, *f.w3a, *f.w1b, *f.w3b, xtex,
                                            m_.ffn_chunk, f.width - m_.ffn_chunk, ha, hb);
-                    o2 = add_q16(gpu_.matvec_from(*f.w2a, ha), gpu_.matvec_from(*f.w2b, hb));
+                    if (getenv("CPU_ADD_GPU")) {
+                        // Probe: fold the residual the way the fused path does
+                        // (one rounding per stage) instead of two read-backs
+                        // plus a CPU add.
+                        GLuint r1 = gpu_.upload_hidden(x1);
+                        gpu_.matvec_add(*f.w2a, ha, r1, gpu_.hidden_a_, gpu_.ffn_fmt_);
+                        gpu_.matvec_add(*f.w2b, hb, gpu_.hidden_a_.tex, gpu_.hidden_b_, gpu_.ffn_fmt_);
+                        o2 = read_hidden(gpu_.hidden_b_);
+                        o2.resize(x1.size());
+                        x1 = o2;
+                        o2.assign(x1.size(), 0.0f);
+                    } else {
+                        o2 = add_q16(gpu_.matvec_from(*f.w2a, ha), gpu_.matvec_from(*f.w2b, hb));
+                    }
                 } else if (f.w1->rows) htex = gpu_.ffn_split(*f.w1, *f.w3, xtex, f.width);
                 else htex = gpu_.ffn_fused(*f.w13, xtex, f.width);
                 if (!m_.ffn_chunked) o2 = gpu_.matvec_from(*f.w2, htex);
@@ -723,7 +751,9 @@ vector<float> Session::step(int token, int pos, bool want_logits){
         }
         vector<float> x = forward(token, pos);
         if (g_stop || !want_logits) return {};
-        vector<float> xb = rms_norm(x, m_.rms_final.data());
+        vector<float> xb = getenv("CPU_RMS_GPU")
+                ? rms_final_gpu(x)
+                : rms_norm(x, m_.rms_final.data());
         return gpu_.logits(m_.logits_tiles, xb);
     }
 
@@ -738,6 +768,50 @@ CandidateResult Session::step_candidates(int token, int pos, int topk, float tem
         vector<float> xb = rms_norm(x, m_.rms_final.data());
         return gpu_.logits_candidates(m_.logits_tiles, xb, topk, temp, top_p);
     }
+
+vector<float> Session::rms_gpu(const vector<float>& x, int layer, bool ffn){
+        // rmsnorm reads the residual layout (res_fmt_), not the activation one:
+        // the fused path feeds it upload_hidden()'s texture.
+        GLuint xt = gpu_.upload_hidden(x);
+        Target& t = ffn ? gpu_.xbf_ : gpu_.xb_;
+        gpu_.rmsnorm(xt, ffn ? gpu_.rms_ffn_tex_[layer] : gpu_.rms_att_tex_[layer], t);
+        vector<uint8_t> b = gpu_.read_bytes(t, t.w, 1);
+        vector<float> out(x.size());
+        for (size_t i = 0; i < x.size(); ++i) {
+                const size_t o = (i / 2) * 4 + (i % 2) * 2;
+                int u = (int)b[o] * 256 + (int)b[o + 1];
+                if (u >= 32768) u -= 65536;
+                out[i] = (float)u / ACT_SCALE;
+        }
+        return out;
+}
+
+vector<float> Session::rms_final_gpu(const vector<float>& x){
+        GLuint xt = gpu_.upload_hidden(x);
+        gpu_.rmsnorm(xt, gpu_.rms_final_tex_, gpu_.xf_);
+        vector<uint8_t> b = gpu_.read_bytes(gpu_.xf_, gpu_.xf_.w, 1);
+        vector<float> out(x.size());
+        for (size_t i = 0; i < x.size(); ++i) {
+                const size_t o = (i / 2) * 4 + (i % 2) * 2;
+                int u = (int)b[o] * 256 + (int)b[o + 1];
+                if (u >= 32768) u -= 65536;
+                out[i] = (float)u / ACT_SCALE;
+        }
+        return out;
+}
+
+vector<float> Session::read_hidden(const Target& t){
+        vector<uint8_t> b = gpu_.read_bytes(const_cast<Target&>(t), t.w, 1);
+        vector<float> out((size_t)t.w * x_per_texel(m_.res_q24 ? XFormat::I24_1 : XFormat::I16_2));
+        const int per = x_per_texel(XFormat::I16_2);
+        for (size_t i = 0; i < out.size(); ++i) {
+                const size_t o = (i / per) * 4 + (i % per) * 2;
+                int u = (int)b[o] * 256 + (int)b[o + 1];
+                if (u >= 32768) u -= 65536;
+                out[i] = (float)u / ACT_SCALE;
+        }
+        return out;
+}
 
 vector<float> Session::rms_norm(const vector<float>& x, const float* w){
         float ss = 0;

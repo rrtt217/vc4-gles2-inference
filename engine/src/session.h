@@ -48,6 +48,12 @@ private:
     vector<float> rope_cos_, rope_sin_;
 
     vector<float> rms_norm(const vector<float>& x, const float* w);
+    // A/B probe: the GPU rmsnorm (fixed-point partial sums) instead of the
+    // CPU f32 mean, so the only changed variable is the norm's statistics.
+    vector<float> rms_gpu(const vector<float>& x, int layer, bool ffn);
+    vector<float> rms_final_gpu(const vector<float>& x);
+    // A/B probe: read a residual-layout target back as floats.
+    vector<float> read_hidden(const Target& t);
 
     vector<float> head_rms_norm(const vector<float>& v, int n_heads, const float* w);
 

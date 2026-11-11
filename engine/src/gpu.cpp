@@ -985,6 +985,9 @@ GLuint GPU::attention_block(const Mat& qkv, GLuint x, int layer, int pos){
 void GPU::init_persistent(int dim, int layers, const vector<float>& rms_att,
                         const vector<float>& rms_ffn, const vector<float>& rms_final){
         layer_fast_finish_ = true;
+        // rmsnorm() sizes its target from att_dim_, which init_attention sets
+        // on the fused path; the CPU loop's A/B probe calls rmsnorm without it.
+        att_dim_ = dim;
         const int rw = x_texels(dim, res_fmt_);
         const int aw = x_texels(dim, act_fmt_);
         hidden_a_ = make_target(rw, 1);

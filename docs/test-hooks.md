@@ -33,6 +33,8 @@ exist.
 | `QKV_DUMP=1` | hashes every layer/position of the `qkv` matvec output; `2` also prints the first two rows.  Layout-agnostic, so `QKV_PAIR=0` and `QKV_PAIR=1` runs compare exactly |
 | `ATT_DUMP=<pos>` | the exact integers the score/softmax path consumed and produced, for every layer at one position.  Feed the log to `engine/scripts/check_att.py` |
 | `FFN_DUMP=1` | the first 8 texels of the layer-0 gate output, for bisecting a 1-LSB drift |
+| `CPU_RMS_GPU=1` | the CPU layer loop computes its RMSNorm with the GPU shader (fixed-point partial sums) instead of the f32 CPU mean: the A/B probe for the fused path's PPL gap |
+| `CPU_ADD_GPU=1` | the CPU layer loop folds the `wo`/`w2` residual add in the kernel (`matvec_add`) instead of a read-back plus `add_q16`: the other half of that A/B |
 | `CONV_SKIP=1` | LFM2 hybrid, `CONV_GPU=1`: the conv layers become identity copies, to separate a conv-block bug from the rest of the GPU path |
 | `CONV_GPU=1` | LFM2 hybrid only: run the conv block through its GPU passes instead of the serial reference path.  Experimental — the elementwise chain does not yet agree with the CPU path |
 | `CONV_DEBUG=1` | prints the first values of the LFM2 conv block's stages (`xb`, `in_proj`, gates, conv output) for layer 0, next to the CPU reference |

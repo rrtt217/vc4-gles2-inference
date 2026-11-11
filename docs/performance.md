@@ -4686,3 +4686,33 @@ These are shallow-depth numbers: a 2048-token prefill costs ~35 minutes at
 `KV_PACK=8` also fits 2048 (it halves the width), but on the GPU attention path
 it costs a lot of quality: fused PPL 126.89 -> 194.07 on the corpus.  With the
 trim there is no reason to use it for context.
+
+### Where the fused path's PPL gap comes from (2026-11-11, Xe)
+
+Same container (`lfm2.5.q4.dedup.mmcf`), same corpus, `SEQ=512`.  Two probes in
+the CPU layer loop change exactly one thing each:
+
+| path | PPL | delta |
+|---|---:|---:|
+| serial (CPU f32 rms, read-back adds) | 112.15 | — |
+| + GPU rmsnorm (fixed-point partial sums) | **117.57** | +5.42 |
+| + fused `wo`/`w2` residual adds (`matvec_add`) | 117.57 | **0.00** |
+| fused (`GPU_LAYER=1 CONV_GPU=1`) | 126.89 | +9.32 |
+
+So about a third of the gap is the **RMSNorm's statistics**: the shader sums
+squares in fixed point, the CPU path in f32, and this model's residual grows a
+"massive" channel (~25-34) at layer 5-6, where the norm's global scale is
+dominated by that one channel.  The **residual-add order contributes nothing**
+(fusing the add leaves PPL unchanged to four decimals), and **attention is
+exact**: `GPU_LAYER=0 GPU_ATTN=1` reproduces the serial path's `x1` bit for bit
+at every layer.
+
+Per-layer `x1` dumps say the rest is a **step at layer 6** — 2-8 q16 units
+through L0-L5, then 282 units (8 of 1024 channels) from L6 on, largest on the
+massive channel (25.3 vs 24.2, a 4.4% relative change), with no clamping.  With
+the GPU rms swapped in the step moves but does not go away (590), so the
+remaining ~9 points are neither the attention nor the add order nor the final
+norm; they sit in the fused loop's fixed-point handling of that channel and are
+not attributed to a single stage yet.
+
+Reproduce: `CPU_RMS_GPU=1`, `CPU_ADD_GPU=1` (docs/test-hooks.md).
