@@ -46,6 +46,10 @@ std::string matvec_q8_add_pair(int rows, int cols, XFormat xf, bool inl = true, 
 std::string matvec_i16(int rows, int cols, XFormat xf);
 std::string matvec_i16_add(int rows, int cols, XFormat xf, XFormat rf);
 std::string matvec_i4(int rows, int cols, XFormat xf, bool inl = true);
+// Signed 6-bit head: a 4-bit low plane and a 2-bit high plane in two textures
+// (one sampler cannot be fetched twice in a fragment on VC4), one 24-bit value
+// per fragment, per-row scale plane when `wrow`.
+std::string matvec_i6(int rows, int cols, XFormat xf, bool wrow);
 std::string matvec_i4_add(int rows, int cols, XFormat xf, XFormat rf);
 std::string matvec_i4_pair(int rows, int cols, XFormat xf);
 std::string matvec_i4_pair_swiglu(int rows, int cols, XFormat xf, bool inl = true);

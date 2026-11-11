@@ -555,7 +555,7 @@ bool Model::load_mmcf(){
                         continue;
                 }
                 if (r.dtype != 0 && r.dtype != 1 && r.dtype != 2 && r.dtype != 3 &&
-                    r.dtype != 4 && r.dtype != 5) {
+                    r.dtype != 4 && r.dtype != 5 && r.dtype != 6) {
                         cerr << "mmcf: tensor 0x" << std::hex << r.id << std::dec
                              << " has unknown dtype " << (int)r.dtype << "\n";
                         return false;
@@ -592,6 +592,28 @@ bool Model::load_mmcf(){
                 }
                 switch (base) {
                 case 1: {  // embedding (stays signed: the CPU reads it)
+                        if (r.dtype == 6) {
+                                const size_t nlo = (size_t)r.rows * (r.cols / 2);
+                                const size_t nhi = (size_t)r.rows * (r.cols / 4);
+                                if (r.bytes != nlo + nhi) {
+                                        cerr << "mmcf: q6 embedding body is " << r.bytes
+                                             << " bytes, expected " << nlo + nhi << "\n";
+                                        return false;
+                                }
+                                if (getenv("MMCF_DEBUG"))
+                                        cerr << "MMCF q6 emb rows " << r.rows << " cols " << r.cols
+                                             << " bytes " << r.bytes << " nlo " << nlo << "\n";
+                                emb_q6_lo.resize(nlo);
+                                emb_q6_hi.resize(nhi);
+                                memcpy(emb_q6_lo.data(), fbase_ + data_off + r.off, nlo);
+                                memcpy(emb_q6_hi.data(), fbase_ + data_off + r.off + nlo, nhi);
+                                has_q6_emb = true;
+                                break;
+                        }
+                        if (r.dtype != 3 && r.dtype != 2) {
+                                cerr << "mmcf: embedding dtype " << (int)r.dtype << "\n";
+                                return false;
+                        }
                         emb_q8.resize((size_t)r.rows * r.cols);
                         memcpy(emb_q8.data(), fbase_ + data_off + r.off, emb_q8.size());
                         has_q8_emb = true;
@@ -872,6 +894,27 @@ bool Model::load_mmcf(){
         // each.  Build the tiles as views into the embedding bytes and keep the
         // per-row plane, which is exactly what the logits kernel's wrow variant
         // reads (matvec_q8_pair_logits with `WS`).
+        if (logits_tiles.empty() && has_q6_emb && !emb_scale.empty()) {
+                float unit = 0.0f;
+                for (int v = 0; v < (int)emb_scale.size() && v < vocab; ++v)
+                        if (emb_scale[v] > unit) unit = emb_scale[v];
+                if (unit <= 0.0f) { cerr << "mmcf: a dedup head needs embedding scales\n"; return false; }
+                for (int st = 0; st < vocab; st += kLogitsGrid) {
+                        const int rows = (vocab - st < kLogitsGrid) ? vocab - st : kLogitsGrid;
+                        Mat m;
+                        m.rows = rows; m.cols = dim;
+                        m.type = WeightType::INT6;
+                        m.scale = unit;
+                        m.ext6_lo = emb_q6_lo.data() + (size_t)st * (dim / 2);
+                        m.ext6_hi = emb_q6_hi.data() + (size_t)st * (dim / 4);
+                        m.row_scale.assign(emb_scale.begin() + st, emb_scale.begin() + st + rows);
+                        for (float& f : m.row_scale) f /= unit;
+                        logits_tiles.push_back(std::move(m));
+                }
+                if (getenv("MMCF_DEBUG"))
+                        cerr << "MMCF q6 tiles " << logits_tiles.size() << " unit " << unit
+                             << " lo " << emb_q6_lo.size() << " hi " << emb_q6_hi.size() << "\n";
+        }
         if (logits_tiles.empty() && has_q8_emb && !emb_scale.empty()) {
                 float unit = 0.0f;
                 for (int v = 0; v < (int)emb_scale.size() && v < vocab; ++v)
@@ -894,7 +937,8 @@ bool Model::load_mmcf(){
                         logits_tiles.push_back(std::move(m));
                 }
         }
-        if ((!has_q8_emb && !has_i16_emb) || (int)rms_att.size() != layers * dim || logits_tiles.empty()) {
+        if ((!has_q8_emb && !has_i16_emb && !has_q6_emb) || (int)rms_att.size() != layers * dim ||
+            logits_tiles.empty()) {
                 cerr << "mmcf: missing required tensors\n";
                 return false;
         }

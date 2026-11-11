@@ -131,6 +131,15 @@ void GPU::upload(Mat& m){
                 }
                 m.row_scale_tex = make_texture(W, np, rs.data());
         }
+        if (m.type == WeightType::INT6) {
+            // Two planes: nibbles (cols/2 bytes a row) and two-bit values
+            // (cols/4 bytes a row).  `tex` carries the low plane so the generic
+            // draw() binding works; the high plane gets unit 2 there.
+            m.tex_lo = make_texture(m.cols / 8, m.rows, m.lo6());
+            m.tex_hi = make_texture(m.cols / 16, m.rows, m.hi6());
+            m.tex = m.tex_lo;
+            return;
+        }
         if (m.type == WeightType::INT8) {
             const int8_t* src = m.w8();
             const size_t n = (size_t)m.rows * m.cols;
@@ -1321,6 +1330,12 @@ GLuint GPU::x_q8(int rows, int cols, bool wrow){
                       matvec_q8(rows, cols, act_fmt_, wrow));
     }
 
+GLuint GPU::x_q6(int rows, int cols, bool wrow){
+        return x_prog("xq6_" + to_string(rows) + "_" + to_string(cols) + "_" +
+                      x_format_name(act_fmt_) + (wrow ? "_wr" : ""),
+                      matvec_i6(rows, cols, act_fmt_, wrow));
+    }
+
 GLuint GPU::x_q8_pair(int rows, int cols, bool wrow){
         return x_prog("xq8p_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(act_fmt_) +
                       (wrow ? "_wr" : ""),
@@ -2262,9 +2277,11 @@ void GPU::att_v(int layer, int pos){
     }
 
 void GPU::draw(const Mat& m, GLuint x, Target& t, int row ){
-        const bool wr = m.type == WeightType::INT8 && m.has_row_scale();
+        const bool wr = (m.type == WeightType::INT8 || m.type == WeightType::INT6) &&
+                        m.has_row_scale();
         GLuint p = (m.type == WeightType::INT8) ? x_q8(m.rows, m.cols, wr)
                   : (m.type == WeightType::INT4) ? x_i4(m.rows, m.cols)
+                  : (m.type == WeightType::INT6) ? x_q6(m.rows, m.cols, wr)
                                                  : x_i16(m.rows, m.cols);
         bind_fbo(t.fbo);
         // DRAW_CLEAR=1 fills the target with a known pattern before the draw, so
@@ -2278,6 +2295,10 @@ void GPU::draw(const Mat& m, GLuint x, Target& t, int row ){
         set_sampler(p, "W", 0);
         bind_tex(1, x);
         set_sampler(p, "X", 1);
+        if (m.type == WeightType::INT6) {
+            bind_tex(2, m.tex_hi);
+            set_sampler(p, "W2", 2);
+        }
         if (m.type == WeightType::INT4) {
             bind_tex(2, m.q4_param_tex);
             set_sampler(p, "P", 2);

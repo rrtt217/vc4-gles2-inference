@@ -23,7 +23,7 @@ import numpy as np
 
 from mmcf_grid import LOGITS_GRID
 
-DT_F32, DT_I16, DT_Q8I8, DT_Q4 = 0, 1, 3, 4
+DT_F32, DT_I16, DT_Q8I8, DT_Q4, DT_Q6 = 0, 1, 3, 4, 6
 T_EMB, T_EMB_SCALE, T_RMS_ATT, T_RMS_FFN, T_RMS_FINAL = 1, 2, 3, 4, 5
 T_Q_NORM, T_K_NORM = 6, 7
 T_QKV, T_WO, T_W1, T_W3, T_W13, T_W2 = 0x10, 0x11, 0x12, 0x13, 0x14, 0x15
@@ -79,6 +79,40 @@ def q4mat(w):
     s16 = np.clip(np.rint(flat_sc / ps), -32767, 32767).astype('<i2')
     m16 = np.clip(np.rint(flat_lo / ps), -32767, 32767).astype('<i2')
     return packed, s16, m16, ps, groups
+
+
+def q6mat(w):
+    """Signed 6-bit, per-row symmetric, as two planes.
+
+    The value is split into a 4-bit low plane (two nibbles per byte) and a
+    2-bit high plane (four values per byte): the GPU cannot fetch two texels of
+    one sampler in a fragment on VC4, so the two halves must live in two
+    textures.  Storage is exactly 6 bits a value; the per-row scale is the
+    embedding's existing f32 scale vector.
+    """
+    w = np.asarray(w, np.float32)
+    if w.ndim == 1:
+        lo, hi, s = q6mat(w[None, :])
+        return lo[0], hi[0], s[0]
+    rows, cols = w.shape
+    if cols % 4:
+        raise SystemExit("q6 cols must be divisible by 4")
+    s = np.abs(w).max(axis=1, keepdims=True) / 31.0
+    s[s == 0] = 1.0
+    q = np.clip(np.rint(w / s), -32, 31).astype(np.int8)
+    v = (q.astype(np.int16) & 0x3F).astype(np.uint16)
+    # uint16 shifts: a uint8 << 4 wraps and silently drops the high nibble of
+    # the odd value (the first pack was wrong by exactly that).
+    # Only the low four bits go in the low plane: the top two bits live in the
+    # high plane, and leaving them in the nibble ORs into the neighbour.
+    lo = (((v[:, 0::2] & 0xF) | ((v[:, 1::2] & 0xF) << 4)) & 0xFF).astype(np.uint8)
+    # The high plane carries the *top two bits* of each value (v >> 4), not the
+    # whole 6-bit code: shifting the full value put v's low nibble into the
+    # neighbour's field and decoded to garbage.
+    h = (v >> 4).astype(np.uint16)
+    hi = ((h[:, 0::4] | (h[:, 1::4] << 2) | (h[:, 2::4] << 4) |
+           (h[:, 3::4] << 6)) & 0xFF).astype(np.uint8)                # 4 per byte
+    return lo.reshape(rows, cols // 2), hi.reshape(rows, cols // 4), s[:, 0]
 
 
 def rope_of(cfg):
@@ -717,7 +751,7 @@ def tok_entry_count(path):
 
 
 def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit=None,
-                    q8_row=False, head_dedup=False):
+                    q8_row=False, head_dedup=False, head_q6=False):
     """Build the tensor list directly from an HF safetensors directory.
 
     Same list shape the legacy reader produces, so build() cannot tell them
@@ -822,7 +856,22 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
         q = np.clip(np.rint(w / s), -127, 127).astype(np.int8)
         return q, float(s.max()), s[:, 0].astype(np.float32)
 
-    if scheme == 'i16':
+    if head_q6:
+        # A 6-bit head: the embedding body is the two q6 planes and the logits
+        # are rendered from them (dedup).  Only the q8/q4 containers use it; an
+        # i16 container keeps i16 rows.
+        if scheme == 'i16':
+            raise SystemExit("--head-q6 is for q8/q4 containers")
+        lo = np.empty((vocab, dim // 2), np.uint8)
+        hi = np.empty((vocab, dim // 4), np.uint8)
+        es = np.empty(vocab, np.float32)
+        for i in range(vocab):
+            lo[i], hi[i], es[i] = q6mat(np.asarray(m['emb'][i], np.float32))
+        body = lo.tobytes() + hi.tobytes()
+        T.append((T_EMB, DT_Q6, vocab, dim, 0, body, 0.0))
+        T.append((T_EMB_SCALE, DT_F32, vocab, 1, 0, es.tobytes(), 0.0))
+        head_dedup = True
+    elif scheme == 'i16':
         er = np.empty((vocab, dim), np.int16)
         es = np.empty(vocab, np.float32)
         for i in range(vocab):

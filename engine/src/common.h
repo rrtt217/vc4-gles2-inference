@@ -19,7 +19,7 @@ using Clock = chrono::steady_clock;
 static constexpr float ACT_SCALE = 256.0f;  // q16 activation scale
 
 
-enum class WeightType { INT8, INT16, INT4 };
+enum class WeightType { INT8, INT16, INT4, INT6 };
 
 struct Mat {
     int rows = 0, cols = 0;
@@ -35,6 +35,13 @@ struct Mat {
     // matrix has a single per-matrix scale, which is every container written
     // before this existed.  The plane is uploaded as one 24-bit value per row
     // and the shader multiplies the row's dot product by it instead of `scale`.
+    // q6 stores a 4-bit low plane and a 2-bit high plane in two textures (VC4
+    // cannot fetch one sampler twice in a fragment).  Only the tied head uses
+    // it: the logits kernel decodes lo | hi<<4 and the rows carry a scale.
+    vector<uint8_t> q6_lo, q6_hi;
+    const uint8_t* ext6_lo = nullptr;
+    const uint8_t* ext6_hi = nullptr;
+    GLuint tex_lo = 0, tex_hi = 0;
     vector<float> row_scale;
     // A fused W13 draw evaluates rows r and r+rows in one fragment, so its
     // plane is packed as (t, t+rows/2) instead of (2t, 2t+1) and the kernel
@@ -57,6 +64,8 @@ struct Mat {
     const uint8_t* w4() const { return ext4 ? ext4 : q4.data(); }
     const int16_t* s4() const { return ext_scale4 ? ext_scale4 : q4_scale.data(); }
     const int16_t* m4() const { return ext_min4 ? ext_min4 : q4_min.data(); }
+    const uint8_t* lo6() const { return ext6_lo ? ext6_lo : q6_lo.data(); }
+    const uint8_t* hi6() const { return ext6_hi ? ext6_hi : q6_hi.data(); }
     bool borrowed() const { return ext8 || ext16 || ext4; }
     // MMCF q8u8 tensors carry the +128 bias already applied, so the upload
     // copies the bytes to the texture instead of flipping the sign bit.

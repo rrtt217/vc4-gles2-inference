@@ -178,6 +178,7 @@ private:
     AttnConfig att_cfg() const;
     GLuint x_prog(const string& key, const string& src);
     GLuint x_q8(int rows, int cols, bool wrow = false);
+    GLuint x_q6(int rows, int cols, bool wrow = false);
     GLuint x_q8_pair(int rows, int cols, bool wrow = false);
     GLuint x_q8_pair_swiglu(int rows, int cols, bool wrow = false);
     GLuint x_q8_gate2(int rows, int cols);

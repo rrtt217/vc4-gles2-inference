@@ -23,6 +23,10 @@ public:
     vector<float> emb_f32, rms_att, rms_ffn, rms_final;
     vector<float> q_norm, k_norm; // [layers * head_dim], only if qk_norm
     vector<int8_t> emb_q8;
+    // A 6-bit tied head (dtype 6): low nibble plane and high 2-bit plane, both
+    // row-major.  The logits are rendered from these rows (dedup).
+    vector<uint8_t> emb_q6_lo, emb_q6_hi;
+    bool has_q6_emb = false;
     vector<int16_t> emb_i16;
     vector<float> emb_scale;
     bool has_q8_emb = false, has_i16_emb = false;

@@ -480,6 +480,9 @@ def main():
     ap.add_argument("--bos", type=int, help="BOS id (-1 for none); default: derived from the tokenizer")
     ap.add_argument("--eos", type=int, help="EOS id; default: derived")
     ap.add_argument("--stop", type=int, help="extra stop id (e.g. <|im_end|>); default: derived")
+    ap.add_argument("--head-q6", action="store_true",
+                    help="tied embedding stored as signed 6-bit (two planes) and "
+                         "used as the logits matrix: --head-dedup plus 6-bit rows")
     ap.add_argument("--head-dedup", action="store_true",
                     help="tied embedding: write no logits tiles and let the engine "
                          "render them from the embedding rows with their per-row "
@@ -512,7 +515,8 @@ def main():
                                         rail_check=not args.no_rail_check,
                                         vocab_limit=_ntok or None,
                                         q8_row=args.q8_row_scale,
-                                        head_dedup=args.head_dedup)
+                                        head_dedup=args.head_dedup,
+                                        head_q6=args.head_q6)
         if _cfg.get("tie_word_embeddings") is False:
             # load_minimind refuses a false tie with no lm_head, so reaching here
             # means the head really is the checkpoint's own matrix.

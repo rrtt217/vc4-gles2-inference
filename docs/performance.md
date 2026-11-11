@@ -4577,6 +4577,7 @@ opt-in through `CONV_GPU=1`.
 | packer's residual calibration (rail 128) | peak 33.7 at layer 5 |
 | engine q4 logits vs numpy f32 reference (`The capital of France is`) | cos 0.948, top-1 same |
 | q4 container, tiled head vs `--head-dedup` | 234.9 MB / 168.9 MB, PPL 111.83 / 112.15 |
+| q4 dedup vs `--head-q6` (6-bit rows) | 168.9 MB / 152.4 MB, PPL 112.15 / 128.17 |
 | MiniMind3 q8 tiled vs dedup (SEQ=768) | 68.98 MB / 64.07 MB, PPL 271.19 / 270.28, golden string unmoved |
 
 The PPL is not comparable with MiniMind's 270 — different model, tokenizer and
@@ -4620,3 +4621,14 @@ Two findings worth keeping:
   the fused path answers garbage with it and is correct with `KV_PACK=16`.  A
   hybrid model now defaults to 16; `KV_PACK` still overrides.  Dense models are
   unaffected (MiniMind3 answers the same with either).
+
+### The 6-bit head is not free either (2026-11-11)
+
+`--head-q6` stores the tied head as signed 6-bit (a 4-bit low plane plus a 2-bit
+high plane, per-row scale) and renders the logits from it: 152.4 MB, 16.5 MB
+smaller than the q8 dedup container.  It costs **PPL 112.15 -> 128.17 (+14%)**,
+because the head is also the *input* embedding: 1.61% row error at the input is
+amplified by 14 layers exactly as the q4 head was (q4: 2.1% -> +7.5 logits).
+The logits side alone would be cheap; the input side is what decides, and both
+6 and 4 bits fail there.  So the Pi candidates are 168.9 MB at q8 quality or
+152.4 MB at -14%, and the q8 one is the reference.

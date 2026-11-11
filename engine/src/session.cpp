@@ -334,6 +334,18 @@ vector<float> Session::embedding(int token){
             float s = m_.emb_scale[token];
             for (int i = 0; i < m_.dim; ++i)
                 x[i] = quantize_act_f((float)m_.emb_i16[(size_t)token * m_.dim + i] * s);
+        } else if (m_.has_q6_emb) {
+            // q6 row: 4-bit low plane, 2-bit high plane, both row-major.
+            const float s = m_.emb_scale[token];
+            const uint8_t* lo = m_.emb_q6_lo.data() + (size_t)token * (m_.dim / 2);
+            const uint8_t* hi = m_.emb_q6_hi.data() + (size_t)token * (m_.dim / 4);
+            for (int i = 0; i < m_.dim; ++i) {
+                const int lb = (i & 1) ? (lo[i / 2] >> 4) : (lo[i / 2] & 15);
+                const int hb = (hi[i / 4] >> (2 * (i & 3))) & 3;
+                int v = lb | (hb << 4);
+                if (v >= 32) v -= 64;
+                x[i] = quantize_act_f((float)v * s);
+            }
         } else if (m_.has_q8_emb) {
             float s = m_.emb_scale[token];
             for (int i = 0; i < m_.dim; ++i)
