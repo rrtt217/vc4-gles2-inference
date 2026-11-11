@@ -343,6 +343,13 @@ int main(int argc, char** argv) {
     if (model.have_specials)
         if (!g_quiet) cerr << "specials: bos " << model.id_bos << " eos " << model.id_eos
              << " stop " << model.id_stop << " (from the checkpoint)\n";
+    // The template's `{{ bos_token }}` / `{{ eos_token }}` need the *text* of
+    // those ids, not just the id: LFM2.5's template starts with
+    // `{{- bos_token -}}`, and handing it "" dropped the BOS from every chat
+    // prompt (the tokenizer does not add one, because the template is supposed
+    // to).  llama.cpp passes the strings; so must this.
+    const string bos_str = tokenizer.id_text(model.id_bos);
+    const string eos_str = tokenizer.id_text(model.id_eos);
     tokenizer.set_qwen(qwen_template || minimind3_template);
     tokenizer.set_bytelevel(minimind3_template);
     // Tool definitions, normalised to one JSON array for the template context.
@@ -414,23 +421,38 @@ int main(int argc, char** argv) {
         if (!read_text_file(ppl_path, text)) { cerr << "cannot read " << ppl_path << "\n"; return 1; }
         auto tokens = tokenizer.encode(text, false, false);
         if ((int)tokens.size() < 4) { cerr << "not enough tokens\n"; return 1; }
-        int n = min((int)tokens.size(), model.seq - 1);
+        // Score *every* window, not only the first.  A single window is what
+        // this used to do: fine for A/B on a corpus shorter than SEQ (which is
+        // how every pinned number was measured, so they do not move), useless
+        // for comparing with llama.cpp's chunked perplexity, which averages
+        // dozens of chunks over a real text.  Stride is SEQ-1 so the only
+        // unscored token is the very first one; each window gets a fresh
+        // session, because the KV cache and the conv history are per-position.
+        const int span = model.seq - 1;
         double nll = 0.0;
-        int cnt = 0;
-        for (int i = 0; i + 1 < n; ++i) {
+        long cnt = 0;
+        int windows = 0;
+        for (size_t s = 0; s + 1 < tokens.size(); s += (size_t)span) {
             if (g_stop) break;
-            vector<float> lg = session.step(tokens[i], i, true);
-            if ((int)lg.size() <= tokens[i + 1]) break;
-            double mx = -1e30;
-            for (float v : lg) mx = max((double)v, mx);
-            double se = 0.0;
-            for (float v : lg) se += exp((double)v - mx);
-            double logp = ((double)lg[tokens[i + 1]] - mx) - log(se);
-            nll += -logp;
-            ++cnt;
+            Session win(model, gpu);
+            const size_t e = std::min(tokens.size(), s + (size_t)span + 1);
+            for (size_t i = s; i + 1 < e; ++i) {
+                if (g_stop) break;
+                vector<float> lg = win.step(tokens[i], (int)(i - s), true);
+                if ((int)lg.size() <= tokens[i + 1]) break;
+                double mx = -1e30;
+                for (float v : lg) mx = max((double)v, mx);
+                double se = 0.0;
+                for (float v : lg) se += exp((double)v - mx);
+                double logp = ((double)lg[tokens[i + 1]] - mx) - log(se);
+                nll += -logp;
+                ++cnt;
+            }
+            ++windows;
         }
         if (!cnt) { cerr << "no tokens scored\n"; return 1; }
-        printf("PPL %.4f  nll=%.4f  tokens=%d\n", exp(nll / cnt), nll / cnt, cnt);
+        printf("PPL %.4f  nll=%.4f  tokens=%ld  windows=%d\n",
+               exp(nll / cnt), nll / cnt, cnt, windows);
         return 0;
     }
 
@@ -528,7 +550,7 @@ int main(int argc, char** argv) {
                 }
                 req_parts = chat_tmpl->render(req_msgs, req_tools, true,
                                               req_thinking >= 0 ? req_thinking != 0 : open_thinking,
-                                              "", "");
+                                              bos_str, eos_str);
                 if (chat_dump)
                     for (auto& p : req_parts)
                         fprintf(stderr, "PROMPT[%s] %3zu B  %s\n", p.is_input ? "in" : "tmpl",
@@ -536,6 +558,11 @@ int main(int argc, char** argv) {
             }
             auto tokens = req_parts.empty() ? tokenizer.encode(prompt, false, false)
                                             : tokenizer.encode_parts(req_parts, enc_bos, enc_bos);
+            if (chat_dump) {
+                fprintf(stderr, "PROMPT_IDS %zu:", tokens.size());
+                for (int t : tokens) fprintf(stderr, " %d", t);
+                fprintf(stderr, "\n");
+            }
             if (tokens.empty()) {
                 emit("{\"event\":\"error\",\"message\":\"empty prompt\"}");
                 continue;
@@ -731,7 +758,7 @@ int main(int argc, char** argv) {
                 msgs.push_back(ChatMsg{"user", user, "", ""});
             }
             parts = chat_tmpl->render(msgs, tools_array, /*add_generation_prompt=*/true,
-                                      open_thinking, "", "");
+                                      open_thinking, bos_str, eos_str);
             if (open_thinking) {
                 bool has = false;
                 for (auto& p : parts) if (p.text.find("<think>") != string::npos) has = true;
@@ -998,7 +1025,7 @@ int main(int argc, char** argv) {
             vector<PromptPart> parts;
             if (chat_tmpl)
                 parts = chat_tmpl->render(msgs, tools_array, /*add_generation_prompt=*/true,
-                                          open_thinking, "", "");
+                                          open_thinking, bos_str, eos_str);
             // A template without an open_thinking switch (LFM2.5's) still gets
             // the block: the caller asked for it, and `<think>` is one token.
             if (chat_tmpl && open_thinking) {
@@ -1022,6 +1049,14 @@ int main(int argc, char** argv) {
             }
             auto tokens = chat_tmpl ? tokenizer.encode_parts(parts, enc_bos, enc_bos)
                                     : tokenizer.encode(text, false, false);
+            // CHAT_DUMP also prints the ids the model will see: a template that
+            // renders to the same bytes can still tokenise differently, and the
+            // ids are what the model actually reads.
+            if (chat_dump) {
+                fprintf(stderr, "PROMPT_IDS %zu:", tokens.size());
+                for (int t : tokens) fprintf(stderr, " %d", t);
+                fprintf(stderr, "\n");
+            }
             if ((int)tokens.size() >= model.seq) { tt.cut = "context"; cout << "[context full]\n"; return; }
             vector<float> logits;
             CandidateResult cand;

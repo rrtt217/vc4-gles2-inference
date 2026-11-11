@@ -328,12 +328,24 @@ bool Session::load_prefix_cache(const string& path, vector<int>& toks){
         return true;
     }
 
+// ACT_F32=1 keeps the CPU layer loop's activations in f32 instead of storing
+// them on the q16 grid.  The grid is 1/256, which is fine for a residual of
+// order 1 and fatal for one of order 0.01: LFM2.5's embedding row peaks at
+// 0.05, so quantising it left 2-3 significant bits per component and the whole
+// model drifted (probe: xb 8.8% off after the first norm).  The GPU path is
+// unaffected -- its textures are q16 by construction.
+static bool act_f32() {
+    static const bool on = getenv("ACT_F32") != nullptr;
+    return on;
+}
+
 vector<float> Session::embedding(int token){
         vector<float> x(m_.dim);
         if (m_.has_i16_emb) {
             float s = m_.emb_scale[token];
             for (int i = 0; i < m_.dim; ++i)
-                x[i] = quantize_act_f((float)m_.emb_i16[(size_t)token * m_.dim + i] * s);
+                x[i] = act_f32() ? (float)m_.emb_i16[(size_t)token * m_.dim + i] * s
+                                : quantize_act_f((float)m_.emb_i16[(size_t)token * m_.dim + i] * s);
         } else if (m_.has_q6_emb) {
             // q6 row: 4-bit low plane, 2-bit high plane, both row-major.
             const float s = m_.emb_scale[token];
@@ -344,7 +356,7 @@ vector<float> Session::embedding(int token){
                 const int hb = (hi[i / 4] >> (2 * (i & 3))) & 3;
                 int v = lb | (hb << 4);
                 if (v >= 32) v -= 64;
-                x[i] = quantize_act_f((float)v * s);
+                x[i] = act_f32() ? (float)v * s : quantize_act_f((float)v * s);
             }
         } else if (m_.has_q8_emb) {
             float s = m_.emb_scale[token];
@@ -377,7 +389,7 @@ vector<float> Session::forward(int token, int pos){
                 vector<float> gx = gpu_.matvec(m_.conv_in_x[l], xb);
                 vector<float> gated(dim), cv(dim);
                 for (int i = 0; i < dim; ++i)
-                    gated[i] = quantize_act_f(gb[i] * gx[i]);
+                    gated[i] = act_f32() ? gb[i] * gx[i] : quantize_act_f(gb[i] * gx[i]);
                 vector<float>& st = conv_state_[l];
                 for (int i = 0; i < dim; ++i) {
                     float acc = 0.0f;
@@ -385,7 +397,7 @@ vector<float> Session::forward(int token, int pos){
                         const float v = (j + 1 < k) ? st[(size_t)j * dim + i] : gated[i];
                         acc += m_.conv_w[l][(size_t)i * k + j] * v;
                     }
-                    cv[i] = quantize_act_f(acc);
+                    cv[i] = act_f32() ? acc : quantize_act_f(acc);
                 }
                 if (k > 1) {
                     for (int j = 0; j + 2 < k; ++j)
@@ -395,7 +407,7 @@ vector<float> Session::forward(int token, int pos){
                 }
                 vector<float> y(dim);
                 for (int i = 0; i < dim; ++i)
-                    y[i] = quantize_act_f(gc[i] * cv[i]);
+                    y[i] = act_f32() ? gc[i] * cv[i] : quantize_act_f(gc[i] * cv[i]);
                 if (getenv("CONV_DEBUG") && l == 0) {
                     cerr << "CV pos=" << pos << " xb";
                     for (int i = 0; i < 5; ++i) cerr << " " << xb[i];
@@ -446,7 +458,8 @@ vector<float> Session::forward(int token, int pos){
                 memcpy(kv_cache_v_[l].data() + (size_t)pos * m_.kv_dim, v.data(), m_.kv_dim * 4);
                 vector<float> att = attention(q, l, pos);
                 vector<float> att_q16(att.size());
-                for (size_t i = 0; i < att.size(); ++i) att_q16[i] = quantize_act_f(att[i]);
+                for (size_t i = 0; i < att.size(); ++i)
+                    att_q16[i] = act_f32() ? att[i] : quantize_act_f(att[i]);
                 if (getenv("STAGE_DUMP")) gpu_.dump_cpu_row(att_q16, gpu_.act_fmt_, "att", 4096);
                 wo = gpu_.matvec(m_.wo[l], att_q16);
             }
@@ -938,7 +951,8 @@ vector<float> Session::add_q16(const vector<float>& a, const vector<float>& b){
                 }
                 return o;
         }
-        for (size_t i = 0; i < a.size(); ++i) o[i] = quantize_act_f(a[i] + b[i]);
+        for (size_t i = 0; i < a.size(); ++i)
+            o[i] = act_f32() ? a[i] + b[i] : quantize_act_f(a[i] + b[i]);
         return o;
     }
 
@@ -946,7 +960,7 @@ vector<float> Session::swiglu(const vector<float>& h, int n){
         vector<float> o(n);
         for (int i = 0; i < n; ++i) {
             float a = h[i], b = h[n + i];
-            o[i] = quantize_act_f((a / (1.0f + expf(-a))) * b);
+            o[i] = act_f32() ? (a / (1.0f + expf(-a))) * b : quantize_act_f((a / (1.0f + expf(-a))) * b);
         }
         return o;
     }

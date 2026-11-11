@@ -4,6 +4,10 @@
     mmcf_dump.py model.mmcf            # summary
     mmcf_dump.py model.mmcf --tensors  # one line per tensor
     mmcf_dump.py model.mmcf --check    # also verify every tensor CRC
+    mmcf_dump.py model.mmcf --template # print the chat template text, raw
+
+`--template` is the answer to "is the container's template the one the vendor
+shipped": compare it byte for byte with the GGUF's tokenizer.chat_template.
 
 The point is to make "the container is self-describing" a checkable fact rather
 than a claim: everything the engine reads is printed here from the file alone.
@@ -38,7 +42,18 @@ def main():
     ap.add_argument("path")
     ap.add_argument("--tensors", action="store_true")
     ap.add_argument("--check", action="store_true")
+    # The template text is what a model actually sees; printing only its length
+    # is how a container ends up "using the right template" for months without
+    # anyone comparing the bytes.
+    ap.add_argument("--template", metavar="NAME", nargs="?", const="default",
+                    help="print the chat template text (default: the 'default' variant)")
     args = ap.parse_args()
+
+    # With --template the container's Jinja text owns stdout, so the summary
+    # goes to stderr: a diff of two templates must not have to strip a header.
+    out = sys.stdout
+    if args.template is not None:
+        sys.stdout = sys.stderr
 
     raw = open(args.path, "rb").read()
     if raw[:4] != b"MMCF":
@@ -61,6 +76,7 @@ def main():
     p = mo
     tok_bytes = 0
     has_moe = False
+    tmpls = {}
     while p + 8 <= mo + ms:
         key, typ, ln = rd(raw, p, "<HHI")
         payload = raw[p + 8:p + 8 + ln]
@@ -100,6 +116,7 @@ def main():
                 q += 4
                 body = payload[q:q + vlen]
                 q += vlen
+                tmpls[vname] = body
                 first = body.split(b"\n", 1)[0].decode("utf-8", "replace")
                 print(f"chat tmpl   '{vname}' {vlen} B  {first[:64]}")
         elif key == 12 and ln >= 1:
@@ -122,6 +139,14 @@ def main():
             fmt = lambda v: "unset" if v == 255 else str(v)
             print(f"bos/eos     add_bos {fmt(ab)} add_eos {fmt(ae)}")
         p += 8 + ln
+
+    if args.template is not None:
+        body = tmpls.get(args.template)
+        if body is None:
+            raise SystemExit("no template variant '%s' (have: %s)"
+                             % (args.template, ", ".join(sorted(tmpls)) or "none"))
+        out.buffer.write(body)
+        return
 
     # tensors.  The table starts at the first 16-byte boundary after the
     # metadata, so the record size follows from the two offsets; v2 is 48 and

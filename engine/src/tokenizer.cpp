@@ -168,6 +168,11 @@ vector<int> Tokenizer::encode_parts(const vector<PromptPart>& parts, bool bos, b
         return t;
     }
 
+string Tokenizer::id_text(int id) const{
+    if (id < 0 || id >= (int)vocab_.size()) return string();
+    return vocab_[(size_t)id];
+}
+
 string Tokenizer::decode(const vector<int>& toks, int prev ){
         string out;
         for (int id : toks) {

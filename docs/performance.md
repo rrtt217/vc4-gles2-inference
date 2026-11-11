@@ -4846,3 +4846,84 @@ is wrong (PPL 1.39e7 against 98.10 serial), and it was already wrong at
 `f22bb76` -- the same number to four decimals before and after this work, so the
 conv changes neither caused nor fixed it.  q4 containers, the path the board
 runs, are exact.
+
+## LFM2.5 answers badly because its activations do not fit the q16 grid (2026-11-11, Xe)
+
+The model runs, the text is fluent, and it is wrong.  Measured against two
+independent references on the same weights, the same prompt and -- after the
+fix below -- the same token ids:
+
+| reference | first token after `assistant\n` for "What is C. elegans?" |
+|---|---|
+| float32 numpy, from the same safetensors (`probe_logits.py`) | **544 `C`, logprob -0.042** |
+| prebuilt llama.cpp b12283, official QAD-Q4_0 GGUF | **544 `C`, logprob -0.037** |
+| this engine, i16 container, serial | 841 `ĠC`, logprob -0.215 |
+| this engine, q4 container, serial | 841 `ĠC`, logprob -1.109 |
+
+Perplexity on `docs/engine-internals.md` (7110 tokens, `SEQ=512`):
+
+| implementation | PPL |
+|---|---:|
+| float32 numpy, same safetensors, same ids | **14.71** (on `data/ppl_test.txt`, 334 tokens) |
+| llama.cpp b12283, QAD-Q4_0, 13 chunks | **44.20** |
+| this engine, QAD q4, serial, 14 windows | 225.56 |
+
+So a 230M model that is merely small in llama.cpp is unusable here, and the
+gap is not the quantization (i16 is just as wrong as q4) nor the tokenizer
+(prose tokenizes identically, 334/335 ids) nor the GPU (serial and fused agree
+to a few PPL points).
+
+The first wrong number is the first normalization.  `Session::embedding()`
+quantizes every component of the embedding row onto the activation grid
+(step 1/256, rail 128).  LFM2.5's embedding row peaks at **0.05** and is
+typically 0.008: at that size the grid keeps 2-3 bits per component, and
+components below 0.002 become exactly zero.  The operator norm then amplifies
+the damage, because it divides by the vector's RMS:
+
+| layer 0 `xb` (operator_norm output), position 0 | float32 numpy | engine |
+|---|---:|---:|
+| channels 0-5 | 0.2291 0.2390 -0.0277 -0.1201 0.1244 -0.1798 | 0.2344 0.2188 **0.0000** -0.1094 0.1133 -0.2227 |
+
+8.8% relative error on the first activation, cos 0.996; it accumulates to
+cos 0.92 by layer 12, which is enough to pick the wrong token.
+
+`ACT_F32=1` removes every q16 store from the CPU layer loop as a probe.  It
+fixes the first norm (`xb` then matches numpy to four digits) but only moves
+the q4 container 117.08 -> 115.81 PPL, and makes the **i16** container *worse*
+(98.10 -> 107.88) -- so the activation grid is the first error, not the only
+one.  The remaining ones are unexplained; do not treat this section as a fix.
+
+### What the comparison did fix
+
+* **Chat templates never saw their special tokens.**  All three render sites
+  passed `""` for `bos_token`/`eos_token`, so LFM2.5's template (which starts
+  with `{{- bos_token -}}`) rendered no BOS at all and every chat prompt began
+  at `<|im_start|>`.  Passing the container's token text is not enough on its
+  own: the context is marked as caller input, so `"<|startoftext|>"` was
+  tokenised as four text tokens (`<`, `|`, `start`, `oftext`).  The two strings
+  are now marked as template text (`ctx.set_val`), and all six template cases
+  -- plain, no system, tools, multi-turn, think-block, tool round-trip --
+  render byte-identically to Jinja2 *and* tokenise to the same ids as
+  llama.cpp's `/apply-template` + `/tokenize` (31/31, 16/16, 110/110, 52/52,
+  140/140; the think case differs on purpose, llama.cpp preserves reasoning by
+  default).
+* **`--ppl` scored only the first window.**  It now walks every window
+  (`windows=N` in the line).  Every pinned number is unchanged because those
+  corpora are shorter than `SEQ` (333 < 512, 293 < 768) -- but a 7110-token
+  file used to report `tokens=510` and now reports `tokens=7115 windows=14`.
+* **`mmcf_dump.py --template`** prints the container's Jinja text, which is how
+  the 4762-byte template was compared with the GGUF's `tokenizer.chat_template`
+  (byte-identical) in the first place.
+
+### The tokenizer is not LFM2's for numbers
+
+`tokenizer.ggml.pre = 'lfm2'` makes llama.cpp use the **llama-3** pre-tokenizer
+with `ignore_merges`: digits split as `\p{N}{1,3}`, which is why "6789" becomes
+`678``9` there and `6``789` here.  Ordinary prose is identical (334 of 335 ids
+on the PPL corpus), and 15 of 20 hand probes are identical; the five that
+differ all contain digit runs of 4+ or a double space (`"a  b"`).  Since the
+model is asked arithmetic, this matters, and it is not fixed yet.
+
+Reproduce: `models/lfm2.5-230m/probe_logits.py --ids <ids>` (float32 logits
+from the safetensors), `ACT_F32=1`, `CHAT_DUMP=1` (now also prints
+`PROMPT_IDS`).

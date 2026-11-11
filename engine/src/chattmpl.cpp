@@ -107,6 +107,13 @@ std::vector<PromptPart> ChatTemplate::render(const std::vector<ChatMsg>& msgs,
     // mark_input=true is the whole point: everything from the context (message
     // roles and contents, tool definitions) is caller text, never template text.
     global_from_json(ctx, parsed, /*mark_input=*/true);
+    // ... but the special-token strings are *template* text, not caller text:
+    // marked as input, `{{- bos_token -}}` would be tokenised as the literal
+    // characters "<|startoftext|>" (4 tokens) instead of the BOS id.  The
+    // template context is the only place this distinction is visible, so it is
+    // made here rather than in the tokenizer.
+    ctx.set_val("bos_token", mk_val<value_string>(bos_token));
+    ctx.set_val("eos_token", mk_val<value_string>(eos_token));
 
     runtime rt(ctx);
     auto out = rt.execute(impl_->prog);

@@ -35,6 +35,8 @@ exist.
 | `FFN_DUMP=1` | the first 8 texels of the layer-0 gate output, for bisecting a 1-LSB drift |
 | `CPU_RMS_GPU=1` | the CPU layer loop computes its RMSNorm with the GPU shader (fixed-point partial sums) instead of the f32 CPU mean: the A/B probe for the fused path's PPL gap |
 | `CPU_ADD_GPU=1` | the CPU layer loop folds the `wo`/`w2` residual add in the kernel (`matvec_add`) instead of a read-back plus `add_q16`: the other half of that A/B |
+| `ACT_F32=1` | the CPU layer loop stores activations in f32 instead of on the q16 grid (1/256).  The grid is fine for a residual of order 1 and fatal for one of order 0.01: LFM2.5's embedding row peaks at 0.05, so its first norm saw 2-3 significant bits per component and came out 8.8% off (measured against the float32 numpy reference).  Off by default; on the q4 container it is worth 1.3 PPL, on i16 it is *worse* than the grid -- i.e. the activation grid is not the only error left in this model |
+| `PROMPT_IDS` (with `CHAT_DUMP=1`) | the ids the model will actually see, as `PROMPT_IDS <n>: <id> ...`.  A template that renders to the same bytes can still tokenise differently, and the ids are what the model reads |
 | `CONV_SKIP=1` | LFM2 hybrid, `CONV_GPU=1`: the conv layers become identity copies, to separate a conv-block bug from the rest of the GPU path |
 | `CONV_GPU=1` | LFM2 hybrid only: run the conv block through its GPU passes instead of the serial reference path.  Experimental — the elementwise chain does not yet agree with the CPU path |
 | `CONV_DEBUG=1` | prints the first values of the LFM2 conv block's stages (`xb`, `in_proj`, gates, conv output) for layer 0, next to the CPU reference |

@@ -25,6 +25,10 @@ public:
                              bool dummy_prefix = true);
 
     string decode(const vector<int>& toks, int prev = 0);
+    // The token's own text as the vocabulary spells it.  A chat template can
+    // ask for it by name (LFM2.5's starts with {{ bos_token }}), and passing ""
+    // there silently changes the prompt: the model then sees no BOS at all.
+    string id_text(int id) const;
 
 private:
     void encode_into(const string& text, bool allow_specials, vector<int>& out) const;
