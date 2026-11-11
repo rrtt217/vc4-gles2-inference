@@ -4755,3 +4755,88 @@ python3 engine/tools/mmcf_pack.py --in models/lfm2.5-230m/qad --quant q4 --seq 5
   --system "You are a helpful assistant trained by Liquid AI." \
   --bos 1 --eos 7 --stop 7 --add-bos 0 --add-eos 0 --verify
 ```
+
+## The conv block is matvec-bound, not pass-bound (2026-11-11, Pi Zero + Xe)
+
+Four changes to the hybrid conv block, all in the fused path
+(`GPU_LAYER=1 CONV_GPU=1`):
+
+| change | what it removes |
+|---|---|
+| three rotating state slots | 2 fullscreen copy draws per conv layer per token (`s0 <- s1`, `s1 <- gated`); the gate's output is written straight into the slot holding `x[pos-3]`, which is dead |
+| `conv3_act` two channels per fragment | every input (state rows, gate, kernel row) is an I16_2 texel holding exactly the pair `(2q, 2q+1)`, so 512 fragments with 4 pair fetches replace 1024 fragments with 3 single-value fetches |
+| `conv3_act` writes the q16 pair | 1024 24-bit texels and a 24-bit decode in the second gate; `mul_act` now takes the source layout per operand |
+| literal width, `*0.00390625` | an `aw` uniform of the same value (a constant is not a uniform) and a division the driver lowers to `frcp + fmul` |
+
+`conv3_act` and `mul_act` are also in `--dump-shaders` now: their text is the
+conv numerics and no digest covered it before.
+
+**Quality is unchanged.** Same container, same corpus, `SEQ=512`, Xe:
+
+| container | serial | fused before | fused after |
+|---|---:|---:|---:|
+| base `lfm2.5.q4.dedup.mmcf` | 112.1544 | 126.8862 | **126.8862** |
+| `base.i16.mmcf` | 98.0988 | — | — |
+
+The fused number is identical to four decimals, and `regression.sh` is ACCEPT
+(q8 270.3170, q4 330.5302 unchanged).  The q16 rounding of the conv result --
+the one place the new path is *not* bit-exact by construction, because the 24-bit
+store used to keep 1/256 of a q16 unit -- moves nothing measurable.
+
+**Speed: about 1% on the board, and not more.**  Pi Zero, `SEQ=256 KV_PACK=16`,
+`lfm2.5.qad.q4.mmcf` (the only container on the board), `--gen 24`, greedy,
+steady state with `LAYER_PROFILE=1` (first token dropped, it carries the shader
+compile), two interleaved rounds:
+
+| stage | older binary | this change |
+|---|---:|---:|
+| `conv` (8 layers) | 205.3 | **200.0** |
+| `attn` (6 layers) | 213.9 | 198.5 |
+| `ffn` (14 layers) | 404.1 | 396.9 |
+| `w2` (14) | 186.2 | 183.9 |
+| `logits` | 231.3 | 175.1 |
+| fastest token | **1115.2** | 1119.6 |
+
+The stages that were *not* touched move by 15-56 ms, so the noise floor on this
+board is ~±50 ms/token; the conv delta (5 ms) is inside it.  The single-layer
+`PROF l=13 conv` line is the sharper measurement: 22.60 -> 21.17 ms.
+
+On Xe the same change is **neutral** (conv 23.46 -> 23.53 of a 168 ms token).
+
+So the estimate this work started from -- "pairing the fetches should save
+80-100 ms/token on the Pi" -- was wrong, and the reason is worth keeping: the
+conv block's 200 ms is dominated by the three 1024-row **in_proj matvecs**
+(3.15 MMAC/layer), not by the three elementwise passes.  At the engine's q4 rate
+those matvecs alone are ~170 ms of it.  The elementwise passes were ~4.5 ms per
+layer and are now ~3 ms.  Anything that makes the elementwise side cheaper
+cannot win more than a few ms until the conv weights themselves get cheaper
+(fewer rows, or a fused B/C/X draw that does not hit the 2048 hazard), and
+`conv3`'s 2.4x fetch reduction is a precondition for that, not a win on its own.
+
+Two things the measurements also say, which cost time to learn:
+
+* **A single `decode avg` run cannot resolve a 1% change on this board.**  The
+  first generated token pays the shader compile of every program it touches --
+  measured 443 ms of `logits` in one run and 2964 ms in another with a new
+  conv program -- and the SD card (load average ~5, 90 MB available) adds
+  ±150 ms/token run to run.  Drop the first token and use `LAYER_PROFILE`'s
+  per-stage lines, which are taken across a `glFinish`.
+* **The 16 removed draws are not measurable on VC4.**  `DRAWCOUNT` shows 375 ->
+  353 per token, and the time does not move.  The fused path already skips the
+  per-pass finishes (`layer_fast_finish_`), so a draw on this board is ~10 us
+  and 16 of them are noise.
+
+**"Three fetches from one sampler" is safe here, and that was worth checking.**
+`probes/conv_probe` (new) drives the exact patterns: 1/2/3/5 fetches per
+fragment from the 512x3 kernel texture, `.rg` and `.ba`, height 3 and 4, plus
+the shipped `conv3_act`/`mul_act` against a CPU reference that mirrors the
+shader's float32 order.  **Every case is byte-exact on both Xe and VC4.**  The
+per-row scale plane's failure (`probes/wrow_probe`) is therefore shape-specific
+-- a tall plane texture -- and not a rule about samplers, which is what the
+critique of this block assumed.
+
+Still open, found while measuring: an **i16** hybrid container on the fused path
+is wrong (PPL 1.39e7 against 98.10 serial), and it was already wrong at
+`f22bb76` -- the same number to four decimals before and after this work, so the
+conv changes neither caused nor fixed it.  q4 containers, the path the board
+runs, are exact.

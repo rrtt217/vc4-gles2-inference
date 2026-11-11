@@ -247,6 +247,7 @@ Pick the tool that answers the question before writing a new probe:
 | is one pass expensive? | `ATTN_DUP`, `PASS_DUP`, `DRAWCOUNT`, `LAYER_PROFILE` |
 | is the attention block internally consistent? | `ATT_DUMP` + `check_att.py` |
 | does a new sampler / texture fetch work on the target? | `probes/wrow_probe` (and `_pi`): drives the engine's own q8 kernels against a CPU reference and names the rows that differ.  It is how the per-row scale plane's two fetches from one sampler were found to be undefined on VC4 |
+| does the conv (hybrid) block's fetching work? | `probes/conv_probe` (and `_pi`): section A drives the kernel fetch patterns byte-for-byte, B/C run the shipped `conv3_act`/`mul_act` against a CPU reference.  It is how "three fetches from one sampler" was cleared on VC4 -- the kernel texture is 512x3, and every case is exact |
 | did my change alter numerics? | `regression.sh`, and PPL rather than one string |
 | did my change move the emitted GLSL? | `scripts/shader_hashes.sh` (no GPU needed); `--dump-shaders` / `--dump-shaders=raw` to look |
 

@@ -66,6 +66,12 @@ the fragment stage to mediump.  The two-position
 prefill kernels have no row-scale variant, so such a model prefills on the
 single-position path (`Session::pair_ok()` returns false).
 
+The rule is about **tall** textures, not about samplers: `probes/conv_probe`
+(A1-A7) asks one sampler for 1, 2, 3 and 5 texels per fragment at 512x3 and
+`4x3`, in 8-bit rows, and every fetch is byte-exact on VC4 -- which is what the
+hybrid conv block needs, since its depthwise kernel is sampled three times per
+fragment.  So check the shape, not the pattern.
+
 ## Weight quantization experiments
 
 The NumPy reference (`minimind3/ref_numpy.py`) supports symmetric and

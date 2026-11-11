@@ -367,6 +367,69 @@ Rejected experiments:
 `GPU_LAYER=1` implies GPU attention and GPU FFN, and
 `--top-k 64 --top-k-candidates` still works on top of it.
 
+## Hybrid (conv) block
+
+LFM2 alternates 8 short-convolution layers with 6 attention layers.  A conv
+layer is a gated depthwise causal convolution:
+
+```
+xb   = x + attn(x)                 (residual already in xb)
+b    = W_b * xb        B slice, 1024 rows
+c    = W_c * xb        C slice, 1024 rows
+g    = W_x * xb        X slice, 1024 rows
+gate = b * g                       elementwise
+cv   = sum_t K[:, t] * gate[pos - 2 + t]      depthwise, causal, k = 3
+y    = c * cv                      elementwise
+x    = x + W_out * y
+```
+
+`conv_in` is 3072 rows and the draw/target cap is 2048 (§5), so it is sliced
+into three 1024-row views (`conv_in_b/c/x`) and drawn three times.  The two
+gates, the convolution and the residual add are elementwise full-screen passes.
+
+**State.** The last `k-1 = 2` gated rows are the conv's history.  Each conv
+layer owns **three** rotating one-row targets: `conv_cur_` names the slot
+holding `x[pos-1]`, the slot one step round holds `x[pos-2]`, and the third
+holds `x[pos-3]`, which is dead.  The gate's output *is* `x[pos]`, so it is
+written straight into the dead slot; the shift used to be two fullscreen copy
+draws per layer per token and now costs nothing.  The three indices are
+distinct mod 3, so no draw reads a target another one writes.
+
+The prefix cache (v4) stores the two rows per conv layer in the order
+`(0) = x[pos-2]`, `(1) = x[pos-1]`; a reload writes them into slots 2 and 0 and
+resets the rotation, so the file format did not change.
+
+**Widths.** `conv3_act` runs two channels per fragment: the two state rows, the
+gate and the kernel row are all I16_2 texels holding exactly the pair
+`(2q, 2q+1)`, so each texture is fetched once and the store is the q16 pair the
+second gate wants (`x_st2q`).  That replaced 1024 fragments with three
+single-value fetches each by 512 fragments with four pair fetches.
+
+`mul_act` takes the source layout **per operand**: the first gate multiplies two
+24-bit matvec outputs (`I24_1`, two fetches per texel), the second multiplies
+`C*xb` (24-bit) by the q16 conv result (one fetch).  The 24-bit side is
+`x_i24q`, i.e. real units, and the q16 side is raw/256, so both products are
+real and the store is `x_st2`.
+
+**Units.** Everything inside the block is raw q16.  `conv3_act` sums three raw
+products and multiplies by 0.00390625 (an exact power-of-two scale, and a
+multiply instead of the division the driver lowers to `frcp + fmul`) to stay
+raw; `x_st2q` then clamps to the ±32768 rail.  The conv result therefore carries
+the same rail as the residual, not the 256x range a 24-bit store would allow.
+
+`probes/conv_probe` covers this block: section A drives the kernel fetch
+patterns (1/2/3/5 fetches per fragment, `.rg`/`.ba`, height 3 and 4) and
+compares **bytes**, sections B/C run the shipped `conv3_act`/`mul_act` from
+`shaders.cpp` against a CPU reference that mirrors the shader's float32
+expression order.  On both Xe and VC4 every case is exact, including three
+fetches from one sampler at 512x3 -- the wrow plane's failure (§ below,
+`probes/wrow_probe`) is shape-specific, not a general rule.
+
+Known gap: an **i16** hybrid container on the fused path is wrong (PPL 1.39e7
+against 98.10 serial).  It was already wrong at `f22bb76`, the serial path is
+fine, and the q4 containers (the path the board runs) are exact; the cause is
+not identified, so the fused path is only safe for q4/(q6 head) hybrids today.
+
 ## Top-K
 
 `--top-k N --top-k-candidates` sources the k candidates from the candidate
