@@ -115,3 +115,34 @@ therefore safe: the KV chain only advances on real generations.
 - No side-effecting tools yet (`set_timer`, `network_info` need a policy first).
 - The model path is unchanged when the client does not name a tool, so existing
   behaviour and the `tool_calls` contract are preserved.
+
+## A second tool-call dialect: LFM2.5 (2026-11-11)
+
+LFM2.5 emits `<|tool_call_start|>[name(arg="value"), …]<|tool_call_end|>` (a
+Pythonic call list) instead of the `<tool_call>{json}</tool_call>` block above.
+`parse_tool_calls()` reads both: the LFM form is converted argument by argument
+(`name=value` → JSON, quoted strings, numbers, bools/None, one level of
+list/dict), and the chat history carries `arguments` as an **object**, which is
+what the LFM template's `func_args.items()` needs — a JSON string there used to
+abort the process inside Jinja.
+
+Verified end to end on the Xe (`qad` container, `--tools`):
+
+```
+Assistant: <|tool_call_start|>[calculate_math(expression="12345*6789")]<|tool_call_end|>
+[tool] calculate_math {"expression":"12345*6789"}
+[tool result] {"result":"83810205"}
+Assistant: The result of 12345 multiplied by 6,789 is 838,205.
+```
+
+(The last line is the 230M model mis-transcribing the tool's number; the tool
+itself returned 83810205.)
+
+The same release carries `<think>`/`</think>`: `--thinking` now appends the
+opening block to the prompt when the template has no switch for it, and a
+closed block in the answer is split into the message's `reasoning` field
+(rendered back as `reasoning_content` because `preserve_thinking` is set)
+instead of being shown as content.  An unclosed `<think>` is kept as text — the
+answer must not disappear when a generation is cut short.  The model did not
+emit a thinking block in three probes, so the path is wired but unexercised by
+the checkpoint itself.

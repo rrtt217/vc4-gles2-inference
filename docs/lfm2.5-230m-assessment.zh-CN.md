@@ -156,9 +156,11 @@
 ## 七、明确不做（本次范围外）
 
 - 32k 上下文（Pi 的实际上限见 `docs/long-context.md`；SEQ 由内存决定）。
-- LFM2.5 的 Pythonic 工具调用协议（`<|tool_call_start|>[...]`）——现有确定性工具
-  路由不匹配，最多保证模板可渲染。
-- `<think>` 思考链的语义化处理（只保证模板渲染不崩）。
+- ~~LFM2.5 的 Pythonic 工具调用协议~~——已支持（2026-11-11）：`parse_tool_calls()`
+  解析 `<|tool_call_start|>[f(a="x")]<|tool_call_end|>`，参数转 JSON 对象，接入既有
+  工具循环；`get_weather`（未知工具）与 `calculate_math`（执行成功）两条路径均实测。
+- `<think>` 通道已接线（`--thinking` 打开、闭合块拆到 `reasoning` 并跨轮渲染），
+  但模型在三次探测里都没有输出思考块。
 - 许可证：LFM1.0（`license_name: lfm1.0`），分发前需单独确认条款。
 
 ## 八、残差与激活幅值实测（2026-11-11）

@@ -117,7 +117,136 @@ bool json_get_object(const string& obj, const string& key, string& out) {
     return false;
 }
 
+namespace {
+
+string trim_copy(const string& s) {
+    size_t a = 0, b = s.size();
+    while (a < b && isspace((unsigned char)s[a])) ++a;
+    while (b > a && isspace((unsigned char)s[b - 1])) --b;
+    return s.substr(a, b - a);
+}
+
+// Split on commas that are not inside quotes or brackets.
+vector<string> split_top(const string& s) {
+    vector<string> out;
+    string cur;
+    int depth = 0;
+    char q = 0;
+    for (char c : s) {
+        if (q) { cur += c; if (c == q) q = 0; continue; }
+        if (c == '"' || c == '\'') { q = c; cur += c; continue; }
+        if (c == '(' || c == '[' || c == '{') ++depth;
+        else if (c == ')' || c == ']' || c == '}') --depth;
+        if (c == ',' && depth == 0) { out.push_back(trim_copy(cur)); cur.clear(); continue; }
+        cur += c;
+    }
+    if (!trim_copy(cur).empty()) out.push_back(trim_copy(cur));
+    return out;
+}
+
+// One Python-ish literal -> JSON text.  The LFM2.5 tool calls are Pythonic
+// (`f(city="Paris", n=3)`), so a quoted string, a number, a bool/None or one
+// level of list/dict is all that shows up in practice; anything else becomes a
+// JSON string rather than an invalid document.
+string py_json(const string& in) {
+    string v = trim_copy(in);
+    if (v.empty()) return "null";
+    const char c = v[0];
+    if (c == '"' || c == '\'') {
+        string body;
+        for (size_t i = 1; i < v.size(); ++i) {
+            char ch = v[i];
+            if (ch == '\\' && i + 1 < v.size()) {
+                char nx = v[++i];
+                if (nx == 'n') body += '\n';
+                else if (nx == 't') body += '\t';
+                else if (nx == 'r') body += '\r';
+                else body += nx;
+                continue;
+            }
+            if (ch == c) break;
+            body += ch;
+        }
+        return "\"" + json_escape(body) + "\"";
+    }
+    if (v == "True" || v == "true") return "true";
+    if (v == "False" || v == "false") return "false";
+    if (v == "None" || v == "null") return "null";
+    if (c == '[' || c == '(') {
+        string inner = v.substr(1, v.size() > 2 ? v.size() - 2 : 0);
+        string out = "[";
+        bool first = true;
+        for (auto& item : split_top(inner)) {
+            if (!first) out += ",";
+            first = false;
+            out += py_json(item);
+        }
+        return out + "]";
+    }
+    if (c == '{') {
+        string inner = v.substr(1, v.size() > 2 ? v.size() - 2 : 0);
+        string out = "{";
+        bool first = true;
+        for (auto& kv : split_top(inner)) {
+            size_t colon = kv.find(':');
+            if (colon == string::npos) continue;
+            if (!first) out += ",";
+            first = false;
+            out += py_json(kv.substr(0, colon)) + ":" + py_json(kv.substr(colon + 1));
+        }
+        return out + "}";
+    }
+    // A bare number stays a number; anything else is quoted so the JSON
+    // document is still valid.
+    bool numeric = !v.empty();
+    for (char ch : v)
+        if (!(isdigit((unsigned char)ch) || ch == '-' || ch == '+' || ch == '.' ||
+              ch == 'e' || ch == 'E'))
+            numeric = false;
+    return numeric ? v : "\"" + json_escape(v) + "\"";
+}
+
+// <|tool_call_start|>[f(a="x"), g(b=1)]<|tool_call_end|>
+vector<ToolCall> parse_lfm_calls(const string& text) {
+    vector<ToolCall> out;
+    const string open = "<|tool_call_start|>", close = "<|tool_call_end|>";
+    size_t pos = 0;
+    while ((pos = text.find(open, pos)) != string::npos) {
+        size_t a = pos + open.size();
+        size_t b = text.find(close, a);
+        if (b == string::npos) break;
+        string body = trim_copy(text.substr(a, b - a));
+        if (!body.empty() && body.front() == '[' && body.back() == ']')
+            body = body.substr(1, body.size() - 2);
+        for (auto& call : split_top(body)) {
+            size_t p = call.find('(');
+            if (p == string::npos) continue;
+            string name = trim_copy(call.substr(0, p));
+            size_t q = call.rfind(')');
+            string argv = (q == string::npos || q <= p) ? string() : call.substr(p + 1, q - p - 1);
+            string js = "{";
+            bool first = true;
+            for (auto& kv : split_top(argv)) {
+                size_t eq = kv.find('=');
+                if (eq == string::npos) continue;
+                if (!first) js += ",";
+                first = false;
+                js += "\"" + json_escape(trim_copy(kv.substr(0, eq))) + "\":" +
+                      py_json(kv.substr(eq + 1));
+            }
+            js += "}";
+            if (!name.empty()) out.push_back(ToolCall{name, js});
+        }
+        pos = b + close.size();
+    }
+    return out;
+}
+
+}  // namespace
+
 vector<ToolCall> parse_tool_calls(const string& text) {
+    vector<ToolCall> lfm = parse_lfm_calls(text);
+    if (!lfm.empty()) return lfm;
     vector<ToolCall> out;
     size_t pos = 0;
     const string open = "<tool_call>", close = "</tool_call>";

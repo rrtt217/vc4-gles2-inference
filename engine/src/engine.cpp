@@ -732,6 +732,11 @@ int main(int argc, char** argv) {
             }
             parts = chat_tmpl->render(msgs, tools_array, /*add_generation_prompt=*/true,
                                       open_thinking, "", "");
+            if (open_thinking) {
+                bool has = false;
+                for (auto& p : parts) if (p.text.find("<think>") != string::npos) has = true;
+                if (!has) parts.push_back(PromptPart{"<think>", false});
+            }
         } else if (minimind3_template) {
             string sys = system_prompt;
             if (!tools_json.empty()) {
@@ -898,6 +903,14 @@ int main(int argc, char** argv) {
         size_t pos = 0;
         while (true) {
             size_t a = text.find("<tool_call>", pos);
+            size_t la = text.find("<|tool_call_start|>", pos);
+            if (la != string::npos && (a == string::npos || la < a)) {
+                out += text.substr(pos, la - pos);
+                size_t b = text.find("<|tool_call_end|>", la);
+                if (b == string::npos) break;
+                pos = b + strlen("<|tool_call_end|>");
+                continue;
+            }
             if (a == string::npos) { out += text.substr(pos); break; }
             out += text.substr(pos, a - pos);
             size_t b = text.find("</tool_call>", a);
@@ -908,12 +921,37 @@ int main(int argc, char** argv) {
         for (char c : out) if (!isspace((unsigned char)c)) { trimmed += c; }
         return trimmed.empty() ? string() : out;
     };
+    // LFM2.5/similar: the answer may open with <think> ... </think>.  The
+    // reasoning goes into the message's reasoning field (the template renders
+    // it as reasoning_content when preserve_thinking is set) and the content
+    // the caller sees is the answer without it.
+    auto take_thinking = [](const string& text, string& reasoning) {
+        size_t a = text.find("<think>");
+        if (a == string::npos) return text;
+        size_t b = text.find("</think>", a);
+        // No closing tag: the model opened a block and stopped.  Keeping the
+        // text is the honest choice -- swallowing the tail would print an
+        // empty answer for a truncated generation.
+        if (b == string::npos) return text;
+        size_t cs = a + 7;
+        size_t ce = (b == string::npos) ? text.size() : b;
+        reasoning = text.substr(cs, ce - cs);
+        size_t s0 = reasoning.find_first_not_of(" \t\r\n");
+        size_t s1 = reasoning.find_last_not_of(" \t\r\n");
+        reasoning = (s0 == string::npos) ? string()
+                                        : reasoning.substr(s0, s1 - s0 + 1);
+        size_t cut = (b == string::npos) ? text.size() : b + 8;
+        return text.substr(0, a) + text.substr(cut);
+    };
     auto tool_calls_json = [](const vector<ToolCall>& calls) {
         string j = "[";
         for (size_t i = 0; i < calls.size(); ++i) {
             if (i) j += ",";
+            // `arguments` is an object, not an OpenAI-style JSON string: the
+            // LFM2.5 template reads `func_args.items()` and throws on a string
+            // (the render aborted the process before this).
             j += "{\"type\":\"function\",\"function\":{\"name\":\"" + json_escape(calls[i].name) +
-                 "\",\"arguments\":\"" + json_escape(calls[i].args) + "\"}}";
+                 "\",\"arguments\":" + (calls[i].args.empty() ? "{}" : calls[i].args) + "}}";
         }
         return j + "]";
     };
@@ -961,6 +999,13 @@ int main(int argc, char** argv) {
             if (chat_tmpl)
                 parts = chat_tmpl->render(msgs, tools_array, /*add_generation_prompt=*/true,
                                           open_thinking, "", "");
+            // A template without an open_thinking switch (LFM2.5's) still gets
+            // the block: the caller asked for it, and `<think>` is one token.
+            if (chat_tmpl && open_thinking) {
+                bool has = false;
+                for (auto& p : parts) if (p.text.find("<think>") != string::npos) has = true;
+                if (!has) parts.push_back(PromptPart{"<think>", false});
+            }
             if (chat_dump) {
                 if (parts.empty()) {
                     // No template: the prompt is one string built by hand.
@@ -1052,13 +1097,16 @@ int main(int argc, char** argv) {
             }
             cout << "\n";
             if (pos >= model.seq) tt.cut = "context";
-            vector<ToolCall> calls = parse_tool_calls(out);
+            string reasoning;
+            string body = take_thinking(out, reasoning);
+            vector<ToolCall> calls = parse_tool_calls(body);
             if (chat_tmpl) {
                 // The final answer goes into the history too.  Before this the
                 // tool path returned without recording it, so the next REPL turn
                 // lost the answer and had no shared prefix to reuse.
-                msgs.push_back(ChatMsg{"assistant", strip_tool_calls(out),
-                                       calls.empty() ? string() : tool_calls_json(calls), ""});
+                msgs.push_back(ChatMsg{"assistant", strip_tool_calls(body),
+                                       calls.empty() ? string() : tool_calls_json(calls),
+                                       reasoning});
             }
             kv_tokens = tokens;
             if (getenv("TOKENS_OUT")) {

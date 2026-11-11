@@ -88,10 +88,17 @@ std::vector<PromptPart> ChatTemplate::render(const std::vector<ChatMsg>& msgs,
     msgs_json += "]";
 
     const std::string tools_json = tools.empty() ? std::string("[]") : tools;
+    // Templates that render a reasoning field (LFM2.5) only keep it in history
+    // when preserve_thinking is set; the engine sets it whenever a message
+    // carries reasoning, and --thinking asks for it for the current turn.
+    bool preserve_thinking = open_thinking;
+    for (const auto& m : msgs)
+        if (!m.reasoning.empty()) preserve_thinking = true;
     const std::string ctx_json =
         "{\"messages\":" + msgs_json + ",\"tools\":" + tools_json +
         ",\"add_generation_prompt\":" + (add_generation_prompt ? "true" : "false") +
         ",\"open_thinking\":" + (open_thinking ? "true" : "false") +
+        ",\"preserve_thinking\":" + (preserve_thinking ? "true" : "false") +
         ",\"bos_token\":\"" + jesc(bos_token) + "\"" +
         ",\"eos_token\":\"" + jesc(eos_token) + "\"}";
 
