@@ -46,13 +46,19 @@ models/
                                  lfm2.5.q4.mmcf (235 MB, tiled head),
                                  lfm2.5.q4.dedup.mmcf (169 MB, --head-dedup) and
                                  lfm2.5.q4.q6.mmcf (152 MB, 6-bit head).
-                                 Xe: PPL 111.83 / 112.15 / 128.17 (333 tokens),
-                                 172-180 ms/token serial, 24 ms fused.
+                                 Xe: 172-180 ms/token serial, 24 ms fused.
+                                 Every PPL quoted for this model before
+                                 2026-11-11 was measured without a BOS and is
+                                 5x too high (docs/performance.md has the
+                                 correction).  With the BOS the engine is
+                                 15.97 on the i16 base and 18.73 on qad q4
+                                 (float32 numpy reference 14.71), so it is
+                                 within 9% of the reference.
                                  Pi Zero: dedup 1133 ms/token, q6 1371 ms, both
-                                 run (docs/performance.md, 2026-11-11).  qad/ is
-                                 the QAD weights (FP32 source): q4 fused PPL
-                                 114.53 against the base 126.89, so the Pi
-                                 container to use is lfm2.5.qad.q4.mmcf.
+                                 run (docs/performance.md, 2026-11-11); those
+                                 timings stand, the PPL that chose qad over
+                                 base does not -- re-measure before trusting
+                                 the container choice.
                                  probe_residuals.py is the numpy f32 forward behind
                                  docs/lfm2.5-230m-assessment.zh-CN.md (residual peak
                                  29.5, 0.23x the q16 rail -> q16 path is enough);

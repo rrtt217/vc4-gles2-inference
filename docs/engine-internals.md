@@ -367,6 +367,19 @@ Rejected experiments:
 `GPU_LAYER=1` implies GPU attention and GPU FFN, and
 `--top-k 64 --top-k-candidates` still works on top of it.
 
+### 4d-known. A prompt longer than `SEQ` corrupts the heap
+
+Found 2026-11-11 while comparing with llama.cpp (pre-existing at `d802cb8`):
+a `--prompt` that tokenises to more than the container's `SEQ` prints
+`[context full]` and then **aborts at exit** with `corrupted size vs.
+prev_size`, i.e. something wrote past an allocation during the attempt.  A
+600-token prompt into a `SEQ=512` container reproduces it every time; the same
+run through `--ppl` (which resets per window) does not.
+
+The guard that prints the message runs before the token that would overflow, so
+the write is most likely the *pair* prefill writing rows `pos, pos+1`.  Not
+fixed; treat `SEQ` as a hard prompt limit and repack with a larger `--seq`.
+
 ### 4e. The activation grid is absolute, so a matvec input carries its own scale
 
 `I16_2` stores q16: step 1/256, rail +-128.  That is an *absolute* resolution,
