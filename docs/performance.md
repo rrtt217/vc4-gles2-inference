@@ -4659,3 +4659,30 @@ Two surprises worth keeping:
   here: a 168.9 MB container runs with 195 MB free afterwards.  Whether that is
   driver-dependent (textures backed outside CMA) or pumpkin's occupancy
   changed is not established; the numbers above are one session on the board.
+
+### Context ceiling on the Pi: 2048 is reachable at 16-bit KV (2026-11-11)
+
+`docs/long-context.md` says the binding limit is the KV texture height (2048 on
+VC4).  For this model the limit was lower than that until the allocation was
+trimmed: a hybrid model was creating a KV texture for **all 14 layers** while
+only the 6 attention layers ever read one.  At SEQ 2048 the 8 dead entries cost
+8 x 512 x 2048 x 4 = 33.5 MB of CMA, and the board failed with `FBO incomplete`
+at SEQ 1280.
+
+After `init_attention()` takes the layer types and skips them, the same
+container runs at every size (dedup q8 head, `GPU_LAYER=1 CONV_GPU=1`,
+`KV_PACK=16`, greedy, one 6-token prompt):
+
+| SEQ | result | decode (position 5) |
+|---:|---|---:|
+| 1024 | runs | 1027 ms/token |
+| 1536 | runs | 1040 ms/token |
+| 2048 | **runs** | 981 ms/token |
+
+These are shallow-depth numbers: a 2048-token prefill costs ~35 minutes at
+~1 s a token and was not run, so the decode cost *at depth* (attention over
+2048 rows) is unmeasured.
+
+`KV_PACK=8` also fits 2048 (it halves the width), but on the GPU attention path
+it costs a lot of quality: fused PPL 126.89 -> 194.07 on the corpus.  With the
+trim there is no reason to use it for context.

@@ -35,6 +35,14 @@ Widths for the models here (`att_kv_width` = `kv_dim` at `KV_PACK=16`):
 | Supra2-100M | 256 | 8 |
 | Supra2-Medium | 512 | 4 |
 
+**Hybrid models (2026-11-11).** LFM2 has conv layers that never read a KV
+cache, but the session used to allocate one for every layer.  At SEQ 2048 those
+8 dead entries were 33.5 MB of CMA and the board failed at SEQ 1280 with
+`FBO incomplete`; `init_attention()` now takes the layer types and skips them,
+which puts 2048 back within reach at `KV_PACK=16` (measured, see
+`docs/performance.md`).  `KV_PACK=8` fits too but costs fused PPL 126.89 ->
+194.07, so it is not needed for context any more.
+
 ## 2. Why "just split the rows" is not a one-liner
 
 Splitting the cache into N textures of 2048 rows is host-side for the **write**
