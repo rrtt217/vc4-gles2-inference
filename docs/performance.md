@@ -4632,3 +4632,30 @@ amplified by 14 layers exactly as the q4 head was (q4: 2.1% -> +7.5 logits).
 The logits side alone would be cheap; the input side is what decides, and both
 6 and 4 bits fail there.  So the Pi candidates are 168.9 MB at q8 quality or
 152.4 MB at -14%, and the q8 one is the reference.
+
+## LFM2.5-230M on the Pi Zero (2026-11-11)
+
+The first hybrid model on the board, and the first 230M one.  ARMv6 build from
+the vlab cross host (`Tag_CPU_arch: v6`, `Tag_FP_arch: VFPv2`), greedy,
+`SEQ=256` (`KV_PACK=16` is the hybrid default), one run each unless noted.
+`CmaFree` was 210 MB before the first run and 195-201 MB after it: the weights
+do not land in CMA the way the 198M MoE's did (that one failed at q8 with
+`FBO incomplete`), so the board has room for both containers.
+
+| container | size | path | prefill | decode | text |
+|---|---:|---|---:|---:|---|
+| `lfm2.5.q4.dedup.mmcf` | 168.9 MB | `GPU_LAYER=1 CONV_GPU=1` | 3.2 s/token | **1133 ms/token** | `Paris, a historic city renowned` |
+| `lfm2.5.q4.q6.mmcf` | 152.4 MB | `GPU_LAYER=1 CONV_GPU=1` | 2.2 s/token | 1371 ms/token | `Paris. It is the largest city in` |
+| `lfm2.5.q4.q6.mmcf` | 152.4 MB | serial (CPU attention/conv) | — | 1538 ms/token | `Paris.` |
+| `lfm2.5.q4.dedup.mmcf` chat | 168.9 MB | `GPU_LAYER=1 CONV_GPU=1` | ~6 s/token | — | `I'm a text` |
+
+Two surprises worth keeping:
+
+* **The q8 head is faster than the 6-bit one** (1133 against 1371 ms/token).
+  The 16 MB the q6 container saves cost more per token in the unpacking kernel
+  than the traffic they save, and the q6 head is 14% worse in PPL.  For this
+  board the dedup q8 container is the one to ship.
+* **Both fit.**  The 170 MB CMA figure from the MoE work did not reproduce
+  here: a 168.9 MB container runs with 195 MB free afterwards.  Whether that is
+  driver-dependent (textures backed outside CMA) or pumpkin's occupancy
+  changed is not established; the numbers above are one session on the board.

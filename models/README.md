@@ -43,11 +43,13 @@ models/
   feng30m/                       feng-30m (Qwen3-shaped, 11 layers): works
 
   lfm2.5-230m/                   LFM2.5-230M (hybrid: 8 conv + 6 attention layers):
-                                 lfm2.5.q4.mmcf (235 MB, tiled head) and
-                                 lfm2.5.q4.dedup.mmcf (169 MB, --head-dedup) run
-                                 the serial path on Xe: PPL 111.83 / 112.15
-                                 (333 tokens), 172-180 ms/token.  GPU_LAYER=1
-                                 is 24 ms/token at PPL 126.67 (opt-in).
+                                 lfm2.5.q4.mmcf (235 MB, tiled head),
+                                 lfm2.5.q4.dedup.mmcf (169 MB, --head-dedup) and
+                                 lfm2.5.q4.q6.mmcf (152 MB, 6-bit head).
+                                 Xe: PPL 111.83 / 112.15 / 128.17 (333 tokens),
+                                 172-180 ms/token serial, 24 ms fused.
+                                 Pi Zero: dedup 1133 ms/token, q6 1371 ms, both
+                                 run (docs/performance.md, 2026-11-11).
                                  probe_residuals.py is the numpy f32 forward behind
                                  docs/lfm2.5-230m-assessment.zh-CN.md (residual peak
                                  29.5, 0.23x the q16 rail -> q16 path is enough);
