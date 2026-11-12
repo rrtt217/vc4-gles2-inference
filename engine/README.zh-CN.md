@@ -234,6 +234,24 @@ candidate 路径而不是全 logits。candidate 路径是近似的：候选质�
 回退全 logits，也不保证精确的全局 top-k；不加这个开关时，CPU 路径用
 `nth_element` 选出 k 个、只排序这 k 个。
 
+## 困惑度（PPL）
+
+teacher-forced 困惑度是量化格式的质量闸门：
+
+```bash
+MODEL=../models/minimind3/minimind3.q8.mmcf \
+GPU_LAYER=1 KV_PACK=16 ./engine_mm3  --ppl data/ppl_test.txt
+```
+
+比较格式时用同一个语料；`ACT8=1` 和 `ACT8=2` 并非在所有语料上都安全。
+
+语料长于 `SEQ` 时分窗口打分：每个窗口喂 `SEQ` 个 token，只计最后 `SEQ/2`
+个（输出里的 `stride=`；`PPL_STRIDE=n` 可改）。热身不是可选的：起点落在正文
+中间的窗口是"冷"的，在真实文档上每个 token 贵约 1.8 nats —— 2026-11-11 那次
+"逐窗口退化"就是这么把一个正确的引擎测成了坏的（见
+[`docs/performance.md`](../docs/performance.md)）。`PPL_STRIDE=0` 复原旧的冷
+窗口，两者不可比。`PPL_DUMP=path` 在两种协议下都会写出每个 token 的 NLL。
+
 ## 排查一个错误答案
 
 问题决定工具，这些工具都在本仓库里：

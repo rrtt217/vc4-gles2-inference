@@ -128,19 +128,27 @@ Board (Pi Zero, `SEQ=256`, QAD q4, 24 tokens, greedy):
 | 用一句话介绍你自己。 | "我是一个AI助手，帮助您理解和交流。" |
 | 17\*23 with the `calculate_math` tool | **"Answer: 391"** |
 
-Board PPL at `SEQ=256` (two windows, not comparable with the `SEQ=512` rows
-above): fused **45.52**, serial **43.91**.  Those two are *cold-window* sums,
-the only protocol the board binary had; reproduce them with `PPL_STRIDE=0`.
-The same corpus and `SEQ` on Xe, where both protocols can be run:
+Board PPL at `SEQ=256`, same corpus (two windows, not comparable with the
+`SEQ=512` rows above).  The two rows this page used to carry -- fused **45.52**,
+serial **43.91** -- are *cold-window* sums, the only protocol the board binary
+had; both protocols now exist, and the cold one still prints them on the board
+bit for bit (`43.9130` and `45.5248`), so the new build did not move that
+measurement:
 
-| Xe, QAD q4, `SEQ=256`, 334 tokens | cold (`PPL_STRIDE=0`) | warm (default, `stride=128`) |
+| Pi Zero, QAD q4, `SEQ=256`, 334 scored tokens | cold (`PPL_STRIDE=0`) | warm (default, `stride=128`) |
 |---|---:|---:|
-| serial | 42.63 | **28.82** |
-| fused | 45.00 | **30.10** |
+| serial (`GPU_LAYER=0`) | 43.9130 | **28.6196** |
+| fused (`GPU_LAYER=1 CONV_GPU=1`) | 45.5248 | 31.6824 |
+| Xe, same corpus, serial | 42.63 | 28.82 |
+| Xe, same corpus, fused | 45.00 | 30.10 |
 
-i.e. the board rows overstate PPL by ~48% purely through the protocol, which is
-the correction recorded in [`performance.md`](performance.md).  A board
-re-measure needs the new binary and is not done here.
+Two things to read there.  The protocol alone moves the number ~35% (43.91 ->
+28.62 on the board), which is the correction recorded in
+[`performance.md`](performance.md) -- compare warm with warm or cold with cold,
+never one with the other.  And the fused path's gap is protocol-dependent on the
+board: 3.7% behind serial cold, 10.7% behind warm (Xe: 5.5% / 4.4%), so the
+board's older "3.7% behind" understated what the fused path costs on this
+machine.
 
 ### History: what was wrong before 2026-11-11
 

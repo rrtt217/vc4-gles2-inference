@@ -5197,3 +5197,42 @@ window rows -- every MiniMind3 pin, the `SEQ=512` LFM2.5 rows, `14.71` against
 `15.97` -- are untouched: one window has nothing to warm up on, and the loop for
 it is the same code as before (`PPL 18.7251 tokens=334 windows=1` on the q4 QAD
 container, before and after).
+
+### Board re-measure under both PPL protocols, and the deploy that made it possible (2026-11-12, Pi Zero)
+
+The correction above was Xe-only for a few hours because the board runs a
+standalone binary.  Cross-built it on vlab from `ee7929b` (ARMv6/VFPv2, 1546980
+bytes, md5 `aefc2e99dde64d61b22f4978bc039a52`), uploaded to
+`/home/david/vc4-llm-runtime/bin/engine_mm3_pi`, previous binary kept as
+`engine_mm3_pi.4771eac`, corpus copied to
+`/home/david/vc4-llm-runtime/data/ppl_test.txt`.  Same container
+(`lfm2.5.qad.q4.mmcf`), `SEQ=256 KV_PACK=16`, 334 scored tokens, two windows:
+
+| Pi Zero, QAD q4 | cold (`PPL_STRIDE=0`) | warm (default, `stride=128`) |
+|---|---:|---:|
+| serial (`GPU_LAYER=0`) | 43.9130 | **28.6196** |
+| fused (`GPU_LAYER=1 CONV_GPU=1`) | 45.5248 | 31.6824 |
+
+Both cold values are the two numbers this file recorded on 2026-11-11 (`43.91`
+serial, `45.52` fused), reproduced to four digits -- the refactored window loop
+is a no-op for the old protocol, which is the check that matters for a change to
+a measurement path.  Warm is what a long file now scores: the protocol alone is
+worth 35% on this corpus and board.
+
+The fused path's gap is protocol-dependent on the board: 3.7% behind serial
+cold, **10.7%** behind warm (Xe: 5.5% and 4.4%).  So the board's older "serial
+is 3.7% better" understated what the fused path costs there; the warm protocol
+is the one to quote.
+
+Deploy checks beyond PPL, same binary, fused `SEQ=256`, greedy, default system
+prompt unless noted:
+
+| prompt | answer |
+|---|---|
+| What is C. elegans? | `C. elegans is a small, round, worm-like organism that is commonly used in research to study genetics, physiology` (24-token limit) |
+| Write a haiku about rain. | `Rain whispers softly,` / `a gentle sigh of the sky.` (two lines now; the 2026-11-11 run stopped at the first) |
+| 用一句话介绍你自己。 | `我是一个AI助手，帮助您理解和交流。` |
+| MiniMind3 q8 tripwire, `SEQ=768`, `--system "You are a helpful assistant."` | `我是MiniMind，一个由jingyaogong` -- the pinned Pi string, unchanged |
+
+Nothing about decode speed moved: this is a measurement-path change, and the
+board still runs ~1040 ms/token on the fused path.
