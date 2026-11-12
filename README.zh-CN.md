@@ -8,6 +8,23 @@ OpenAI 兼容 HTTP 服务器和磁盘 KV prefix cache。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
+## Vibe coding 声明
+
+本项目以 **vibe coding** 方式开发：引擎代码、容器工具链、测试基准和 `docs/` 的
+大部分内容，由 AI 编程智能体（DeepSeek Harness 驱动的多智能体协作）在人类的
+方向、审查与实测约束下完成。使用前须知两点：
+
+- **数字是实测的，文字是生成的。**  `docs/performance.md` 与
+  `docs/evaluation.md` 里的每个数字都对应本仓库中一条可执行命令，数值由
+  `engine/scripts/regression.sh` 与 `engine/scripts/shader_hashes.sh` 钉住。
+  解释不是证据——要跑门禁。
+- **依赖前请先审查。** 智能体写的改动在这里经过审查和门禁，但这是一个面向研究
+  与端侧推理的工程，不是经过认证的产品。除 MIT 许可证外没有任何担保；如果需要
+  保证，请自己读 diff、在目标板子上跑测试套件、并测你自己的负载。
+
+参与贡献同样遵循 `AGENTS.md`：数值改动要附证据、更新"拥有该事实"的文档、
+不为没有理由的改动重新基线。
+
 ## 目前可用
 
 - **MiniMind3 64M** — 8 层、768 hidden、2432 FFN、8 Q / 4 KV heads、

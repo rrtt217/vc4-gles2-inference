@@ -9,6 +9,29 @@ and a disk KV prefix cache.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
+## Vibe coding declaration
+
+This project is developed in a **vibe-coding** workflow: the engine code, the
+container toolchain, the test batteries and most of `docs/` are written by AI
+coding agents (DeepSeek Harness running a team of agents) under human
+direction, review and measurement.  Two consequences are worth knowing before
+you build on it:
+
+- **The measurements are real; the prose is generated.**  Every number in
+  `docs/performance.md` and `docs/evaluation.md` comes from a command that
+  exists in this tree, and `engine/scripts/regression.sh` /
+  `engine/scripts/shader_hashes.sh` pin the numerics.  An explanation is not
+  evidence: run the gate.
+- **Review before you rely on it.**  Agent-written changes are reviewed and
+  gated here, but this is a research/edge-inference stack, not a certified
+  product.  There is no warranty beyond the MIT licence; if you need a
+  guarantee, read the diff, run the suite on your own target and measure your
+  own workload.
+
+Contributions follow the same rule: `AGENTS.md` is what keeps the generated
+parts honest -- cite evidence for a numeric change, update the document that
+owns the fact, and never re-baseline a pin without a reason.
+
 ## What works
 
 - **MiniMind3 64M** — 8 layers, 768 hidden, 2432 FFN, 8 Q / 4 KV heads,
