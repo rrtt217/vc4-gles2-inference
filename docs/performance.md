@@ -5132,13 +5132,17 @@ apparent growth with the window index was the third window being short (111
 tokens, all of them cold prefix).  The float32 numpy reference says the same
 thing about the *model* and nothing about the engine:
 
-| window | tokens scored | engine q4, cold | f32 numpy, cold | engine q4, warm | f32 numpy, warm |
-|---|---|---:|---:|---:|---:|
-| 0 | 1-511 | 4.2304 | 3.7990 | 4.2304 | 3.7990 |
-| 1 | 512-767 / 512-1022 | 5.8826 | 5.6112 | 5.5400 | 5.1131 |
-| 2 | 768-1023 / 768-1133 | 7.4052 | 7.3714 | 5.1153 | 4.9242 |
-| 3 | 1024-1133 | -- | -- | 5.7050 | 5.5469 |
-| **total** | 1133 | **5.2866** (PPL 197.67) | **4.9663** (143.50) | **4.8694** (130.24) | **4.5199** (91.82) |
+| window | cold: fed / scored | warm: fed / scored | engine q4, cold | f32 numpy, cold | engine q4, warm | f32 numpy, warm |
+|---|---|---|---:|---:|---:|---:|
+| 0 | 0-511 / 1-511 | 0-511 / 1-511 | 4.2304 | 3.7990 | 4.2304 | 3.7990 |
+| 1 | 511-1022 / 512-1022 | 256-767 / 512-767 | 5.8826 | 5.6112 | 5.5400 | 5.1131 |
+| 2 | 1022-1133 / 1023-1133 | 512-1023 / 768-1023 | 7.4052 | 7.3714 | 5.1153 | 4.9242 |
+| 3 | -- | 768-1133 / 1024-1133 | -- | -- | 5.7050 | 5.5469 |
+| **total** | 1133 tokens | 1133 tokens | **5.2866** (PPL 197.67) | **4.9663** (143.50) | **4.8694** (130.24) | **4.5199** (91.82) |
+
+("fed" is the window's token range, "scored" the targets it accumulates; the
+warm protocol of window 1 feeds the 256 tokens before the ones it scores.  The
+ranges are half-open in the code but written inclusive here.)
 
 The engine sits 0.32 nats above f32 when the windows are cold, 0.35 when they
 are warm, and 0.33 on the whole file in one window (`SEQ=2048`: 3.8951 against
