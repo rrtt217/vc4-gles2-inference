@@ -428,44 +428,69 @@ int main(int argc, char** argv) {
         // GGUF's add_bos_token).
         auto tokens = tokenizer.encode(text, /*bos=*/true, /*dummy_prefix=*/false);
         if ((int)tokens.size() < 4) { cerr << "not enough tokens\n"; return 1; }
-        // Score *every* window, not only the first.  A single window is what
-        // this used to do: fine for A/B on a corpus shorter than SEQ (which is
-        // how every pinned number was measured, so they do not move), useless
-        // for comparing with llama.cpp's chunked perplexity, which averages
-        // dozens of chunks over a real text.  Stride is SEQ-1 so the only
-        // unscored token is the very first one; each window gets a fresh
-        // session, because the KV cache and the conv history are per-position.
-        const int span = model.seq - 1;
+        // Score every token of the file, in windows of at most SEQ tokens.
+        //
+        // A window that starts mid-text is cold: it has no left context, and on
+        // a real document that costs ~1.8 nats/token (measured 2026-11-12 on
+        // this file: 3.80 nats with the document before it, 5.61 starting at
+        // token 512 -- f32 numpy, so it is the model and not the engine).  So a
+        // sum of cold windows is not a perplexity anyone else reports, and the
+        // 2026-11-11 note that called it a window-by-window degradation was
+        // reading llama.cpp's warm chunks against our cold ones.
+        //
+        // Each window therefore warms up on the tokens before the ones it
+        // scores: it feeds `span` tokens and scores the last `stride` of them,
+        // which is the sliding-window protocol (`--ppl-stride` in llama.cpp,
+        // `--stride` in HuggingFace's evaluate).  Default stride is SEQ/2 so
+        // every scored token has at least SEQ/2 tokens of context and each
+        // window pays half its passes for context.  PPL_STRIDE=0 restores the
+        // old cold-window behaviour (stride SEQ-1, no warm-up), which is the
+        // only way to reproduce the pre-2026-11-12 long-file numbers.
+        const int span = model.seq;
+        int stride = span / 2 > 0 ? span / 2 : 1;
+        if (const char* ps = getenv("PPL_STRIDE")) stride = atoi(ps);
+        if (stride < 0) stride = 0;
+        if (stride == 0) stride = span - 1;             // cold windows
+        if (stride > span - 1) stride = span - 1;
+        const int warm = span - stride;                 // context tokens per window
         FILE* ppl_dump = nullptr;
         if (const char* dp = getenv("PPL_DUMP")) ppl_dump = fopen(dp, "w");
         double nll = 0.0;
         long cnt = 0;
         int windows = 0;
-        for (size_t s = 0; s + 1 < tokens.size(); s += (size_t)span) {
+        const long n = (long)tokens.size();
+        long next = 1;                                  // first token still to score
+        while (next < n) {
             if (g_stop) break;
+            const long a = windows == 0 ? 0 : next - warm;   // first token fed
+            const long len = std::min((long)span, n - a);
+            if (len < 2 || a < 0) break;
             Session win(model, gpu);
-            const size_t e = std::min(tokens.size(), s + (size_t)span + 1);
-            for (size_t i = s; i + 1 < e; ++i) {
+            for (long j = 0; j + 1 < len; ++j) {
                 if (g_stop) break;
-                vector<float> lg = win.step(tokens[i], (int)(i - s), true);
-                if ((int)lg.size() <= tokens[i + 1]) break;
+                const long t = a + j + 1;               // token this position predicts
+                const bool score = t >= next;
+                vector<float> lg = win.step(tokens[a + j], (int)j, score);
+                if (!score) continue;
+                if ((int)lg.size() <= tokens[t]) break;
                 double mx = -1e30;
                 for (float v : lg) mx = max((double)v, mx);
                 double se = 0.0;
                 for (float v : lg) se += exp((double)v - mx);
-                double logp = ((double)lg[tokens[i + 1]] - mx) - log(se);
+                double logp = ((double)lg[tokens[t]] - mx) - log(se);
                 nll += -logp;
                 // PPL_DUMP=path writes one line per scored token.  The mean is
                 // not enough to see what a gap is made of: a handful of
                 // catastrophic positions and a uniform 2% error both raise PPL.
-                if (FILE* pf = ppl_dump) fprintf(pf, "%lld %d %.6f\n", (long long)i, tokens[i + 1], -logp);
+                if (FILE* pf = ppl_dump) fprintf(pf, "%ld %d %.6f\n", t, tokens[t], -logp);
                 ++cnt;
+                next = t + 1;
             }
             ++windows;
         }
         if (!cnt) { cerr << "no tokens scored\n"; return 1; }
-        printf("PPL %.4f  nll=%.4f  tokens=%ld  windows=%d\n",
-               exp(nll / cnt), nll / cnt, cnt, windows);
+        printf("PPL %.4f  nll=%.4f  tokens=%ld  windows=%d  span=%d  stride=%d\n",
+               exp(nll / cnt), nll / cnt, cnt, windows, span, stride);
         return 0;
     }
 

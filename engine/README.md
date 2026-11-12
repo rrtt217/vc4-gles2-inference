@@ -411,6 +411,16 @@ GPU_LAYER=1 KV_PACK=16 ./engine_mm3  --ppl data/ppl_test.txt
 Use the same corpus when comparing formats; `ACT8=1` and `ACT8=2` are not
 default-safe on every corpus.
 
+A corpus longer than `SEQ` is scored in windows: each window feeds `SEQ` tokens
+and scores only its last `SEQ/2`, so every scored token has at least `SEQ/2`
+tokens of context (`stride=` in the output, `PPL_STRIDE=n` to change it).  The
+warm-up matters: a window that starts mid-text is cold and costs ~1.8 nats per
+token on a real document, which is how a 2026-11-11 measurement turned a correct
+engine into a "window-by-window degradation" (see
+[`docs/performance.md`](../docs/performance.md)).  `PPL_STRIDE=0` gives the old
+cold windows back; do not compare one with the other.  `PPL_DUMP=path` writes
+the per-token NLL either way.
+
 ## Diagnosing a wrong answer
 
 The question decides the tool.  All of these live in this repository.

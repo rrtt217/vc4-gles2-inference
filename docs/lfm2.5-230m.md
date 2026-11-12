@@ -129,11 +129,23 @@ Board (Pi Zero, `SEQ=256`, QAD q4, 24 tokens, greedy):
 | 17\*23 with the `calculate_math` tool | **"Answer: 391"** |
 
 Board PPL at `SEQ=256` (two windows, not comparable with the `SEQ=512` rows
-above): fused **45.52**, serial **43.91**.
+above): fused **45.52**, serial **43.91**.  Those two are *cold-window* sums,
+the only protocol the board binary had; reproduce them with `PPL_STRIDE=0`.
+The same corpus and `SEQ` on Xe, where both protocols can be run:
+
+| Xe, QAD q4, `SEQ=256`, 334 tokens | cold (`PPL_STRIDE=0`) | warm (default, `stride=128`) |
+|---|---:|---:|
+| serial | 42.63 | **28.82** |
+| fused | 45.00 | **30.10** |
+
+i.e. the board rows overstate PPL by ~48% purely through the protocol, which is
+the correction recorded in [`performance.md`](performance.md).  A board
+re-measure needs the new binary and is not done here.
 
 ### History: what was wrong before 2026-11-11
 
-Two engine bugs, both found by chasing a phantom 5× gap against llama.cpp:
+Two engine bugs, both found by chasing a phantom 5× gap against llama.cpp, and
+one bad measurement:
 
 1. **Chat prompts had no BOS.**  All three render sites passed `""` for
    `bos_token`, and the template is *supposed* to supply `<|startoftext|>`; on
@@ -146,6 +158,14 @@ Two engine bugs, both found by chasing a phantom 5× gap against llama.cpp:
    85.44 against 14.71).  Every LFM2.5 PPL in this repository older than
    2026-11-11 is therefore 5× too high, and one conclusion inverted with it
    (the fused path is now correctly *worse* than serial).
+3. **A cold window is not a perplexity.**  `--ppl` scored every token of every
+   window from a fresh `Session`, so each window after the first had no context
+   and the total looked like state carried across windows (NLL 4.23 / 5.88 /
+   7.41 against llama.cpp's 3.96 / 3.88).  The float32 reference settles it:
+   5.61 for that text cold against 3.80 with the document in front, i.e. the
+   model, and the engine tracks f32 by the same 0.3 nats (its q4 container)
+   under cold, warm and single-window protocols alike.  `--ppl` now feeds `SEQ`
+   tokens per window and scores only the last `SEQ/2`.
 
 On the way, `GPU::matvec_s()` was added: a matvec input gets a power-of-two
 scale from its own maximum before it is uploaded, because this model's conv
@@ -225,7 +245,7 @@ are described in [`deterministic-tools.md`](deterministic-tools.md).
 | 2 | **i16 container + fused path is wrong**: PPL 1.4e7 against 15.97 on the serial path; pre-existing at `f22bb76` | not fixed; the i16 container is serial-only |
 | 3 | **tokenizer splits digit runs differently** from llama.cpp (`6789` → `6`+`789` here, `678`+`9` there, because `tokenizer.ggml.pre = lfm2` means the llama-3 pre-tokenizer with `\p{N}{1,3}`); prose is identical (334/335 ids on the PPL corpus), 5 of 20 probe strings differ | not fixed; matters for arithmetic prompts |
 | 4 | **the fused path's I16_2 targets have no per-tensor scale** (`matvec_s` is serial-only), so the board's fused quality is 3.7% behind its own serial path | next step |
-| 5 | **`--ppl` degrades window by window** (per-window NLL 4.23 / 5.88 / 7.41 where llama.cpp's chunks are 3.96 / 3.88); every pinned number is a single window, so this is a long-context issue, not a short-chat one | open, repro in `performance.md` |
+| 5 | ~~`--ppl` degrades window by window~~ — **was our metric, not the engine**: a window that starts mid-text is cold and costs ~1.8 nats/token (f32 3.80 against 5.61 on the same text), and llama.cpp's chunked number is a full-context estimate.  `--ppl` now warms each window up (`PPL_STRIDE=0` for the old behaviour) | fixed 2026-11-12 in `--ppl`; correction and numbers in `performance.md` |
 | 6 | **`--thinking` is plumbed but unobserved** — the model did not emit `<think>` in three probes; an unclosed `<think>` is kept as text | plumbed only |
 
 ## Measuring it
@@ -237,6 +257,10 @@ MODEL=../models/lfm2.5-230m/qad/lfm2.5.qad.q4.mmcf SEQ=512 GPU_LAYER=0 \
   ./engine_mm3 --ppl data/ppl_test.txt          # "PPL 18.7251 ... windows=1"
 # per-token NLL, for "is the gap a few catastrophes or a uniform offset"
 MODEL=... SEQ=512 GPU_LAYER=0 PPL_DUMP=/tmp/nll.txt ./engine_mm3 --ppl ...
+# a file longer than SEQ is scored window by window: `stride=` (default SEQ/2)
+# says how many tokens of each window are scored after the warm-up prefix.
+# PPL_STRIDE=0 restores the pre-2026-11-12 cold windows; never compare the two.
+MODEL=... SEQ=512 GPU_LAYER=0 ./engine_mm3 --ppl /tmp/long.md   # "PPL 130.2420 ... windows=4 span=512 stride=256"
 
 # the float32 reference, from the same safetensors
 python3 models/lfm2.5-230m/probe_logits.py --ids "1 6 24131 708 ..." --top 8

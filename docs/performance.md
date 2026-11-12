@@ -5120,3 +5120,76 @@ SEQ=512 GPU_LAYER=0 PPL_DUMP=/tmp/nll.txt ./engine_mm3 --ppl /tmp/c3.txt   # fro
 llama.cpp b12283 — CPU and Vulkan — the comparison scripts and a venv, so its
 numbers and commands only run where that directory exists.  `refs/llamacpp/README.md`
 records the two archives' official sha256 and how to re-create it.)
+
+### Correction: the window-by-window "degradation" was a cold window mean (2026-11-12, Iris Xe)
+
+The section above called it state carried across windows.  It is not: the engine
+was right and the measurement was wrong.  `--ppl` built a fresh `Session` per
+window and scored *every* token of it, so every window after the first was a
+**cold** start -- 511 tokens cut out of the middle of a document with no context
+in front of them.  On this text that costs about **1.8 nats/token**, and the
+apparent growth with the window index was the third window being short (111
+tokens, all of them cold prefix).  The float32 numpy reference says the same
+thing about the *model* and nothing about the engine:
+
+| window | tokens scored | engine q4, cold | f32 numpy, cold | engine q4, warm | f32 numpy, warm |
+|---|---|---:|---:|---:|---:|
+| 0 | 1-511 | 4.2304 | 3.7990 | 4.2304 | 3.7990 |
+| 1 | 512-767 / 512-1022 | 5.8826 | 5.6112 | 5.5400 | 5.1131 |
+| 2 | 768-1023 / 768-1133 | 7.4052 | 7.3714 | 5.1153 | 4.9242 |
+| 3 | 1024-1133 | -- | -- | 5.7050 | 5.5469 |
+| **total** | 1133 | **5.2866** (PPL 197.67) | **4.9663** (143.50) | **4.8694** (130.24) | **4.5199** (91.82) |
+
+The engine sits 0.32 nats above f32 when the windows are cold, 0.35 when they
+are warm, and 0.33 on the whole file in one window (`SEQ=2048`: 3.8951 against
+3.5645) -- the q4 container's cost, identical under all three protocols.  A
+window-dependent defect would not be constant.
+
+The llama.cpp number that started this was not a cold-window mean either.  On
+the same file at `-c 512` it prints `[1]52.4995,[2]48.2827`: the overall 48.28
+matches our **full-context** 49.16 (3.8951 nll, one window), not our cold-window
+197.67.  Its chunked perplexity keeps the context of the earlier chunks, so it
+is a full-context estimate; its own `--ppl-stride` is the option that says so
+explicitly, and its chunk means at small `-c` can even fall *below* the f32
+truth (first 255 tokens: 3.08 against 3.66), which no quantised model can.
+
+There is nothing to fix in the session or the conv state.  The fix is the
+metric: since this correction `--ppl` **warms each window up**.  A window feeds
+`SEQ` tokens and scores only the last `SEQ/2` (`stride=` in the output;
+`PPL_STRIDE=n` changes it, `PPL_STRIDE=0` restores the old cold windows), which
+is the sliding-window protocol of HuggingFace's `evaluate` and llama.cpp's
+`--ppl-stride`.  Corpora shorter than `SEQ` are unaffected -- every pinned
+number is one window, and `PPL 18.7251 tokens=334 windows=1` is what the q4 QAD
+container still prints on `engine/data/ppl_test.txt`.
+
+Same file, three protocols, both engines (`SEQ=512` unless noted):
+
+| protocol | engine q4 serial | engine q4 fused | f32 numpy | windows |
+|---|---:|---:|---:|---:|
+| cold, `PPL_STRIDE=0` | 197.6719 | 199.9021 | 143.4955 | 3 |
+| warm, stride `SEQ/2` | 130.2420 | 127.6320 | 91.8232 | 4 |
+| one window, `SEQ=2048` | 49.1586 | -- | 35.3204 | 1 |
+
+Reproduce (the corpus is the file as it was at `f79dc6c`, so the numbers above
+stay reachable after this document grows):
+
+```bash
+git show f79dc6c:docs/engine-internals.md | head -c 3600 > /tmp/c3.txt
+SEQ=512 GPU_LAYER=0 PPL_DUMP=/tmp/nll.txt ./engine_mm3 --ppl /tmp/c3.txt   # warm
+SEQ=512 GPU_LAYER=0 PPL_STRIDE=0 ./engine_mm3 --ppl /tmp/c3.txt            # cold
+SEQ=2048 GPU_LAYER=0 ./engine_mm3 --ppl /tmp/c3.txt                        # one window
+```
+
+The per-window columns come from bucketing `PPL_DUMP` by the window start the
+`stride=` line implies; the f32 columns from a numpy forward over the same
+windows (`refs/llamacpp/scripts/np_windows.py` prototype, same protocol,
+safetensors source, no container).
+
+Every number in this file that spans more than one window is a cold-window sum
+for the same reason, and stays reachable only with `PPL_STRIDE=0`: the board's
+LFM2.5 rows at `SEQ=256` (`43.91` serial, `45.52` fused) are the same corpus
+that Xe now scores `42.63` / `45.00` cold and `28.82` / `30.10` warm.  Single
+window rows -- every MiniMind3 pin, the `SEQ=512` LFM2.5 rows, `14.71` against
+`15.97` -- are untouched: one window has nothing to warm up on, and the loop for
+it is the same code as before (`PPL 18.7251 tokens=334 windows=1` on the q4 QAD
+container, before and after).

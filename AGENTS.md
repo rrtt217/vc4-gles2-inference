@@ -291,6 +291,13 @@ These were paid for; do not relearn them.
   per machine, re-baseline deliberately, and let PPL decide.
 - **Never compare a Pi run with an Xe run**, and never compare PPL across
   different `SEQ` values.
+- **A window that starts mid-text is cold, and a cold window is not a
+  perplexity.**  Cut 512 tokens out of the middle of a document and LFM2.5 pays
+  about 1.8 nats/token more than the same tokens with their context (float32
+  numpy: 3.80 with the document in front against 5.61 without), so a sum of
+  cold windows measures the resets, not the model.  `--ppl` warms each window up
+  since 2026-11-12 (`PPL_STRIDE=n`, default `SEQ/2`); `PPL_STRIDE=0` restores the
+  old cold windows and the two numbers are not comparable.
 - **Never run the Pi suite while another GPU client holds the model** (the
   server, a benchmark); CMA is single-client on this board.
 
