@@ -138,6 +138,17 @@ def quantize_emb(buf, rec, off, rowscale):
     return q.tobytes(), sc
 
 
+def source_scheme(meta):
+    """(scheme, group) from metadata key 3, or (None, None) when absent."""
+    p = 0
+    while p + 8 <= len(meta):
+        key, typ, ln = struct.unpack_from('<HHI', meta, p)
+        if key == 3 and typ == 1 and ln >= 4:
+            return meta[p + 8], meta[p + 9]
+        p += 8 + ln
+    return None, None
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--in', dest='src', required=True)
@@ -152,6 +163,17 @@ def main():
     src = parse(args.src)
     if args.src == args.dst:
         raise SystemExit('refusing to overwrite the source')
+    # The rebuild below assumes i16 bodies: the matrix branch tests dt == 1, and
+    # every part-1/part-2 record is treated as a matrix.  A q4 source therefore
+    # keeps its q4 bodies while the metadata is patched to scheme q8, and the
+    # engine loads and runs that as a wrong model (the audit's 2026-11-12
+    # mutant printed gibberish at logits cos 0.067).  Refuse instead of guessing.
+    scheme, _group = source_scheme(src['meta'])
+    if scheme != 0:
+        raise SystemExit(
+            '%s: quant scheme is %s; this tool rebuilds q8 from an i16 container '
+            'only.  Re-pack from the safetensors source instead.'
+            % (args.src, {1: 'q8', 2: 'q4'}.get(scheme, 'unknown (%r)' % scheme)))
     buf = np.memmap(args.src, dtype=np.uint8, mode='r')
     off0 = src['data_off']
 
@@ -168,6 +190,9 @@ def main():
     bodies = []
     emb_scale = None
     for r in src['recs']:
+        if r['dt'] == 4 or (r['tid'] >> 14) != 0:
+            raise SystemExit('%s: tensor 0x%x is a q4 body or a plane record; only an '
+                             'i16 source is supported' % (args.src, r['tid']))
         base = r['tid'] & 0xFF
         tid, dt, scale = r['tid'], r['dt'], r['scale']
         body = bytes(buf[off0 + r['off']:off0 + r['off'] + r['blen']])

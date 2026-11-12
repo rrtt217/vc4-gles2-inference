@@ -199,7 +199,10 @@ Two consequences:
 
 - **Anything taller than 2048 rows must be tiled.** The FFN matrices are chunked
   (`ffn_split_chunked`, `m_.ffn_chunk`) and the logits pass draws per 1536-row
-  tile; a single 2432-row weight texture silently fails to upload.
+  tile; a single 2432-row weight texture silently fails to upload.  There are
+  exactly **two** FFN chunks, so the width ceiling is 2x the GL target width:
+  4096 on VC4 (2048) and larger on desktop GLES2 -- LFM2-350M's 4608 hidden runs
+  as two 2304-wide chunks on Xe since 2026-11-12 (`split_ffn(max_dim)`).
 - **There is no free-precision path.** Weights can only live in RGBA8, so every
   weight is decoded in the fragment shader. An "I16 is much faster" note in this
   repo's older tables does not hold on this driver: the INT16 format is also

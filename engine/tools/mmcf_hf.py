@@ -17,6 +17,8 @@ safetensors be byte-identical to one packed from the legacy file it replaces:
        logits stay q8
 """
 import json
+import math
+import os
 import struct
 
 import numpy as np
@@ -373,13 +375,28 @@ def load_minimind(model_dir, seq=512):
     q_norm = np.stack([get(f'model.layers.{l}.self_attn.q_norm.weight') for l in range(layers)]) if qk else None
     k_norm = np.stack([get(f'model.layers.{l}.self_attn.k_norm.weight') for l in range(layers)]) if qk else None
     theta, half = rope_of(cfg)
+    # The template's special tokens are where a chat prompt's activation peaks
+    # live (MiniMind3-MoE reaches 250 in the expert hidden at <|im_start|>).
+    # tokenizer.json lists them with their ids, so the rail calibration can
+    # exercise them without a tokenizer library.
+    added_ids = []
+    tok_json = model_dir + '/tokenizer.json'
+    if os.path.exists(tok_json):
+        try:
+            with open(tok_json) as f:
+                tj = json.load(f)
+            added_ids = sorted({int(t['id']) for t in tj.get('added_tokens', [])
+                                if isinstance(t, dict) and 'content' in t and 'id' in t})
+            added_ids = [i for i in added_ids if 0 <= i < vocab]
+        except (ValueError, KeyError, TypeError):
+            added_ids = []
     return dict(dim=dim, hidden=hidden, layers=layers, heads=heads, kv=kv, vocab=vocab, seq=seq,
                 emb=emb, rms_att=rms_att, rms_ffn=rms_ffn, rms_final=rms_final,
                 wq=wq, wk=wk, wv=wv, wo=wo, w1=w1, w2=w2, w3=w3, wcls=wcls,
                 theta=theta, half=half, qk_norm=1 if qk else 0,
                 q_norm=q_norm, k_norm=k_norm, untied='lm_head.weight' in hdr,
                 moe=moe, router=router, expert_w1=expert_w1, expert_w2=expert_w2,
-                expert_w3=expert_w3)
+                expert_w3=expert_w3, added_ids=added_ids)
 
 
 def load_lfm2(model_dir, seq=512):
@@ -436,6 +453,22 @@ def load_lfm2(model_dir, seq=512):
                    for l in range(layers)])
     w3 = np.stack([get('model.layers.%d.feed_forward.w3.weight' % l)
                    for l in range(layers)])
+    # LFM2's block_auto_adjust_ff_dim rounds the *nominal* config width to the
+    # multiple-of-256 the tensors actually carry: LFM2-350M says 6656 and
+    # ships 4608.  The tensors are the truth -- the container's hidden field is
+    # what the engine slices w1/w2 with, so taking the config value produces a
+    # container that loads and then emits garbage (2026-11-12).
+    if w1.shape[1:] != (hidden, dim) or w2.shape[1:] != (dim, hidden):
+        actual = int(w1.shape[1])
+        if w1.shape[1:] != (actual, dim) or w2.shape[1:] != (dim, actual):
+            raise SystemExit('%s: w1 %s / w2 %s do not agree on an FFN width'
+                             % (model_dir, list(w1.shape), list(w2.shape)))
+        print('ffn hidden %d (config.json says %d, block_auto_adjust_ff_dim)'
+              % (actual, hidden))
+        hidden = actual
+    if w3.shape[1:] != (hidden, dim):
+        raise SystemExit('%s: w3 has shape %s, expected (%d, %d, %d)'
+                         % (model_dir, list(w3.shape), layers, hidden, dim))
 
     wq = [None] * layers
     wk = [None] * layers
@@ -499,7 +532,7 @@ def load_lfm2(model_dir, seq=512):
                 wq=wq, wk=wk, wv=wv, wo=wo, w1=w1, w2=w2, w3=w3, wcls=emb,
                 theta=theta, half=half, qk_norm=qk, q_norm=q_norm, k_norm=k_norm,
                 layer_types=lt, conv_in=conv_in, conv_w=conv_w, conv_out=conv_out,
-                conv_k=ksize, untied=False, moe=None)
+                conv_k=ksize, untied=False, moe=None, added_ids=[])
 
 
 def load_llama2c(path):
@@ -562,6 +595,10 @@ def is_llama2c(path):
 # caught cheaply.
 RESIDUAL_RAIL = 32767.0 / 256.0   # 127.996
 RESIDUAL_WARN = 96.0             # 75% of the rail
+# The FFN's SwiGLU hidden is written through the same q16 activation format,
+# so it clamps at the same rail.  Kept as its own name because the two streams
+# are different tensors with different fixes.
+ACTIVATION_RAIL = 32767.0 / 256.0
 
 
 def residual_peaks_lfm2(m, seq=8):
@@ -641,16 +678,27 @@ def residual_peaks_lfm2(m, seq=8):
     return peaks
 
 
-def residual_peaks(m, seq=8):
-    """max|x| of the residual stream per layer, for a few token samples.
+def rail_peaks(m, seq=8):
+    """(residual peaks, FFN hidden peaks) from a float32 forward pass.
 
-    A float32 forward from a deterministic sample of vocabulary ids: three runs
-    of `seq` consecutive ids (the start of the vocabulary, the middle and the
-    end), taking the maximum over both the samples and the positions.  It needs
-    no tokenizer, so it works for every source the packer accepts.
+    Two streams travel through the engine's q16 activation format (grid 1/256,
+    rail +-127.996) and a value over the rail is clamped silently: the residual
+    stream `x` and the FFN's SwiGLU hidden `silu(gate)*up`.  The residual check
+    has existed since the supra2 episode; the hidden one was added after the
+    MiniMind3-MoE audit (2026-11-12), where the experts' hidden state reaches
+    250 at the template's `<|im_start|>` positions.
+
+    Sampling is deterministic and needs no tokenizer library: three runs of
+    `seq` consecutive vocabulary ids, plus one run per *added token* parsed
+    from the source's tokenizer.json.  Position 0 of a run depends only on its
+    own embedding, so a leading special id reproduces the hot hidden state a
+    chat prompt produces at its first token.
+
+    Returns (residual_peaks, hidden_peaks); hidden_peaks is None for a hybrid
+    model (LFM2), whose conv block has no such check yet.
     """
     if m.get('layer_types'):
-        return residual_peaks_lfm2(m, seq)
+        return residual_peaks_lfm2(m, seq), None
     dim, hidden, layers = m['dim'], m['hidden'], m['layers']
     heads, kv, vocab = m['heads'], m['kv'], m['vocab']
     hd = dim // heads
@@ -660,6 +708,7 @@ def residual_peaks(m, seq=8):
     qk = bool(m.get('qk_norm'))
     emb = m['emb']
     peaks = [0.0] * layers
+    hpeaks = [0.0] * layers
     seq = max(1, min(seq, vocab))
 
     def rotate(a, pos):          # a: (T, H, hd)
@@ -684,8 +733,13 @@ def residual_peaks(m, seq=8):
 
     rep = heads // kv
     starts = [0, max(0, vocab // 2 - seq // 2), max(0, vocab - seq)]
-    for st in starts:
-        ids = list(range(st, st + seq))
+    samples = [list(range(st, st + seq)) for st in starts]
+    # One run per added token: a leading special id puts the template's first
+    # token at position 0, and position 0's hidden state depends only on that
+    # embedding, so this is where a chat prompt's hot expert hidden lives.
+    for aid in (m.get('added_ids') or [])[:16]:
+        samples.append([aid] + list(range(0, seq - 1)))
+    for ids in samples:
         x = emb[ids].astype(np.float32)
         T = len(ids)
         for l in range(layers):
@@ -720,17 +774,26 @@ def residual_peaks(m, seq=8):
                                      m['expert_w2'][l][e])
                     g = h2[t:t + 1] @ w1e.T
                     u = h2[t:t + 1] @ w3e.T
-                    x[t] = x1[t] + ((g / (1 + np.exp(-g))) * u) @ w2e.T
+                    hh = (g / (1 + np.exp(-g))) * u
+                    hpeaks[l] = max(hpeaks[l], float(np.abs(hh).max()))
+                    x[t] = x1[t] + hh @ w2e.T
             else:
                 g = h2 @ m['w1'][l].T
                 u = h2 @ m['w3'][l].T
-                x = x1 + ((g / (1 + np.exp(-g))) * u) @ m['w2'][l].T
+                hh = (g / (1 + np.exp(-g))) * u
+                hpeaks[l] = max(hpeaks[l], float(np.abs(hh).max()))
+                x = x1 + hh @ m['w2'][l].T
             mx = float(np.abs(x).max())
             if not np.isfinite(mx):
                 raise SystemExit("residual calibration produced %s at layer %d; the "
                                  "check cannot vouch for this model" % (mx, l))
             peaks[l] = max(peaks[l], mx)
-    return peaks
+    return peaks, hpeaks
+
+
+def residual_peaks(m, seq=8):
+    """The residual-stream peaks only (backwards-compatible wrapper)."""
+    return rail_peaks(m, seq)[0]
 
 
 def tok_entry_count(path):
@@ -787,7 +850,12 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
     # The FFN width that is written to the file is the expert width for a MoE
     # container: the dense mlp does not exist there.
     ffn_w = moe['hidden'] if moe else hidden
-    split = 1 if 2 * ffn_w > 2048 else 0
+    # A MoE container always carries separate w1/w3 (there is no fused-W13
+    # expert form) and the loader requires the flag to say so, so derive it
+    # from the block, not from the dense 2*hidden > 2048 rule.  Without the
+    # `moe` term a Qwen3-MoE whose expert width is <= 1024 packs split_w13 = 0
+    # and the engine then refuses the file the packer just wrote.
+    split = 1 if (moe or 2 * ffn_w > 2048) else 0
     meta = dict(dim=dim, hidden=hidden, layers=layers, heads=heads, kv_heads=kv,
                 vocab=vocab, seq=seq, head_dim=head_dim,
                 theta=float(m['theta']), half=bool(m['half']), qk_norm=bool(qk),
@@ -805,29 +873,53 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
     # matrices are that skewed instead of leaving the reader to guess; a ratio
     # over ~100 is where --q8-row-scale starts to pay.
     skew = []
+
+    def scan_skew(label, w):
+        w = np.asarray(w, np.float32)
+        med = float(np.median(np.abs(w)))
+        if med <= 0:
+            return
+        skew.append((float(np.abs(w).max()) / med, label))
+
     for key in ('wq', 'wk', 'wv', 'wo', 'w1', 'w3', 'w2', 'wcls'):
         arr = m.get(key)
         if arr is None:
             continue
-        n_rows = len(arr) if isinstance(arr, list) else int(getattr(arr, 'shape', (0,))[0])
-        for l in range(n_rows):
-            if arr[l] is None:
-                continue
-            w = np.asarray(arr[l], np.float32)
-            med = float(np.median(np.abs(w)))
-            if med <= 0:
-                continue
-            skew.append((float(np.abs(w).max()) / med, key, l))
+        for l in range(len(arr)):
+            if arr[l] is not None:
+                scan_skew('%s[%d]' % (key, l), arr[l])
+    # The expert matrices were missing from this scan, and they are the largest
+    # and least uniform matrices of a q8/q4 MoE: a 2432x768 expert at one scale
+    # is exactly the case --q8-row-scale exists for.
+    for key in ('expert_w1', 'expert_w3', 'expert_w2'):
+        arr = m.get(key)
+        if not arr:
+            continue
+        for l in range(len(arr)):
+            for e in range(len(arr[l])):
+                scan_skew('%s[%d].e%d' % (key, l, e), arr[l][e])
     if skew:
         skew.sort(reverse=True)
         worst = skew[0]
-        print("q8 skew: worst %s[%d] max|w|/median|w| = %.0f (median over matrices %.0f)"
-              % (worst[1], worst[2], worst[0], float(np.median([x[0] for x in skew]))))
+        print("q8 skew: worst %s max|w|/median|w| = %.0f (median over matrices %.0f)"
+              % (worst[1], worst[0], float(np.median([x[0] for x in skew]))))
         if scheme == 'q8' and not q8_row and worst[0] > 100:
             print("note: that matrix loses most of its small weights at one scale; "
                   "--q8-row-scale writes one scale per output row instead")
     if rail_check:
-        meta['res_peaks'] = residual_peaks(m)
+        res_peaks, hid_peaks = rail_peaks(m)
+        meta['res_peaks'] = res_peaks
+        if hid_peaks is not None:
+            meta['hid_peaks'] = hid_peaks
+            # A hidden over the q16 activation rail is stored *2^-k (key 15)
+            # instead of being clamped at run time: k is the smallest power of
+            # two whose store fits, and the engine folds 2^k back into w2 after
+            # load.  k is capped at 5 (the shader literal table's end).
+            k = [0 if peak <= ACTIVATION_RAIL
+                 else min(5, max(0, int(math.ceil(math.log2(peak / ACTIVATION_RAIL)))))
+                 for peak in hid_peaks]
+            if any(k):
+                meta['hid_scale'] = k
     T = []
 
     def f32(a):
@@ -913,7 +1005,10 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
             T.append((base, DT_Q8I8, rows, cols, 0, q.tobytes(), float(s), aux))
         else:
             packed, s16, mn, ps, groups = q4mat(np.asarray(w, np.float32))
-            T.append((base, DT_Q4, rows, cols, 0, packed.tobytes(), float(ps), aux))
+            # The record's group byte is the q4 group size for the body
+            # (docs/checkpoint-container.md); it used to be written as 0.  The
+            # engine hardcodes 32, but a reader of the format should not have to.
+            T.append((base, DT_Q4, rows, cols, 32, packed.tobytes(), float(ps), aux))
             T.append((base | (1 << 14), DT_I16, rows, groups, 0, s16.tobytes(), 0.0, aux))
             T.append((base | (2 << 14), DT_I16, rows, groups, 0, mn.tobytes(), 0.0, aux))
 

@@ -55,6 +55,22 @@ const string kQzSl =
     "float qz(float v){return clamp(floor(v+0.5),-32768.0,32767.0);}"
     "float sl(float q,float g){float a=q/256.0;return (a/(1.0+exp(-a)))*(g/256.0);}";
 
+// FFN hidden store scale (metadata key 15): the SwiGLU output is written as
+// value * 2^-hs so a hidden over the q16 activation rail still fits, and w2's
+// read-back multiplies by 2^hs (folded into its scale on the host).  hs = 0
+// emits no text at all, so a container without the key produces byte-identical
+// GLSL and scripts/shader_hashes.sh stays green.
+static const char* const kHidScaleLit[] = {"", "0.5", "0.25", "0.125", "0.0625", "0.03125"};
+static int hid_scale_max() { return (int)(sizeof(kHidScaleLit) / sizeof(kHidScaleLit[0])) - 1; }
+static string hid_scale_def(int hs) {
+    if (hs <= 0 || hs > hid_scale_max()) return "";
+    return "#define HIDSCALE " + string(kHidScaleLit[hs]) + "\n";
+}
+static string hid_scale_mul(int hs) {
+    if (hs <= 0 || hs > hid_scale_max()) return "";
+    return "*HIDSCALE";
+}
+
 // q16 pair from a scaled value (s*w) and from a value already in q16 units.
 const string kEnc16Mul =
     "vec2 enc16(float s,float w){float v=clamp(floor(s*w+0.5),-32768.0,32767.0);"
@@ -312,12 +328,16 @@ string matvec_q8(int rows, int cols, XFormat xf, bool wrow) {
                "vec4 xa=texture2D(X,vec2((float(2*q)+0.5)/float(" + AXW + "),0.5));"
                "vec4 xb=texture2D(X,vec2((float(2*q+1)+0.5)/float(" + AXW + "),0.5));"
                "s+=w.x*dA(xa)+w.y*dB(xa)+w.z*dA(xb)+w.w*dB(xb);}"
-               "float v=clamp(floor(s*" + SC + "+0.5),-32768.0,32767.0);if(v<0.0)v+=65536.0;"
-               "v+=8388608.0;"
-               "float r0=floor(v/16777216.0);float g=floor(v/65536.0)-r0*256.0;"
-               "float b=floor(v/256.0)-r0*65536.0-g*256.0;"
-               "float a=v-r0*16777216.0-g*65536.0-b*256.0;"
-               "gl_FragColor=vec4(r0/255.0,g/255.0,b/255.0,a/255.0);}";
+               // q24, signed with the 2^23 bias -- the same encode as x_i24encq.  This
+               // used to add 65536 for a negative sum first (a copy of the unsigned q16
+               // packing), so every negative matvec output came back 256 too large: the
+               // LFM2 conv block, the only user of this non-pair q8 path, then read
+               // garbage from the second texel on (gated 55.98 against 0.07, 2026-11-12).
+               "float v=clamp(floor(s*" + SC + "+0.5),-32768.0,32767.0)+8388608.0;"
+               "float g=floor(v/65536.0);"
+               "float b=floor(v/256.0)-g*256.0;"
+               "float a=v-g*65536.0-b*256.0;"
+               "gl_FragColor=vec4(0.0,g/255.0,b/255.0,a/255.0);}";
     }
     return head(xf) + q24_helpers() +
         "uniform sampler2D W,X;uniform float ws;" + WD +
@@ -431,8 +451,9 @@ string matvec_q8_pair_logits(int rows, int cols, XFormat xf, bool wrow) {
 // the viewport at rows/2.  The gate quantisation (int16 of s*ws) and the final q16
 // rounding are the same operations the separate passes perform, so the output is
 // bit-identical.
-string matvec_q8_pair_swiglu(int rows, int cols, XFormat xf, bool inl, bool wrow) {
+string matvec_q8_pair_swiglu(int rows, int cols, XFormat xf, bool inl, bool wrow, int hs) {
     need_shape("matvec_q8_pair_swiglu", rows, cols, 4);
+    const string HD = hid_scale_def(hs), HM = hid_scale_mul(hs);
     const int axw = x_texels(cols, xf);
     const string ROWS = to_string(rows), COLS4 = to_string(cols / 4), AXW = to_string(axw);
     const string WD = wrow ? (wrow_scale(rows, "WS1", "wsr1", "ws1") +
@@ -450,7 +471,7 @@ string matvec_q8_pair_swiglu(int rows, int cols, XFormat xf, bool inl, bool wrow
     // packed output is byte-identical.  FFN_SW_INLINE=0 restores the generic
     // form in the same binary for an interleaved A/B.
     if (inl && xf == XFormat::I16_2) {
-        return head(xf) + "uniform sampler2D W1,W2,X;uniform float ws1,ws2;" + WD +
+        return head(xf) + HD + "uniform sampler2D W1,W2,X;uniform float ws1,ws2;" + WD +
                kDec16A + kDec16B
                + kQzSl +
                "void main(){int t=int(gl_FragCoord.x);int r0=2*t;"
@@ -469,9 +490,9 @@ string matvec_q8_pair_swiglu(int rows, int cols, XFormat xf, bool inl, bool wrow
                "c=texture2D(W2," + WR1 + ");w=c*255.0-128.0;"
                "s21+=w.x*a0+w.y*a1+w.z*a2+w.w*a3;}"
                "float v1=(r0+1<" + to_string(rows) + ")?sl(qz(s11*" + A11 + "),qz(s21*" + A21 + ")):0.0;"
-               "gl_FragColor=x_st2(sl(qz(s10*" + A10 + "),qz(s20*" + A20 + ")),v1);}";
+               "gl_FragColor=x_st2(sl(qz(s10*" + A10 + "),qz(s20*" + A20 + "))" + HM + ",v1" + HM + ");}";
     }
-    return head(xf) +
+    return head(xf) + HD +
         "uniform sampler2D W1,W2,X;uniform float ws1,ws2;" + WD +
                kQzSl +
         "void main(){int t=int(gl_FragCoord.x);int r0=2*t;"
@@ -488,7 +509,7 @@ string matvec_q8_pair_swiglu(int rows, int cols, XFormat xf, bool inl, bool wrow
         "c=texture2D(W2," + WR1 + ");w=c*255.0-128.0;"
         "s21+=w.x*x.x+w.y*x.y+w.z*x.z+w.w*x.w;}"
         "float v1=(r0+1<" + to_string(rows) + ")?sl(qz(s11*" + A11 + "),qz(s21*" + A21 + ")):0.0;"
-        "gl_FragColor=x_st2(sl(qz(s10*" + A10 + "),qz(s20*" + A20 + ")),v1);}";
+        "gl_FragColor=x_st2(sl(qz(s10*" + A10 + "),qz(s20*" + A20 + "))" + HM + ",v1" + HM + ");}";
 }
 
 // Two-position gate packing (WORKLOG item 7b).  One fragment evaluates one
@@ -1071,8 +1092,9 @@ string matvec_i4_pair(int rows, int cols, XFormat xf) {
 // and the per-group order (scale*dot + min*xsum) of matvec_i4_pair; qz/sl
 // reproduce x_st2q -> x_i16pair -> x_st2 exactly, so the packed output is
 // bit-identical to the two-pass path.
-string matvec_i4_pair_swiglu(int rows, int cols, XFormat xf, bool inl) {
+string matvec_i4_pair_swiglu(int rows, int cols, XFormat xf, bool inl, int hs) {
     need_shape("matvec_i4_pair_swiglu", rows, cols, 32);
+    const string HD = hid_scale_def(hs), HM = hid_scale_mul(hs);
     const int texw = cols / 8;
     const int groups = (cols + 31) / 32;
     const int axw = x_texels(cols, xf);
@@ -1106,7 +1128,7 @@ string matvec_i4_pair_swiglu(int rows, int cols, XFormat xf, bool inl) {
         if (mv4) return s + q4_taps4("w0") + dst + "+=lo*xe+hi*xo;";
         return s + dst + "+=dot4(w0,xa,xb);";
     };
-    return q4_head(xf, inl) +
+    return q4_head(xf, inl) + HD +
         "uniform sampler2D W1,W2,P1,P2,X;uniform float ps1,ps2;" +
         (mv4 ? string()
              : "float dot4(vec4 w0,vec4 xa,vec4 xb){" + q4_taps("w0") +
@@ -1131,8 +1153,8 @@ string matvec_i4_pair_swiglu(int rows, int cols, XFormat xf, bool inl) {
              : q4_act(xf, cols, inl) + q4_xsum()) +
         wtap("d1", "W1", "0", 0) + wtap("d2", "W2", "0", 1) +
         wtap("e1", "W1", "1", 2) + wtap("e2", "W2", "1", 3) + "}" + SUM +
-        "float v0=sl(qz(s10),qz(s20));"
-        "float v1=(r0+1<" + ROWS + ")?sl(qz(s11),qz(s21)):0.0;"
+        "float v0=sl(qz(s10),qz(s20))" + HM + ";"
+        "float v1=(r0+1<" + ROWS + ")?sl(qz(s11),qz(s21))" + HM + ":0.0;"
         "gl_FragColor=x_st2(v0,v1);}";
 }
 
@@ -1168,9 +1190,10 @@ string matvec_i4_add(int rows, int cols, XFormat xf, XFormat rf) {
 }
 
 
-string swiglu_pair(int hidden, XFormat out) {
+string swiglu_pair(int hidden, XFormat out, int hs) {
     need_dim("swiglu_pair", hidden);
     const string H = to_string(hidden);
+    const string HD = hid_scale_def(hs), HM = hid_scale_mul(hs);
     string act =
         "float actv(int i){if(i>=" + H + ")return 0.0;"
         "vec2 g=X2(A,2*i," + H + ".0);"
@@ -1178,17 +1201,18 @@ string swiglu_pair(int hidden, XFormat out) {
     string body;
     if (out == XFormat::I8_4) {
         body = "void main(){int t=int(gl_FragCoord.x);int i0=4*t;"
-               "gl_FragColor=x_i8enc4(actv(i0),actv(i0+1),actv(i0+2),actv(i0+3));}";
+               "gl_FragColor=x_i8enc4(actv(i0)" + HM + ",actv(i0+1)" + HM + ",actv(i0+2)" + HM + ",actv(i0+3)" + HM + ");}";
     } else {
         body = "void main(){int t=int(gl_FragCoord.x);int i0=2*t;"
-               "gl_FragColor=x_st2(actv(i0),actv(i0+1));}";
+               "gl_FragColor=x_st2(actv(i0)" + HM + ",actv(i0+1)" + HM + ");}";
     }
-    return head(XFormat::I16_2) + "uniform sampler2D A;" + act + body;
+    return head(XFormat::I16_2) + HD + "uniform sampler2D A;" + act + body;
 }
 
-string swiglu_2row(int hidden, XFormat out) {
+string swiglu_2row(int hidden, XFormat out, int hs) {
     need_dim("swiglu_2row", hidden);
     const string H = to_string(hidden);
+    const string HD = hid_scale_def(hs), HM = hid_scale_mul(hs);
     string read =
         "float yat(int i){float x=float(i);"
         "vec4 ca=texture2D(A,vec2((x+0.5)/float(" + H + "),0.25));"
@@ -1198,17 +1222,18 @@ string swiglu_2row(int hidden, XFormat out) {
     string body;
     if (out == XFormat::I8_4) {
         body = "void main(){int t=int(gl_FragCoord.x);int i0=4*t;"
-               "gl_FragColor=x_i8enc4(yat(i0),yat(i0+1),yat(i0+2),yat(i0+3));}";
+               "gl_FragColor=x_i8enc4(yat(i0)" + HM + ",yat(i0+1)" + HM + ",yat(i0+2)" + HM + ",yat(i0+3)" + HM + ");}";
     } else {
         body = "void main(){int t=int(gl_FragCoord.x);int i0=2*t;"
-               "gl_FragColor=x_st2(yat(i0),yat(i0+1));}";
+               "gl_FragColor=x_st2(yat(i0)" + HM + ",yat(i0+1)" + HM + ");}";
     }
-    return head(XFormat::I16_2) + q24_helpers() + "uniform sampler2D A;" + read + body;
+    return head(XFormat::I16_2) + HD + q24_helpers() + "uniform sampler2D A;" + read + body;
 }
 
-string swiglu(int hidden, bool fused, XFormat out) {
+string swiglu(int hidden, bool fused, XFormat out, int hs) {
     need_dim("swiglu", hidden);
     const string H = to_string(hidden);
+    const string HD = hid_scale_def(hs), HM = hid_scale_mul(hs);
     string read;
     if (fused) {
         read = "uniform sampler2D A;"
@@ -1228,12 +1253,12 @@ string swiglu(int hidden, bool fused, XFormat out) {
     string body;
     if (out == XFormat::I8_4) {
         body = "void main(){int t=int(gl_FragCoord.x);int i0=4*t;"
-               "gl_FragColor=x_i8enc4(yat(i0),yat(i0+1),yat(i0+2),yat(i0+3));}";
+               "gl_FragColor=x_i8enc4(yat(i0)" + HM + ",yat(i0+1)" + HM + ",yat(i0+2)" + HM + ",yat(i0+3)" + HM + ");}";
     } else {
         body = "void main(){int t=int(gl_FragCoord.x);int i0=2*t;"
-               "gl_FragColor=x_st2(yat(i0),yat(i0+1));}";
+               "gl_FragColor=x_st2(yat(i0)" + HM + ",yat(i0+1)" + HM + ");}";
     }
-    return head(XFormat::I16_2) + q24_helpers() + read + body;
+    return head(XFormat::I16_2) + HD + q24_helpers() + read + body;
 }
 
 string rms_stats_split(int dim, XFormat residual) {

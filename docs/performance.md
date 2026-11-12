@@ -5239,3 +5239,165 @@ board still runs ~1040 ms/token on the fused path.  The board's acceptance pin
 is untouched as well -- MiniMind3 q8 at `SEQ=768` on `data/ppl_test.txt` prints
 `PPL 271.6420 tokens=293 windows=1`, the value pinned in `AGENTS.local.md`
 (one window, so the window protocol cannot move it).
+
+## MiniMind3-MoE audit: llama.cpp oracle, the activation rail, and the fixes (2026-11-12, Xe)
+
+An audit of the first MoE block (container v3, see
+[`checkpoint-container.md`](checkpoint-container.md)) against two independent
+implementations and against its own containers.  The short version: the block's
+semantics are right and the containers are faithful; what remains is
+quantization, one silent format clamp the packer did not check, and a set of
+tooling gaps.
+
+Oracles, all on the same 30 prompt ids (the container's own chat render of
+system `You are a helpful assistant.` + `Hello`):
+
+* **llama.cpp b12283**, the upstream CI build in `refs/llamacpp/bin/b12283-cpu`
+  (used as shipped, **not** compiled here), on a pure-python F16 GGUF of the
+  safetensors source: log probability max |d| **3.2e-05** over the full
+  6400-token vocabulary, same argmax, same top-5, same greedy chain (9 tokens
+  then EOS), PPL **370.9727**.
+* **torch f32** (transformers `Qwen3MoeForCausalLM`): PPL 370.9732, same
+  greedy chain.
+* **numpy f32** (`engine/tools/ref_forward.py`): PPL 370.9727, 240/240 routes
+  identical to the torch chain.
+
+Every engine-vs-reference delta below is therefore the engine's arithmetic, not
+a different model.  The engine, same ids, `GPU_LAYER=1 KV_PACK=16`:
+
+| container | logits vs f32: max |d| / mean |d| / cos | greedy | PPL (293 tokens) |
+|---|---|---:|---:|
+| i16 | 0.775 / 0.140 / 0.99856 | 9 tokens + EOS, identical | 389.3532 (+5.0%) |
+| q8 | 1.093 / 0.183 / 0.99751 | identical | 350.8860 (-5.4%) |
+| q4 | 3.974 / 0.690 / 0.96484 | identical | 437.7821 (+18%) |
+
+The i16/q8 PPL inversion is **bias**, not noise: per-token NLL against f32 is
++0.048 nats/token (i16) and -0.056 (q8) with the same scatter, and a float32
+chain that applies *only* the documented q16 activation stores reproduces the
+i16 end-to-end numbers (logits 0.830 / 0.144 / 0.99847, 9 route flips against
+the engine's 4).  The q16 grid compresses the logit vector by about 0.5% (fit
+slope 0.99471 in the simulation, 0.99349 in the engine); q8's weight noise
+happens to push the other way on this corpus, which is all the "inversion" is.
+
+Routing over 30 positions (240 layer-positions): i16 4, q8 3-5, q4 26-29 flips
+against f32, every one at a f32 top-2 margin of 0.002-1.3.  The pure-grid
+simulation itself flips 7/240, so the router is as faithful as the activation
+format allows — it is not a MoE bug.  The router stays i16 in every container
+(q4 included) and the expert map is the identity (12x12 cosine; the container
+audit's numbers).
+
+**The one hard defect: the FFN hidden rail.**  The expert SwiGLU hidden
+(`silu(w1*xbf) * w3*xbf`) is stored through the q16 activation format and
+clamps at +/-127.996.  On a chat prompt it reaches **158/161** (layer 3) and
+**250/222** (layer 7) at the template's `<|im_start|>` positions, i.e. 49% of
+the layer-7 value is cut; clipping the f32 hidden reproduces the engine's FFN
+output at those positions to 0.02-0.6% (unclipped: 4-25%).  The dense 64M model
+peaks at 88.8 and the plain-text PPL corpus at 15.1, so `--ppl` cannot see it.
+The numeric fix (a per-tensor power-of-two scale on the hidden store, folded
+into the w2 read-back) is **not** landed — it needs its own A/B and
+re-baseline.  The packer now warns, and its calibration samples the tokenizer's
+added tokens, which is what makes the chat-template positions visible at pack
+time: see [`model-formats.md`](model-formats.md), "The packer checks the
+residual and FFN-hidden rails".
+
+Landed with the audit, all verified:
+
+* packer: a MoE container always gets `split_w13 = 1` (an expert width <= 1024
+  used to pack a file the loader then refused); the q4 record's `group` byte is
+  the real group size; the skew report covers the expert matrices.
+* engine: the CPU layer loop's RMSNorm uses the container's eps instead of a
+  hardcoded 1e-5 (the CPU-vs-GPU xb difference halves on a model that states
+  1e-6); `MODEL_BORROW=0` works for q4 (the copy path truncated the group
+  planes) and keeps a copy of the tokenizer blob instead of pointing into the
+  unmapped file; q4 planes are shape-checked at load.
+* tools: `--verify` compares every record field with the source tensor (a
+  swapped expert `aux` now fails instead of running the wrong expert);
+  `mmcf_requant_q8.py` refuses a non-i16 source; `mmcf_dump.py` counts MoE
+  expert tensors and states the default eps when key 11 is absent;
+  `ref_stages.py` gained MoE support (its dense multi-token prefix bug is
+  documented but left as it was).
+* `regression.sh`: optional `MOE_ROUTES` baseline, so the discrete part of a
+  MoE can be pinned per machine, not only the text.
+
+If the llama.cpp comparison is repeated: the host's
+`~/.config/llama.cpp/config.ini` sets `cache-type-k/v = q8_0` and
+`flash-attn = on`, which moves log probabilities by up to 0.148 (four orders of
+magnitude over the real agreement) unless `-ctk f32 -ctv f32 -fa off` is
+passed, and `ignore_eos` fabricates a greedy divergence by banning EOS.  Also
+`llama-perplexity -c 768` cannot run on a 294-token corpus (it wants at least
+2*n_ctx tokens), so the PPL above was measured per position through
+`/completion` with `n_probs=n_vocab`.
+
+
+## The FFN hidden rail: per-layer 2^-k on the store (2026-11-12, Xe)
+
+This supersedes the "numeric fix is not landed" note in the audit section
+above; the fix landed the same day.  The pattern is the one `GPU::matvec_s()`
+established for a matvec input: one exact power-of-two scale at the point where
+a value crosses the fixed-point grid.
+
+**How it works.**  The packer's float32 calibration (three vocabulary runs plus
+one run per tokenizer added token) yields a per-layer hidden peak.  Key 15
+carries one byte per layer: `k` is the smallest exponent with
+`peak / 2^k <= 127.996`, capped at 5.  The serial FFN kernels write the SwiGLU
+hidden `* 2^-k` (one multiply before the q16 encode; the emitted GLSL is
+byte-identical when `k = 0`, so `scripts/shader_hashes.sh` is untouched), and
+`Model::apply_hidden_scale()` multiplies every w2 and w2 chunk by `2^k` after
+`split_ffn()`.  The read side needs no shader change: `ws`/`ps` already carry
+a per-matrix scale, and the q8 row-scale path multiplies the same unit.  The
+two-position prefill kernels have no hidden scale, so `pair_ok()` refuses a
+scaled container's prefill pair (the MoE block already refused it); scaled
+dense models would fall back to the serial loop.
+
+For MiniMind3-MoE the calibration gives `k = 0 0 0 1 0 0 0 1` (layers 3 and
+7; store peak 249.9 -> 124.9).  Repacked from the same safetensors, `SEQ=768`,
+30-token chat prompt, `GPU_LAYER=1 KV_PACK=16`:
+
+| measurement | shipped (no key 15) | repacked (k=1 on L3/L7) |
+|---|---:|---:|
+| q8 `hidA` at l3 t0: max error vs float32 | 1.748 | **0.247** |
+| q8 `hidA` at l7 t0: max error vs float32 | 7.668 | **0.349** |
+| q8 `hidA` mean error, all 240 positions | 0.0864 | **0.0624** |
+| i16 `hidA` at l7 t0: max error | 7.589 | **0.217** |
+| q8 logits vs float32: mean / cos | 0.1834 / 0.997507 | **0.1764 / 0.997707** |
+| i16 logits vs float32: mean / cos | 0.1405 / 0.998571 | **0.1261 / 0.998847** |
+| routes, 304 lines (prompt + 8 decoded) | -- | identical |
+| greedy text | `Hello! How can I assist you today` | identical |
+
+PPL, same 293-token corpus.  That text never crosses the hidden rail (peak
+15.1), so this table is the *resolution cost* of one bit on two layers, not the
+clip:
+
+| container | shipped | scaled |
+|---|---:|---:|
+| i16 | 389.3532 | 391.1756 (+0.47%) |
+| q8 | 350.8860 | 352.5846 (+0.48%) |
+| q4 | 437.7821 | **426.6095 (-2.55%)** |
+
++0.005 nats/token is well inside the per-token scatter (sd ~0.3-0.4 on 293
+tokens); q4 moves the other way because its weight noise dominates.  The trade
+is deliberate: the clip cut 49% of the layer-7 hidden at the template's
+`<|im_start|>` positions on *every* chat prompt, and that is gone.  A model that
+stays under the rail gets no key 15 and a byte-identical container: MiniMind3
+dense peaks at 88.3 and the plain-text corpus at 15.1.
+
+**What this does not fix.**  The scale is per layer, not per position; a
+per-token dynamic scale (the way `matvec_s` works) would avoid the resolution
+cost but needs a readback per layer per token, and that readback is exactly
+what the MoE route already pays once per layer.  Containers already in the
+store predate key 15 and still clamp until re-packed — `models/minimind3-moe/`
+was not touched by this change.  Re-pack with the usual command; the packer
+prints the chosen exponents next to the peaks.
+
+## 2026-11-12 — deliberate shader re-baseline (hybrid q8 conv fix)
+
+`matvec_q8_*_i16_2` (the I16_2 fast path of the non-pair q8 matvec) changed
+text: 839 B -> 748 B, digest `3ca31cd46926e2fb` -> `470ba9d4bf6c94e7`.  It used
+to encode its result as an unsigned q16 (adding 65536 for a negative sum) and
+*then* add the q24 bias, so every negative output came back 256 too large.
+The only user is the LFM2 conv block (dense q8 models never call the non-pair
+path), which is why no existing PPL pin moved: laptop q8 PPL 270.3170 and q4
+330.5302 are unchanged, `scripts/regression.sh` ACCEPTs, and the golden strings
+reproduce.  The hybrid q8 container now translates (`This product is out of
+stock.`) instead of emitting noise; `docs/lfm2.5-230m.md` gap 8 has the staging
+evidence.

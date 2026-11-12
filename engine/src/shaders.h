@@ -30,7 +30,7 @@ std::string att_helpers();
 
 std::string matvec_q8(int rows, int cols, XFormat xf, bool wrow = false);
 std::string matvec_q8_pair(int rows, int cols, XFormat xf, bool wrow = false);
-std::string matvec_q8_pair_swiglu(int rows, int cols, XFormat xf, bool inl = true, bool wrow = false);
+std::string matvec_q8_pair_swiglu(int rows, int cols, XFormat xf, bool inl = true, bool wrow = false, int hs = 0);
 std::string matvec_q8_gate2(int rows, int cols);
 std::string matvec_q8_p2(int rows, int cols, bool wrow = false);
 std::string rms_stats2(int dim, XFormat rf);
@@ -52,12 +52,17 @@ std::string matvec_i4(int rows, int cols, XFormat xf, bool inl = true);
 std::string matvec_i6(int rows, int cols, XFormat xf, bool wrow);
 std::string matvec_i4_add(int rows, int cols, XFormat xf, XFormat rf);
 std::string matvec_i4_pair(int rows, int cols, XFormat xf);
-std::string matvec_i4_pair_swiglu(int rows, int cols, XFormat xf, bool inl = true);
+std::string matvec_i4_pair_swiglu(int rows, int cols, XFormat xf, bool inl = true, int hs = 0);
 std::string matvec_i4_add_pair(int rows, int cols, XFormat xf, bool inl = true);
 
-std::string swiglu_pair(int hidden, XFormat out);
-std::string swiglu_2row(int hidden, XFormat out);
-std::string swiglu(int hidden, bool fused, XFormat out);
+// `hs` is the container's per-layer FFN-hidden scale exponent (metadata key
+// 15): the hidden is written as value * 2^-hs so it fits the q16 activation
+// rail, and w2's read-back multiplies by 2^hs.  hs = 0 emits exactly the text
+// the builder produced before the key existed, so every existing container's
+// programs are byte-identical.
+std::string swiglu_pair(int hidden, XFormat out, int hs = 0);
+std::string swiglu_2row(int hidden, XFormat out, int hs = 0);
+std::string swiglu(int hidden, bool fused, XFormat out, int hs = 0);
 // LFM2 conv block: elementwise gate, 3-tap depthwise convolution, and a copy
 // (the state shift).  All three work in raw q16 units on I16_2 textures.
 // One elementwise multiply of two conv-block activations.  A and B each

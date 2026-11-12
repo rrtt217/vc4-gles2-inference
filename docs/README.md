@@ -23,6 +23,7 @@ Deep dives:
 | [long-context.md](long-context.md) | why the Pi stops at 2048 tokens, and what passing it would cost |
 | [vc4-glsl-costs.md](vc4-glsl-costs.md) | what each GLSL function costs on VC4, read from Mesa 26.2.2 — and the six that abort the process |
 | [test-hooks.md](test-hooks.md) | environment switches: probes, dumps, A/B hooks |
+| [evaluation.md](evaluation.md) | **model quality, measured**: the multiple-choice battery (letter logprob, calibrated, format compliance), the instruction-following battery and the translation battery (chrF), with the 2026-11-12 numbers |
 | [vc4-1536-repro.md](vc4-1536-repro.md) | the runbook for the two open VC4 questions: is a single 1536 draw wrong, and what changing the vocabulary grid costs |
 | [vc4-mesa-debug-build.md](vc4-mesa-debug-build.md) | cross-building Mesa 26.2.2 for the Pi on 107, the soname/version traps, and what the instrumented vc4 driver showed |
 | [prefix-cache.md](prefix-cache.md) | in-memory and disk KV prefix cache, packed cache |

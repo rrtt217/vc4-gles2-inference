@@ -76,6 +76,7 @@ def main():
     p = mo
     tok_bytes = 0
     has_moe = False
+    have_eps = False
     tmpls = {}
     while p + 8 <= mo + ms:
         key, typ, ln = rd(raw, p, "<HHI")
@@ -123,13 +124,16 @@ def main():
             print(f"residual    {payload[0] and 'q24 (1 value/texel, +-32768)' or 'q16 (2 per texel, +-128)'}")
         elif key == 11 and ln >= 4:
             import struct as _s
-            print(f"rms eps     {_s.unpack('<f', bytes(payload[:4]))[0]:g}"
-                  f"{'' if payload else ' (default 1e-05)'}")
+            have_eps = True
+            print(f"rms eps     {_s.unpack('<f', bytes(payload[:4]))[0]:g}")
         elif key == 13 and ln >= 16:
             ne, tk, mh, mf = struct.unpack_from("<4i", payload)
             has_moe = True
             print(f"moe         experts {ne} top_k {tk} expert_hidden {mh} "
                   f"norm_topk_prob {bool(mf & 1)}")
+        elif key == 15 and ln >= 1:
+            print(f"ffn scale   hidden * 2^-k per layer: "
+                  + " ".join(str(int(b)) for b in payload))
         elif key == 14 and ln >= 1:
             kinds = {0: "attn", 1: "conv"}
             print(f"layers      {ln} typed: "
@@ -139,6 +143,11 @@ def main():
             fmt = lambda v: "unset" if v == 255 else str(v)
             print(f"bos/eos     add_bos {fmt(ab)} add_eos {fmt(ae)}")
         p += 8 + ln
+
+    if not have_eps:
+        # A file without key 11 uses the engine default, and printing nothing
+        # here read as "this model has no eps" rather than "1e-05".
+        print("rms eps     absent (engine default 1e-05)")
 
     if args.template is not None:
         body = tmpls.get(args.template)
@@ -172,9 +181,17 @@ def main():
     if rplanes:
         print(f"q8 rows     {len(rplanes)} per-row scale plane(s), {sum(t[5] for t in rplanes)} B "
               f"({sum(t[2] for t in rplanes)} rows total)")
-    nex = sum(1 for t in rows if t[8])
-    if nex:
-        print(f"experts     {nex} tensor(s) carry an expert index")
+    if has_moe:
+        # v3 expert matrices: layers x experts x 3 bodies.  Counting `aux != 0`
+        # missed expert 0 (24 of 96) and counted the q4/q8 plane records, which
+        # also carry aux: the old line said 72 for a 96-tensor block.
+        nex = sum(1 for t in rows
+                  if (t[0] & 0xFF) in (0x12, 0x13, 0x15) and (t[0] >> 14) == 0)
+        print(f"experts     {nex} expert matrix tensor(s)")
+    else:
+        nex = sum(1 for t in rows if t[8])
+        if nex:
+            print(f"experts     {nex} tensor(s) carry an expert index")
     print(f"tensor data {total} B in {n} tensors, {len(raw) - total - table} B of headers/padding")
     if args.tensors:
         for tid, dt, rws, cls, off, blen, crc, scale, aux in rows:

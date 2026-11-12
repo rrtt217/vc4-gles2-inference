@@ -52,6 +52,14 @@
         }
         ok = load_mmcf();
         fbase_ = nullptr; fsize_ = fpos_ = 0;
+        if (ok && !borrow_ && tok_blob && tok_blob_bytes) {
+                // load_mmcf() borrows the tokenizer blob from the mapping that
+                // this path unmaps below; copy it before the munmap or the
+                // tokenizer (read after load()) decodes a released page.
+                const uint8_t* p = (const uint8_t*)tok_blob;
+                tok_owned.assign(p, p + tok_blob_bytes);
+                tok_blob = tok_owned.data();
+        }
         if (ok && getenv("MODEL_DUMP")) {
                 auto head = [](const char* n, const Mat& m) {
                         if (m.rows == 0) { cerr << "DUMP " << n << " empty\n"; return; }
@@ -100,7 +108,7 @@ void Model::materialize(Mat& m){
     if (m.ext_min4) { m.q4_min.assign(m.ext_min4, m.ext_min4 + (size_t)m.rows * m.groups); m.ext_min4 = nullptr; }
 }
 
-void Model::split_ffn(){
+void Model::split_ffn(int max_dim){
         if (is_moe()) {
                 // The 2048-row texture/viewport limit applies to the expert FFN,
                 // not to the (unused) dense width.  Each expert is chunked on
@@ -124,7 +132,17 @@ void Model::split_ffn(){
                 return;
         }
         if (hidden <= 2048) return;
-        if (hidden > 4096) { cerr << "hidden too large for two FFN chunks\n"; exit(1); }
+        // Two chunks are all the FFN kernels carry, and each chunk is written to
+        // a texture/FBO of its own width, so the real ceiling is 2x the driver's
+        // target limit: 4096 on VC4 (2048) and larger on desktop GLES2.  It used
+        // to be the literal 4096, which refused LFM2-350M's 4608 hidden even
+        // though a 2304-wide chunk is legal on Xe (2026-11-12).
+        const int chunk_limit = max_dim > 0 ? max_dim : 2048;
+        if (hidden > 2 * chunk_limit) {
+                cerr << "hidden " << hidden << " needs two FFN chunks wider than the "
+                     << "GL target limit " << chunk_limit << "\n";
+                exit(1);
+        }
         ffn_chunked = true;
         ffn_chunk = (hidden + 1) / 2;
         for (int l = 0; l < layers; ++l) {
@@ -137,6 +155,36 @@ void Model::split_ffn(){
         }
         w1.clear(); w3.clear(); w2.clear();
     }
+
+// Metadata key 15: the SwiGLU hidden is written *2^-k by the FFN kernels, so
+// every w2 (and its chunks, after split_ffn) has to read back *2^k.  For a
+// power of two this is exact in float32 and costs one multiply here, with no
+// shader change on the read side: q8/i16 carry it in the scale field (the ws
+// uniform), q4 in q4_param_scale (the ps uniform), and the q8 row-scale path
+// multiplies the row plane by the same unit, so all three forms follow.
+void Model::apply_hidden_scale(){
+        if (hid_scale.empty()) return;
+        auto scale_mat = [](Mat& m, float s) {
+                if (m.rows <= 0) return;
+                if (m.type == WeightType::INT4) m.q4_param_scale *= s;
+                else m.scale *= s;
+        };
+        for (int l = 0; l < layers; ++l) {
+                const int k = hid_shift(l);
+                if (k <= 0) continue;
+                const float s = (float)(1u << k);
+                if (is_moe()) {
+                        for (auto& e : moe[l]) {
+                                scale_mat(e.w2, s);
+                                scale_mat(e.w2a, s);
+                                scale_mat(e.w2b, s);
+                        }
+                } else {
+                        if (l < (int)w2.size()) scale_mat(w2[l], s);
+                        if (l < (int)w2a.size()) { scale_mat(w2a[l], s); scale_mat(w2b[l], s); }
+                }
+        }
+}
 
 bool Model::quantize_q4(Mat& m){
         materialize(m);
@@ -450,6 +498,8 @@ bool Model::load_mmcf(){
                         if (e > 0.0f) { rms_eps = e; rms_eps_stated = true; }
                 } else if (key == 14 && type == 1 && len >= 1) {
                         layer_type.assign(payload, payload + len);
+                } else if (key == 15 && type == 1 && len >= 1) {
+                        hid_scale.assign(payload, payload + len);
                 } else if (key == 10 && type == 1 && len >= 2) {
                         add_bos = payload[0] == 255 ? -1 : (int)payload[0];
                         add_eos = payload[1] == 255 ? -1 : (int)payload[1];
@@ -466,6 +516,20 @@ bool Model::load_mmcf(){
                 cerr << "mmcf: layer types " << layer_type.size() << " for "
                      << layers << " layers\n";
                 return false;
+        }
+        if (!hid_scale.empty()) {
+                if ((int)hid_scale.size() != layers) {
+                        cerr << "mmcf: hidden-scale metadata has " << hid_scale.size()
+                             << " entries for " << layers << " layers\n";
+                        return false;
+                }
+                for (int l = 0; l < layers; ++l) {
+                        if (hid_scale[l] > 5) {
+                                cerr << "mmcf: layer " << l << " hidden scale 2^-"
+                                     << (int)hid_scale[l] << " is out of range (0..5)\n";
+                                return false;
+                        }
+                }
         }
         for (uint8_t t : layer_type) {
                 if (t > 1) { cerr << "mmcf: unknown layer type " << (int)t << "\n"; return false; }
@@ -720,13 +784,28 @@ bool Model::load_mmcf(){
                 m.group = 32;
                 m.groups = (int)q.scl->cols;   // groups per row, not the plane size
                 m.q4_param_scale = q.body->scale;
+                // A truncated or mis-shaped plane used to be read out of bounds
+                // (the copy path also copied one row's worth); validate the
+                // three records against each other before either path runs.
+                if (q.scl->rows != q.body->rows || q.mn->rows != q.body->rows ||
+                    q.scl->cols != q.mn->cols ||
+                    q.scl->bytes != (uint64_t)q.body->rows * q.scl->cols * 2 ||
+                    q.mn->bytes != (uint64_t)q.body->rows * q.mn->cols * 2 ||
+                    q.body->bytes != (uint64_t)q.body->rows * (q.body->cols / 2)) {
+                        cerr << "mmcf: q4 tensor 0x" << std::hex << id << std::dec
+                             << " expert " << expert
+                             << " has inconsistent body/scale/min plane sizes\n";
+                        return false;
+                }
                 if (!borrow_) {
                         m.q4.assign((const uint8_t*)(fbase_ + data_off + q.body->off),
                                     (const uint8_t*)(fbase_ + data_off + q.body->off) + q.body->bytes);
                         m.q4_scale.assign((const int16_t*)(fbase_ + data_off + q.scl->off),
-                                          (const int16_t*)(fbase_ + data_off + q.scl->off) + m.groups);
+                                          (const int16_t*)(fbase_ + data_off + q.scl->off) +
+                                          (size_t)m.rows * m.groups);
                         m.q4_min.assign((const int16_t*)(fbase_ + data_off + q.mn->off),
-                                        (const int16_t*)(fbase_ + data_off + q.mn->off) + m.groups);
+                                        (const int16_t*)(fbase_ + data_off + q.mn->off) +
+                                        (size_t)m.rows * m.groups);
                 } else {
                         m.ext4 = (const uint8_t*)(fbase_ + data_off + q.body->off);
                         m.ext_scale4 = (const int16_t*)(fbase_ + data_off + q.scl->off);

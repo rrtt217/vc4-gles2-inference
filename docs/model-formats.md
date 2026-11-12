@@ -175,30 +175,43 @@ python3 engine/tools/mmcf_dump.py models/<model>/<model>.q4.mmcf --check
 A llama2.c fp32 `.bin` is the other accepted source: `--in models/llama2c/
 stories15M.bin --quant i16 --tok .../tokenizer.bin --template plain --chat`.
 
-### The packer checks the residual rail
+### The packer checks the residual and FFN-hidden rails
 
 The engine's residual stream is q16 at 1/256, so it clamps at **127.996**.
-A model whose residual is larger still packs and still runs, but from a
-truncated state — supra2-100M reaches 2300 and echoes the prompt, feng30m
-reaches 212 and answers correctly.  Because that is the only cheap place to
-notice, `mmcf_pack.py` runs a short float32 calibration (three 8-token samples,
-~2 s) before writing, prints
+The FFN's SwiGLU hidden travels through the same activation format and clamps at
+the same value.  A model over either rail still packs and still runs, but from
+a truncated state — supra2-100M's residual reaches 2300 and it echoes the
+prompt, and MiniMind3-MoE's expert hidden reaches **250** at the chat template's
+`<|im_start|>` positions (a 49% cut of that hidden) while its residual peaks at
+118.  Because the packer is the only cheap place to notice, `mmcf_pack.py` runs
+a short float32 calibration before writing — three 8-token vocabulary runs plus
+one run per special/added token (ids from `tokenizer.json`, so the template
+positions a chat prompt actually uses are exercised; position 0 depends only on
+its own embedding, which is what the added-token runs exploit) — about 2 s, and
+prints both peaks:
 
 ```
-residual: peak 46.1 at layer 7 (rail 128.0), per layer 1 8 23 40 42 43 43 46
+residual: peak 118.7 at layer 6 (rail 128.0), per layer 1 21 30 110 111 118 119 95
+ffn hidden: peak 249.9 at layer 7 (activation rail 128.0), per layer 4 51 35 163 7 32 10 250
 ```
 
-and then:
+and then, for either stream:
 
 | peak | behaviour |
 |---|---|
-| < 96 | silent |
-| 96 – 512 | warning, packs |
-| > 512 (4x the rail) | **refuses**, exit 1, names the ratio and points at `models/README.md` |
+| residual < 96, hidden <= 127.996 | silent |
+| residual 96 – 512 | warning, packs |
+| hidden > 127.996 | warning with the cut depth, packs |
+| either > 4x the rail (512) | **refuses**, exit 1, names the ratio and points at `models/README.md` |
 
 `--allow-over-rail` packs anyway; `--no-rail-check` skips the calibration.  A
 legacy source has no float weights to run, so the packer prints a note instead
-of guessing.
+of guessing.  A residual over the rail is a packing decision; a *hidden* over
+the rail is handled by **key 15** — the packer writes the smallest per-layer
+exponent `k` whose store fits, the serial FFN kernels write the hidden
+`*2^-k`, and the engine folds `2^k` back into w2.  `--no-rail-check` writes no
+key and keeps the old clamped behaviour.  See
+[`checkpoint-container.md`](checkpoint-container.md), "The activation rail".
 
 The arithmetic is the same as the converters that used to exist, which is why a
 container packed from safetensors is **byte-identical** to one packed from the

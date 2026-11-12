@@ -137,6 +137,7 @@ chat model.
 - [Prefix cache](docs/prefix-cache.md)
 - [Performance](docs/performance.md)
 - [Test hooks](docs/test-hooks.md)
+- [Evaluation: model quality](docs/evaluation.md) — the multiple-choice, instruction-following and translation batteries
 - [Source layout / split decision](docs/engine-layout.md)
 - [Future optimization directions](docs/future-optimization.md)
 - [Agent notes](AGENTS.md)

@@ -57,12 +57,15 @@ public:
 
     vector<float> matvec_from(const Mat& m, GLuint x);
 
-    GLuint ffn_split(const Mat& w1, const Mat& w3, GLuint x, int hidden);
-    GLuint ffn_fused(const Mat& w13, GLuint x, int hidden);
+    // `hs` = the layer's FFN-hidden store scale exponent (metadata key 15):
+    // the SwiGLU output is written *2^-hs and w2's scale was already folded by
+    // 2^hs in Model::apply_hidden_scale().  hs = 0 is the historical path.
+    GLuint ffn_split(const Mat& w1, const Mat& w3, GLuint x, int hidden, int hs = 0);
+    GLuint ffn_fused(const Mat& w13, GLuint x, int hidden, int hs = 0);
 
     // Paired gate matvec + swiglu for one FFN chunk.
-    GLuint ffn_pair_chunk(const Mat& w1, const Mat& w3, GLuint x, int hidden, Target& pair_buf, Target& out);
-    GLuint ffn_pair_swiglu_chunk(const Mat& w1, const Mat& w3, GLuint x, int rows, Target& out);
+    GLuint ffn_pair_chunk(const Mat& w1, const Mat& w3, GLuint x, int hidden, Target& pair_buf, Target& out, int hs = 0);
+    GLuint ffn_pair_swiglu_chunk(const Mat& w1, const Mat& w3, GLuint x, int rows, Target& out, int hs = 0);
     // Two-position variants: one weight fetch feeds two positions (item 7b).
     GLuint ffn_pair_swiglu_chunk2(const Mat& w1, const Mat& w3, GLuint x2, int rows, Target& out);
     void matvec_p2(const Mat& m, GLuint xp2, Target& out);
@@ -73,18 +76,18 @@ public:
     void matvec_p2_add_p2(const Mat& m, GLuint xp2, GLuint rp2, Target& out);
     void matvec_p2_add(const Mat& m, GLuint xp2, GLuint ra, GLuint rb, Target& out);
     void p2_split(GLuint xp2, Target& out, int which);
-    GLuint ffn_pair_i4_swiglu_chunk(const Mat& w1, const Mat& w3, GLuint x, int rows, Target& out);
+    GLuint ffn_pair_i4_swiglu_chunk(const Mat& w1, const Mat& w3, GLuint x, int rows, Target& out, int hs = 0);
 
     void ffn_split_chunked(const Mat& w1a, const Mat& w3a, const Mat& w1b, const Mat& w3b,
-                           GLuint x, int n1, int n2, GLuint& ha, GLuint& hb);
+                           GLuint x, int n1, int n2, GLuint& ha, GLuint& hb, int hs = 0);
 
-    GLuint swiglu_2row(Target& src, int hidden);
+    GLuint swiglu_2row(Target& src, int hidden, int hs = 0);
 
-    GLuint swiglu_2row(Target& src, int hidden, Target& out);
+    GLuint swiglu_2row(Target& src, int hidden, Target& out, int hs = 0);
 
     GLuint swiglu_split(Target& a, Target& b);
 
-    GLuint swiglu_fused(Target& src, int hidden);
+    GLuint swiglu_fused(Target& src, int hidden, int hs = 0);
 
     vector<float> logits(const vector<Mat>& tiles, const vector<float>& x);
 
@@ -188,7 +191,7 @@ private:
     GLuint x_q8(int rows, int cols, bool wrow = false);
     GLuint x_q6(int rows, int cols, bool wrow = false);
     GLuint x_q8_pair(int rows, int cols, bool wrow = false);
-    GLuint x_q8_pair_swiglu(int rows, int cols, bool wrow = false);
+    GLuint x_q8_pair_swiglu(int rows, int cols, bool wrow = false, int hs = 0);
     GLuint x_q8_gate2(int rows, int cols);
     GLuint x_q8_p2(int rows, int cols, bool wrow = false);
     GLuint x_rms_stats2();
@@ -199,7 +202,7 @@ private:
     GLuint x_p2_split(int rows);
     GLuint x_q8_pair_fused(int rows, int cols, bool wrow = false);
     GLuint x_i4_pair(int rows, int cols);
-    GLuint x_i4_pair_swiglu(int rows, int cols);
+    GLuint x_i4_pair_swiglu(int rows, int cols, int hs = 0);
     GLuint x_q8_add(int rows, int cols, XFormat xf, bool wrow = false);
     GLuint x_q8_add_pair(int rows, int cols, XFormat xf, bool wrow = false);
     GLuint x_i4_add_pair(int rows, int cols, XFormat xf);
@@ -207,9 +210,9 @@ private:
     GLuint x_i16_add(int rows, int cols, XFormat xf);
     GLuint x_i4(int rows, int cols);
     GLuint x_i4_add(int rows, int cols, XFormat xf);
-    GLuint x_swiglu_pair(int hidden);
-    GLuint x_swiglu_2row(int hidden);
-    GLuint x_swiglu(int hidden, bool fused);
+    GLuint x_swiglu_pair(int hidden, int hs = 0);
+    GLuint x_swiglu_2row(int hidden, int hs = 0);
+    GLuint x_swiglu(int hidden, bool fused, int hs = 0);
     GLuint x_rms_split();
     GLuint x_rms_reduce();
     GLuint x_rms_norm(bool use_eps_uniform);

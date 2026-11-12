@@ -42,7 +42,7 @@ exist.
 | `PROMPT_IDS` (with `CHAT_DUMP=1`) | the ids the model will actually see, as `PROMPT_IDS <n>: <id> ...`.  A template that renders to the same bytes can still tokenise differently, and the ids are what the model reads |
 | `CONV_SKIP=1` | LFM2 hybrid, `CONV_GPU=1`: the conv layers become identity copies, to separate a conv-block bug from the rest of the GPU path |
 | `CONV_GPU=1` | LFM2 hybrid only: run the conv block through its GPU passes instead of the serial reference path.  Experimental — the elementwise chain does not yet agree with the CPU path |
-| `CONV_DEBUG=1` | prints the first values of the LFM2 conv block's stages (`xb`, `in_proj`, gates, conv output) for layer 0, next to the CPU reference |
+| `CONV_DEBUG=1` | prints the first values of the LFM2 conv block's stages (`xb`, `in_proj`, gates, conv output) for layer 0, next to the CPU reference; on the fused path (`GPU_LAYER=1`) it also prints the GPU `gated`/`cv`/`y` stages and the residual the `matvec_add` wrote, so the two paths can be compared without a dump file |
 | `LOGITS_OUT=path` | float32 logits after prefill.  `engine/scripts/cmp_logits.py` compares two of them per tile |
 | `TOKENS_OUT=path` | prompt + generated token ids (int32).  A tool turn rewrites it after each model round, so a watcher sees every round |
 | `MODEL_DUMP=1` | the parsed model metadata, right after load |

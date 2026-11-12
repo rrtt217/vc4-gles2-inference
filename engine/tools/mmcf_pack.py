@@ -33,8 +33,8 @@ import zlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from mmcf_grid import LOGITS_GRID
-from mmcf_hf import (RESIDUAL_RAIL, RESIDUAL_WARN, is_llama2c, load_llama2c,
-                     tensors_from_hf, tok_entry_count)
+from mmcf_hf import (ACTIVATION_RAIL, RESIDUAL_RAIL, RESIDUAL_WARN, is_llama2c,
+                     load_llama2c, tensors_from_hf, tok_entry_count)
 
 # tensor table record: id, dtype, flags, group, pad, rows, cols, offset, bytes,
 # crc32, scale, aux -> exactly 64 bytes in v3, no implicit padding with "<".
@@ -358,6 +358,12 @@ def build(meta, tensors, tok_blob, args):
     # Absent means "every layer is attention", which is every other model.
     if meta.get('layer_types'):
         md += tlv(14, 1, bytes(1 if t == 'conv' else 0 for t in meta['layer_types']))
+    # key 15: the FFN hidden store's per-layer scale exponent.  Layer k means
+    # the SwiGLU hidden is written *2^-k (so the q16 activation rail fits) and
+    # w2's read-back multiplies by 2^k.  Absent = every layer 0, which is every
+    # container packed before 2026-11-12.
+    if meta.get('hid_scale'):
+        md += tlv(15, 1, bytes(int(k) for k in meta['hid_scale']))
     # key 13: the mixture-of-experts block.  Absent means dense (every existing
     # container).  flags bit 0 says the top-k gate is normalised, which is what
     # lets top-1 use the selected expert with weight 1.0.
@@ -416,7 +422,15 @@ def build(meta, tensors, tok_blob, args):
     return bytes(out)
 
 
-def verify(path, tensors):
+def verify(path, tensors, tok=None):
+    """Re-read the file and check its records against the source tensor table.
+
+    The body CRC alone cannot see a wrong id, dtype, shape, scale or expert
+    index: a container with two experts' `aux` swapped passes a CRC-only check
+    and the engine then runs the wrong expert.  The records are written in the
+    source-tensor order, so this compares them field by field (the audit's
+    2026-11-12 mutant test is why the fields are checked and not just the CRC).
+    """
     raw = Path(path).read_bytes()
     if raw[:4] != MAGIC:
         raise SystemExit("verify: bad magic")
@@ -430,13 +444,47 @@ def verify(path, tensors):
         raise SystemExit("verify: file size field %d != %d" % (fsz, len(raw)))
     rsize = rec_size(ver)
     table = doff - n * rsize
+    want = []
+    for rec in tensors:
+        tid, dt, rows, cols, group, payload, scale = rec[:7]
+        aux = rec[7] if len(rec) > 7 else 0
+        if dt == DT_Q8I8 and (tid & 0xFF) != T_EMB:
+            dt = DT_Q8U8
+        want.append((tid, dt, int(rows), int(cols), int(group), float(scale), int(aux)))
+    if tok is not None:
+        want.append((T_TOKENIZER, DT_BLOB, len(tok), 1, 0, 0.0, 0))
+    if len(want) != n:
+        raise SystemExit("verify: %d records but %d source tensors" % (n, len(want)))
     bad = 0
+    field_bad = 0
     for i in range(n):
         rec = raw[table + i * rsize: table + (i + 1) * rsize]
-        tid, dt, rows, cols, off, blen, crc, _sc = unpack_rec(rec)
+        tid, dt, _flags, group, rows, cols, off, blen, crc, scale, aux = rec_unpack(rec)
         body = raw[doff + off: doff + off + blen]
         if zlib.crc32(body) & 0xFFFFFFFF != crc:
             bad += 1
+        wtid, wdt, wrows, wcols, wgroup, wscale, waux = want[i]
+        mism = []
+        if tid != wtid:
+            mism.append("id 0x%x != 0x%x" % (tid, wtid))
+        if dt != wdt:
+            mism.append("dtype %d != %d" % (dt, wdt))
+        if rows != wrows or cols != wcols:
+            mism.append("shape %dx%d != %dx%d" % (rows, cols, wrows, wcols))
+        if group != wgroup:
+            mism.append("group %d != %d" % (group, wgroup))
+        if aux != waux:
+            mism.append("expert %d != %d" % (aux, waux))
+        if abs(scale - wscale) > 1e-6 * max(1.0, abs(wscale)):
+            mism.append("scale %.7g != %.7g" % (scale, wscale))
+        if mism:
+            field_bad += 1
+            if field_bad <= 8:
+                print("verify: record %d (id 0x%x) does not match the source tensor: %s"
+                      % (i, tid, ", ".join(mism)))
+    if field_bad:
+        raise SystemExit("verify: %d record(s) do not match the source tensor table"
+                         % field_bad)
     return n, caps, mo, ms, doff, len(raw), bad
 
 
@@ -556,8 +604,37 @@ def main():
                 "models/README.md (supra2-100M).  Pack it anyway with --allow-over-rail."
                 % (worst, worst / rail, rail))
         if worst > RESIDUAL_WARN:
-            print("warning: residual peak %.1f is at or over the %.1f rail; expect degraded "
-                  "answers" % (worst, rail))
+            print("warning: residual peak %.1f is %.0f%% of the %.1f rail; expect degraded "
+                  "answers" % (worst, 100.0 * worst / rail, rail))
+    # The FFN SwiGLU hidden goes through the same q16 activation format and is
+    # clamped at the same rail.  It is not the residual, so the check above
+    # cannot see it: MiniMind3-MoE's expert hidden reaches 250 at the chat
+    # template's <|im_start|> positions while the dense 64M model peaks at 88.8.
+    hpeaks = meta.get("hid_peaks")
+    if hpeaks:
+        hrail = ACTIVATION_RAIL
+        worst = max(hpeaks)
+        hscale = meta.get("hid_scale") or [0] * len(hpeaks)
+        scaled = max(peak / float(1 << int(hscale[l])) for l, peak in enumerate(hpeaks))
+        print("ffn hidden: peak %.1f at layer %d (activation rail %.1f), per layer %s"
+              % (worst, hpeaks.index(worst), hrail, " ".join("%.0f" % v for v in hpeaks)))
+        if meta.get("hid_scale"):
+            print("ffn hidden: store scaled, layer k = %s (hidden * 2^-k, w2 read *2^k, "
+                  "metadata key 15); worst store peak %.1f"
+                  % (" ".join(str(int(k)) for k in hscale), scaled))
+        if scaled > 4 * hrail and not args.allow_over_rail:
+            raise SystemExit(
+                "this model's FFN hidden still reaches %.0f after the per-layer scale, "
+                "%.0fx the engine's q16 activation rail (%.1f); the SwiGLU output is "
+                "clamped at every position that peaks, which is a truncated FFN, not a "
+                "precision loss.  Pack it anyway with --allow-over-rail."
+                % (scaled, scaled / hrail, hrail))
+        if scaled > hrail:
+            loss = 100.0 * (1.0 - hrail / scaled)
+            print("warning: the FFN SwiGLU hidden is still clamped by the q16 activation "
+                  "rail at the positions that reach %.0f after scaling (%.0f%% of that "
+                  "hidden is cut); the error is silent.  See docs/checkpoint-container.md."
+                  % (scaled, loss))
     # Sources without rope fields cannot state their rope, and a wrong theta or
     # half flag silently degrades every position: refuse to guess unless the
     # caller says so.
@@ -619,7 +696,7 @@ def main():
           (args.out, len(tensors) + (1 if tok else 0), len(raw), args.src))
 
     if args.verify:
-        n, caps, mo, ms, doff, fsz, bad = verify(args.out, tensors)
+        n, caps, mo, ms, doff, fsz, bad = verify(args.out, tensors, tok)
         print("verify: %d tensors, caps=0x%x meta=%d+%d data@%d size=%d crc_bad=%d" %
               (n, caps, mo, ms, doff, fsz, bad))
         if bad:

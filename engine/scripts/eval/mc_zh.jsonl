@@ -1,0 +1,50 @@
+{"id":"zh-001","lang":"zh","category":"math","difficulty":"easy","question":"一个长方形长 5 厘米、宽 3 厘米，它的面积是多少平方厘米？","options":["8","15","16","30"],"answer":1,"why":"长方形面积=长×宽=5×3=15。"}
+{"id":"zh-002","lang":"zh","category":"math","difficulty":"easy","question":"12 的一半再加上 3，结果是多少？","options":["6","7","9","15"],"answer":2,"why":"12÷2=6，6+3=9。"}
+{"id":"zh-003","lang":"zh","category":"math","difficulty":"easy","question":"三角形三个内角的和是多少度？","options":["90 度","180 度","270 度","360 度"],"answer":1,"why":"三角形内角和是 180 度。"}
+{"id":"zh-004","lang":"zh","category":"math","difficulty":"medium","question":"2 的 10 次方等于多少？","options":["20","100","512","1024"],"answer":3,"why":"2 的 10 次方是 1024。"}
+{"id":"zh-005","lang":"zh","category":"math","difficulty":"medium","question":"下面各分数中，数值最小的是哪一个？","options":["1/2","1/3","1/4","3/4"],"answer":2,"why":"分子相同时，分母越大分数越小。"}
+{"id":"zh-006","lang":"zh","category":"math","difficulty":"medium","question":"一个长方形的周长是 20 厘米，长是 6 厘米，宽是多少厘米？","options":["4 厘米","5 厘米","7 厘米","8 厘米"],"answer":0,"why":"20÷2=10，10−6=4。"}
+{"id":"zh-007","lang":"zh","category":"math","difficulty":"medium","question":"把 2 升水平均倒进 4 个杯子，每杯有多少毫升水？","options":["200 毫升","400 毫升","500 毫升","800 毫升"],"answer":2,"why":"2 升=2000 毫升，2000÷4=500。"}
+{"id":"zh-008","lang":"zh","category":"math","difficulty":"medium","question":"一个正方体有多少条棱？","options":["6 条","8 条","12 条","16 条"],"answer":2,"why":"正方体有 6 个面、8 个顶点、12 条棱。"}
+{"id":"zh-009","lang":"zh","category":"math","difficulty":"hard","question":"24 和 36 的最大公因数是多少？","options":["6","8","12","18"],"answer":2,"why":"24=2³×3，36=2²×3²，最大公因数是 12。"}
+{"id":"zh-010","lang":"zh","category":"math","difficulty":"hard","question":"5 的阶乘（5×4×3×2×1）等于多少？","options":["60","120","150","200"],"answer":1,"why":"5×4×3×2×1=120。"}
+{"id":"zh-011","lang":"zh","category":"chinese","difficulty":"easy","question":"“床前明月光”的下一句是什么？","options":["疑是地上霜","低头思故乡","举头望明月","天涯共此时"],"answer":0,"why":"出自李白《静夜思》。"}
+{"id":"zh-012","lang":"zh","category":"chinese","difficulty":"easy","question":"《西游记》的作者是谁？","options":["罗贯中","施耐庵","曹雪芹","吴承恩"],"answer":3,"why":"《西游记》的作者是吴承恩。"}
+{"id":"zh-013","lang":"zh","category":"chinese","difficulty":"medium","question":"“春眠不觉晓，处处闻啼鸟”的作者是谁？","options":["孟浩然","李白","杜甫","王维"],"answer":0,"why":"出自孟浩然《春晓》。"}
+{"id":"zh-014","lang":"zh","category":"chinese","difficulty":"medium","question":"“三人行，必有我师焉”出自哪部经典？","options":["《论语》","《孟子》","《庄子》","《大学》"],"answer":0,"why":"出自《论语·述而》。"}
+{"id":"zh-015","lang":"zh","category":"chinese","difficulty":"medium","question":"“欲穷千里目，更上一层楼”的作者是谁？","options":["王维","李白","杜甫","王之涣"],"answer":3,"why":"出自王之涣《登鹳雀楼》。"}
+{"id":"zh-016","lang":"zh","category":"chinese","difficulty":"medium","question":"“天”字的普通话读音是第几声？","options":["第一声","第二声","第三声","第四声"],"answer":0,"why":"天读 tiān，是第一声。"}
+{"id":"zh-017","lang":"zh","category":"chinese","difficulty":"hard","question":"“落霞与孤鹜齐飞，秋水共长天一色”出自哪篇文章？","options":["《岳阳楼记》","《滕王阁序》","《赤壁赋》","《兰亭集序》"],"answer":1,"why":"出自王勃《滕王阁序》。"}
+{"id":"zh-018","lang":"zh","category":"chinese","difficulty":"hard","question":"“不积小流，无以成江海”出自哪部作品？","options":["《论语》","《孟子》","《荀子》","《韩非子》"],"answer":2,"why":"出自《荀子·劝学》。"}
+{"id":"zh-019","lang":"zh","category":"history","difficulty":"easy","question":"中国历史上第一个统一的中央集权王朝是哪个？","options":["夏朝","商朝","秦朝","汉朝"],"answer":2,"why":"公元前 221 年秦统一六国。"}
+{"id":"zh-020","lang":"zh","category":"history","difficulty":"easy","question":"中华人民共和国成立于哪一年？","options":["1911 年","1921 年","1945 年","1949 年"],"answer":3,"why":"1949 年 10 月 1 日举行开国大典。"}
+{"id":"zh-021","lang":"zh","category":"history","difficulty":"easy","question":"中国古代四大发明中，用于航海辨别方向的是哪个？","options":["造纸术","印刷术","火药","指南针"],"answer":3,"why":"指南针用于航海定向。"}
+{"id":"zh-022","lang":"zh","category":"history","difficulty":"medium","question":"张骞出使西域发生在哪个朝代？","options":["秦朝","汉朝","唐朝","明朝"],"answer":1,"why":"汉武帝时张骞出使西域。"}
+{"id":"zh-023","lang":"zh","category":"history","difficulty":"medium","question":"唐朝的都城长安是今天的哪座城市？","options":["洛阳","西安","开封","南京"],"answer":1,"why":"唐都长安即今天的西安。"}
+{"id":"zh-024","lang":"zh","category":"history","difficulty":"medium","question":"“贞观之治”出现在哪位皇帝在位时期？","options":["汉武帝","唐太宗","宋太祖","明成祖"],"answer":1,"why":"唐太宗的年号是贞观。"}
+{"id":"zh-025","lang":"zh","category":"history","difficulty":"medium","question":"郑和下西洋发生在哪个朝代？","options":["宋朝","元朝","明朝","清朝"],"answer":2,"why":"明成祖派郑和下西洋。"}
+{"id":"zh-026","lang":"zh","category":"history","difficulty":"hard","question":"秦始皇统一六国是在公元前哪一年？","options":["公元前 221 年","公元前 206 年","公元前 202 年","公元前 256 年"],"answer":0,"why":"公元前 221 年秦灭齐，完成统一。"}
+{"id":"zh-027","lang":"zh","category":"geography","difficulty":"easy","question":"中国最长的河流是哪一条？","options":["长江","黄河","珠江","黑龙江"],"answer":0,"why":"长江全长约 6300 千米。"}
+{"id":"zh-028","lang":"zh","category":"geography","difficulty":"easy","question":"世界上面积最大的海洋是哪一个？","options":["太平洋","大西洋","印度洋","北冰洋"],"answer":0,"why":"太平洋面积居四大洋之首。"}
+{"id":"zh-029","lang":"zh","category":"geography","difficulty":"medium","question":"黄河最终注入哪个海？","options":["黄海","东海","南海","渤海"],"answer":3,"why":"黄河在山东北部注入渤海。"}
+{"id":"zh-030","lang":"zh","category":"geography","difficulty":"medium","question":"澳大利亚的首都是哪座城市？","options":["悉尼","墨尔本","堪培拉","珀斯"],"answer":2,"why":"澳大利亚首都是堪培拉。"}
+{"id":"zh-031","lang":"zh","category":"geography","difficulty":"medium","question":"世界上面积最大的岛屿是哪个？","options":["马达加斯加岛","格陵兰岛","新几内亚岛","加里曼丹岛"],"answer":1,"why":"格陵兰岛是世界面积最大的岛屿。"}
+{"id":"zh-032","lang":"zh","category":"geography","difficulty":"medium","question":"中国面积最大的省级行政区是哪个？","options":["西藏","内蒙古","新疆","青海"],"answer":2,"why":"新疆面积约 166 万平方千米。"}
+{"id":"zh-033","lang":"zh","category":"geography","difficulty":"hard","question":"中国面积最大的淡水湖是哪个？","options":["洞庭湖","太湖","洪泽湖","鄱阳湖"],"answer":3,"why":"鄱阳湖是中国最大的淡水湖。"}
+{"id":"zh-034","lang":"zh","category":"science","difficulty":"easy","question":"水的化学式是什么？","options":["CO2","O2","NaCl","H2O"],"answer":3,"why":"水分子由 2 个氢原子和 1 个氧原子组成。"}
+{"id":"zh-035","lang":"zh","category":"science","difficulty":"easy","question":"绿色植物利用阳光把二氧化碳和水变成有机物的过程叫什么？","options":["呼吸作用","蒸腾作用","发酵作用","光合作用"],"answer":3,"why":"这个过程的名称是光合作用。"}
+{"id":"zh-036","lang":"zh","category":"science","difficulty":"medium","question":"人体面积最大的器官是哪个？","options":["肝脏","心脏","皮肤","肺"],"answer":2,"why":"皮肤是人体面积最大的器官。"}
+{"id":"zh-037","lang":"zh","category":"science","difficulty":"medium","question":"光在真空中的传播速度约为每秒多少？","options":["3 万千米","30 万千米","300 万千米","3000 千米"],"answer":1,"why":"真空中的光速约为 30 万千米/秒。"}
+{"id":"zh-038","lang":"zh","category":"science","difficulty":"medium","question":"声音不能在哪种环境中传播？","options":["空气","水","钢铁","真空"],"answer":3,"why":"声音传播需要介质。"}
+{"id":"zh-039","lang":"zh","category":"science","difficulty":"medium","question":"血液中主要负责运输氧气的是哪种细胞？","options":["红细胞","白细胞","血小板","神经细胞"],"answer":0,"why":"红细胞中的血红蛋白负责运输氧气。"}
+{"id":"zh-040","lang":"zh","category":"science","difficulty":"medium","question":"太阳系中体积最大的行星是哪一颗？","options":["地球","火星","木星","土星"],"answer":2,"why":"木星是太阳系中最大的行星。"}
+{"id":"zh-041","lang":"zh","category":"science","difficulty":"hard","question":"铁元素的化学符号是什么？","options":["F","Fe","Ir","I"],"answer":1,"why":"Fe 源自拉丁语 Ferrum。"}
+{"id":"zh-042","lang":"zh","category":"science","difficulty":"hard","question":"酸雨主要由哪种气体的大量排放引起？","options":["二氧化碳","氧气","氮气","二氧化硫"],"answer":3,"why":"二氧化硫等气体是形成酸雨的主要原因。"}
+{"id":"zh-043","lang":"zh","category":"common_sense","difficulty":"easy","question":"在中国，发生火灾时应拨打哪个电话？","options":["110","119","120","122"],"answer":1,"why":"119 是火警电话。"}
+{"id":"zh-044","lang":"zh","category":"common_sense","difficulty":"easy","question":"乘坐汽车时，下列哪种做法最安全？","options":["系好安全带","把头伸出窗外","站在座位上","不扶扶手"],"answer":0,"why":"系安全带能减少碰撞时的伤害。"}
+{"id":"zh-045","lang":"zh","category":"common_sense","difficulty":"medium","question":"发现有人触电时，首先应该怎么做？","options":["用手把他拉开","泼水降温","先做人工呼吸","立即切断电源"],"answer":3,"why":"先断电才能安全施救。"}
+{"id":"zh-046","lang":"zh","category":"common_sense","difficulty":"medium","question":"电器着火时不能直接用水扑灭，主要原因是什么？","options":["水会导电","水太贵","水会结冰","水会蒸发"],"answer":0,"why":"水导电，可能引起触电。"}
+{"id":"zh-047","lang":"zh","category":"common_sense","difficulty":"medium","question":"洗手的主要目的是什么？","options":["去除细菌和污垢","让手变白","节约用水","让手变香"],"answer":0,"why":"洗手能去除手上的病菌。"}
+{"id":"zh-048","lang":"zh","category":"logic","difficulty":"easy","question":"甲比乙高，乙比丙高，三个人中谁最矮？","options":["甲","乙","丙","一样高"],"answer":2,"why":"甲>乙>丙，所以丙最矮。"}
+{"id":"zh-049","lang":"zh","category":"logic","difficulty":"hard","question":"如果“所有的鸟都会飞”这句话是假的，那么下面哪项一定成立？","options":["所有的鸟都不会飞","没有鸟会飞","只有一只鸟会飞","至少有一只鸟不会飞"],"answer":3,"why":"全称命题为假，说明存在反例。"}
+{"id":"zh-050","lang":"zh","category":"logic","difficulty":"hard","question":"笼子里有鸡和兔共 10 只，共有 28 只脚，兔子有几只？","options":["3 只","4 只","5 只","6 只"],"answer":1,"why":"兔 4 只、鸡 6 只，共 28 只脚。"}

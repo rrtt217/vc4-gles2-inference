@@ -57,6 +57,10 @@ public:
     // the chat template / default system prompt come from its metadata.
     const void* tok_blob = nullptr;
     size_t tok_blob_bytes = 0;
+    // MODEL_BORROW=0 unmaps the container at the end of load(), so the blob the
+    // reader pointed into that mapping has to be copied first (tok_blob is read
+    // later, when the tokenizer is built).
+    vector<uint8_t> tok_owned;
     string tok_kind, default_system, template_name;
     int template_kind = -1;   // 0 plain, 1 chatml/qwen, 2 minimind3, 3 tinybrainbot
     // Metadata key 9: the model's own chat template (HuggingFace Jinja text).
@@ -93,6 +97,18 @@ public:
     // Metadata key 12: the residual stream's width.  False (or absent) keeps
     // the q16 grid every existing container was packed with.
     bool res_q24 = false;
+    // Metadata key 15: one byte per layer, the FFN hidden store's scale
+    // exponent.  Layer k > 0 means the SwiGLU hidden is written *2^-k (so it
+    // fits the q16 activation rail instead of being clamped) and w2's read-back
+    // multiplies by 2^k (folded into its scale by apply_hidden_scale()).  Empty
+    // = every layer unscaled, which is what every pre-2026-11-12 container is.
+    vector<uint8_t> hid_scale;
+    int hid_shift(int l) const {
+        return (l >= 0 && l < (int)hid_scale.size()) ? (int)hid_scale[l] : 0;
+    }
+    // Fold 2^k into every w2 (and its chunks) after split_ffn(): the write side
+    // divides the hidden, so the read side has to undo it exactly.
+    void apply_hidden_scale();
     bool rms_eps_stated = false;   // false = use the shader's literal 1e-5
     int capabilities = 0;
     bool have_capabilities = false;
@@ -115,7 +131,7 @@ public:
     static void materialize(Mat& m);
 
 
-    void split_ffn();
+    void split_ffn(int max_dim);
 
     static bool quantize_q4(Mat& m);
 

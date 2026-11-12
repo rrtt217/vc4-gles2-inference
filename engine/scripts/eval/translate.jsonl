@@ -1,0 +1,30 @@
+{"id":"zh-en-01","src_lang":"zh","tgt_lang":"en","category":"daily","source":"今天天气很好。","reference":"The weather is nice today."}
+{"id":"en-zh-01","src_lang":"en","tgt_lang":"zh","category":"daily","source":"The weather is nice today.","reference":"今天天气很好。"}
+{"id":"zh-en-02","src_lang":"zh","tgt_lang":"en","category":"daily","source":"我每天早上七点起床。","reference":"I get up at seven every morning."}
+{"id":"en-zh-02","src_lang":"en","tgt_lang":"zh","category":"daily","source":"I get up at seven every morning.","reference":"我每天早上七点起床。"}
+{"id":"zh-en-03","src_lang":"zh","tgt_lang":"en","category":"daily","source":"这家餐厅的菜很好吃，但是有点贵。","reference":"The food at this restaurant is delicious, but a little expensive."}
+{"id":"en-zh-03","src_lang":"en","tgt_lang":"zh","category":"daily","source":"The food at this restaurant is delicious, but a little expensive.","reference":"这家餐厅的菜很好吃，但是有点贵。"}
+{"id":"zh-en-04","src_lang":"zh","tgt_lang":"en","category":"daily","source":"请把窗户关上，外面很冷。","reference":"Please close the window; it is very cold outside."}
+{"id":"en-zh-04","src_lang":"en","tgt_lang":"zh","category":"daily","source":"Please close the window; it is very cold outside.","reference":"请把窗户关上，外面很冷。"}
+{"id":"zh-en-05","src_lang":"zh","tgt_lang":"en","category":"daily","source":"他昨天因为生病没有来上班。","reference":"He did not come to work yesterday because he was sick."}
+{"id":"en-zh-05","src_lang":"en","tgt_lang":"zh","category":"daily","source":"He did not come to work yesterday because he was sick.","reference":"他昨天因为生病没有来上班。"}
+{"id":"zh-en-06","src_lang":"zh","tgt_lang":"en","category":"news","source":"会议推迟到下周三下午三点。","reference":"The meeting has been postponed to three p.m. next Wednesday."}
+{"id":"en-zh-06","src_lang":"en","tgt_lang":"zh","category":"news","source":"The meeting has been postponed to three p.m. next Wednesday.","reference":"会议推迟到下周三下午三点。"}
+{"id":"zh-en-07","src_lang":"zh","tgt_lang":"en","category":"news","source":"这个城市的人口超过一千万。","reference":"The population of this city is over ten million."}
+{"id":"en-zh-07","src_lang":"en","tgt_lang":"zh","category":"news","source":"The population of this city is over ten million.","reference":"这个城市的人口超过一千万。"}
+{"id":"zh-en-08","src_lang":"zh","tgt_lang":"en","category":"daily","source":"学习一门新语言需要时间和耐心。","reference":"Learning a new language takes time and patience."}
+{"id":"en-zh-08","src_lang":"en","tgt_lang":"zh","category":"daily","source":"Learning a new language takes time and patience.","reference":"学习一门新语言需要时间和耐心。"}
+{"id":"zh-en-09","src_lang":"zh","tgt_lang":"en","category":"daily","source":"火车晚点了二十分钟，我们错过了电影的开头。","reference":"The train was twenty minutes late, so we missed the beginning of the movie."}
+{"id":"en-zh-09","src_lang":"en","tgt_lang":"zh","category":"daily","source":"The train was twenty minutes late, so we missed the beginning of the movie.","reference":"火车晚点了二十分钟，我们错过了电影的开头。"}
+{"id":"zh-en-10","src_lang":"zh","tgt_lang":"en","category":"daily","source":"如果你有问题，可以随时给我打电话。","reference":"If you have any questions, you can call me at any time."}
+{"id":"en-zh-10","src_lang":"en","tgt_lang":"zh","category":"daily","source":"If you have any questions, you can call me at any time.","reference":"如果你有问题，可以随时给我打电话。"}
+{"id":"zh-en-11","src_lang":"zh","tgt_lang":"en","category":"science","source":"科学家发现这种植物可以在沙漠中生长。","reference":"Scientists found that this plant can grow in the desert."}
+{"id":"en-zh-11","src_lang":"en","tgt_lang":"zh","category":"science","source":"Scientists found that this plant can grow in the desert.","reference":"科学家发现这种植物可以在沙漠中生长。"}
+{"id":"zh-en-12","src_lang":"zh","tgt_lang":"en","category":"technical","source":"请把文件保存成 PDF 格式再发给我。","reference":"Please save the file as a PDF and send it to me."}
+{"id":"en-zh-12","src_lang":"en","tgt_lang":"zh","category":"technical","source":"Please save the file as a PDF and send it to me.","reference":"请把文件保存成 PDF 格式再发给我。"}
+{"id":"zh-en-13","src_lang":"zh","tgt_lang":"en","category":"idiom","source":"我们明天见。","reference":"See you tomorrow."}
+{"id":"en-zh-13","src_lang":"en","tgt_lang":"zh","category":"idiom","source":"See you tomorrow.","reference":"我们明天见。"}
+{"id":"zh-en-14","src_lang":"zh","tgt_lang":"en","category":"idiom","source":"这件事说来话长。","reference":"It's a long story."}
+{"id":"en-zh-14","src_lang":"en","tgt_lang":"zh","category":"idiom","source":"It's a long story.","reference":"这件事说来话长。"}
+{"id":"zh-en-15","src_lang":"zh","tgt_lang":"en","category":"idiom","source":"他做事一向很认真。","reference":"He has always been very conscientious about his work."}
+{"id":"en-zh-15","src_lang":"en","tgt_lang":"zh","category":"idiom","source":"He has always been very conscientious about his work.","reference":"他做事一向很认真。"}

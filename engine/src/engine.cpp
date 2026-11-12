@@ -263,7 +263,8 @@ int main(int argc, char** argv) {
     GPU gpu;
     if (getenv("SHADER_TIME")) fprintf(stderr, "STARTUP %7.1f ms  egl ready\n", run_time_ms());
     if (getenv("Q8_PARTS")) model.apply_precision(getenv("Q8_LAYERS") ? getenv("Q8_LAYERS") : "", getenv("Q8_PARTS"));
-    model.split_ffn();
+    model.split_ffn(gpu.max_target_dim());
+    model.apply_hidden_scale();
     if (getenv("SHADER_TIME")) fprintf(stderr, "STARTUP %7.1f ms  ffn split\n", run_time_ms());
     if (getenv("Q4_WEIGHTS")) model.quantize_q4_weights(getenv("Q4_SCOPE") ? getenv("Q4_SCOPE") : "all");
     if (!tools_json.empty() && model.seq < 768) model.seq = 768;

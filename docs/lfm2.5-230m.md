@@ -182,6 +182,97 @@ gate output at the start of a sequence is order 1e-4 and the q16 grid
 reference went from 6–11% to 0.2–1.4%; MiniMind3's PPL is bit-identical with the
 change, because for well-scaled activations it is a no-op.
 
+## A translation fine-tune of the same architecture (LFM2-350M-ENJP-MT)
+
+Liquid AI ships one official MT fine-tune in this family: **LFM2-350M-ENJP-MT**
+(EN <-> JA, bi-directional, 16 layers = 10 conv + 6 attention, FFN 4608,
+vocab 64400, license lfm1.0).  There is no translation-tuned LFM2.5-230M -- the
+230M fine-tunes on the Hub are abliterated / thinking / ECE / audio / Chinese
+continued-pretraining variants.  The 350M model is the closest thing, so it was
+packed and run to answer two questions: does a real MT fine-tune work on this
+engine, and what does it cost.
+
+Building it (2026-11-12, Iris Xe):
+
+```bash
+# 1. source: HF directory (config.json + model.safetensors + tokenizer.json +
+#    chat_template.jinja).  676 MB bf16.
+# 2. tokenizer blob from tokenizer.json, not from the vocab alone
+python3 engine/tools/make_tok.py --input /tmp/lfm-mt/hf \
+  --output /tmp/lfm-mt/lfm2-350m-enjp.tok
+# 3. pack q4; the template and the specials are NOT defaulted correctly for
+#    this model -- see the two traps below
+python3 engine/tools/mmcf_pack.py --in /tmp/lfm-mt/hf --quant q4 --seq 512 \
+  --tok /tmp/lfm-mt/lfm2-350m-enjp.tok \
+  --out /tmp/lfm-mt/lfm2-350m-enjp-mt.q4.mmcf --name lfm2-350m-enjp-mt \
+  --template chatml --chat --chat-template /tmp/lfm-mt/hf/chat_template.jinja \
+  --system 'You are a helpful assistant.' \
+  --bos 1 --eos 7 --stop 7 --add-bos 0 --add-eos 0 --verify
+```
+
+Two packing traps, both found the hard way (a container that loads and emits
+garbage):
+
+1. **`block_auto_adjust_ff_dim`**: `config.json` says `intermediate_size: 6656`,
+   the tensors are `w1 [4608, 1024]`.  The container's `hidden` is what the
+   engine slices the FFN with, so the config value produced a container that
+   loaded and output noise.  `mmcf_hf.load_lfm2` now takes the width from the
+   tensors, prints the adjustment, and checks `w3`.
+2. **The template is not in `tokenizer_config.json`** (it is a separate
+   `chat_template.jinja`), and the packer defaulted `--bos` to -1 for
+   `--template chatml`.  Without the template the engine fell back to a builtin
+   one and dropped the `{{- bos_token -}}` prefix: the same garbage.  Pass
+   `--chat-template` and the explicit specials above.
+
+The engine needed one capacity change: the FFN is split into exactly **two**
+chunks, and the guard was a literal 4096.  The real ceiling is 2x the driver's
+GL target width, so `Model::split_ffn` now takes `gpu.max_target_dim()`:
+unchanged on VC4 (2048 -> 4096), and on Xe the 4608 hidden runs as two
+2304-wide chunks.  `scripts/regression.sh` still ACCEPTs (PPL 270.3170, same
+pinned strings) -- the change only relaxes a refusal.
+
+Numbers, 9 short sentences (5 ja->en, 4 en->ja; greedy; chrF against one
+reference translation, the same metric as [evaluation.md](evaluation.md)):
+
+| what | path | mean chrF |
+|---|---|---:|
+| LFM2-350M-ENJP-MT **i16**, this engine | serial (`GPU_LAYER=0`) | **0.630** |
+| LFM2-350M-ENJP-MT **q4**, this engine | serial (`GPU_LAYER=0`) | 0.457 |
+| LFM2-350M-ENJP-MT **q8**, this engine | serial (`GPU_LAYER=0`) | 0.456 |
+| LFM2-350M-ENJP-MT **q4**, this engine | fused (`GPU_LAYER=1`) | 0.559 |
+| LFM2-350M-ENJP-MT **q8**, this engine | fused (`GPU_LAYER=1`) | 0.525 |
+| LFM2-350M-ENJP-MT **i16**, this engine | fused (`GPU_LAYER=1`) | 0.491 |
+| the vendor `Q4_0` GGUF, llama.cpp b12128, same prompts/system | llama.cpp | **0.675** |
+| LFM2.5-230M base q4, this engine (control) | fused | 0.419 |
+
+Both loops are correct for every precision since the gap-8 fixes of 2026-11-12.
+The fused/serial split is not uniform (q4 0.56/0.46, q8 0.53/0.46, i16 0.49/0.63)
+and nine sentences move by ~0.08, so read it as "either loop works, i16 prefers
+the serial one" -- the fused loop still lacks the per-tensor activation scale of
+gap 4, which costs i16 the most.
+
+Nine sentences is a coarse probe (a single sentence moves the mean by up to
+~0.08), so read this table as two effects: **precision matters** (i16 0.630 /
+0.491 against q4 0.46-0.56) and **the loop matters** (i16 serial 0.630 against
+fused 0.491; the q4 serial/fused spread is inside the noise).
+
+Timing (Xe, `SEQ=512 GPU_LAYER=1 KV_PACK=16`, q4): prefill 1.79 s for a
+~60-token prompt, decode **33.2 ms/token** (about 30 tok/s).  On the Pi this
+would be ~1.3-1.5 s/token, i.e. not interactive.
+
+Samples (greedy): en->ja `The meeting starts at three.` -> 「会議は3時に始まります。」
+(exact); ja->en 「この商品は在庫切れです。」 -> "This product is out of stock."
+(exact); longer or idiomatic sentences degrade visibly, exactly as the model
+card's "open areas" section warns.
+
+Open: the 0.12 chrF gap to llama.cpp on the same vendor weights.  Candidates
+are our q4 (group-32) against the vendor's Q4_0, and the engine's q16
+activation grid -- LFM2 containers are packed **without** metadata key 15
+(per-layer FFN hidden scale), because the LFM2 rail calibration only covers the
+residual stream.  The i16 container is the A/B that separates them: if i16
+matches the vendor number the gap is quantization, otherwise it is the
+activation format.  The i16 pack is 770 MB and needs a free `/tmp`.
+
 ## The chat template
 
 The container carries the vendor template byte for byte (4762 B) — compare it
@@ -255,6 +346,8 @@ are described in [`deterministic-tools.md`](deterministic-tools.md).
 | 4 | **the fused path's I16_2 targets have no per-tensor scale** (`matvec_s` is serial-only), so the board's fused quality is 3.7% behind its own serial path | next step |
 | 5 | ~~`--ppl` degrades window by window~~ — **was our metric, not the engine**: a window that starts mid-text is cold and costs ~1.8 nats/token (f32 3.80 against 5.61 on the same text), and llama.cpp's chunked number is a full-context estimate.  `--ppl` now warms each window up (`PPL_STRIDE=0` for the old behaviour) | fixed 2026-11-12 in `--ppl`; correction and numbers in `performance.md` |
 | 6 | **`--thinking` is plumbed but unobserved** — the model did not emit `<think>` in three probes; an unclosed `<think>` is kept as text | plumbed only |
+| 7 | ~~q8 LFM2 containers die in `matvec_q8_pair_logits: rows=0 cols=0`~~ — the **pair prefill called `attention_block` for conv layers**, which carry no qkv.  `pair_ok()` now refuses a hybrid model (there is no conv pair kernel), so a hybrid model always prefills through the serial loop; the q8 container itself is correct there | fixed 2026-11-12 |
+| 8 | ~~the fused layer loop (`GPU_LAYER=1`) was wrong for hybrid q8 and i16~~ — two independent bugs, both fixed 2026-11-12.  **(a) i16**: `res_pack_` was decided from `wo[0]`, and a hybrid model's layer 0 is a conv layer with an empty `wo` whose type defaults to INT8, so the i16 container got the packed I16_2 residual while its i16 add kernels wrote one q16 per texel -- every hidden state read back as 0.996 constants.  **(b) q8**: `matvec_q8`'s I16_2 fast path encoded its result as unsigned-then-biased (+65536 for a negative sum before adding 2^23), so **every negative matvec output came back 256 too large**; the conv block is the only user of that non-pair q8 path, which is why dense q8 models never showed it.  Evidence per stage: conv `gated` 55.98/127.99 against the CPU reference 0.07; after the fix it matches to the last q16 step.  Both hybrid containers now run either loop; the shader-hash file was re-baselined for the one changed program (`matvec_q8_6400x768_i16_2`, 839 -> 748 B) and the dense PPL pins did not move | fixed 2026-11-12 |
 
 ## Measuring it
 

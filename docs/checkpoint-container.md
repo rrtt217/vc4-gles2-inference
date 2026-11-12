@@ -49,7 +49,12 @@ That is why a checkpoint could be loaded with the wrong tokenizer, why
 4. **Extensible without a new magic.**  Version, section sizes and a
    skip-unknown rule.
 5. **Integrity on demand.**  A per-tensor CRC in the table, checked by the
-   packer (`--verify`) and the inspector (`--check`), not on every load.
+   packer (`--verify`) and the inspector (`--check`), not on every load.  The
+   packer's `--verify` also re-reads every record's id/dtype/shape/group/
+   scale/`aux` and compares it with the tensor it just wrote: a CRC covers the
+   body only, so without that a container with two experts' `aux` swapped
+   passes inspection and runs the wrong expert (the 2026-11-12 MoE audit's
+   mutant test).  `--check` is standalone and still CRC-only.
 6. **A pre-biased q8 dtype** so the runtime `+128` conversion (69 MB of
    per-byte or XOR work and a 69 MB temporary buffer) disappears.
 
@@ -113,6 +118,7 @@ Each record is `<HHI>` (key, type, length) followed by the payload; `type` is 1
 | 11 | `<f` `rms_norm_eps`.  Absent = the engine's historical 1e-5, compiled as a literal.  A file that states one switches the norm shader to a uniform, which is **not** numerically neutral on this driver (MiniMind3 PPL 270.3170 -> 269.9303 with the same value), so the default path stays literal |
 | 14 | one byte per layer: `0` attention, `1` the LFM2 conv block.  Absent = every layer is attention.  A file with conv tensors and no key 14 is refused, not guessed |
 | 13 | `<4i` mixture of experts: `n_experts`, `top_k`, `expert_hidden`, flags.  Absent = dense.  Flags bit 0 = `norm_topk_prob`.  Present means the container is version 3 and every layer is sparse (see "MoE") |
+| 15 | one byte per layer: the FFN hidden store scale exponent `k`.  Layer `k` means the SwiGLU hidden is written `*2^-k` (the activation rail becomes `127.996 * 2^k`) and w2's read-back multiplies by `2^k` (folded into its scale after load).  Absent = every layer 0, which is every container packed before 2026-11-12.  The loader refuses a length that is not `layers` or a value over 5 |
 
 Key 9 is the model's own `chat_template` from HuggingFace, stored **verbatim**:
 the same text a GGUF file carries in `tokenizer.chat_template`.  A reader that
@@ -156,6 +162,11 @@ boundary after the metadata, so `rec_size = (data_offset - table_start) /
 n_tensors` is 48 or 64 and a reader that knows the version can validate it.
 64 is a multiple of 16, so appending 16 bytes per record keeps `data_offset`
 16-aligned without a second pad.
+
+The `group` byte of a q4 body is **32** in files written since 2026-11-12 and
+**0** in every file written before that (the writer never set it; the engine has
+always used 32 from metadata key 3 and never read the record's copy).  Both
+parse; a reader should take the group size from key 3.
 
 Tensor ids: `1` embedding, `2` embedding scale, `3` rms_att, `4` rms_ffn,
 `5` rms_final, `6` q_norm, `7` k_norm, `8` embedding_i16, `0x10` qkv, `0x11`
@@ -277,7 +288,40 @@ The exception is prefill: the two-position pair path runs one FFN for two
 positions, and the two positions route independently (to different experts in
 general).  `pair_ok()` therefore refuses MoE, and prefill falls back to the
 serial loop — the difference measured in `session.cpp` (7.0-7.2 s paired
-against 8.2-8.4 s serial on a 17-byte prompt), not a factor of two.
+against 8.2-8.4 s serial on a 17-byte prompt), not a factor of two.  It refuses
+a **hybrid** model for the same structural reason: the pair loop implements a
+dense transformer block and calls `attention_block()` for every layer, while a
+conv layer carries no qkv (the LFM2-350M q8 pack aborted there, 2026-11-12).
+
+### The activation rail
+
+The FFN's SwiGLU hidden is written through the q16 activation format (step
+1/256, rail **+/-127.996**), so a hidden value over the rail is clamped —
+silently, because the shader clamps to the int16 range.  MiniMind3-MoE is the
+first model here that trips it: on a chat prompt the expert hidden reaches
+**158/161 (layer 3) and 250/222 (layer 7)** at the template's `<|im_start|>`
+positions, i.e. 49% of the layer-7 value is cut, while the dense model peaks at
+88.8 and plain text (the `--ppl` corpus) at 15.1.  The four positions are part
+of every chat prompt (the template prefix), so the error is systematic, small
+in the logits it was measured against, and invisible without a calibration.
+
+`mmcf_pack.py` tracks both rails in its float32 calibration (residual and FFN
+hidden, sampled over vocabulary runs *and* the tokenizer's added tokens) and
+writes **key 15**: one byte per layer, the smallest `k` whose store fits
+(`peak / 2^k <= 127.996`, capped at 5).  The serial FFN kernels write the hidden
+`*2^-k` (one exact multiply before the q16 encode; the emitted GLSL is
+byte-identical when `k = 0`), and `Model::apply_hidden_scale()` folds `2^k` into
+every w2 (and its chunks) after `split_ffn()` — free on the read side, because
+`ws`/`ps` already carry a per-matrix scale.  This is the same device
+`GPU::matvec_s` uses for a matvec input far from the grid.
+
+The two-position prefill kernels have no hidden scale, so `pair_ok()` refuses a
+scaled container's prefill pair (the MoE block already refused it).  The cost is
+one bit of hidden resolution on the scaled layers: measured on MiniMind3-MoE,
+the clip is gone (`hidA` at layer 7 position 0: 7.59 -> 0.22 against float32)
+while PPL moves +0.5% on i16/q8 (0.005 nats/token, inside the per-token
+scatter) and -2.5% on q4.  A container packed with `--no-rail-check` gets no
+key 15 and keeps the old clamped behaviour.
 
 Consequence for the model store: MiniMind3-MoE is 198M parameters (397 MB of
 F16, ~204 MB as q8, ~138 MB as q4) against the dense 64M model's 66 MB at q8.
@@ -294,6 +338,10 @@ different kernel.  `docs/performance.md` has the measurements.
 - Unknown `dtype` -> refuse, naming the tensor id and the dtype.  Guessing here
   would turn a future fp8 file into silent q8 arithmetic.
 - Unknown *tensor id* -> ignore (forward compat).
+- a q4 body whose scale/min planes do not have the body's shape (`rows`), a
+  matching `cols` and `2 bytes x rows x groups` of payload -> refuse, naming
+  the tensor and expert.  The copy path (`MODEL_BORROW=0`) used to copy one
+  row's worth of planes and read the rest out of bounds.
 - MoE, in a v3 file: `top_k != 1`, a gate without `norm_topk_prob`, a fused
   W13, an incomplete or wrongly shaped expert, an expert index outside
   `n_experts`, or a router tensor in a container without key 13 -> refuse with

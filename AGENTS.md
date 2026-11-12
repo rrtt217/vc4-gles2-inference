@@ -25,7 +25,7 @@ replace working paths with demos or cosmetic rewrites.
 | `engine/tools/` | container packer, container inspector, numpy reference forward passes |
 | `engine/third_party/jinja/` | vendored llama.cpp Jinja engine (MIT) — renders the container's chat template |
 | `templates/` | the chat templates this repository ships, for `mmcf_pack.py --chat-template` |
-| `engine/scripts/` | the regression gate **and** the diagnostic tools |
+| `engine/scripts/` | the regression gate **and** the diagnostic tools, and the model-quality batteries (`bench_mc.py`, `eval_ifeval.py`, `eval_translate.py`) |
 | `engine/probes/` | standalone VC4 feature/throughput probes (not linked into the engine) |
 | `server/` | OpenAI-compatible HTTP server, deterministic tools, self-test, eval suite |
 | `models/` | central model store (gitignored), one `.mmcf` per precision |
@@ -76,6 +76,9 @@ the file format in [`docs/model-formats.md`](docs/model-formats.md) and
 | `verify_packing.sh` | byte-for-byte check of the packed-activation layout against a known-good binary |
 | `bench.sh`, `bench_ab.sh`, `bench_plain_ab.sh`, `longctx.sh` | timings; the `ab` ones interleave two binaries to cancel drift |
 | `docs_check.sh` | documentation drift: every switch the source reads is in `docs/test-hooks.md`, every in-tree path a document names exists, and nothing calls a live switch dead.  Runs without a model or a GPU |
+| `bench_mc.py` | "can this model answer a multiple-choice question": letter-logit accuracy, calibrated accuracy and format compliance from `LOGITS_OUT`, one engine run per item, no sampler.  Data in `scripts/eval/mc_zh.jsonl` and `mc_en.jsonl` |
+| `eval_ifeval.py` | "does the reply obey the instruction": sampled replies scored against regexes and counts; `--selftest` validates the case file (`scripts/eval/ifeval.jsonl`) without a GPU |
+| `eval_translate.py` | "does it translate or just talk about translating": 15 sentence pairs both directions, greedy, chrF against the reference plus source-script leakage (`scripts/eval/translate.jsonl`) |
 
 These scripts existed since `14754be` but were missing from this map, which is
 how a long investigation ended up hand-rolling probes they already contain.
@@ -322,7 +325,9 @@ These were paid for; do not relearn them.
 - **Prefix cache** header flags include pack mode and `KV_SCALE`; loading with
   another `KV_PACK` or scale must be rejected.
 - **FFN**: hidden 2432 is split into 1216-wide chunks because VC4 FBO width is
-  2048. q4 slicing must copy block scale/min and repack nibbles.
+  2048, and there are exactly two chunks -- so the ceiling is 2x the GL target
+  width (4096 on VC4, 4608 for LFM2-350M on Xe).  q4 slicing must copy block
+  scale/min and repack nibbles.
 - **The residual stream rails at ±128.**  It is q16 fixed point, so a model
   whose residual exceeds 128 cannot be represented on the default path
   (supra2-100M reaches 2300 at layer 4).  A per-layer power-of-two scale is the

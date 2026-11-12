@@ -95,6 +95,10 @@ static int pick_expert(const vector<float>& gate){
 Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
         gpu_layer_ = gpu_.gpu_layer_enabled();
         gpu_attn_ = gpu_layer_ || gpu_.gpu_attn_enabled();
+        // Both loops are correct for a hybrid model since 2026-11-12: the q8
+        // conv block was reading its matvec output 256 too large (a q24 encode
+        // bug in matvec_q8's I16_2 branch) and the i16 residual format was
+        // decided from an empty wo.  No fallback is needed.
         if (m_.hybrid) {
             if (gpu_layer_) {
                 gpu_.init_conv(m_.layers, m_.dim);
@@ -141,10 +145,20 @@ Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
             // every rmsnorm pass (stats and norm both read the residual) and lets
             // matvec_add produce two rows per fragment.  Measured -11% decode on
             // the q8 model, perplexity unchanged.  RES_PACK=0 opts out.
+            // A hybrid model's layer 0 is a conv layer with no wo, so wo[0] is an
+            // empty Mat whose type defaults to INT8.  Testing it claimed the q8/q4
+            // packed residual for an i16 container, whose add kernels then wrote
+            // one q16 per texel into a target the rmsnorm read as pairs -- the
+            // LFM2 i16 packs answered with 0.996 constants (2026-11-12).  Use the
+            // first attention layer's matrix, like the fused-loop check above.
             const char* rp = getenv("RES_PACK");
-            gpu_.res_pack_ = !(rp && strcmp(rp, "0") == 0) &&
-                             !m_.wo.empty() &&
-                             (m_.wo[0].type == WeightType::INT8 || m_.wo[0].type == WeightType::INT4);
+            bool wo_packs = false;
+            for (const Mat& w : m_.wo)
+                if (w.rows > 0) {
+                    wo_packs = w.type == WeightType::INT8 || w.type == WeightType::INT4;
+                    break;
+                }
+            gpu_.res_pack_ = !(rp && strcmp(rp, "0") == 0) && wo_packs;
             // A container that declares a 24-bit residual gets one value per
             // texel; packing two values into a texel is a q16-only idea, so it
             // is switched off rather than reinterpreted.
@@ -482,6 +496,11 @@ vector<float> Session::forward(int token, int pos){
                          << gate[0] << "," << gate[1] << "," << gate[2] << "," << gate[3] << "\n";
             }
             const FfnMats f = ffn_mats(m_, l, expert);
+            // Metadata key 15: the serial FFN kernels write the SwiGLU hidden
+            // *2^-hs (and w2's scale was folded by 2^hs), so the CPU FFN path
+            // divides the float hidden before its matvec upload.
+            const int hs = m_.hid_shift(l);
+            const float hsm = hs > 0 ? ldexpf(1.0f, -hs) : 1.0f;
             bool gpu_ffn = m_.is_moe() || !m_.w1.empty();
             if (getenv("CPU_FFN")) gpu_ffn = false;
             else if (getenv("GPU_FFN")) gpu_ffn = atoi(getenv("GPU_FFN")) != 0;
@@ -495,12 +514,14 @@ vector<float> Session::forward(int token, int pos){
                     hh.insert(hh.end(), h1.begin(), h1.end());
                     hh.insert(hh.end(), h3.begin(), h3.end());
                     vector<float> ha = swiglu(hh, m_.ffn_chunk);
+                    if (hs) for (float& v : ha) v *= hsm;
                     h1 = gpu_.matvec_s(*f.w1b, xbf);
                     h3 = gpu_.matvec_s(*f.w3b, xbf);
                     hh.clear(); hh.reserve(2 * (f.width - m_.ffn_chunk));
                     hh.insert(hh.end(), h1.begin(), h1.end());
                     hh.insert(hh.end(), h3.begin(), h3.end());
                     vector<float> hb = swiglu(hh, f.width - m_.ffn_chunk);
+                    if (hs) for (float& v : hb) v *= hsm;
                     o2 = add_q16(gpu_.matvec_s(*f.w2a, ha), gpu_.matvec_s(*f.w2b, hb));
                 } else {
                     if (f.w1->rows) {
@@ -512,7 +533,9 @@ vector<float> Session::forward(int token, int pos){
                     } else {
                         h = gpu_.matvec_s(*f.w13, xbf);
                     }
-                    o2 = gpu_.matvec_s(*f.w2, swiglu(h));
+                    vector<float> hid = swiglu(h);
+                    if (hs) for (float& v : hid) v *= hsm;
+                    o2 = gpu_.matvec_s(*f.w2, hid);
                 }
             } else {
                 GLuint xtex = gpu_.upload_input(xbf);
@@ -520,7 +543,7 @@ vector<float> Session::forward(int token, int pos){
                 if (m_.ffn_chunked) {
                     GLuint ha, hb;
                     gpu_.ffn_split_chunked(*f.w1a, *f.w3a, *f.w1b, *f.w3b, xtex,
-                                           m_.ffn_chunk, f.width - m_.ffn_chunk, ha, hb);
+                                           m_.ffn_chunk, f.width - m_.ffn_chunk, ha, hb, hs);
                     if (getenv("CPU_ADD_GPU")) {
                         // Probe: fold the residual the way the fused path does
                         // (one rounding per stage) instead of two read-backs
@@ -535,8 +558,8 @@ vector<float> Session::forward(int token, int pos){
                     } else {
                         o2 = add_q16(gpu_.matvec_from(*f.w2a, ha), gpu_.matvec_from(*f.w2b, hb));
                     }
-                } else if (f.w1->rows) htex = gpu_.ffn_split(*f.w1, *f.w3, xtex, f.width);
-                else htex = gpu_.ffn_fused(*f.w13, xtex, f.width);
+                } else if (f.w1->rows) htex = gpu_.ffn_split(*f.w1, *f.w3, xtex, f.width, hs);
+                else htex = gpu_.ffn_fused(*f.w13, xtex, f.width, hs);
                 if (!m_.ffn_chunked) o2 = gpu_.matvec_from(*f.w2, htex);
             }
             x = add_q16(x1, o2);
@@ -544,6 +567,10 @@ vector<float> Session::forward(int token, int pos){
         }
         return x;
     }
+
+// Defined next to read_hidden() further down; the fused loop dumps through it
+// so its stages are diffable against the CPU path's float dumps.
+static vector<float> decode_act_row(const vector<uint8_t>& b, int texels, XFormat f);
 
 GLuint Session::forward_gpu_hidden(int token, int pos, bool want_logits){
         bool prof = getenv("LAYER_PROFILE") != nullptr;
@@ -564,25 +591,39 @@ GLuint Session::forward_gpu_hidden(int token, int pos, bool want_logits){
             GLuint xb = gpu_.rmsnorm(h, gpu_.rms_att_tex_[l], gpu_.xb_);
             if (pass_dup("rms_att")) xb = gpu_.rmsnorm(h, gpu_.rms_att_tex_[l], gpu_.xb_);
             mark("rms_att", l);
-            if (getenv("STAGE_DUMP")) gpu_.dump_target(gpu_.xb_, "xb", 4096);
+            // Dump as floats with the CPU path's printer, so GPU_LAYER=0 and
+            // GPU_LAYER=1 dumps are diffable even though the GPU keeps its own
+            // residual format (the byte dump of a target is layout-specific).
+            if (getenv("STAGE_DUMP")) {
+                vector<uint8_t> db = gpu_.read_bytes(gpu_.xb_, gpu_.xb_.w, 1);
+                gpu_.dump_cpu_row(decode_act_row(db, gpu_.xb_.w, gpu_.act_fmt_), gpu_.act_fmt_, "xb", 4096);
+            }
             if (m_.is_conv(l) && getenv("CONV_SKIP")) {
                 gpu_.conv_copy(h, gpu_.hidden_b_);   // probe: conv layer = identity
             } else if (m_.is_conv(l)) {
                 gpu_.conv_block(m_.conv_in_b[l], m_.conv_in_c[l], m_.conv_in_x[l],
                                 m_.conv_out[l], xb, h, l, gpu_.hidden_b_);
-                if (getenv("STAGE_DUMP")) gpu_.dump_target(gpu_.hidden_b_, "x1", 4096);
+                if (getenv("STAGE_DUMP"))
+                    gpu_.dump_cpu_row(read_hidden(gpu_.hidden_b_), gpu_.act_fmt_, "x1", 4096);
                 mark("conv", l);
             } else {
                 GLuint att_tex = gpu_.attention_block(m_.qkv[l], xb, l, pos);
-                if (getenv("STAGE_DUMP")) gpu_.dump_target(gpu_.att_out_, "att", 4096);
+                if (getenv("STAGE_DUMP")) {
+                    vector<uint8_t> db = gpu_.read_bytes(gpu_.att_out_, gpu_.att_out_.w, 1);
+                    gpu_.dump_cpu_row(decode_act_row(db, gpu_.att_out_.w, gpu_.act_fmt_), gpu_.act_fmt_, "att", 4096);
+                }
                 mark("attn", l);
                 gpu_.matvec_add(m_.wo[l], att_tex, h, gpu_.hidden_b_, gpu_.act_fmt_);
-                if (getenv("STAGE_DUMP")) gpu_.dump_target(gpu_.hidden_b_, "x1", 4096);
+                if (getenv("STAGE_DUMP"))
+                    gpu_.dump_cpu_row(read_hidden(gpu_.hidden_b_), gpu_.act_fmt_, "x1", 4096);
                 mark("wo", l);
             }
             GLuint x1 = gpu_.hidden_b_.tex;
             GLuint xbf = gpu_.rmsnorm(x1, gpu_.rms_ffn_tex_[l], gpu_.xbf_);
-            if (getenv("STAGE_DUMP")) gpu_.dump_target(gpu_.xbf_, "xbf", 4096);
+            if (getenv("STAGE_DUMP")) {
+                vector<uint8_t> db = gpu_.read_bytes(gpu_.xbf_, gpu_.xbf_.w, 1);
+                gpu_.dump_cpu_row(decode_act_row(db, gpu_.xbf_.w, gpu_.act_fmt_), gpu_.act_fmt_, "xbf", 4096);
+            }
             if (pass_dup("rms_ffn")) xbf = gpu_.rmsnorm(x1, gpu_.rms_ffn_tex_[l], gpu_.xbf_);
             mark("rms_ffn", l);
             int expert = -1;
@@ -599,10 +640,11 @@ GLuint Session::forward_gpu_hidden(int token, int pos, bool want_logits){
                          << gate[0] << "," << gate[1] << "," << gate[2] << "," << gate[3] << "\n";
             }
             const FfnMats f = ffn_mats(m_, l, expert);
+            const int hs = m_.hid_shift(l);   // FFN hidden store scale (key 15)
             if (m_.ffn_chunked) {
                 GLuint ha, hb;
                 gpu_.ffn_split_chunked(*f.w1a, *f.w3a, *f.w1b, *f.w3b, xbf,
-                                       m_.ffn_chunk, f.width - m_.ffn_chunk, ha, hb);
+                                       m_.ffn_chunk, f.width - m_.ffn_chunk, ha, hb, hs);
                 if (getenv("FFN_DUMP") && l == 0) {
                     gpu_.sync();
                     gpu_.dump_target(gpu_.ffn_h_a_, "ha", 8);
@@ -613,22 +655,18 @@ GLuint Session::forward_gpu_hidden(int token, int pos, bool want_logits){
                 gpu_.matvec_add(*f.w2b, hb, gpu_.hidden_a_.tex, gpu_.hidden_b_, gpu_.ffn_fmt_);
                 mark("w2", l);
                 h = gpu_.hidden_b_.tex;
-            if (getenv("HIDDEN_DUMP")) {
-                gpu_.sync();
-                gpu_.dump_target(gpu_.hidden_b_, "hidA", 4096);
-            }
+            if (getenv("HIDDEN_DUMP"))
+                gpu_.dump_cpu_row(read_hidden(gpu_.hidden_b_), gpu_.act_fmt_, "hidA", 4096);
             } else {
                 GLuint hffn;
-                if (f.w1->rows) hffn = gpu_.ffn_split(*f.w1, *f.w3, xbf, f.width);
-                else hffn = gpu_.ffn_fused(*f.w13, xbf, f.width);
+                if (f.w1->rows) hffn = gpu_.ffn_split(*f.w1, *f.w3, xbf, f.width, hs);
+                else hffn = gpu_.ffn_fused(*f.w13, xbf, f.width, hs);
                 mark("ffn", l);
                 gpu_.matvec_add(*f.w2, hffn, x1, gpu_.hidden_a_, gpu_.ffn_fmt_);
                 mark("w2", l);
                 h = gpu_.hidden_a_.tex;
-            if (getenv("HIDDEN_DUMP")) {
-                gpu_.sync();
-                gpu_.dump_target(gpu_.hidden_a_, "hidA", 4096);
-            }
+            if (getenv("HIDDEN_DUMP"))
+                gpu_.dump_cpu_row(read_hidden(gpu_.hidden_a_), gpu_.act_fmt_, "hidA", 4096);
             }
         }
         if (!want_logits) return h;
@@ -652,11 +690,22 @@ GLuint Session::forward_gpu_hidden(int token, int pos, bool want_logits){
 // q4 / ACT8 / int16 / fused-w13 models keep the serial loop.
 bool Session::pair_ok() const {
         if (!gpu_layer_) return false;
+        // The two-position prefill implements a dense transformer block: it
+        // calls attention_block() for every layer, and a hybrid model's conv
+        // layers carry no qkv (the LFM2-350M q8 container aborted in
+        // matvec_q8_pair_logits with rows=0, 2026-11-12).  There is no conv
+        // pair kernel, so a hybrid model always takes the serial prefill.
+        if (m_.hybrid) return false;
         // The paired path runs one FFN for two positions.  A MoE layer routes
         // each position on its own (and the chosen expert is a host-side
         // uniform), so the pair cannot share the FFN; the serial loop costs
         // the ~17% measured in the comment above, not 2x.
         if (m_.is_moe()) return false;
+        // A per-layer FFN-hidden store scale (metadata key 15) is applied by the
+        // serial FFN kernels only: the two-position kernels encode the hidden
+        // with the fixed q16 scale, so a scaled model has to stay serial.
+        for (int l = 0; l < m_.layers; ++l)
+                if (m_.hid_shift(l) > 0) return false;
         // The two-position kernels have wrow variants (one fragment is one row
         // for both positions, so the plane read is a single fetch) and produce
         // byte-identical tokens.  Measured with PREFILL_REPEAT on a Pi Zero,
@@ -813,24 +862,52 @@ vector<float> Session::rms_final_gpu(const vector<float>& x){
         return out;
 }
 
-vector<float> Session::read_hidden(const Target& t){
-        vector<uint8_t> b = gpu_.read_bytes(const_cast<Target&>(t), t.w, 1);
-        vector<float> out((size_t)t.w * x_per_texel(m_.res_q24 ? XFormat::I24_1 : XFormat::I16_2));
-        const int per = x_per_texel(XFormat::I16_2);
+// One texture row as floats.  The layout is the *GPU's* residual format: a
+// container whose wo is q8/q4 packs two q16 per texel (I16_2), a q8/i16
+// checkpoint uses one q16 per texel (I16_1), and a q24 container carries the
+// 24-bit encode.  Reading with the wrong width silently returns a shifted row,
+// which is how a probe can "prove" a bug that is not there.
+static vector<float> decode_act_row(const vector<uint8_t>& b, int texels, XFormat f){
+        const int per = x_per_texel(f);
+        vector<float> out((size_t)texels * per);
         for (size_t i = 0; i < out.size(); ++i) {
-                const size_t o = (i / per) * 4 + (i % per) * 2;
-                int u = (int)b[o] * 256 + (int)b[o + 1];
-                if (u >= 32768) u -= 65536;
-                out[i] = (float)u / ACT_SCALE;
+                const size_t o = (i / per) * 4;
+                if (f == XFormat::I16_2) {
+                        const size_t q = o + (i % per) * 2;
+                        int u = (int)b[q] * 256 + (int)b[q + 1];
+                        if (u >= 32768) u -= 65536;
+                        out[i] = (float)u / ACT_SCALE;
+                } else if (f == XFormat::I16_1) {
+                        int u = (int)b[o] * 256 + (int)b[o + 1];
+                        if (u >= 32768) u -= 65536;
+                        out[i] = (float)u / ACT_SCALE;
+                } else if (f == XFormat::I24_1) {
+                        int v = (int)b[o + 1] * 65536 + (int)b[o + 2] * 256 + (int)b[o + 3] - 8388608;
+                        out[i] = (float)v / ACT_SCALE;
+                } else {
+                        out[i] = ((float)b[o + (i % 4)] - 128.0f) / 16.0f;
+                }
         }
         return out;
+}
+
+vector<float> Session::read_hidden(const Target& t){
+        vector<uint8_t> b = gpu_.read_bytes(const_cast<Target&>(t), t.w, 1);
+        return decode_act_row(b, t.w, gpu_.res_fmt_);
 }
 
 vector<float> Session::rms_norm(const vector<float>& x, const float* w){
         float ss = 0;
         for (float v : x) ss += v * v;
         ss /= x.size();
-        float r = 1.0f / sqrtf(ss + 1e-5f);
+        // The container states its eps in metadata key 11 and the GPU path
+        // passes it to the shader (engine.cpp set_rms_eps); the CPU layer loop
+        // used to hardcode 1e-5, which is 10x MiniMind3's 1e-6 and made
+        // GPU_LAYER=0 disagree with the fused path by more than the activation
+        // grid.  `rms_eps` defaults to 1e-5, so a container without the key
+        // keeps the old arithmetic.
+        const float eps = m_.rms_eps > 0.0f ? m_.rms_eps : 1e-5f;
+        float r = 1.0f / sqrtf(ss + eps);
         vector<float> o(x.size());
         for (size_t i = 0; i < x.size(); ++i)
             o[i] = quantize_act_f(w[i] * (r * x[i]));

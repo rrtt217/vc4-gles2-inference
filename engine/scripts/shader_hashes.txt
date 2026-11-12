@@ -65,10 +65,10 @@ b821845a2ef44b10    3108 attn_q8_kv16_unpaired/att_vscale
 5674e5cb32288601    3178 conv_copy_1024
 090b127cb4af715a    4090 matvec_i16_6400x768_i16_2
 487e4b4ed69ecbcd    3649 matvec_i16_add_1536x768_i16_2_i16_1
-93324dbf110f8096     839 matvec_q8_1536x768_i16_2
+0fea47f3897d66ac     748 matvec_q8_1536x768_i16_2
 59e695300cdfbaa7    3842 matvec_q8_2432x768_i16_1
 7f73d9321db01a29    3886 matvec_q8_2432x768_i8_4
-3ca31cd46926e2fb     839 matvec_q8_6400x768_i16_2
+470ba9d4bf6c94e7     748 matvec_q8_6400x768_i16_2
 8808cd4fc28a6d4a     926 matvec_q8_add_768x768_i16_2_i16_1
 d61bdda570f6b13d    3443 matvec_q8_add_768x768_i8_4_i16_1
 b009a996b53bafc2    4049 matvec_q8_add_pair_768x768_i16_2_gen

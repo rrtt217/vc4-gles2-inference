@@ -43,6 +43,11 @@
 #                set, the same prefix pin.  No PPL by default: the q4 MoE runs
 #                at ~340 ms/token on a Pi Zero, so it is opt-in via MOE_PPL=1.
 #   MOE_EXPECT   expected MoE prefix; empty = print only
+#   MOE_ROUTES   file with the expected MOE_DUMP route lines (gate values
+#                stripped) for the same prompt; empty = print only.  Routes
+#                are a discrete decision and can move with the driver/GPU, so
+#                this is pinned per machine like the text strings.  Generate
+#                it from a known-good tree, see the MoE block below.
 #   MOE_PPL      compute the MoE container's PPL as well (=1; slow on the Pi)
 #   MOE_PPL_EXPECT expected MoE PPL; empty = print only
 #   PPL_TOL      relative tolerance for both (default 0.01)
@@ -71,6 +76,7 @@ PPL_TOL="${PPL_TOL:-0.01}"
 PPL_SEQ="${PPL_SEQ:-768}"
 MOE="${MOE:-}"
 MOE_EXPECT="${MOE_EXPECT:-}"
+MOE_ROUTES="${MOE_ROUTES:-}"
 MOE_PPL="${MOE_PPL:-0}"
 MOE_PPL_EXPECT="${MOE_PPL_EXPECT:-}"
 PROMPT="用一句话介绍你自己。"
@@ -185,6 +191,33 @@ if [ -n "$MOE" ]; then
     echo "moe determinism OK"
     check_prefix moe "$MOE_EXPECT" "$m1"
     behaviour moe "$m1"
+    # The route sequence is the discrete part of a MoE: a flipped expert is a
+    # different FFN, so a text pin alone can pass on a model whose routing has
+    # moved near a tie.  MOE_ROUTES is a file of the MOE_DUMP lines with the
+    # q16 gate read-back stripped (the route itself is machine independent in
+    # principle, but a driver's rounding can move a tie, so pin per machine):
+    #
+    #   MODEL=$MOE GPU_LAYER=1 KV_PACK=16 MOE_DUMP=1 \
+    #     $BIN --chat --system "$SYS" --prompt "$PROMPT" --gen 8 --greedy \
+    #     2>&1 | sed -n 's/^MOE //p' | sed 's/ gate=.*//' > moe_routes.txt
+    #
+    # then set MOE_ROUTES=moe_routes.txt.
+    if [ -n "$MOE_ROUTES" ]; then
+        MODEL="$MOE" GPU_LAYER=1 KV_PACK=16 MOE_DUMP=1 "$BIN" --chat --system "$SYS" \
+            --prompt "$PROMPT" --gen 8 --greedy 2>&1 \
+            | sed -n 's/^MOE //p' | sed 's/ gate=.*//' > /tmp/moe_routes.$$
+        if diff -q "$MOE_ROUTES" /tmp/moe_routes.$$ >/dev/null 2>&1; then
+            echo "moe routes OK ($(wc -l < /tmp/moe_routes.$$) lines)"
+        else
+            echo "moe routes FAIL: the per-layer route sequence moved" >&2
+            diff "$MOE_ROUTES" /tmp/moe_routes.$$ | head -10 >&2
+            rm -f /tmp/moe_routes.$$
+            exit 1
+        fi
+        rm -f /tmp/moe_routes.$$
+    else
+        echo "moe routes: skipped (set MOE_ROUTES=<baseline> to pin them)"
+    fi
 else
     echo "moe: skipped (set MOE=<container> to check a v3 model)"
 fi

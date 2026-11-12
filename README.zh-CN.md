@@ -130,6 +130,7 @@ TinyChat15M 目前还不能算可用的对话模型，需要先修 tokenizer/pro
 - [Prefix cache](docs/prefix-cache.md)
 - [性能](docs/performance.md)
 - [测试开关](docs/test-hooks.md)
+- [模型质量评测](docs/evaluation.md)：多选知识题、指令遵循、翻译三项基准
 - [源码布局 / 拆分建议](docs/engine-layout.md)
 - [未来优化方向](docs/future-optimization.md)
 - [Agent 说明](AGENTS.md)

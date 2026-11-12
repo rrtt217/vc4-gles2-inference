@@ -24,7 +24,7 @@
 | `src/shaders*.cpp` | GLSL 源码构建 |
 | `tools/` | MMCF 打包器/查看器和 numpy 参考前向（host python） |
 | `quantize/` | F16/I16/q8/q4 转换脚本（legacy 布局，由打包器串起来） |
-| `scripts/` | 回归门禁、CPU-vs-GPU 逐段对比、attention/logits oracle、基准 |
+| `scripts/` | 回归门禁、CPU-vs-GPU 逐段对比、attention/logits oracle、基准、模型质量评测 |
 | `probes/` | 独立 VC4 探针，不链接进引擎 |
 | `Makefile` | 本地、Pi 和探针构建参数 |
 
@@ -282,6 +282,7 @@ GPU_LAYER=1 KV_PACK=16 ./engine_mm3  --ppl data/ppl_test.txt
 | [performance.md](../docs/performance.md) | Pi/笔记本数据 |
 | [prefix-cache.md](../docs/prefix-cache.md) | worker 和磁盘 KV cache |
 | [engine-layout.md](../docs/engine-layout.md) | 源码模块、X 格式和回归规则 |
+| [evaluation.md](../docs/evaluation.md) | 多选知识、指令遵循与翻译三项基准 |
 
 ## 服务器
 

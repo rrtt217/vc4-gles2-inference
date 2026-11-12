@@ -24,7 +24,7 @@ This README is the quick start. Deep notes are in [../docs/](../docs/):
 | `src/shaders*.cpp` | GLSL source builders |
 | `tools/` | MMCF packer/inspector and numpy reference forwards (host python) |
 | `third_party/jinja/` | vendored llama.cpp Jinja engine (MIT), renders the container's chat template |
-| `scripts/` | regression gate, CPU-vs-GPU diff, attention/logits oracles, benchmarks |
+| `scripts/` | regression gate, CPU-vs-GPU diff, attention/logits oracles, benchmarks, the model-quality batteries |
 | `probes/` | standalone VC4 probes, not linked into the engine |
 | `Makefile` | local, Pi and probe build flags |
 
@@ -452,6 +452,7 @@ before concluding anything from it.
 | [performance.md](../docs/performance.md) | Pi/laptop numbers |
 | [prefix-cache.md](../docs/prefix-cache.md) | worker and disk KV cache |
 | [engine-layout.md](../docs/engine-layout.md) | source modules, X formats, regression rule |
+| [evaluation.md](../docs/evaluation.md) | the multiple-choice, instruction-following and translation batteries |
 
 ## Server
 
