@@ -5235,4 +5235,7 @@ prompt unless noted:
 | MiniMind3 q8 tripwire, `SEQ=768`, `--system "You are a helpful assistant."` | `我是MiniMind，一个由jingyaogong` -- the pinned Pi string, unchanged |
 
 Nothing about decode speed moved: this is a measurement-path change, and the
-board still runs ~1040 ms/token on the fused path.
+board still runs ~1040 ms/token on the fused path.  The board's acceptance pin
+is untouched as well -- MiniMind3 q8 at `SEQ=768` on `data/ppl_test.txt` prints
+`PPL 271.6420 tokens=293 windows=1`, the value pinned in `AGENTS.local.md`
+(one window, so the window protocol cannot move it).
