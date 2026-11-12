@@ -66,6 +66,7 @@ models/
                                  probe_residuals.py is the numpy f32 forward behind
                                  docs/lfm2.5-230m-assessment.zh-CN.md (residual peak
                                  29.5, 0.23x the q16 rail -> q16 path is enough);
+                                 Operational page: docs/lfm2.5-230m.md.
                                  probe_head_q4.py measured the q4 vocabulary head
                                  (rejected: input-embedding side costs ~7.5 logits).
                                  Also holds the official QAD-Q4_0 GGUF (the

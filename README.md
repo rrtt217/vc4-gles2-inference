@@ -15,6 +15,11 @@ and a disk KV prefix cache.
   head_dim 96, vocab 6400, RoPE theta 1e6, per-head Q/K RMSNorm.
 - **MiniMind2 Small** — i16/q8/q4; Qwen-style chat, weaker instruction
   following than MiniMind3.
+- **LFM2.5-230M** — the hybrid model: 8 depthwise-conv layers interleaved with
+  6 attention layers, 1024 dim, 64402 vocab, the vendor's own ChatML-shaped
+  template with tools and `<think>`.  Fused decode ~33 ms/token on the laptop
+  and ~1.0 s/token on a Pi Zero at `SEQ=256`; perplexity is within 9% of the
+  float32 reference.  Page: [docs/lfm2.5-230m.md](docs/lfm2.5-230m.md).
 - **One file format** — the self-describing **MMCF** container.  Weights carry
   their tokenizer, chat template, rope configuration and capability flags, so
   one `MODEL=` path is the whole configuration.  The legacy layouts
@@ -106,6 +111,7 @@ next to it in `models/` as a re-pack source.
 
 | Model | Size | Pi decode | Notes |
 |---|---:|---:|---|
+| LFM2.5-230M q4 (QAD) | 169 MB | ~1040 ms/token | hybrid conv+attention; `GPU_LAYER=1 CONV_GPU=1`, `SEQ=256` |
 | MiniMind3 q8 | 66 MB | ~238 ms/token | default Chinese chat |
 | MiniMind3 q4 | 45 MB | ~381 ms/token | memory mode; lower quality |
 | MiniMind2 i16 | 58 MB | ~226 ms/token | reference; weak instruction following |

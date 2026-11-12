@@ -5115,3 +5115,8 @@ boundary itself.  Reproduce with
 head -c 3600 docs/engine-internals.md > /tmp/c3.txt
 SEQ=512 GPU_LAYER=0 PPL_DUMP=/tmp/nll.txt ./engine_mm3 --ppl /tmp/c3.txt   # from engine/
 ```
+
+(`refs/llamacpp/` is gitignored and local to this machine: a prebuilt
+llama.cpp b12283 — CPU and Vulkan — the comparison scripts and a venv, so its
+numbers and commands only run where that directory exists.  `refs/llamacpp/README.md`
+records the two archives' official sha256 and how to re-create it.)

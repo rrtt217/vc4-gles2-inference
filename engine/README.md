@@ -221,6 +221,26 @@ These come from llama2.c fp32 `.bin` sources, which the packer accepts
 directly (`--in .../stories15M.bin --quant i16`).  There is no `LEGACY_Q8=1` path
 anymore: the engine has no legacy reader.
 
+### LFM2.5-230M (hybrid: conv + attention)
+
+The one model with **conv** layers.  Its container carries layer types in
+metadata key 14, and the conv layers are a depthwise causal k=3 convolution
+with two rows of state per layer.  The fused path needs an extra switch:
+
+```bash
+MODEL=../models/lfm2.5-230m/qad/lfm2.5.qad.q4.mmcf SEQ=512 \
+GPU_LAYER=1 CONV_GPU=1 ./engine_mm3 --chat \
+  --system "You are a helpful assistant trained by Liquid AI." \
+  --prompt "What is the capital of France?" --gen 32 --greedy
+```
+
+`CONV_GPU=1` puts the conv block on the GPU; without it the serial layer loop
+runs the conv on the CPU, which is the reference path (the fused path is 4%
+worse in perplexity and 3x faster).  `KV_PACK=16` is the hybrid default — the
+24-bit KV layout is wrong for this model's shape.  Perplexity, timings, the
+template/tool checks and the list of open defects are in
+[docs/lfm2.5-230m.md](../docs/lfm2.5-230m.md).
+
 ## Converting a checkpoint
 
 The engine loads only `.mmcf`.  A `.bin`, `.i16`, `.q8` or `.q4` file is an

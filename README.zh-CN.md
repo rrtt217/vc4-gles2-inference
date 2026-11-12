@@ -13,6 +13,10 @@ OpenAI 兼容 HTTP 服务器和磁盘 KV prefix cache。
 - **MiniMind3 64M** — 8 层、768 hidden、2432 FFN、8 Q / 4 KV heads、
   head_dim 96、vocab 6400、RoPE theta 1e6、per-head Q/K RMSNorm。
 - **MiniMind2 Small** — i16/q8/q4；Qwen 风格 chat，指令跟随弱于 MiniMind3。
+- **LFM2.5-230M** — 唯一的混合模型：8 个 depthwise conv 层与 6 个 attention 层交错，
+  dim 1024、vocab 64402，自带 ChatML 风格模板（含工具与 `<think>`）。融合路径
+  笔记本约 33 ms/token，Pi Zero `SEQ=256` 约 1.0 s/token；困惑度距 float32 参考 9% 以内。
+  详见 [docs/lfm2.5-230m.md](docs/lfm2.5-230m.md)。
 - **只有一种文件格式** — 自描述的 **MMCF** 容器。权重自带 tokenizer、
   chat 模板、rope 配置和能力位，所以一个 `MODEL=` 就是全部配置。
   legacy 布局（llama2.c fp32、Q8M1、I16M1、Q8M2/I16M2、Q4M1）只是
@@ -101,6 +105,7 @@ python3 server.py --seq 768 --kv-pack 16 \
 
 | 模型 | 大小 | Pi decode | 说明 |
 |---|---:|---:|---|
+| LFM2.5-230M q4 (QAD) | 169 MB | ~1040 ms/token | 混合 conv+attention；`GPU_LAYER=1 CONV_GPU=1`、`SEQ=256` |
 | MiniMind3 q8 | 66 MB | ~238 ms/token | 默认中文对话 |
 | MiniMind3 q4 | 45 MB | ~381 ms/token | 内存模式，质量略低 |
 | MiniMind2 i16 | 58 MB | ~226 ms/token | 参考模型，指令跟随较弱 |

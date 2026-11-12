@@ -33,6 +33,15 @@ replace working paths with demos or cosmetic rewrites.
 | `refs/` | untracked upstream reference material for MiniMind3 (gitignored) |
 | `docs/` | deep dives; keep READMEs short and link here |
 
+**LFM2.5-230M is the one hybrid (conv + attention) model.**  It exercises
+metadata key 14, the conv tensors `0x17`-`0x19`, `CONV_GPU=1` and a template that
+supplies its own `<|startoftext|>`.  Read
+[`docs/lfm2.5-230m.md`](docs/lfm2.5-230m.md) before touching the conv block or
+its numbers: it lists what is measured, what is still broken (an i16 container
+on the fused path, a prompt longer than `SEQ`, digit-run tokenisation), and the
+two ways the engine was wrong in 2026-11 — no BOS in the chat template or in
+`--ppl`, and a matvec input that carried no scale.
+
 **SmolLM2-135M is not supported.**  Measured (2026-11-08): its residual reaches
 25982 at layer 11 (204x the q16 rail) *and* its FFN hidden reaches 3164, which
 still travels through an I16_2 texture.  `--res q24` fixes the first and the
@@ -102,6 +111,7 @@ and that file is the authority — this table is a pointer, not a re-baseline.
 | MiniMind2 i16 | 232 ms/token |
 | stories15M q8 | 138 ms/token |
 | stories42M q8 | 188 ms/token |
+| LFM2.5-230M q4 (QAD, `CONV_GPU=1`, `SEQ=256`, 24 tokens) | 1040 ms/token |
 | TinyChat15M q8 | 137 ms/token |
 
 A native ARMv6 build on a Pi Zero takes about 8–10 minutes; never run two
