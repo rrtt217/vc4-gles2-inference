@@ -82,20 +82,29 @@ std::string x_glsl(XFormat f) {
     // q16/q8 on write.  X1/X2/X4 return real values; the Q-suffixed variants
     // return q16 units for hot matvec loops.  No shader needs to know the byte
     // layout or the 1/16 scale.
+    // The q16 decode rounds each stored byte back to an integer before
+    // rebuilding 256*hi+lo.  The argument is c*255+0.5 with c a normalised
+    // byte (0..1), so it is always positive and truncation is bit-identical to
+    // floor() here.  trunc() itself is not accepted by this driver's shader
+    // compiler, so the truncation is spelled float(int(x)), which is FTOI+ITOF
+    // = 2 QIR against floor()'s FTOI+compare+fix ~5 (docs/vc4-glsl-costs.md).
+    // 6234328 made the decode exact but paid that floor, and the board's i16
+    // model lost 41% because it has no paired kernel to amortise the decode
+    // (2026-11-13); this keeps the exactness and gives the instructions back.
     std::string s =
-        "float x_i16raw(vec2 c){float hi=floor(c.x*255.0+0.5);"
-        "float lo=floor(c.y*255.0+0.5);float u=hi*256.0+lo;"
+        "float x_i16raw(vec2 c){float hi=float(int(c.x*255.0+0.5));"
+        "float lo=float(int(c.y*255.0+0.5));float u=hi*256.0+lo;"
         "if(u>=32768.0)u-=65536.0;return u;}\n"
         "float x_i16(vec2 c){return x_i16raw(c)/256.0;}\n"
         "vec2 x_i16pair(vec4 c){return vec2(x_i16(c.rg),x_i16(c.ba));}\n"
-        "vec2 x_i16pairq(vec4 c){float h0=floor(c.x*255.0+0.5),l0=floor(c.y*255.0+0.5);"
-        "float h1=floor(c.z*255.0+0.5),l1=floor(c.w*255.0+0.5);"
+        "vec2 x_i16pairq(vec4 c){float h0=float(int(c.x*255.0+0.5)),l0=float(int(c.y*255.0+0.5));"
+        "float h1=float(int(c.z*255.0+0.5)),l1=float(int(c.w*255.0+0.5));"
         "float u0=h0*256.0+l0;if(u0>=32768.0)u0-=65536.0;"
         "float u1=h1*256.0+l1;if(u1>=32768.0)u1-=65536.0;return vec2(u0,u1);}\n"
-        "vec4 x_i16quadq(vec4 a,vec4 b){float h0=floor(a.x*255.0+0.5),l0=floor(a.y*255.0+0.5);"
-        "float h1=floor(a.z*255.0+0.5),l1=floor(a.w*255.0+0.5);"
-        "float h2=floor(b.x*255.0+0.5),l2=floor(b.y*255.0+0.5);"
-        "float h3=floor(b.z*255.0+0.5),l3=floor(b.w*255.0+0.5);"
+        "vec4 x_i16quadq(vec4 a,vec4 b){float h0=float(int(a.x*255.0+0.5)),l0=float(int(a.y*255.0+0.5));"
+        "float h1=float(int(a.z*255.0+0.5)),l1=float(int(a.w*255.0+0.5));"
+        "float h2=float(int(b.x*255.0+0.5)),l2=float(int(b.y*255.0+0.5));"
+        "float h3=float(int(b.z*255.0+0.5)),l3=float(int(b.w*255.0+0.5));"
         "float u0=h0*256.0+l0;if(u0>=32768.0)u0-=65536.0;"
         "float u1=h1*256.0+l1;if(u1>=32768.0)u1-=65536.0;"
         "float u2=h2*256.0+l2;if(u2>=32768.0)u2-=65536.0;"
