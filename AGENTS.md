@@ -119,7 +119,7 @@ prefill ranges and the rows that were not re-measured are in
 | vertex35 q4 | 241.4 ms/token |
 | MiniMind3 q4 | 304.4 ms/token |
 | MiniMind3-MoE q4 (131 MB) | 322.0 ms/token |
-| MiniMind2 i16 | 326.8 ms/token (unexplained; see below) |
+| MiniMind2 i16 | 216.0 ms/token |
 | vertex100 q4 | 487.0 ms/token |
 | void1 q4 | 554.8 ms/token |
 
@@ -128,13 +128,14 @@ TinyBrainBot q4, picolm85 q4q24 and void1 q8r (their last numbers are in
 `docs/performance.md` with their own dates), and MiniMind3-MoE q8 (203.5 MB does
 not fit the CMA).
 
-The i16 row is the anomaly: it is 41% slower than its 2026-11-02 number
-(226/232 ms/token) while every q8/q4 row got faster.  An interleaved A/B of the
-2026-11-12 binary (`aefc2e99`, code `4ffb536`) against HEAD measured 324.6
-against 324.0 ms/token, so `6c2a0cd` is not the cause; do not read it as a
-regression until a `252c9c4` build is compared.  `docs/performance.md` has the
-i16-kernel history (four lines since 2026-11-02, validation and a macro
-spelling only).
+The i16 row used to be 41% slower than its 2026-11-02 number; a board bisect
+put that on `6234328`'s floor-based exact q16 decode (i16 has no paired kernel
+to amortise the decode).  The default decode now classifies the negative rail
+at 32767.5 and costs two multiplies, which is the row above; it reconstructs
+every q16 value on VC4 with a small error, so the board's q8 pin moved with it.
+`Q16_DECODE=exact` restores `6234328`'s decode and the older pins
+(i16 289.7 ms/token); `docs/performance.md` has both tables and the
+TinyBrainBot cosine evidence.
 
 A native ARMv6 build on a Pi Zero takes about 8–10 minutes; never run two
 builds concurrently.  Prefer the VLAB cross-build (see the VLAB override).
@@ -229,7 +230,8 @@ GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
 Expected text.  The value is **machine specific** — VC4 and Xe round the fused
 FFN differently — so never compare a Pi run with an Xe run:
 
-- Pi Zero q8: `Assistant: 我是MiniMind，一个由jingyaogong`
+- Pi Zero q8: `Assistant: 我是一个AI助手，没有自我意识，也没有身体，所以我无法`
+  (`Q16_DECODE=exact` prints the older `我是MiniMind，一个由jingyaogong`)
 - Pi Zero q4: `Assistant: 我是MiniMind，一个高效的小参数AI模型，专注于`
 - Xe / desktop GLES2 q8: `Assistant: 我是一个AI助手，我的存在是为了提供帮助和信息。`
 
@@ -240,8 +242,10 @@ value from an 8-bit texture sample that VC4 does not return exactly, so the
 whole board moved slightly, not only at the rail — the same change fixed
 TinyBrainBot q4's residual sign flip (Pi-vs-Xe cosine 0.7233 -> 0.9971).  Before
 that the Pi printed `我是一个AI助手，没有自我意识，也没有身体，所以我无法`
-(2026-11-03, when the fused FFN became the default); `docs/performance.md` keeps
-both, and the old binary is still runnable as
+(2026-11-03, when the fused FFN became the default); it moved again on
+2026-11-13, when the cheap q16 decode became the default (see the decode
+section of `docs/performance.md`).  `docs/performance.md` keeps both, and the
+old binary is still runnable as
 `bin/engine_mm3_pi.predecode` on the board.
 
 **The string is a tripwire, not the acceptance criterion.**

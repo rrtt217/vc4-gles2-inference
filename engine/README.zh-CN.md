@@ -173,7 +173,7 @@ Pi Zero，16 token 生成（2026-11-13 在 HEAD `71cb1e0` 上的 campaign：先�
 | 模型 | prefill | decode |
 |---|---:|---:|
 | MiniMind3 q4 | 16.0–35.9 s | **304.4 ms/token** |
-| MiniMind2 i16 | 11.8–19.9 s | 326.8 ms/token（比 2026-11-02 慢 41%，原因待查） |
+| MiniMind2 i16 | 11.8–19.9 s | 216.0 ms/token |
 | MiniMind2 q8 | 7.3–7.9 s | 123.5 ms/token |
 | MiniMind2 q4 | 8.9 s | 153.7 ms/token |
 | TinyChat15M q8 | 3.6–4.5 s | 115.4 ms/token |

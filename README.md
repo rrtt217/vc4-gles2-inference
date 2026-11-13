@@ -137,7 +137,7 @@ next to it in `models/` as a re-pack source.
 | LFM2.5-230M q4 (QAD) | 169 MB | not re-measured | hybrid conv+attention; last 1040 ms/token (2026-11-11) |
 | MiniMind3 q8 | 66 MB | not re-measured | default Chinese chat; last 252 ms/token (2026-11-02) |
 | MiniMind3 q4 | 45 MB | ~304 ms/token | memory mode; lower quality |
-| MiniMind2 i16 | 58 MB | ~327 ms/token | reference; 41% slower than its 2026-11-02 number, unexplained |
+| MiniMind2 i16 | 58 MB | ~216 ms/token | reference; the default q16 decode (`Q16_DECODE=exact` gives ~290) |
 | MiniMind2 q8 | 29 MB | ~124 ms/token | rope comes from the container |
 | MiniMind2 q4 | 21 MB | ~154 ms/token | memory mode; identity answers unreliable |
 | TinyChat15M q8 | 24 MB | ~115 ms/token | llama-2 chat format; needs the shipped `[INST]` template; 15M quality |
@@ -150,7 +150,7 @@ The Pi column is the 2026-11-13 campaign on HEAD `71cb1e0` (`GPU_LAYER=1
 KV_PACK=16`, greedy, `--gen 16`, a discarded warm-up plus three timed runs,
 median), decode only.  Rows marked "not re-measured" / "not on the board" keep
 their last number in [performance.md](docs/performance.md), which also has the
-protocol, the prefill ranges and the open i16 anomaly.  Prefill moves with the
+protocol, the prefill ranges and the q16-decode switch.  Prefill moves with the
 board's SD card and background load; do not quote it as a constant.
 
 ## Documentation

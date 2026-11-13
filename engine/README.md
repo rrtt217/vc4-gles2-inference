@@ -331,7 +331,7 @@ and the rows not re-measured):
 | model | prefill | decode |
 |---|---:|---:|
 | MiniMind3 q4 | 16.0–35.9 s | **304.4 ms/token** |
-| MiniMind2 i16 | 11.8–19.9 s | 326.8 ms/token (41% slower than 2026-11-02, unexplained) |
+| MiniMind2 i16 | 11.8–19.9 s | 216.0 ms/token |
 | MiniMind2 q8 | 7.3–7.9 s | 123.5 ms/token |
 | MiniMind2 q4 | 8.9 s | 153.7 ms/token |
 | TinyChat15M q8 | 3.6–4.5 s | 115.4 ms/token |

@@ -125,7 +125,7 @@ python3 server.py --seq 768 --kv-pack 16 \
 | LFM2.5-230M q4 (QAD) | 169 MB | 未重测 | 混合 conv+attention；最后数据 1040 ms/token（2026-11-11） |
 | MiniMind3 q8 | 66 MB | 未重测 | 默认中文对话；最后数据 252 ms/token（2026-11-02） |
 | MiniMind3 q4 | 45 MB | ~304 ms/token | 内存模式，质量略低 |
-| MiniMind2 i16 | 58 MB | ~327 ms/token | 参考模型；比 2026-11-02 慢 41%，原因待查 |
+| MiniMind2 i16 | 58 MB | ~216 ms/token | 参考模型；默认 q16 解码（`Q16_DECODE=exact` 约 290） |
 | MiniMind2 q8 | 29 MB | ~124 ms/token | rope 由容器自带 |
 | MiniMind2 q4 | 21 MB | ~154 ms/token | 内存模式，身份类回答不可靠 |
 | TinyChat15M q8 | 24 MB | ~115 ms/token | llama-2 chat 格式；需要随仓库提供的 `[INST]` 模板；15M 级质量 |
@@ -138,7 +138,7 @@ Pi 一列是 2026-11-13 在 HEAD `71cb1e0` 上的测试（`GPU_LAYER=1 KV_PACK=1
 greedy、`--gen 16`，先丢弃一次预热、再 3 次计时取中位数），只含 decode。
 标"未重测"/"板上没有"的行沿用
 [performance.md](docs/performance.md) 里带日期的最后数据，协议、prefill 范围和
-i16 异常也在那里。prefill 受板子 SD 卡和后台负载影响，不要当作常数引用。
+q16 解码开关也在那里。prefill 受板子 SD 卡和后台负载影响，不要当作常数引用。
 
 ## 文档
 

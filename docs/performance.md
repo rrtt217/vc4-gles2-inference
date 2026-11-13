@@ -5496,7 +5496,7 @@ row.  Rows marked † predate the warm-up rule and carry the noise it explains.
 | vertex35 q4 | `vertex35.q4.mmcf` | 512 | chat, `What is the capital of France?` | **241.4** (224.0-265.1) | 8.9-9.1 s |
 | MiniMind3 q4 | `minimind3.q4.mmcf` | 768 | chat, `用一句话介绍你自己。` | **304.4** (303.7-310.0) | 16.0-35.9 s |
 | MiniMind3-MoE q4 | `minimind3-moe.q4.mmcf` | 768 | chat, `用一句话介绍你自己。` | **322.0** (319.3-345.3) | 18.2-22.5 s |
-| MiniMind2 i16 † | `minimind2-small.i16.mmcf` | 512 | chat, `用一句话介绍你自己。` | **326.8** (322.7-372.3) | 11.8-19.9 s |
+| MiniMind2 i16 † | `minimind2-small.i16.mmcf` | 512 | chat, `用一句话介绍你自己。` | **326.8** (322.7-372.3) †† | 11.8-19.9 s |
 | vertex100 q4 | `vertex100.q4.mmcf` | 512 | chat, `Write a haiku about rain.` | **487.0** (487.0-633.3) | 18.6-23.1 s |
 | void1 q4 | `void1.q4.mmcf` | 1024 | `Once upon a time,` + `TOK_NO_PREFIX=1` | **554.8** (533.8-578.8) | 14.0 s |
 
@@ -5512,13 +5512,9 @@ What moved against the 2026-11-02 table, in one place:
   residual, wrow planes, the fused FFN default) is what that table predates.
 * **q4 moved the same way**: MiniMind3 q4 304.4 against 381 (+20% faster),
   MoE q4 322.0 against 341.8 (+6%), MiniMind2 q4 153.7 against 193-212.
-* **i16 went the other way and is not explained yet**: 326.8 against 226/232,
-  i.e. 41% slower, with the largest scatter of the campaign.  An interleaved
-  A/B of the 2026-11-12 binary (`aefc2e99`, code `4ffb536`) against HEAD on the
-  same container gave 324.6 against 324.0 ms/token, so `6c2a0cd` did not do it.
-  The i16 weight kernels themselves changed by four lines since the 2026-11-02
-  matrix and only in validation/macro spelling; a build of `252c9c4` is the
-  next comparison.  Until then do not use this row as a regression signal.
+* **i16 went the other way**: 326.8 against 226/232, and it is now explained
+  and fixed — see the decode section below.  †† marks the row measured with the
+  `floor` decode; the default decode gives **216.0**.
 * **Decode is the reproducible number, prefill is not.**  Identical MiniMind3 q4
   runs gave 16.0 and 35.9 s prefill (load 0.9 versus 2.4) while decode stayed
   inside ±1%.  The board's SD card and the background load move prefill; quote
@@ -5542,3 +5538,57 @@ q4, picolm85 q4q24 and void1 q8r (load checks only), and MiniMind3-MoE q8 (the
 203.5 MB container cannot fit the CMA; `FBO incomplete`, as recorded on
 2026-11-11).  Their last numbers are the ones already in this file, with their
 own dates.
+
+## 2026-11-13 — the q16 decode: the cheap spelling is the default, the exact one is a switch
+
+Follow-up to the campaign above.  Its i16 row was 41% slower than the
+2026-11-02 number while every q8/q4 row got faster, so the i16 container was
+bisected on the board — first with the leftover binaries, then with two
+builds:
+
+| binary | i16 decode (ms/token) |
+|---|---:|
+| 2026-11-09 morning, `625c591` (before `6234328`) | 215.2 / 217.7 / 221.7 |
+| 2026-11-09 evening, `6234328` (integer decode) | 323.5 / 335.2 / 379.5 |
+| HEAD floor decode (`71cb1e0`) | 322.9 / 323.5 / 327.8 |
+
+`6234328` is the cause.  It rounds each q16 byte with `floor(c*255+0.5)` so
+VC4 stops reading the -32768 rail as +32768, and `floor` costs ~5 QIR there
+(FTOI truncates, so Mesa adds a compare-and-fix) against 2 for FTOI+ITOF, and
+it breaks the add/mul pairing (`docs/vc4-glsl-costs.md`).  q8/q4 have paired
+kernels that amortise the decode; i16 does not (`pair_ok()` is INT8-only), and
+that is why only i16 paid visibly.
+
+Two cheaper spellings were compared on the board, both classifying the sign at
+`32767.5` (the encoder clamps to 32767, so nothing positive can enter
+[32767.5, 32768)):
+
+| decode | i16 | board q8 PPL | board q4 PPL | LFM2 serial warm | TinyBrainBot vs Xe (5 prompts) |
+|---|---:|---:|---:|---:|---:|
+| `floor` (`6234328`) | 323.5 | 271.6420 | 326.8088 | 28.6196 | 0.99878 |
+| `float(int())` (`7258faa`) | 288.8 | bit-identical to `floor` by construction | | | |
+| **default: two multiplies** (`7f976d1`) | **216.0** | 271.2855 | 325.3751 | 29.1588 | 0.99831 |
+| 2026-11-09 broken decode (for scale) | — | — | — | — | 0.7233 |
+
+The default row is the pre-`6234328` expression.  It keeps the **sign** right
+(TinyBrainBot stays at 0.998, not 0.72) but reconstructs *every* value with
+the 8-bit texture sample's small VC4 error, which is the part `6234328` also
+fixed.  That is the deliberate trade: 33% back on the board's i16 model for
+about 0.0005 cosine against Xe, +1.9% on LFM2's warm PPL and a moved board
+q8 pin.  `Q16_DECODE=exact` restores the `6234328` spelling and the older
+board values (`i16 289.7`) when exactness matters; the switch is documented in
+[`test-hooks.md`](test-hooks.md).
+
+Xe is unchanged in every row (q8 PPL 270.3170, q4 330.5302, both golden
+strings, TinyBrainBot logits bit-identical): a float32 texture sample is exact
+there, so only VC4 sees the difference.  `shader_hashes.txt` does not move for
+the default, because its emitted GLSL is the same text `7f976d1` had.
+
+The campaign table above was measured with the `floor` binary, so its i16 row
+(326.8) is superseded by 216.0; that is the one row whose time moves with this
+change (q8 spot checks are inside the noise: 185.7 with `floor` against 184.1
+with the default).  Board pins after this change: q8 string
+`我是一个AI助手，没有自我意识，也没有身体，所以我无法` (`Q16_DECODE=exact`
+prints `我是MiniMind，一个由jingyaogong`), q8 PPL 271.2855, q4 PPL 325.3751,
+LFM2 serial warm 29.1588 (with `Q16_DECODE=exact`: 271.6420 / 326.8088 /
+28.6196).
