@@ -103,6 +103,18 @@ binary.  They are measurement hooks, not production settings.
 - `UPLOAD_XOR=0` — restore the byte-at-a-time int8 → uint8 weight conversion.
   The default converts four bytes at a time with the equivalent `^ 0x80`; the
   texture bytes are identical either way.
+- `Q16_DECODE=exact` — the q16 activation decode.  The default is the fast
+  float reconstruction (`c.x*65280 + c.y*255`) with the negative-rail sign
+  classified at `32767.5`: two multiplies and an add per value, which is what
+  the kernels cost before `6234328`.  It reconstructs every value with the
+  texture sample's small VC4 error, so the board's PPL pins move with it
+  (MiniMind3 q8 271.2855, q4 325.3751, LFM2 warm 29.1588; TinyBrainBot q4
+  against Xe: cosine 0.9983, mean of five prompts).  `Q16_DECODE=exact`
+  restores `6234328`'s integer decode (`float(int(c*255+0.5))`, bit-identical
+  to floor for these positive arguments): MiniMind3 q8 271.6420 and the older
+  pinned strings, at the cost of the board's i16 model (326.8 against 216.0
+  ms/token).  Both spellings are the same arithmetic up to the reconstruction
+  error; see `docs/vc4-glsl-costs.md` for why the fast one is cheaper.
 - `RES_PACK=0` — disable the default two-q16-per-texel residual stream (q8 and
   q4 use packed residual by default).
 - `PREFILL_PAIR=0` — disable the two-position prefill pair (the default since

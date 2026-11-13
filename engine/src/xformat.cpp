@@ -3,6 +3,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
 
 int XLayout::texels() const { return x_texels(count, fmt); }
 
@@ -77,6 +79,57 @@ std::vector<uint8_t> x_pack(const std::vector<float>& values, XFormat f) {
     return x_pack(values.data(), (int)values.size(), f);
 }
 
+// The q16 decode comes in two spellings.  The default is the fast float
+// reconstruction with the sign classified at 32767.5: two multiplies and an
+// add, no conversions, which is the cost the pre-6234328 kernels had.  It
+// reconstructs every value with the 8-bit texture sample's small error on VC4,
+// so the board's PPL pins move with it; Q16_DECODE=exact restores 6234328's
+// integer-exact decode (float(int(c*255+0.5)) per byte, bit-identical to floor
+// for these positive arguments) when the exact board values are wanted.
+// docs/test-hooks.md has the switch, docs/vc4-glsl-costs.md the numbers.
+static bool q16_decode_exact() {
+        const char* v = getenv("Q16_DECODE");
+        return v && (!strcmp(v, "exact") || !strcmp(v, "1"));
+}
+
+static const char* q16_raw_glsl() {
+        if (q16_decode_exact())
+                return
+                    "float x_i16raw(vec2 c){float hi=float(int(c.x*255.0+0.5));"
+                    "float lo=float(int(c.y*255.0+0.5));float u=hi*256.0+lo;"
+                    "if(u>=32768.0)u-=65536.0;return u;}\n";
+        return
+            "float x_i16raw(vec2 c){float u=c.x*65280.0+c.y*255.0;"
+            "if(u>=32767.5)u-=65536.0;return u;}\n";
+}
+
+static const char* q16_pair_glsl() {
+        if (q16_decode_exact())
+                return
+                    "vec2 x_i16pairq(vec4 c){float h0=float(int(c.x*255.0+0.5)),l0=float(int(c.y*255.0+0.5));"
+                    "float h1=float(int(c.z*255.0+0.5)),l1=float(int(c.w*255.0+0.5));"
+                    "float u0=h0*256.0+l0;if(u0>=32768.0)u0-=65536.0;"
+                    "float u1=h1*256.0+l1;if(u1>=32768.0)u1-=65536.0;return vec2(u0,u1);}\n"
+                    "vec4 x_i16quadq(vec4 a,vec4 b){float h0=float(int(a.x*255.0+0.5)),l0=float(int(a.y*255.0+0.5));"
+                    "float h1=float(int(a.z*255.0+0.5)),l1=float(int(a.w*255.0+0.5));"
+                    "float h2=float(int(b.x*255.0+0.5)),l2=float(int(b.y*255.0+0.5));"
+                    "float h3=float(int(b.z*255.0+0.5)),l3=float(int(b.w*255.0+0.5));"
+                    "float u0=h0*256.0+l0;if(u0>=32768.0)u0-=65536.0;"
+                    "float u1=h1*256.0+l1;if(u1>=32768.0)u1-=65536.0;"
+                    "float u2=h2*256.0+l2;if(u2>=32768.0)u2-=65536.0;"
+                    "float u3=h3*256.0+l3;if(u3>=32768.0)u3-=65536.0;"
+                    "return vec4(u0,u1,u2,u3);}\n";
+        return
+            "vec2 x_i16pairq(vec4 c){float u0=c.x*65280.0+c.y*255.0;"
+            "if(u0>=32767.5)u0-=65536.0;float u1=c.z*65280.0+c.w*255.0;"
+            "if(u1>=32767.5)u1-=65536.0;return vec2(u0,u1);}\n"
+            "vec4 x_i16quadq(vec4 a,vec4 b){float u0=a.x*65280.0+a.y*255.0;"
+            "if(u0>=32767.5)u0-=65536.0;float u1=a.z*65280.0+a.w*255.0;"
+            "if(u1>=32767.5)u1-=65536.0;float u2=b.x*65280.0+b.y*255.0;"
+            "if(u2>=32767.5)u2-=65536.0;float u3=b.z*65280.0+b.w*255.0;"
+            "if(u3>=32767.5)u3-=65536.0;return vec4(u0,u1,u2,u3);}\n";
+}
+
 std::string x_glsl(XFormat f) {
     // Values crossing this boundary are real activations.  XST* converts to
     // q16/q8 on write.  X1/X2/X4 return real values; the Q-suffixed variants
@@ -94,19 +147,10 @@ std::string x_glsl(XFormat f) {
     // multiplies and an add, no conversions, no floor (docs/vc4-glsl-costs.md)
     // - which is what the board's i16 model pays for: a bisect put 41% of its
     // 2026-11-09 regression on that commit's floor-based exact decode.
-    std::string s =
-        "float x_i16raw(vec2 c){float u=c.x*65280.0+c.y*255.0;"
-        "if(u>=32767.5)u-=65536.0;return u;}\n"
+    std::string s = std::string(q16_raw_glsl()) +
         "float x_i16(vec2 c){return x_i16raw(c)/256.0;}\n"
-        "vec2 x_i16pair(vec4 c){return vec2(x_i16(c.rg),x_i16(c.ba));}\n"
-        "vec2 x_i16pairq(vec4 c){float u0=c.x*65280.0+c.y*255.0;"
-        "if(u0>=32767.5)u0-=65536.0;float u1=c.z*65280.0+c.w*255.0;"
-        "if(u1>=32767.5)u1-=65536.0;return vec2(u0,u1);}\n"
-        "vec4 x_i16quadq(vec4 a,vec4 b){float u0=a.x*65280.0+a.y*255.0;"
-        "if(u0>=32767.5)u0-=65536.0;float u1=a.z*65280.0+a.w*255.0;"
-        "if(u1>=32767.5)u1-=65536.0;float u2=b.x*65280.0+b.y*255.0;"
-        "if(u2>=32767.5)u2-=65536.0;float u3=b.z*65280.0+b.w*255.0;"
-        "if(u3>=32767.5)u3-=65536.0;return vec4(u0,u1,u2,u3);}\n"
+        "vec2 x_i16pair(vec4 c){return vec2(x_i16(c.rg),x_i16(c.ba));}\n" +
+        q16_pair_glsl() +
         "vec2 x_q16enc(float q){q=clamp(floor(q+0.5),-32768.0,32767.0);"
         "if(q<0.0)q+=65536.0;float hi=floor(q/256.0);"
         "return vec2(hi/255.0,(q-hi*256.0)/255.0);}\n"
