@@ -43,7 +43,7 @@
 //     the engine already uses (ffn_chunk 1216, logits tile 1536), so the engine
 //     itself is clean - but batching must not push a packed draw over it.
 //
-// build: make -C engine probes/draw_probe_pi CROSS_SYSROOT=/home/ubuntu/raspi-root4
+// build: make -C engine probes/draw_probe_pi CROSS_SYSROOT=<sysroot>
 // run:   ./draw_probe_pi              (RMS_SPLIT=1 switches the rmsnorm variant)
 #include "gpu.h"
 

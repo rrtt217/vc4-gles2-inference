@@ -89,8 +89,15 @@ When a numerics question comes up, read them first.
 Build for the target and do not reuse a stale binary:
 
 - Native GLES2: `make -C engine -B engine_mm3`
-- Pi: cross-build with `make -C engine -B pi CROSS_SYSROOT=<sysroot>` on the
-  cross host, or build on the Pi with the ARMv6 flags in the Makefile.
+- Pi Zero, on the board: `make -C engine -B armv6` — the same flag set the cross
+  target uses, with no sysroot.
+- Pi Zero, cross: `make -C engine -B pi CROSS_SYSROOT=<sysroot>` on the cross
+  host.  There is no default sysroot, and the recipe refuses to finish unless the
+  artifact reports `Tag_CPU_arch: v6` / `Tag_FP_arch: VFPv2`: gcc silently
+  ignores a `-B` directory that does not exist, then links the host's ARMv7
+  start files and leaves a binary that faults on the ARM1176.  The sysroot and
+  the compiler are prepared per `docs/cross-build.md` (the root filesystem must
+  be Raspbian; Debian's armhf is ARMv7).
 - Probes: `make -C engine -B probes/<name>[_pi]` — see the targets in
   `engine/Makefile`.
 

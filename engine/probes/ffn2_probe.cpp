@@ -14,7 +14,7 @@
 // are the same operations in the same order, so any difference is a packing
 // bug.  Timings are the min of three interleaved blocks on the real driver.
 //
-// build: make -C engine probes/ffn2_probe_pi CROSS_SYSROOT=/home/ubuntu/raspi-root4
+// build: make -C engine probes/ffn2_probe_pi CROSS_SYSROOT=<sysroot>
 // run:   ./ffn2_probe_pi
 //
 // Measured on the Pi Zero (VC4 V3D 2.1, Mesa 26.2.2), two runs, same numbers:

@@ -17,7 +17,7 @@
 //           does floor(c*255+0.5) == b and floor(c*255) == b?
 //
 // Build (Pi cross, same flags as the engine):
-//   make -C engine probes/q4fmt_probe_pi CROSS_SYSROOT=~/raspi-root4
+//   make -C engine probes/q4fmt_probe_pi CROSS_SYSROOT=<sysroot>
 // Run on the Pi: ./q4fmt_probe_pi
 #include <EGL/egl.h>
 #include <EGL/eglext.h>

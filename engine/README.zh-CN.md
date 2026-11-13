@@ -40,10 +40,30 @@ make engine_mm3
 Pi Zero（构建约 8–10 分钟，构建和运行分开；不要同时跑两个构建）：
 
 ```bash
-make -B engine_mm3 CXXFLAGS='-O2 -march=armv6 -mfpu=vfp -mfloat-abi=hard -ffast-math -std=c++17'
+make -B armv6
 ```
 
 不要在很短的 timeout 下构建；旧二进制会让结果看起来不稳定。
+
+### 交叉编译（ARMv6，在笔记本或构建机上）
+
+这里最容易错得悄无声息：Debian 的 armhf 交叉工具链是 ARMv7，构建必须用 `-B` 指向
+**sysroot 里**的 ARMv6 startfiles，而 gcc 会**静默忽略不存在的 `-B` 目录**。链接照样成功，
+二进制在构建机能跑，到 ARM1176 上才 fault（`Tag_CPU_arch: v7` 而不是 `v6`）。
+所以 sysroot 不是可选项，它的 gcc 运行时版本靠发现而不是写死：
+
+```bash
+make -B pi CROSS_SYSROOT=$HOME/pi-rootfs
+```
+
+`check-cross` 会打印解析到的驱动、sysroot 和运行时目录；链接后如果产物不是
+`Tag_CPU_arch: v6` / `Tag_FP_arch: VFPv2`，构建直接失败，并打印 `.comment` 里的 GCC 行，
+让日志记住实际链接的是哪个运行时。发现选错时用 `CROSS_CXX`（驱动）或 `CROSS_GCC_DIR`
+（sysroot 运行时）覆盖。sysroot 必须来自 Raspbian——Debian 的 armhf 用户态是 ARMv7，
+在 Pi Zero 上跑不起来。产物是 `engine_mm3_pi`。
+
+编译器与 sysroot 怎么准备、怎么验证：见
+[../docs/cross-build.md](../docs/cross-build.md)。
 
 ## 运行
 

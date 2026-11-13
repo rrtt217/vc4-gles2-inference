@@ -75,7 +75,7 @@ Build on the Pi, separately from the run:
 
 ```bash
 cd engine
-make -B engine_mm3 CXXFLAGS='-O2 -march=armv6 -mfpu=vfp -mfloat-abi=hard -ffast-math -std=c++17'
+make -B armv6
 ```
 
 Run:

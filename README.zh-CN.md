@@ -65,7 +65,7 @@ GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
 
 ```bash
 cd engine
-make -B engine_mm3 CXXFLAGS='-O2 -march=armv6 -mfpu=vfp -mfloat-abi=hard -ffast-math -std=c++17'
+make -B armv6
 ```
 
 运行：

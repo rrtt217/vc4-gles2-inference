@@ -10,7 +10,7 @@
 // a non-zero length, a non-zero format and identical pixels.  Timing the two
 // first draws says whether the reload actually skipped the backend compile.
 //
-// Build: make -C engine probes/progbinary_probe_pi CROSS_SYSROOT=~/raspi-root4
+// Build: make -C engine probes/progbinary_probe_pi CROSS_SYSROOT=<sysroot>
 // Run on the Pi: ./progbinary_probe_pi
 #include <EGL/egl.h>
 #include <EGL/eglext.h>

@@ -40,25 +40,37 @@ make engine_mm3
 Pi Zero, build separately from the run (8–10 minutes; never run two builds):
 
 ```bash
-make -B engine_mm3 CXXFLAGS='-O2 -march=armv6 -mfpu=vfp -mfloat-abi=hard -ffast-math -std=c++17'
+make -B armv6
 ```
 
 Do not build under a short timeout: a stale binary makes results look
 nondeterministic.
 
-### Cross build on VLAB
+### Cross build (ARMv6, from a laptop or a build host)
 
-VLAB has `arm-linux-gnueabihf-g++-12` and a Raspbian trixie rootfs at
-`$HOME/raspi-root4`. Build the Pi binary there (about 25 seconds):
+The thing that goes wrong here is quiet: Debian's armhf cross toolchain is
+ARMv7, so the build has to point gcc at the *sysroot's* ARMv6 startfiles with
+`-B`, and gcc **silently ignores a `-B` directory that does not exist**. The
+link then succeeds, the binary runs on the build host, and it faults on the
+ARM1176 (`Tag_CPU_arch: v7` instead of `v6`). So the sysroot is not optional and
+its gcc runtime version is discovered, not assumed:
 
 ```bash
-make -B pi CROSS_SYSROOT=$HOME/raspi-root4
+make -B pi CROSS_SYSROOT=$HOME/pi-rootfs
 ```
 
-The target uses `--sysroot` plus `-B` for the sysroot's own GCC startfiles;
-the sysroot is a complete Raspbian root filesystem (ARMv6, VFPv2), not a
-hand-picked set of libraries. The output is `engine_mm3_pi`; copy it to the Pi
-only after checking `readelf -A` reports `Tag_CPU_arch: v6`.
+`check-cross` echoes the driver, the sysroot and the runtime directory it
+resolved, and the recipe refuses to finish unless the result is
+`Tag_CPU_arch: v6` / `Tag_FP_arch: VFPv2`; it prints the `.comment` GCC line so a
+log records which runtime was linked. Override `CROSS_CXX` (the driver — a
+distribution often installs only the versioned name, e.g.
+`arm-linux-gnueabihf-g++-12`) or `CROSS_GCC_DIR` (the sysroot's runtime, e.g.
+`…/usr/lib/gcc/arm-linux-gnueabihf/14`) when the discovery picks wrong. The
+sysroot must be a Raspbian root filesystem — Debian's armhf userland is ARMv7
+and cannot run on a Pi Zero. The output is `engine_mm3_pi`.
+
+How to prepare the compiler and the sysroot, and how to verify them:
+[../docs/cross-build.md](../docs/cross-build.md).
 
 ## Run
 

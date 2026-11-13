@@ -29,25 +29,112 @@ engine_mm3: $(CORE) $(HEADERS)
 	$(CXX) $(CXXFLAGS) $(SECTIONS) $(INCS) -o $@ $(CORE) $(LDLIBS) $(LDFLAGS)
 
 
-# Raspbian/ARMv6 cross build for Pi Zero.  CROSS_SYSROOT must be a full
-# Raspbian root filesystem; the compiler's own startfiles are overridden with
-# -B so the linked binary really uses ARMv6 glibc/libstdc++.
-CROSS_CXX ?= arm-linux-gnueabihf-g++-12
-CROSS_SYSROOT ?= $(HOME)/raspi-root4
-CROSS_GCCLIB := $(CROSS_SYSROOT)/usr/lib/gcc/arm-linux-gnueabihf/14
+# ARMv6 cross build for the Pi Zero.  Two independent installs meet here: the
+# host's compiler driver and the sysroot's runtime, and their major versions
+# legitimately differ (a g++-12 driver against a gcc-14 runtime is what built the
+# v6 binaries this repository ships).  Neither is hardcoded, for one measured
+# reason: gcc SILENTLY IGNORES a -B directory that does not exist and then links
+# the host's ARMv7 startfiles.  The link succeeds, the binary runs on the build
+# host, and it faults on the ARM1176 with `Tag_CPU_arch: v7` - v6/VFPv2 with the
+# right -B, v7/VFPv3-D16 with a wrong one, exit 0 and no diagnostic either way.
+# So check-cross validates the discovery before the link, and the recipe
+# validates the artifact after it.  docs/cross-build.md has the sysroot and
+# toolchain recipe.
+CROSS_SYSROOT ?=
+# First match wins: the unversioned name, else the newest versioned one that is
+# installed.  Lazy (`?=` plus $(shell)) so `make engine_mm3` on a host without a
+# cross toolchain never runs this lookup.
+CROSS_CXX ?= $(shell for v in "" -20 -19 -18 -17 -16 -15 -14 -13 -12 -11 -10; do \
+                 c=arm-linux-gnueabihf-g++$$v; \
+                 command -v $$c >/dev/null 2>&1 && { echo $$c; break; }; done)
+# readelf reads any ELF target, so the host's copy is enough; the prefixed one is
+# preferred when the cross binutils are installed.  Two details: derive the name
+# from the driver's *basename* (a `ccache <driver>` wrapper must not become the
+# readelf candidate), and use $(subst) because a patsubst pattern like `g++%'
+# does not match the middle of `arm-linux-gnueabihf-g++-12' and would hand back
+# the compiler itself.
+CROSS_READELF ?= $(shell for r in $(subst g++,readelf,$(notdir $(CROSS_CXX))) \
+                                  arm-linux-gnueabihf-readelf readelf; do \
+                   command -v $$r >/dev/null 2>&1 && { echo $$r; break; }; done)
+# Prefer the runtime matching the driver, else the highest present (a glob sorts
+# ascending, so lastword is the newest).  Both `$(if ...)` guards matter: with no
+# driver the major is empty, and `.../arm-linux-gnueabihf//` would match the
+# parent directory and pass the check with a meaningless -B.  `?=` keeps an
+# environment or command-line override working; an immediate `:=` ignores both.
+CROSS_DRIVER_MAJOR = $(if $(CROSS_CXX),$(shell $(CROSS_CXX) -dumpversion 2>/dev/null | cut -d. -f1))
+CROSS_GCC_DIRS = $(if $(CROSS_DRIVER_MAJOR),$(wildcard $(CROSS_SYSROOT)/usr/lib/gcc/arm-linux-gnueabihf/*/))
+CROSS_GCC_DIR ?= $(strip $(if $(and $(CROSS_DRIVER_MAJOR),$(wildcard $(CROSS_SYSROOT)/usr/lib/gcc/arm-linux-gnueabihf/$(CROSS_DRIVER_MAJOR)/)),\
+                   $(CROSS_SYSROOT)/usr/lib/gcc/arm-linux-gnueabihf/$(CROSS_DRIVER_MAJOR),\
+                   $(patsubst %/,%,$(lastword $(CROSS_GCC_DIRS)))))
 CROSS_TARGETLIB := $(CROSS_SYSROOT)/usr/lib/arm-linux-gnueabihf
 CROSS_CXXFLAGS ?= --sysroot=$(CROSS_SYSROOT) \
-                 -B$(CROSS_GCCLIB)/ -B$(CROSS_TARGETLIB)/ \
+                 -B$(CROSS_GCC_DIR)/ -B$(CROSS_TARGETLIB)/ \
                  -I$(CROSS_SYSROOT)/usr/include \
                  -O2 -marm -march=armv6 -mfpu=vfp -mfloat-abi=hard \
                  -ffast-math -std=c++17
 CROSS_LDLIBS ?= -L$(CROSS_TARGETLIB) -lEGL -lGLESv2 -lm
 
+.PHONY: pi armv6 check-cross clean probes
+
 pi: engine_mm3_pi
 
-engine_mm3_pi: $(CORE) $(HEADERS)
-	@test -d "$(CROSS_SYSROOT)" || { echo "missing CROSS_SYSROOT=$(CROSS_SYSROOT)" >&2; exit 2; }
+# Every cross recipe depends on this.  Each check guards a condition that used to
+# fail silently and leave an ARMv7 binary behind.
+check-cross:
+	@test -n "$(CROSS_SYSROOT)" || { \
+	  echo "CROSS_SYSROOT is not set: pass the ARMv6 Raspbian root filesystem." >&2; \
+	  echo "  make -C engine -B pi CROSS_SYSROOT=/path/to/pi-rootfs" >&2; \
+	  echo "  how to build that rootfs and the cross compiler: docs/cross-build.md" >&2; \
+	  echo "  (there is no default: every default is wrong on some host)" >&2; \
+	  exit 2; }
+	@test -d "$(CROSS_TARGETLIB)" || { \
+	  echo "CROSS_SYSROOT=$(CROSS_SYSROOT) has no $(CROSS_TARGETLIB)" >&2; \
+	  echo "  it must be a Raspbian root filesystem: Debian's armhf is ARMv7 and" >&2; \
+	  echo "  cannot run on a Pi Zero.  docs/cross-build.md" >&2; \
+	  exit 2; }
+	@command -v "$(CROSS_CXX)" >/dev/null 2>&1 || { \
+	  echo "no usable cross compiler: CROSS_CXX='$(CROSS_CXX)'" >&2; \
+	  echo "  install it (g++-arm-linux-gnueabihf) or set CROSS_CXX to the driver." >&2; \
+	  echo "  docs/cross-build.md" >&2; \
+	  exit 2; }
+	@test -n "$(CROSS_GCC_DIR)" && test -d "$(CROSS_GCC_DIR)" || { \
+	  echo "no gcc runtime under $(CROSS_SYSROOT)/usr/lib/gcc/arm-linux-gnueabihf/" >&2; \
+	  echo "  found: $(if $(CROSS_GCC_DIRS),$(CROSS_GCC_DIRS),(nothing))" >&2; \
+	  echo "  without it -B is ignored and the link uses the host's ARMv7 startfiles;" >&2; \
+	  echo "  the result builds and then faults on the ARM1176 (no diagnostic)" >&2; \
+	  echo "  override with CROSS_GCC_DIR=<dir> if the glob picked wrong" >&2; \
+	  exit 2; }
+	@printf 'cross: %s (%s)\n' "$(CROSS_CXX)" "$$($(CROSS_CXX) -dumpversion)"
+	@printf '  sysroot %s\n  runtime %s\n  libs    %s\n' \
+	  "$(CROSS_SYSROOT)" "$(CROSS_GCC_DIR)" "$(CROSS_TARGETLIB)"
+
+# The arch attributes are the only proof that the -B discovery matched reality:
+# -march=armv6 on our own objects does not stop ARMv7 startfiles from raising
+# Tag_CPU_arch.  The .comment line names the runtime that was actually linked.
+engine_mm3_pi: $(CORE) $(HEADERS) | check-cross
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) $(SECTIONS) $(INCS) -o $@ $(CORE) $(CROSS_LDLIBS) $(LDFLAGS)
+	@if [ -n "$(CROSS_READELF)" ]; then \
+	  attrs=$$($(CROSS_READELF) -A $@); \
+	  echo "$$attrs" | grep -q 'Tag_CPU_arch: v6' || { \
+	    echo "FAIL: $@ is not ARMv6 - it will fault on the ARM1176" >&2; exit 1; }; \
+	  echo "$$attrs" | grep -q 'Tag_FP_arch: VFPv2' || { \
+	    echo "FAIL: $@ is not VFPv2" >&2; exit 1; }; \
+	  echo "  $@: ARMv6/VFPv2, $$($(CROSS_READELF) -p .comment $@ 2>/dev/null | sed -n 's/.*\(GCC: ([^)]*)\).*/\1/p' | head -1)"; \
+	else echo "FAIL: no readelf found, so $@ is unverified; set CROSS_READELF" >&2; \
+	     echo "  (any host readelf reads ARM ELF; a build that cannot be checked is not shipped)" >&2; \
+	     exit 1; fi
+
+# Build on the Pi itself: the host compiler already targets ARMv6, so there is
+# no sysroot and no -B.  This target exists so the READMEs stop hand-copying the
+# flag list (they had lost -marm, which the cross target carries).
+ARMV6_CXXFLAGS ?= -O2 -marm -march=armv6 -mfpu=vfp -mfloat-abi=hard -ffast-math -std=c++17
+armv6: $(CORE) $(HEADERS)
+	@$(CXX) -dumpmachine 2>/dev/null | grep -q '^arm' || { \
+	  echo "armv6 builds on the Pi itself; this host targets $$($(CXX) -dumpmachine)." >&2; \
+	  echo "  To build the Pi binary from here: make -C engine -B pi CROSS_SYSROOT=<sysroot>" >&2; \
+	  exit 2; }
+	$(CXX) $(ARMV6_CXXFLAGS) $(SECTIONS) $(INCS) -o engine_mm3 $(CORE) $(LDLIBS) $(LDFLAGS)
+	@echo "  built engine_mm3 for this host (a Pi Zero reports ARMv6/VFPv2)"
 
 probes/vc4_probe: probes/vc4_probe.cpp
 	$(CXX) $(CXXFLAGS) -o $@ $< $(LDLIBS)
@@ -79,23 +166,18 @@ probes/wrow_probe: probes/wrow_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $
 probes/conv_probe: probes/conv_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp
 	$(CXX) $(CXXFLAGS) -I$(SRC) -o $@ probes/conv_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(LDLIBS)
 
-probes/conv_probe_pi: probes/conv_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp
-	@test -d "$(CROSS_SYSROOT)" || { echo "missing CROSS_SYSROOT=$(CROSS_SYSROOT)" >&2; exit 2; }
+probes/conv_probe_pi: probes/conv_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp | check-cross
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -I$(SRC) -o $@ probes/conv_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(CROSS_LDLIBS)
 
-probes/wrow_probe_pi: probes/wrow_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp
-	@test -d "$(CROSS_SYSROOT)" || { echo "missing CROSS_SYSROOT=$(CROSS_SYSROOT)" >&2; exit 2; }
+probes/wrow_probe_pi: probes/wrow_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp | check-cross
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -I$(SRC) -o $@ probes/wrow_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(CROSS_LDLIBS)
 
 # Standalone VC4 format probes: no engine sources, cross-built for the Pi.
-probes/q4fmt_probe_pi: probes/q4fmt_probe.cpp
-	@test -d "$(CROSS_SYSROOT)" || { echo "missing CROSS_SYSROOT=$(CROSS_SYSROOT)" >&2; exit 2; }
+probes/q4fmt_probe_pi: probes/q4fmt_probe.cpp | check-cross
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -o $@ $< $(CROSS_LDLIBS)
-probes/progbinary_probe_pi: probes/progbinary_probe.cpp
-	@test -d "$(CROSS_SYSROOT)" || { echo "missing CROSS_SYSROOT=$(CROSS_SYSROOT)" >&2; exit 2; }
+probes/progbinary_probe_pi: probes/progbinary_probe.cpp | check-cross
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -o $@ $< $(CROSS_LDLIBS)
-probes/load_probe_pi: probes/load_probe.cpp
-	@test -d "$(CROSS_SYSROOT)" || { echo "missing CROSS_SYSROOT=$(CROSS_SYSROOT)" >&2; exit 2; }
+probes/load_probe_pi: probes/load_probe.cpp | check-cross
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -o $@ $< $(CROSS_LDLIBS)
 
 clean:
@@ -103,28 +185,23 @@ clean:
 	rm -f probes/vc4_probe probes/vc4_ffn_probe probes/vc4_topk_probe probes/load_probe_pi
 	rm -f probes/matvec_probe probes/texsize_probe probes/q4fmt_probe_pi probes/glsl_probe_pi probes/q4mv_probe_pi probes/draw_probe_pi probes/packunpack_probe probes/packunpack_probe_pi probes/logits_grid_probe probes/wrow_probe probes/wrow_probe_pi probes/conv_probe probes/conv_probe_pi
 
-probes/glsl_probe_pi: probes/glsl_probe.cpp
-	@test -d "$(CROSS_SYSROOT)" || { echo "missing CROSS_SYSROOT=$(CROSS_SYSROOT)" >&2; exit 2; }
+probes/glsl_probe_pi: probes/glsl_probe.cpp | check-cross
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -o $@ $< $(CROSS_LDLIBS)
 
 # Which GLSL ES pack/unpack builtins actually run on this driver (VC4 needs the
 # answer more than Xe does; see the probe's header).
-probes/packunpack_probe_pi: probes/packunpack_probe.cpp
-	@test -d "$(CROSS_SYSROOT)" || { echo "missing CROSS_SYSROOT=$(CROSS_SYSROOT)" >&2; exit 2; }
+probes/packunpack_probe_pi: probes/packunpack_probe.cpp | check-cross
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -o $@ $< $(CROSS_LDLIBS)
 
-probes/q4mv_probe_pi: probes/q4mv_probe.cpp $(SRC)/gpu.cpp $(SRC)/shaders.cpp $(SRC)/shaders_attn.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp
-	@test -d "$(CROSS_SYSROOT)" || { echo "missing CROSS_SYSROOT=$(CROSS_SYSROOT)" >&2; exit 2; }
+probes/q4mv_probe_pi: probes/q4mv_probe.cpp $(SRC)/gpu.cpp $(SRC)/shaders.cpp $(SRC)/shaders_attn.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp | check-cross
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -I$(SRC) -o $@ $^ $(CROSS_LDLIBS)
 
 # Prices a draw, an rmsnorm and the q8 matvec shapes on the real driver
 # (WORKLOG item 7: the cost model behind prefill batching).
-probes/draw_probe_pi: probes/draw_probe.cpp $(SRC)/gpu.cpp $(SRC)/shaders.cpp $(SRC)/shaders_attn.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp
-	@test -d "$(CROSS_SYSROOT)" || { echo "missing CROSS_SYSROOT=$(CROSS_SYSROOT)" >&2; exit 2; }
+probes/draw_probe_pi: probes/draw_probe.cpp $(SRC)/gpu.cpp $(SRC)/shaders.cpp $(SRC)/shaders_attn.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp | check-cross
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -I$(SRC) -o $@ $^ $(CROSS_LDLIBS)
 
 # Prices 2-position packing: one weight fetch feeding two positions, and the
 # P2 layout it writes (WORKLOG item 7b).
-probes/ffn2_probe_pi: probes/ffn2_probe.cpp $(SRC)/gpu.cpp $(SRC)/shaders.cpp $(SRC)/shaders_attn.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp
-	@test -d "$(CROSS_SYSROOT)" || { echo "missing CROSS_SYSROOT=$(CROSS_SYSROOT)" >&2; exit 2; }
+probes/ffn2_probe_pi: probes/ffn2_probe.cpp $(SRC)/gpu.cpp $(SRC)/shaders.cpp $(SRC)/shaders_attn.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp | check-cross
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -I$(SRC) -o $@ $^ $(CROSS_LDLIBS)

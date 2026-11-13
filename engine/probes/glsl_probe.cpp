@@ -8,7 +8,7 @@
 // See docs/performance.md.
 // modes: es2 (client 2), es3 (client 2 + MESA_GLES_VERSION_OVERRIDE=3.0),
 //        es3ctx (client 3).  The overrides must be set before eglInitialize.
-// build: make -C engine probes/glsl_probe_pi CROSS_SYSROOT=/home/ubuntu/raspi-root4
+// build: make -C engine probes/glsl_probe_pi CROSS_SYSROOT=<sysroot>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>

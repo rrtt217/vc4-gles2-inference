@@ -113,9 +113,15 @@ than an error.
 
 ```bash
 make -C engine -B engine_mm3 CXXFLAGS='-O2 -std=c++17'
-make -C engine -B pi CROSS_SYSROOT=<sysroot>       # Pi Zero, ARMv6
-make -C engine -B probes/draw_probe_pi             # a probe
+make -C engine -B armv6                            # Pi Zero, built on the board
+make -C engine -B pi CROSS_SYSROOT=<sysroot>       # Pi Zero, ARMv6, cross
+make -C engine -B probes/draw_probe_pi CROSS_SYSROOT=<sysroot>   # a probe
 ```
+
+The cross target discovers the compiler and the sysroot's gcc runtime, and fails
+unless the linked binary is ARMv6/VFPv2 — see `docs/cross-build.md`; a `-B`
+directory that does not exist is silently ignored by gcc and produces a binary
+that faults on the ARM1176.
 
 Probes have their own targets under `engine/probes/`; the Pi ones take the same
 `CROSS_*` variables as `pi`.

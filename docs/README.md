@@ -18,6 +18,7 @@ Deep dives:
 | [model-formats.md](model-formats.md) | the legacy layouts the packer consumes, and the models this repo runs |
 | [engine-internals.md](engine-internals.md) | VC4 findings, FFN split, GPU attention, persistent layers, Top-K |
 | [engine-layout.md](engine-layout.md) | source layout, X formats, regression rule |
+| [cross-build.md](cross-build.md) | **how to build for the Pi Zero**: the ARMv6 toolchain and sysroot recipe, why a missing `-B` fails silently, and how the build verifies the artifact |
 | [quantization.md](quantization.md) | q4/q6 experiments, offline Q4M1, packed KV, quality caveats |
 | [performance.md](performance.md) | Pi/laptop timing tables, the chronological lab notebook, regression baselines |
 | [long-context.md](long-context.md) | why the Pi stops at 2048 tokens, and what passing it would cost |
