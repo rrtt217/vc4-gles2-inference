@@ -394,7 +394,7 @@ being a coin flip.
 ## Self-test, evaluation, prefix cache
 
 ```bash
-python3 server/selftest.py            # 54 assertions, no engine needed
+python3 server/selftest.py            # routing, SSE and sampling; no engine needed
 python3 server/eval_suite.py --base http://127.0.0.1:8000 --out eval.json
 python3 server/build_prefix_cache.py build  --tools system_status --out server/pfx.kv
 python3 server/build_prefix_cache.py verify --cache server/pfx.kv

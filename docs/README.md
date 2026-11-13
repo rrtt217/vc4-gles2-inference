@@ -32,6 +32,7 @@ Deep dives:
 | [translation-decision-model-fit.zh-CN.md](translation-decision-model-fit.zh-CN.md) | 20–150M translation/decision model fit, Jev-like decisions, adaptation plan (中文) |
 | [lfm2.5-230m.md](lfm2.5-230m.md) | **LFM2.5-230M, the hybrid (conv + attention) model**: containers, run commands, the quality numbers and what is still broken |
 | [lfm2.5-230m-assessment.zh-CN.md](lfm2.5-230m-assessment.zh-CN.md) | LFM2.5-230M 的打包与可行性评估：架构事实、残差/激活幅值实测、官方 GGUF 配方、工作量与风险（历史记录；实现现状见 `lfm2.5-230m.md`） |
+| [rwkv7-assessment.zh-CN.md](rwkv7-assessment.zh-CN.md) | RWKV-7（Goose）支持评估：算子清单、容器/分词器/状态差距、Pi 与 Xe 的性能内存估算、分阶段工作量与风险（评估文档，未实现） |
 
 Working on a numerics question?  `AGENTS.md` has the "Debugging protocol"
 table that maps a question to the tool that answers it — `mmcf_dump.py`,
@@ -42,8 +43,10 @@ Conventions:
 
 - Numbers are measured on the machine named in the section; they are not
   promises for every Pi or driver.
-- `performance.md` is chronological.  Its top matrix is current; later
-  sections retain historical numbers so the cost model stays auditable.
+- `performance.md` is chronological.  The **newest dated campaign near the
+  bottom** is the current matrix (with a documentation addendum after it); the
+  table near the top is the 2026-11-02 history, kept so the cost model stays
+  auditable.
 - The Pi and laptop do **not** produce byte-identical KV caches. Build a disk
   cache on the machine that will load it.
 - `CmaFree` is actual CMA occupancy; reducing `gpu_mem` or `cma` does not

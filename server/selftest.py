@@ -123,7 +123,7 @@ class TinyContextWorker:
         pass
 
     def generate(self, prompt, max_tokens, temperature, top_p, seed, on_token=None, penalties=None,
-                 messages=None):
+                 messages=None, top_k=0):
         self.prompts.append(prompt if messages is None else json.dumps(messages, sort_keys=True))
         if self.marker in prompt and (self.fail_always or len(self.prompts) == 1):
             raise srv.ContextFull("[context full]")
@@ -141,17 +141,19 @@ class StubWorker:
         self.restarts = 0
         self.alive = True
         self.last_penalties = None
+        self.last_top_k = 0
 
     def ensure_alive(self) -> None:
         if not self.alive:
             raise srv.WorkerError("engine worker exited (auto-restart disabled or exhausted)")
 
     def generate(self, prompt, max_tokens, temperature, top_p, seed, on_token=None, penalties=None,
-                 messages=None):
+                 messages=None, top_k=0):
         self.ensure_alive()
         self.last_messages = messages
         self.calls += 1
         self.last_penalties = penalties
+        self.last_top_k = top_k
         self.last_prompt = prompt
         self.total_tokens += 1
         if on_token:
@@ -304,6 +306,14 @@ code, resp = http("POST", "/v1/chat/completions", {
     "messages": [{"role": "user", "content": "hi"}], "repetition_penalty": 9.0})
 check("penalties clamped", worker.last_penalties == {"repetition_penalty": 2.0},
       str(worker.last_penalties))
+# top_k is the column that broke this suite when it was plumbed through the
+# worker without the stubs following: assert the value, not just the signature.
+code, resp = http("POST", "/v1/chat/completions", {
+    "messages": [{"role": "user", "content": "hi"}], "top_k": 7})
+check("top_k forwarded", worker.last_top_k == 7, str(worker.last_top_k))
+code, resp = http("POST", "/v1/chat/completions", {
+    "messages": [{"role": "user", "content": "hi"}], "top_k": -3})
+check("top_k clamped", worker.last_top_k == 0, str(worker.last_top_k))
 
 print("== stop sequences ==")
 from server import StopFilter, apply_stop_text  # noqa: E402

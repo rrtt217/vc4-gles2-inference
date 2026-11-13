@@ -10,8 +10,9 @@ paths); the current invocation is in `AGENTS.md` and `engine/README.md`.
 
 ## Historical model matrix (2026-11-02 run)
 
-**The current Pi matrix is the 2026-11-13 campaign at the bottom of this file**
-(HEAD `71cb1e0`, protocol v1).  This table stays as history: it was measured on
+**The current Pi matrix is the 2026-11-13 campaign near the bottom of this
+file** (HEAD `71cb1e0`, protocol v1; the very last section is a documentation
+addendum, not a measurement).  This table stays as history: it was measured on
 an older build in a lower GPU-clock state, and the 2026-11-13 section lists what
 moved.  Quote a Pi number only with its date and protocol.
 
@@ -5592,3 +5593,26 @@ with the default).  Board pins after this change: q8 string
 prints `我是MiniMind，一个由jingyaogong`), q8 PPL 271.2855, q4 PPL 325.3751,
 LFM2 serial warm 29.1588 (with `Q16_DECODE=exact`: 271.6420 / 326.8088 /
 28.6196).
+
+## 2026-11-13 — documentation audit: `CONV_GPU` was never a switch
+
+Every LFM2.5 command in this log that carries `CONV_GPU=1` passed a variable the
+engine has never read.  `getenv("CONV_GPU")` appears in no source file, in no
+commit of any branch (`git log --all -S CONV_GPU` touches Markdown only) and in
+no built binary (`strings engine/engine_mm3 .bench/engine_mm3_pi.71cb1e0 |
+grep -c CONV_GPU` → 0, 0).  The row was written into `docs/test-hooks.md` by
+`0b50fb0`, the same commit that added the GPU conv passes — whose call site is
+the unconditional `if (m_.is_conv(l))` — so it was documented and unread from
+birth, not removed later.
+
+Consequence for the entries above: **none of their numbers is wrong.**  What
+selects the fused path is `GPU_LAYER`, and every fused/serial pair in this file
+differs in exactly that (`serial` rows carry `GPU_LAYER=0`).  Read
+`GPU_LAYER=1 CONV_GPU=1` as `GPU_LAYER=1`.  The switch row is gone from
+`test-hooks.md` and `lfm2.5-230m.md` now explains it; the commands above stay as
+they were run, per the append-only rule.
+
+Two older sections in this file still call the top table "the current matrix
+above" (the 2026-11-01 and 2026-11-02 reports, written when it was the newest
+build).  That table is history; the pointer at the top of this file and the
+2026-11-13 campaign are the authority.

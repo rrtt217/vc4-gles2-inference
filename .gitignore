@@ -29,32 +29,16 @@ __pycache__/
 .pytest_cache/
 
 # Engine/build outputs
-engine/engine
-engine/engine_mm3
-engine/engine_mm3_pi
-engine/engine_attn
-engine/engine_layer
-engine/engine_profile
-engine/vc4_probe
-engine/vc4_ffn_probe
-engine/vc4_topk_probe
-engine/probes/vc4_probe
-engine/probes/vc4_ffn_probe
-engine/probes/vc4_topk_probe
-engine/probes/matvec_probe
-engine/probes/texsize_probe
-engine/probes/q4fmt_probe_pi
-engine/probes/progbinary_probe_pi
-engine/probes/load_probe_pi
-engine/probes/glsl_probe_pi
-engine/probes/q4mv_probe_pi
-engine/probes/wrow_probe
-engine/probes/conv_probe
-engine/probes/conv_probe_pi
-engine/probes/wrow_probe_pi
-engine/probes/draw_probe_pi
-engine/probes/ffn2_probe_pi
-engine/probes/logits_grid_probe
+/engine/engine
+/engine/engine_mm3
+/engine/engine_mm3_pi
+
+# Probe binaries are build outputs; track the sources only.  A hand-written
+# list of probe names is how probes/packunpack_probe got committed (5 times):
+# every sibling was listed, that one was not.  Negate on the sources instead.
+/engine/probes/*
+!/engine/probes/*.cpp
+!/engine/probes/README*
 
 # Editor / OS
 .DS_Store

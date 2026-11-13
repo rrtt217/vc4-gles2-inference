@@ -17,6 +17,10 @@
 #                      switch dead.  scripts/docs_check.sh, no GPU needed; a
 #                      drift here is a real defect (a stale doc sends the next
 #                      reader at the wrong thing), so it fails the gate.
+#   0b. shaders      - the emitted GLSL *is* the numerics, so a builder change
+#                      that moves it must move scripts/shader_hashes.txt in the
+#                      same commit.  --dump-shaders returns before any EGL call,
+#                      so this needs no GPU and no model (~0.03 s).
 #   1. determinism   - the same binary, run twice, prints the same text.  A
 #                      failure here is a real bug (uninitialised state, a race,
 #                      a stale cache), never "noise".
@@ -149,6 +153,26 @@ sh scripts/docs_check.sh || {
     echo "docs FAIL: run scripts/docs_check.sh for the list" >&2
     exit 1
 }
+
+# Shader text is the numerics: a builder change that moves the emitted GLSL has
+# to move the golden deliberately, and a text-neutral refactor must leave it
+# untouched (AGENTS.md, "Source split policy").  Pass the same binary the rest
+# of the gate uses - the text does not depend on the target, so a Pi run is
+# checked against the same golden.  Three outcomes, and they must not be
+# confused: 0 passed, 1 the text really moved, anything else the check could
+# not run here (a cross-built binary on the laptop exits 255, a build without
+# --dump-shaders fails earlier) - still a gate failure, but not a numerics
+# signal, so say which one happened.
+shader_rc=0
+sh scripts/shader_hashes.sh "$BIN" || shader_rc=$?
+case $shader_rc in
+    0) ;;
+    1) echo "shader FAIL: the emitted GLSL moved; run scripts/shader_hashes.sh $BIN" >&2
+       exit 1 ;;
+    *) echo "shader gate could not run: scripts/shader_hashes.sh $BIN exited $shader_rc" >&2
+       echo "  (binary not runnable on this host, or built without --dump-shaders)" >&2
+       exit 1 ;;
+esac
 
 q8=$(text "$Q8" "$PROMPT" 16 "$SYS")
 q8b=$(text "$Q8" "$PROMPT" 16 "$SYS")

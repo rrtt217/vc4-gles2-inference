@@ -228,16 +228,17 @@ anymore: the engine has no legacy reader.
 
 The one model with **conv** layers.  Its container carries layer types in
 metadata key 14, and the conv layers are a depthwise causal k=3 convolution
-with two rows of state per layer.  The fused path needs an extra switch:
+with two rows of state per layer.  The fused path is `GPU_LAYER=1`:
 
 ```bash
 MODEL=../models/lfm2.5-230m/qad/lfm2.5.qad.q4.mmcf SEQ=512 \
-GPU_LAYER=1 CONV_GPU=1 ./engine_mm3 --chat \
+GPU_LAYER=1 ./engine_mm3 --chat \
   --system "You are a helpful assistant trained by Liquid AI." \
   --prompt "What is the capital of France?" --gen 32 --greedy
 ```
 
-`CONV_GPU=1` puts the conv block on the GPU; without it the serial layer loop
+`GPU_LAYER=1` puts the conv block on the GPU, because it selects the fused layer
+loop and a conv layer takes its GPU branch there; the serial `GPU_LAYER=0` loop
 runs the conv on the CPU, which is the reference path (the fused path is 4%
 worse in perplexity and 3x faster).  `KV_PACK=16` is the hybrid default — the
 24-bit KV layout is wrong for this model's shape.  Perplexity, timings, the

@@ -34,8 +34,8 @@ replace working paths with demos or cosmetic rewrites.
 | `docs/` | deep dives; keep READMEs short and link here |
 
 **LFM2.5-230M is the one hybrid (conv + attention) model.**  It exercises
-metadata key 14, the conv tensors `0x17`-`0x19`, `CONV_GPU=1` and a template that
-supplies its own `<|startoftext|>`.  Read
+metadata key 14, the conv tensors `0x17`-`0x19`, the fused `GPU_LAYER=1` conv
+path and a template that supplies its own `<|startoftext|>`.  Read
 [`docs/lfm2.5-230m.md`](docs/lfm2.5-230m.md) before touching the conv block or
 its numbers: it lists what is measured, what is still broken (an i16 container
 on the fused path, a prompt longer than `SEQ`, digit-run tokenisation), and the
@@ -67,7 +67,7 @@ the file format in [`docs/model-formats.md`](docs/model-formats.md) and
 
 | Script | Answers |
 |---|---|
-| `regression.sh` | the acceptance gate: docs drift, determinism, behaviour, pinned strings, PPL |
+| `regression.sh` | the acceptance gate: docs drift, shader hashes, determinism, behaviour, pinned strings, PPL |
 | `shader_hashes.sh` | did a builder change move the emitted GLSL: digests of every builder's text (`--dump-shaders`), no GPU or model needed |
 | `diff_paths.sh` + `dump_diff.awk` | per-stage CPU-vs-GPU comparison, from `STAGE_DUMP=1 HIDDEN_DUMP=1 PREFILL_PAIR=0` |
 | `dump_stats.py` | per-row `max/mean/clamp-count` of a `DUMP` file (is a row saturating?) |
@@ -395,9 +395,10 @@ five scripts and two READMEs after the engine dropped it, and `docs_check.sh`
 only catches the paths it knows about.
 
 `docs/performance.md` is append-only history: new measurements go at the
-bottom with the date and the machine, and the current state lives in its top
-matrix.  Do not rewrite old entries; correct them with a new section that says
-what was wrong.
+bottom with the date and the machine, and the current Pi matrix is the newest
+dated campaign there (2026-11-13 today).  The matrix near the top is the
+2026-11-02 history, kept so the cost model stays auditable.  Do not rewrite old
+entries; correct them with a new section that says what was wrong.
 
 ## Source split policy
 

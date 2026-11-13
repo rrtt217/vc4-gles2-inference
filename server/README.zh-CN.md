@@ -128,7 +128,7 @@ curl -sS http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application
 ## 自测、评测、前缀缓存
 
 ```bash
-python3 server/selftest.py            # 57 条断言，不需要 GPU
+python3 server/selftest.py            # 路由、SSE 与采样，不需要 GPU
 python3 server/eval_suite.py --base http://127.0.0.1:8000 --out eval.json
 python3 server/build_prefix_cache.py build  --tools system_status --out server/pfx.kv
 python3 server/build_prefix_cache.py verify --cache server/pfx.kv

@@ -66,7 +66,7 @@ run is a comparison.
 cd engine
 # laptop: fused (GPU conv + GPU attention + texture residual), ~33 ms/token
 MODEL=../models/lfm2.5-230m/qad/lfm2.5.qad.q4.mmcf SEQ=512 \
-GPU_LAYER=1 CONV_GPU=1 ./engine_mm3 --chat \
+GPU_LAYER=1 ./engine_mm3 --chat \
   --system "You are a helpful assistant trained by Liquid AI." \
   --prompt "What is the capital of France?" --gen 32 \
   --temp 0.1 --top-k 50 --repeat-penalty 1.05   # see the sampling note below
@@ -77,14 +77,18 @@ MODEL=../models/lfm2.5-230m/qad/lfm2.5.qad.q4.mmcf SEQ=512 GPU_LAYER=0 \
 
 # Pi Zero (runtime dir, no checkout): SEQ=256 fits the CMA
 MODEL=models/lfm2.5-230m/lfm2.5.qad.q4.mmcf SEQ=256 KV_PACK=16 \
-GPU_LAYER=1 CONV_GPU=1 ./bin/engine_mm3_pi --chat \
+GPU_LAYER=1 ./bin/engine_mm3_pi --chat \
   --system "You are a helpful assistant trained by Liquid AI." \
   --prompt "What is the capital of France?" --gen 32 --greedy
 ```
 
-* `CONV_GPU=1` is what puts the conv block on the GPU; without it the serial
-  path runs the conv on the CPU.  The serial path is the reference (see the gap
-  below), the fused path is the fast one.
+* `GPU_LAYER=1` is what puts the conv block on the GPU: it selects the fused
+  layer loop, and a conv layer takes its GPU branch there.  The serial
+  `GPU_LAYER=0` loop is the one that runs the conv on the CPU, and it is the
+  reference (see the gap below); the fused path is the fast one.  There is **no
+  separate conv switch** — `CONV_GPU` was documented here and read by nothing;
+  a 2026-11-13 audit found it in no source file, no git history and no built
+  binary, so a command carrying it behaves exactly like `GPU_LAYER=1` alone.
 * `KV_PACK=16` is the hybrid default.  The 24-bit KV layout is **wrong for this
   shape** (kv_dim 512, head_dim 64) and the fused path answers garbage with it.
 * Sampling: the model card and the probe agree on low temperature.  `--temp 0.1
@@ -138,7 +142,7 @@ measurement:
 | Pi Zero, QAD q4, `SEQ=256`, 334 scored tokens | cold (`PPL_STRIDE=0`) | warm (default, `stride=128`) |
 |---|---:|---:|
 | serial (`GPU_LAYER=0`) | 43.9130 | **28.6196** |
-| fused (`GPU_LAYER=1 CONV_GPU=1`) | 45.5248 | 31.6824 |
+| fused (`GPU_LAYER=1`) | 45.5248 | 31.6824 |
 | Xe, same corpus, serial | 42.63 | 28.82 |
 | Xe, same corpus, fused | 45.00 | 30.10 |
 

@@ -31,7 +31,7 @@ numbers with their protocol, and do not read the rows below as current.
 | Server | OpenAI-compatible server; per-request tool/sampling control is partial |
 | Deterministic tools | `/status` `/time` `/math` `/v1/tool` + `tool_choice` routing: 10–30 ms, no model |
 | Prefix cache automation | `server/build_prefix_cache.py build|verify`, sidecar metadata, refuses stale caches |
-| Eval harness | `server/eval_suite.py` (fixed cases, JSON output) + `server/selftest.py` (54 assertions, no GPU) |
+| Eval harness | `server/eval_suite.py` (fixed cases, JSON output) + `server/selftest.py` (no engine needed, ~1 s) |
 | Thinking | format works, but MiniMind3 q4/q8 does not reliably close think tags |
 | Effective throughput | q8 on Pi: 183.5 ms per decode token (2026-11-03), i.e. ~5.4 tok/s; the 517 ms and 238 ms figures are historical |
 
@@ -172,7 +172,7 @@ cache per tool set (`--only-tool`) once the server runs that mode by default.
 live server and writes JSON: deterministic routes, named-tool routing,
 identity, natural-language arithmetic, multi-turn, long prompt, streaming and
 malformed-body handling.  `server/selftest.py` covers the same routing logic
-with a stub worker (54 assertions, no GPU, ~1 s), which is what makes it safe
+with a stub worker (no engine needed, ~1 s), which is what makes it safe
 to change the server without a Pi in the loop.
 
 Still to add: q4 vs q8, tool-name/argument accuracy over several prompts,
