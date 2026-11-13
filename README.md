@@ -132,23 +132,26 @@ details.
 Every row is an `.mmcf` container; the legacy file it was packed from stays
 next to it in `models/` as a re-pack source.
 
-| Model | Size | Pi decode | Notes |
+| Model | Size | Pi decode (2026-11-13) | Notes |
 |---|---:|---:|---|
-| LFM2.5-230M q4 (QAD) | 169 MB | ~1040 ms/token | hybrid conv+attention; `GPU_LAYER=1 CONV_GPU=1`, `SEQ=256` |
-| MiniMind3 q8 | 66 MB | ~238 ms/token | default Chinese chat |
-| MiniMind3 q4 | 45 MB | ~381 ms/token | memory mode; lower quality |
-| MiniMind2 i16 | 58 MB | ~226 ms/token | reference; weak instruction following |
-| MiniMind2 q8 | 29 MB | ~140–190 ms/token | rope comes from the container |
-| MiniMind2 q4 | 21 MB | ~193–212 ms/token | memory mode; identity answers unreliable |
-| TinyChat15M q8 | 24 MB | ~139–171 ms/token | runs, but output is not coherent; format probe only |
-| stories15M i16 | 49 MB | ~167 ms/token | TinyStories completion; coherent |
-| stories42M q8 | 58 MB | ~190 ms/token | TinyStories completion; coherent |
-| stories15M q8 | 24 MB | ~148 ms/token | q8 conversion produces gibberish; use i16 |
-| stories260K | 1 MB | ~85 ms/token | floor probe; prefill 5.4 s |
+| LFM2.5-230M q4 (QAD) | 169 MB | not re-measured | hybrid conv+attention; last 1040 ms/token (2026-11-11) |
+| MiniMind3 q8 | 66 MB | not re-measured | default Chinese chat; last 252 ms/token (2026-11-02) |
+| MiniMind3 q4 | 45 MB | ~304 ms/token | memory mode; lower quality |
+| MiniMind2 i16 | 58 MB | ~327 ms/token | reference; 41% slower than its 2026-11-02 number, unexplained |
+| MiniMind2 q8 | 29 MB | ~124 ms/token | rope comes from the container |
+| MiniMind2 q4 | 21 MB | ~154 ms/token | memory mode; identity answers unreliable |
+| TinyChat15M q8 | 24 MB | ~115 ms/token | llama-2 chat format; needs the shipped `[INST]` template; 15M quality |
+| stories15M i16 | 49 MB | not on the board | TinyStories completion; coherent |
+| stories42M q8 | 58 MB | ~160 ms/token | TinyStories completion; coherent |
+| stories15M q8 | 24 MB | ~116 ms/token | TinyStories completion; coherent |
+| stories260K | 1 MB | not on the board | floor probe; prefill 5.4 s |
 
-Pi numbers are single-run and noisy; see [performance.md](docs/performance.md).
-TinyChat15M needs a working tokenizer/prompt pairing before it can be called a
-chat model.
+The Pi column is the 2026-11-13 campaign on HEAD `71cb1e0` (`GPU_LAYER=1
+KV_PACK=16`, greedy, `--gen 16`, a discarded warm-up plus three timed runs,
+median), decode only.  Rows marked "not re-measured" / "not on the board" keep
+their last number in [performance.md](docs/performance.md), which also has the
+protocol, the prefill ranges and the open i16 anomaly.  Prefill moves with the
+board's SD card and background load; do not quote it as a constant.
 
 ## Documentation
 

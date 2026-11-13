@@ -120,22 +120,25 @@ python3 server.py --seq 768 --kv-pack 16 \
 
 每一行都是 `.mmcf` 容器；打包前的 legacy 文件留在 `models/` 里作为重新打包的源。
 
-| 模型 | 大小 | Pi decode | 说明 |
+| 模型 | 大小 | Pi decode（2026-11-13） | 说明 |
 |---|---:|---:|---|
-| LFM2.5-230M q4 (QAD) | 169 MB | ~1040 ms/token | 混合 conv+attention；`GPU_LAYER=1 CONV_GPU=1`、`SEQ=256` |
-| MiniMind3 q8 | 66 MB | ~238 ms/token | 默认中文对话 |
-| MiniMind3 q4 | 45 MB | ~381 ms/token | 内存模式，质量略低 |
-| MiniMind2 i16 | 58 MB | ~226 ms/token | 参考模型，指令跟随较弱 |
-| MiniMind2 q8 | 29 MB | ~140–190 ms/token | rope 由容器自带 |
-| MiniMind2 q4 | 21 MB | ~193–212 ms/token | 内存模式，身份类回答不可靠 |
-| TinyChat15M q8 | 24 MB | ~139–171 ms/token | 能运行但输出不连贯，只作格式探针 |
-| stories15M i16 | 49 MB | ~167 ms/token | TinyStories 补全，连贯 |
-| stories42M q8 | 58 MB | ~190 ms/token | TinyStories 补全，连贯 |
-| stories15M q8 | 24 MB | ~148 ms/token | q8 转换输出乱码，改用 i16 |
-| stories260K | 1 MB | ~85 ms/token | 下限探针；prefill 5.4 s |
+| LFM2.5-230M q4 (QAD) | 169 MB | 未重测 | 混合 conv+attention；最后数据 1040 ms/token（2026-11-11） |
+| MiniMind3 q8 | 66 MB | 未重测 | 默认中文对话；最后数据 252 ms/token（2026-11-02） |
+| MiniMind3 q4 | 45 MB | ~304 ms/token | 内存模式，质量略低 |
+| MiniMind2 i16 | 58 MB | ~327 ms/token | 参考模型；比 2026-11-02 慢 41%，原因待查 |
+| MiniMind2 q8 | 29 MB | ~124 ms/token | rope 由容器自带 |
+| MiniMind2 q4 | 21 MB | ~154 ms/token | 内存模式，身份类回答不可靠 |
+| TinyChat15M q8 | 24 MB | ~115 ms/token | llama-2 chat 格式；需要随仓库提供的 `[INST]` 模板；15M 级质量 |
+| stories15M i16 | 49 MB | 板上没有 | TinyStories 补全，连贯 |
+| stories42M q8 | 58 MB | ~160 ms/token | TinyStories 补全，连贯 |
+| stories15M q8 | 24 MB | ~116 ms/token | TinyStories 补全，连贯 |
+| stories260K | 1 MB | 板上没有 | 下限探针；prefill 5.4 s |
 
-Pi 数字是单次运行，受后台负载影响；详见 [performance.md](docs/performance.md)。
-TinyChat15M 目前还不能算可用的对话模型，需要先修 tokenizer/prompt 配对。
+Pi 一列是 2026-11-13 在 HEAD `71cb1e0` 上的测试（`GPU_LAYER=1 KV_PACK=16`、
+greedy、`--gen 16`，先丢弃一次预热、再 3 次计时取中位数），只含 decode。
+标"未重测"/"板上没有"的行沿用
+[performance.md](docs/performance.md) 里带日期的最后数据，协议、prefill 范围和
+i16 异常也在那里。prefill 受板子 SD 卡和后台负载影响，不要当作常数引用。
 
 ## 文档
 

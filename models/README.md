@@ -23,7 +23,8 @@ models/
   llama2c/                       llama2.c TinyStories family + MiniMind2 Small
     stories15M.bin               source
     stories42M.bin               source
-    TinyChat15M.bin              source; output is not coherent (format probe)
+    TinyChat15M.bin              source; llama-2 chat format (the containers carry
+                                 templates/llama2_chat.jinja; repack with --chat)
     stories260K.bin + tok512.bin 5-layer floor probe, 512-token vocabulary
     minimind2-small.i16          kept: the only local source for this model
     minimind2-small.{i16,q4,q8}.mmcf

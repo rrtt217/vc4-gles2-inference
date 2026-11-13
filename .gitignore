@@ -68,3 +68,6 @@ engine/probes/logits_grid_probe
 # Local agent overrides (machine-specific, not portable)
 /AGENTS.local.md
 /AGENTS.override.md
+
+# Agent scratch (campaign scripts, audits)
+.bench/

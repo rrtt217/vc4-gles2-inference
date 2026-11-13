@@ -196,9 +196,12 @@ GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
 
 ### TinyChat15M
 
-TinyChat15M.q8 loads and runs, but the repository tokenizer/prompt pairing
-currently produces incoherent text.  Treat it as a format/probe model, not as
-a chat model.
+TinyChat15M is a llama-2-chat-format 15M model, not a completion model: the
+container ships `templates/llama2_chat.jinja`, so `--chat` renders
+`[INST] ... [/INST]` and the reply comes back in dialogue form.  The old
+"tokenizer/prompt pairing" caveat (2026-11-02) was the missing template plus a
+plain prompt; the store's q8/i16 containers were repacked with `--chat-template`
+on 2026-11-13.  It is still a 15M model: grammatical and in-format, not correct.
 
 ### TinyStories 15M/42M
 
@@ -321,20 +324,23 @@ the same short English default system prompt as the other chat templates
 (`You are a helpful assistant.`). Override it with `--system`. Add `TIMING=1`
 for prefill/decode timing.
 
-Pi Zero, 16 generated tokens (2026-11-02 run; Pi also runs a Minecraft
-server, so expect noise):
+Pi Zero, 16 generated tokens (2026-11-13 campaign on HEAD `71cb1e0`: a discarded
+warm-up plus three timed runs, median; `docs/performance.md` has the protocol
+and the rows not re-measured):
 
 | model | prefill | decode |
 |---|---:|---:|
-| MiniMind3 q8 | 20.5 s | **238 ms/token** |
-| MiniMind3 q4 | 33.0 s | **381 ms/token** |
-| MiniMind2 i16 | 9.2 s | 226 ms/token |
-| MiniMind2 q8 | 8.4 s | 140–190 ms/token |
-| MiniMind2 q4 | 9.7 s | 193–212 ms/token |
-| TinyChat15M q8 | 4.8 s | 139–171 ms/token (not coherent) |
+| MiniMind3 q4 | 16.0–35.9 s | **304.4 ms/token** |
+| MiniMind2 i16 | 11.8–19.9 s | 326.8 ms/token (41% slower than 2026-11-02, unexplained) |
+| MiniMind2 q8 | 7.3–7.9 s | 123.5 ms/token |
+| MiniMind2 q4 | 8.9 s | 153.7 ms/token |
+| TinyChat15M q8 | 3.6–4.5 s | 115.4 ms/token |
 
-The historical 520.9 ms/token and 42.7 s prefill figures were measured before
-the q16 attention and q4 paired-residual work; use the table above.
+MiniMind3 q8 was not re-measured; its last number is 252 ms/token (2026-11-02).
+The historical 520.9 ms/token and 42.7 s prefill figures predate the q16
+attention and q4 paired-residual work; the 32-token plain-prompt pair for the
+two MiniMind3 containers is 195.5 / 291.7 ms/token (2026-11-05), a different
+protocol.
 
 The FFN hidden width 2432 exceeds the VC4 2048-pixel FBO limit.
 `Model::split_ffn()` splits W1/W3 rows and W2 columns into 1216-wide chunks;

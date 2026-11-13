@@ -8,17 +8,25 @@ as they were run, so historical ones may use flags that no longer exist
 (`--template`, `TOKENIZER=`, `ROPE_THETA=`, `ROPE_HALF=`, legacy `.q8`/`.q4`
 paths); the current invocation is in `AGENTS.md` and `engine/README.md`.
 
-## Current model matrix (2026-11-02 run)
+## Historical model matrix (2026-11-02 run)
+
+**The current Pi matrix is the 2026-11-13 campaign at the bottom of this file**
+(HEAD `71cb1e0`, protocol v1).  This table stays as history: it was measured on
+an older build in a lower GPU-clock state, and the 2026-11-13 section lists what
+moved.  Quote a Pi number only with its date and protocol.
 
 Pi Zero, `GPU_LAYER=1 KV_PACK=16`, greedy, 16 generated tokens.  The Pi also
 runs a Minecraft server, so use the ranges rather than individual decimals.
 
 Every row is loaded from the `.mmcf` container named here; the legacy file of
 the same name (without the suffix) is the packer input.  These are the
-**2026-11-02** numbers: the decode campaign, the fused-FFN default and the
-two-position prefill all landed afterwards, so the q8/q4 pair to quote today is
-252 / 388 ms/token (see "q4 parity, step 1" below, which explains the different
-clock state).  Rows keep their date so the cost model stays auditable.
+**2026-11-02** numbers, measured on an older build in a lower GPU-clock state
+(`vcgencmd measure_clock core` read 300 MHz): the decode campaign, the fused-FFN
+default and the two-position prefill all landed afterwards.  The last 32-token
+measurement of the two MiniMind3 containers is 195.5 / 291.7 ms/token
+(2026-11-05, plain short prompt, median of three interleaved runs, `SEQ=768`) --
+a different protocol from this 16-token table, and neither column is "today".
+Rows keep their date so the cost model stays auditable.
 
 | model | container | size | prefill | decode | status |
 |---|---|---:|---:|---:|---|
@@ -104,6 +112,12 @@ walk back through the entries that produced it.
 
 Current state:
 
+- **2026-11-13: the current Pi matrix.**  HEAD `71cb1e0`, 14 containers,
+  protocol v1 (a discarded warm-up plus three timed runs).  q8 is 14-22% faster
+  than the 2026-11-02 table; i16 is 41% slower and unresolved.  The section is
+  at the bottom of this file.
+- **2026-11-12: the deploy that made it possible**, and the board storage
+  failure that delayed it by a day.
 - [Decode loop campaign summary (2026-11-02 .. 03)](#decode-loop-campaign-summary-2026-11-02--03)
   — 237.3 -> 183.5 ms decode, the pass budget, and the env knob behind each
   landed change.  Dead ends live in
@@ -5401,3 +5415,130 @@ path), which is why no existing PPL pin moved: laptop q8 PPL 270.3170 and q4
 reproduce.  The hybrid q8 container now translates (`This product is out of
 stock.`) instead of emitting noise; `docs/lfm2.5-230m.md` gap 8 has the staging
 evidence.
+
+## 2026-11-12 — HEAD deployed; the re-calibration stopped at the board's storage (Pi Zero)
+
+The board had been running a binary from `4ffb536` (the warm-window `--ppl`
+deploy).  It was one code commit behind, and that commit matters: `6c2a0cd`
+carries the hybrid fused-loop repairs, the MoE per-layer FFN-hidden store scale
+(metadata key 15), the container-stated RMS eps and `MOE_ROUTES`.  A fresh
+cross-build was made on vlab from `f8b3fb8` (docs-only on top of `6c2a0cd`),
+ARMv6 / VFPv2, 1,560,176 B, md5 `a171cd94f778e3d35f2c6b634b6888dc`, and deployed
+over the old one, which is kept as `engine_mm3_pi.aefc2e99` (`4ffb536`, md5
+`aefc2e99dde64d61b22f4978bc039a52`).
+
+What the new binary was checked on before the board became unusable:
+
+* MiniMind3 q8, `SEQ=768`, `--chat`, pinned system prompt, greedy, `--gen 16`:
+  `我是MiniMind，一个由jingyaogong` -- the Pi acceptance pin, unchanged.  So
+  `6c2a0cd` does not move the board's tripwire.
+* seven of the twenty containers in the runtime store were started and emitted
+  at least one token, all `GPU_LAYER=1 KV_PACK=16`, greedy:
+  `minimind3.q8` (768), `minimind3-moe.q4` (768), `lfm2.5.qad.q4` (256,
+  `CONV_GPU=1`), `tinybrainbot.q4` (512), `picolm85.q4q24` (512),
+  `void1.q8r` (512) and `vertex100.q4` (512).  The other thirteen were **not**
+  exercised on this build: either feng container, the MiniMind2 trio, the three
+  stories containers, `minimind3.q4`, `minimind3-moe.q8`, `vertex15`,
+  `vertex35` and `void1.q4`.  That is a coverage check, not a claim that they
+  run.
+* **No usable timing.**  Every run from 20:37 on was concurrent with an
+  inventory sweep reading ~1.5 GB from the same card.  The first MiniMind3 q8
+  run (prefill 27.6 s, `decode_avg` 219.1 ms/token, `--gen 16`) is contended,
+  and the repeats show the board rather than the model: two identical `--gen 8`
+  runs at 21:05 gave prefill 23.1 vs 34.0 s and 267.1 vs 492.7 ms/token.  No
+  row in this file may be quoted from them.
+
+Why it stopped, recorded for the next person:
+
+* The card is a white-label 32 GB SD (`SD32G`, manfid `0x009f`, oemid `0x5449`,
+  date `08/2024`), 91% full.  Every boot prints `mmc0: Problem switching card
+  into high-speed mode!`; `/sys/kernel/debug/mmc0/ios` reports 25 MHz **legacy**
+  timing at 4-bit, and `dd` measures ~8.5 MB/s.
+* Under load the block layer returned EIO at **eight distinct LBAs** spread over
+  6.3-27.6 GB (`I/O error, dev mmcblk0, sector ...`), and ten pages of the
+  512 MB `/var/swap` file could not be read back (`Read-error on swap-device`).
+* With 437 MB of RAM and ~190 MB in swap, a failed swap-in delivered SIGBUS to
+  `tailscaled` (each Go crash dump is tens of KB); journald wrote them to the
+  same card at 45% CPU, load reached 20-27, and the 5-minute hardware watchdog
+  reset the board three times in twenty minutes.  `tailscaled`'s binary
+  verified clean (`dpkg -V`), and the seven failed LBAs that were re-read
+  afterwards all read OK, so no permanent bad block is proven -- what is proven
+  is that this storage cannot carry a benchmark.
+* Therefore: do not run a Pi matrix on this board until the card is replaced (or
+  swap is moved off it and the resident services are stopped), and do not run a
+  benchmark while a tool sweeps the model store -- the failing reads coincided
+  with exactly that.
+
+## 2026-11-13 — the Pi campaign on HEAD: 14 containers, protocol v1 (Pi Zero)
+
+Binary: HEAD `71cb1e0` (`6c2a0cd`'s code plus the fused-W13 guard found on
+2026-11-13), cross-built on vlab, ARMv6 / VFPv2, 1,560,176 B, deployed over the
+2026-11-12 build (kept as `engine_mm3_pi.2026-11-12`).  Board otherwise as it
+ships: `pumpkin` resident, swap on the SD card, load 0.2-3.7 during the runs.
+
+Protocol v1 was adopted after the first three models showed that a cold page
+cache inflates the first run by up to 50%: before each model `drop_caches`, then
+one **discarded warm-up** run (it faults the mmap'd embedding rows the timed
+runs will touch), then **three timed runs, 20 s apart**, median reported.  All
+runs are `GPU_LAYER=1 KV_PACK=16`, greedy, `--gen 16`; `SEQ` and prompt are per
+row.  Rows marked † predate the warm-up rule and carry the noise it explains.
+
+| model | container | SEQ | prompt | decode (median, range) | prefill |
+|---|---|---:|---|---:|---:|
+| MiniMind2 q8 † | `minimind2-small.q8.mmcf` | 512 | chat, `用一句话介绍你自己。` | **123.5** (123.2-123.7) | 7.3-7.9 s |
+| stories15M q8 † | `stories15M.q8.mmcf` | 256 | `Once upon a time` | **116.2** (114.8-117.7) | 3.1-3.9 s |
+| TinyChat15M q8 | `TinyChat15M.q8.mmcf` | 256 | `Once upon a time, there was a little girl named` | **115.4** (114.5-161.2) | 3.6-4.5 s |
+| minimind2 q4 | `minimind2-small.q4.mmcf` | 512 | chat, `用一句话介绍你自己。` | **153.7** (152.1-154.8) | 8.9 s |
+| stories42M q8 | `stories42M.q8.mmcf` | 1024 | `Once upon a time` | **160.2** (158.4-160.4) | 4.3-6.7 s |
+| feng q8 † | `feng.q8.mmcf` | 512 | chat, `用一句话介绍你自己。` | **192.1** (189.2-194.3) | 8.2-14.8 s |
+| feng q8r † | `feng.q8r.mmcf` | 512 | chat, `用一句话介绍你自己。` | **192.8** (189.3-197.9) | 8.0-16.9 s |
+| vertex15 q4 | `vertex15.q4.mmcf` | 512 | chat, `What is the capital of France?` | **196.9** (193.4-211.4) | 8.6-8.7 s |
+| vertex35 q4 | `vertex35.q4.mmcf` | 512 | chat, `What is the capital of France?` | **241.4** (224.0-265.1) | 8.9-9.1 s |
+| MiniMind3 q4 | `minimind3.q4.mmcf` | 768 | chat, `用一句话介绍你自己。` | **304.4** (303.7-310.0) | 16.0-35.9 s |
+| MiniMind3-MoE q4 | `minimind3-moe.q4.mmcf` | 768 | chat, `用一句话介绍你自己。` | **322.0** (319.3-345.3) | 18.2-22.5 s |
+| MiniMind2 i16 † | `minimind2-small.i16.mmcf` | 512 | chat, `用一句话介绍你自己。` | **326.8** (322.7-372.3) | 11.8-19.9 s |
+| vertex100 q4 | `vertex100.q4.mmcf` | 512 | chat, `Write a haiku about rain.` | **487.0** (487.0-633.3) | 18.6-23.1 s |
+| void1 q4 | `void1.q4.mmcf` | 1024 | `Once upon a time,` + `TOK_NO_PREFIX=1` | **554.8** (533.8-578.8) | 14.0 s |
+
+Two short-sample rows: `vertex15`/`vertex35` stop at EOS after 7 tokens and
+`vertex100` after 15, so a single token weighs 7-14% of their mean.  `void1 q4`
+uses a 259-entry byte tokenizer, so 16 tokens are about 16 characters.
+
+What moved against the 2026-11-02 table, in one place:
+
+* **q8 is roughly 12-22% faster**: MiniMind2 q8 123.5 against 140-190, stories15M q8
+  116.2 against 148, stories42M q8 160.2 against 190, TinyChat15M 115.4 against
+  139-171.  The INT8-only work of 2026-11-03..05 (row-paired qkv, packed
+  residual, wrow planes, the fused FFN default) is what that table predates.
+* **q4 moved the same way**: MiniMind3 q4 304.4 against 381 (+20% faster),
+  MoE q4 322.0 against 341.8 (+6%), MiniMind2 q4 153.7 against 193-212.
+* **i16 went the other way and is not explained yet**: 326.8 against 226/232,
+  i.e. 41% slower, with the largest scatter of the campaign.  An interleaved
+  A/B of the 2026-11-12 binary (`aefc2e99`, code `4ffb536`) against HEAD on the
+  same container gave 324.6 against 324.0 ms/token, so `6c2a0cd` did not do it.
+  The i16 weight kernels themselves changed by four lines since the 2026-11-02
+  matrix and only in validation/macro spelling; a build of `252c9c4` is the
+  next comparison.  Until then do not use this row as a regression signal.
+* **Decode is the reproducible number, prefill is not.**  Identical MiniMind3 q4
+  runs gave 16.0 and 35.9 s prefill (load 0.9 versus 2.4) while decode stayed
+  inside ±1%.  The board's SD card and the background load move prefill; quote
+  prefill only with its run.
+* **TinyChat15M is fixed, and the old caveat was the wrong diagnosis.**  It is a
+  llama-2-chat-format 15M model; the container had no chat template, so the
+  engine refused `--chat` and the plain prompts used for the probe were out of
+  distribution.  `templates/llama2_chat.jinja` renders `[INST] ... [/INST]`, and
+  the store's q8/i16 containers were repacked with `--chat-template`; `--chat`
+  now answers in dialogue form (` I am feeling quite disgusted with the current
+  situation in the world.` to "Hello, who are you?").  The timing in the table
+  was taken on the old plain container; the weights are unchanged, so it applies
+  to the repacked one.  Answers are still the
+  quality a 15M model gives; "coherent" here means grammatical and in-format,
+  not correct.
+
+Not re-measured in this campaign, and why: MiniMind3 q8 (the only HEAD run was
+the 2026-11-12 pilot, 219.1 ms/token, taken while the store was being scanned;
+not usable), LFM2.5-230M q4 (only a `--gen 1` load check on HEAD), TinyBrainBot
+q4, picolm85 q4q24 and void1 q8r (load checks only), and MiniMind3-MoE q8 (the
+203.5 MB container cannot fit the CMA; `FBO incomplete`, as recorded on
+2026-11-11).  Their last numbers are the ones already in this file, with their
+own dates.

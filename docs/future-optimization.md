@@ -10,6 +10,11 @@ measurement record this file summarizes.
 
 ## Current baseline
 
+**Stale as of 2026-11-13.**  The Pi rows below are 2026-11-03 measurements on an
+older build.  The current Pi matrix is the 2026-11-13 campaign in
+`docs/performance.md` (HEAD `71cb1e0`, warm-up plus three timed runs); use its
+numbers with their protocol, and do not read the rows below as current.
+
 | Area | Current state |
 |---|---|
 | Chat models | MiniMind3 64M q8/q4; MiniMind2 Small i16/q8/q4; TinyChat15M is a format probe only |

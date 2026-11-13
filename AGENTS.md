@@ -99,23 +99,42 @@ belong in `AGENTS.local.md` (DSH) or `AGENTS.override.md` (Hermes/VLAB).
 
 ### Pi Zero reference (measured, not a target)
 
-Measured on a Pi Zero, `GPU_LAYER=1 KV_PACK=16`, greedy, 32 generated tokens,
-best of two runs; MiniMind3 uses `SEQ=768`.  Prefill is prompt-specific; the
-full matrix and prefills are in [`docs/performance.md`](docs/performance.md),
-and that file is the authority — this table is a pointer, not a re-baseline.
+**The current reference is the 2026-11-13 campaign on HEAD `71cb1e0`**: Pi Zero,
+`GPU_LAYER=1 KV_PACK=16`, greedy, `--gen 16`, and per model a discarded warm-up
+followed by three timed runs (median).  Decode only; prefill is prompt-specific
+and moves with the board's SD card and background load.  The protocol, the
+prefill ranges and the rows that were not re-measured are in
+[`docs/performance.md`](docs/performance.md), which is the authority.
 
-| model | decode |
+| model | decode (2026-11-13) |
 |---|---:|
-| MiniMind3 q8 | 252 ms/token |
-| MiniMind3 q4 | 388 ms/token |
-| MiniMind3-MoE q4 (131 MB) | 342 ms/token |
-| MiniMind2 q8 | 144 ms/token |
-| MiniMind2 q4 | 187 ms/token |
-| MiniMind2 i16 | 232 ms/token |
-| stories15M q8 | 138 ms/token |
-| stories42M q8 | 188 ms/token |
-| LFM2.5-230M q4 (QAD, `CONV_GPU=1`, `SEQ=256`, 24 tokens) | 1040 ms/token |
-| TinyChat15M q8 | 137 ms/token |
+| TinyChat15M q8 | 115.4 ms/token |
+| stories15M q8 | 116.2 ms/token |
+| MiniMind2 q8 | 123.5 ms/token |
+| minimind2 q4 | 153.7 ms/token |
+| stories42M q8 | 160.2 ms/token |
+| feng q8 | 192.1 ms/token |
+| feng q8r | 192.8 ms/token |
+| vertex15 q4 | 196.9 ms/token |
+| vertex35 q4 | 241.4 ms/token |
+| MiniMind3 q4 | 304.4 ms/token |
+| MiniMind3-MoE q4 (131 MB) | 322.0 ms/token |
+| MiniMind2 i16 | 326.8 ms/token (unexplained; see below) |
+| vertex100 q4 | 487.0 ms/token |
+| void1 q4 | 554.8 ms/token |
+
+Ordered by speed.  **Not re-measured**: MiniMind3 q8, LFM2.5-230M q4,
+TinyBrainBot q4, picolm85 q4q24 and void1 q8r (their last numbers are in
+`docs/performance.md` with their own dates), and MiniMind3-MoE q8 (203.5 MB does
+not fit the CMA).
+
+The i16 row is the anomaly: it is 41% slower than its 2026-11-02 number
+(226/232 ms/token) while every q8/q4 row got faster.  An interleaved A/B of the
+2026-11-12 binary (`aefc2e99`, code `4ffb536`) against HEAD measured 324.6
+against 324.0 ms/token, so `6c2a0cd` is not the cause; do not read it as a
+regression until a `252c9c4` build is compared.  `docs/performance.md` has the
+i16-kernel history (four lines since 2026-11-02, validation and a macro
+spelling only).
 
 A native ARMv6 build on a Pi Zero takes about 8–10 minutes; never run two
 builds concurrently.  Prefer the VLAB cross-build (see the VLAB override).
@@ -155,9 +174,11 @@ python3 engine/tools/mmcf_pack.py --in models/minimind3-moe \
 What it costs: the route is a 4x768 matvec whose logits are read back, so a
 token pays 8 host syncs (~29 ms on a Pi Zero, ~19 ms on Xe); the weight traffic
 is the dense model's, because only one expert is read.  The Pi Zero runs the
-198M-A64M model at q4 (131 MB, 342 ms/token) and cannot hold it at q8 (204 MB:
-the weights take the CMA and the session's FBOs fail).  `docs/performance.md`
-has the table; `MOE_DUMP=1` prints the routes and `MOE_FIXED=<e>` prices them.
+198M-A64M model at q4 (131 MB, 322.0 ms/token in the 2026-11-13 campaign; a
+2026-11-11 24-token run gave 342) and cannot hold it at q8 (204 MB: the weights
+take the CMA and the session's FBOs fail).
+`docs/performance.md` has the table; `MOE_DUMP=1` prints the routes and
+`MOE_FIXED=<e>` prices them.
 
 A legacy checkpoint (`Q8M1/Q8M2`, `Q4M1`, `I16M1/I16M2`) or a llama2.c `.bin`
 is still accepted by `--in`; `--quant` then has no effect and the source's own

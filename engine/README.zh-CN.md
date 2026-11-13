@@ -101,8 +101,11 @@ GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
 
 q4 是内存模式，身份类回答明显更弱。
 
-TinyChat15M.q8 能加载运行，但当前 tokenizer/prompt 配对下输出不连贯，
-只能当格式探针，不要当对话模型使用。
+TinyChat15M 是 llama-2 chat 格式的 15M 模型，不是补全模型：容器自带
+`templates/llama2_chat.jinja`，`--chat` 会渲染 `[INST] ... [/INST]`，回复是对话形式。
+2026-11-02 那条"tokenizer/prompt 配对"说明，实际是缺模板 + 用了普通补全提示词；
+库里的 q8/i16 容器已于 2026-11-13 用 `--chat-template` 重新打包。它仍然是 15M 模型：
+语法和格式连贯，但内容不正确。
 
 ### TinyStories 15M/42M
 
@@ -164,18 +167,20 @@ head_dim 96、vocab 6400、RoPE theta 1e6、tied embedding、per-head Q/K RMSNor
 短英文默认系统提示（`You are a helpful assistant.`）。需要时用 `--system` 覆盖。
 加 `TIMING=1` 打印 prefill/decode 时间。
 
-Pi Zero，16 token 生成（2026-11-02，Pi 上还有 Minecraft server，数字有噪声）：
+Pi Zero，16 token 生成（2026-11-13 在 HEAD `71cb1e0` 上的 campaign：先丢弃一次预热，
+再 3 次计时取中位数；协议与未重测的行见 `docs/performance.md`）：
 
 | 模型 | prefill | decode |
 |---|---:|---:|
-| MiniMind3 q8 | 20.5 s | **238 ms/token** |
-| MiniMind3 q4 | 33.0 s | **381 ms/token** |
-| MiniMind2 i16 | 9.2 s | 226 ms/token |
-| MiniMind2 q8 | 8.4 s | 140–190 ms/token |
-| MiniMind2 q4 | 9.7 s | 193–212 ms/token |
-| TinyChat15M q8 | 4.8 s | 139–171 ms/token（不连贯） |
+| MiniMind3 q4 | 16.0–35.9 s | **304.4 ms/token** |
+| MiniMind2 i16 | 11.8–19.9 s | 326.8 ms/token（比 2026-11-02 慢 41%，原因待查） |
+| MiniMind2 q8 | 7.3–7.9 s | 123.5 ms/token |
+| MiniMind2 q4 | 8.9 s | 153.7 ms/token |
+| TinyChat15M q8 | 3.6–4.5 s | 115.4 ms/token |
 
-旧的 520.9 ms/token、42.7 s prefill 是 q16 attention 和 q4 paired residual 之前的数字。
+MiniMind3 q8 未重测，最后数据是 252 ms/token（2026-11-02）。旧的 520.9 ms/token、
+42.7 s prefill 是 q16 attention 和 q4 paired residual 之前的数字；同样两个 MiniMind3
+容器的 32 token 短 prompt 测量是 195.5 / 291.7 ms/token（2026-11-05），协议不同。
 
 FFN hidden 2432 超过 VC4 2048 像素 FBO 限制。
 `Model::split_ffn()` 把 W1/W3 按行、W2 按列切成 1216 宽两块；

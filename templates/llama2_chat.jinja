@@ -1,0 +1,11 @@
+{# llama-2 chat format, for llama2.c checkpoints whose training data used the
+   literal "[INST] ... [/INST]" turns (TinyChat15M is the one in this store).
+   The container supplies no template of its own, so the plain completion
+   prompt is out of distribution; this reproduces the format the model was
+   trained on.  The engine adds <s> (the container states bos=1), and the
+   reply is written straight after "[/INST]". #}
+{%- for m in messages -%}
+{%- if m['role'] == 'user' -%}{{- '[INST] ' + m['content'] + ' [/INST]' -}}
+{%- elif m['role'] == 'assistant' -%}{{- ' ' + m['content'] + '</s>' -}}
+{%- endif -%}
+{%- endfor -%}
