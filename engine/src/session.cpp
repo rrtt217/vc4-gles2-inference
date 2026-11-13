@@ -71,7 +71,12 @@ static FfnMats ffn_mats(const Model& m, int l, int expert){
         f.w1b = &e.w1b; f.w3b = &e.w3b; f.w2b = &e.w2b;
         f.width = m.moe_hidden;
     } else {
-        f.w1 = &m.w1[l]; f.w3 = &m.w3[l]; f.w2 = &m.w2[l];
+        // A fused-W13 container (feng, stories15M, TinyChat15M) has no w1/w3
+        // at all.  Taking the address of an empty vector's element left them
+        // null, and the callers' `f.w1->rows` then dereferenced it; every
+        // fused-W13 model crashed from 607cf77 (2026-11-11) until this guard.
+        if (!m.w1.empty()) { f.w1 = &m.w1[l]; f.w3 = &m.w3[l]; }
+        if (!m.w2.empty()) f.w2 = &m.w2[l];
         if (!m.w13.empty()) f.w13 = &m.w13[l];
         if (!m.w1a.empty()) {
             f.w1a = &m.w1a[l]; f.w3a = &m.w3a[l]; f.w2a = &m.w2a[l];
@@ -524,7 +529,7 @@ vector<float> Session::forward(int token, int pos){
                     if (hs) for (float& v : hb) v *= hsm;
                     o2 = add_q16(gpu_.matvec_s(*f.w2a, ha), gpu_.matvec_s(*f.w2b, hb));
                 } else {
-                    if (f.w1->rows) {
+                    if (f.w1 && f.w1->rows) {
                         vector<float> h1 = gpu_.matvec_s(*f.w1, xbf);
                         vector<float> h3 = gpu_.matvec_s(*f.w3, xbf);
                         h.reserve(2 * f.width);
@@ -558,7 +563,7 @@ vector<float> Session::forward(int token, int pos){
                     } else {
                         o2 = add_q16(gpu_.matvec_from(*f.w2a, ha), gpu_.matvec_from(*f.w2b, hb));
                     }
-                } else if (f.w1->rows) htex = gpu_.ffn_split(*f.w1, *f.w3, xtex, f.width, hs);
+                } else if (f.w1 && f.w1->rows) htex = gpu_.ffn_split(*f.w1, *f.w3, xtex, f.width, hs);
                 else htex = gpu_.ffn_fused(*f.w13, xtex, f.width, hs);
                 if (!m_.ffn_chunked) o2 = gpu_.matvec_from(*f.w2, htex);
             }
@@ -659,7 +664,7 @@ GLuint Session::forward_gpu_hidden(int token, int pos, bool want_logits){
                 gpu_.dump_cpu_row(read_hidden(gpu_.hidden_b_), gpu_.act_fmt_, "hidA", 4096);
             } else {
                 GLuint hffn;
-                if (f.w1->rows) hffn = gpu_.ffn_split(*f.w1, *f.w3, xbf, f.width, hs);
+                if (f.w1 && f.w1->rows) hffn = gpu_.ffn_split(*f.w1, *f.w3, xbf, f.width, hs);
                 else hffn = gpu_.ffn_fused(*f.w13, xbf, f.width, hs);
                 mark("ffn", l);
                 gpu_.matvec_add(*f.w2, hffn, x1, gpu_.hidden_a_, gpu_.ffn_fmt_);
