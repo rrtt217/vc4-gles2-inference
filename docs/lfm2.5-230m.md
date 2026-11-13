@@ -145,7 +145,10 @@ measurement:
 Two things to read there.  The protocol alone moves the number ~35% (43.91 ->
 28.62 on the board), which is the correction recorded in
 [`performance.md`](performance.md) -- compare warm with warm or cold with cold,
-never one with the other.  And the fused path's gap is protocol-dependent on the
+never one with the other.  The board's rows are `Q16_DECODE=exact` values, the
+2026-11-12 binary's decode; the default cheap q16 decode (2026-11-13) reads
+serial warm **29.1588** (fused not re-measured), so compare board PPL with the
+same decode setting.  And the fused path's gap is protocol-dependent on the
 board: 3.7% behind serial cold, 10.7% behind warm (Xe: 5.5% / 4.4%), so the
 board's older "3.7% behind" understated what the fused path costs on this
 machine.
