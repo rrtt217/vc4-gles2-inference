@@ -292,7 +292,7 @@ in `docs/performance.md` with the numbers.
 | Do not | Why (measured) |
 |---|---|
 | Decode q4 nibbles with integer ops (`roundEven`, ESSL 3.00 shifts) | `roundEven` reaches the backend as `fround_even` and **aborts the process**; the ESSL 1.00 integer form (`b/16`, `b-h*16`) is exact but costs more ops than the float decode.  `Q4_SHIFT` (the shift decode) is the shipped compromise. |
-| Split q4 into a hi/lo plane pair to cheapen the unpack | The unpack is FLOOR-bound, so no encoding change moves it. |
+| Split q4 into a hi/lo plane pair to cheapen the unpack | The unpack is FLOOR-bound, so no encoding change moves it.  *Partly superseded 2026-11-15:* a **4-bit texel** (`Q4_FMT=rgba4`, four weights per texel, `n/15` with 15 folded into the scale) needs no decode at all and is **adopted at -5%** of a Pi q4 token.  The floor is still not the lever -- the gate kernel's shape is, and the 4-bit view only buys 5% of it. |
 | Merge the q4 gate into one draw | The gate is draw-bound and this driver cannot express it in one draw; the vec4 variant is not faster either. |
 | Pair q4 qkv rows | Not bit-exact *and* not faster. |
 | Batch prefill at B=4 | Priced on the real driver: the extra passes outweigh the shared fetch.  Two positions is the ceiling. |

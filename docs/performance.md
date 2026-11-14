@@ -5842,3 +5842,60 @@ Two things worth keeping:
 * It closes a design nobody had proposed yet: "unpack the nibbles once on the
   GPU into a 4444 texture" cannot work on VC4, because nothing can be rendered
   into one.  The unpack stays in the shader, or the format stays 8-bit.
+
+## 2026-11-15 — the RGBA4 q4 gate is adopted (-5%), and the decode was never the cost
+
+`Q4_FMT=rgba4` now binds the dense FFN gate's INT4 matrices as `GL_RGBA4` at
+twice the width: four weights per texel, `n/15` straight out of the sampler,
+15 folded into the group scale, no decode at all.  The bytes are the
+container's, so nothing is re-packed.
+
+**Where the q4 token actually goes** (`MATVEC_DUP`, Pi, 16 greedy tokens,
+`minimind3.q4`, base 286 ms):
+
+| pass | marginal cost | share |
+|---|---:|---:|
+| FFN gate (w1+w3+swiglu) | 124-163 | ~50% |
+| w2 (both halves) | 65 | 23% |
+| attention (all 7 passes) | 34-44 | 14% |
+| fixed passes (embed, rms x3, logits, read-back) | 44-45 | 15% |
+| wo | 15 | 5% |
+
+The three matvecs are ~78% of the token.  Against q8 the same probes give
+ffn 47-64 and w2 23-44, so the q4 gate is ~2.3x the q8 gate -- and `Q4_NOUNPACK`
+says only ~32 ms of the whole token is the floor chain.  **The unpack was never
+the cost; the gate kernel's shape was.**
+
+**What the format is worth, measured on the board** (load 0.12, three
+interleaved pairs, `Q4_FMT=0` restoring the packed view in the same binary):
+
+| pair | rgba4 | packed |
+|---|---:|---:|
+| 1 | 270.6 | 286.2 |
+| 2 | 268.4 | 288.0 |
+| 3 | 277.3 | 288.3 |
+| 4 | 276.5 | 286.4 |
+
+~-4 to -6% of the token, and -8% on the gate's own marginal cost (134.5 ->
+123.9).  Small, but it is outside the pair-to-pair spread (<1%), so it is a
+real 5%.
+
+Two things it is *not*:
+
+* **Not the sampler.**  `probes/rgba4444_probe` section G times 192 fragments x
+  96 texels: 8-bit 0.172 ms/draw against 4-bit 0.172 ms/draw on VC4 (+0%).  The
+  4-bit format costs nothing per texel, so the remaining 2x against q8 is the
+  kernel (two taps per eight weights, four P-plane fetches per group), not the
+  texture.
+* **Not bit-exact.**  `15*(n/15)` is not exactly `n`; the logits move by about
+  1 ULP (Xe, `LOGITS_OUT` compared: first difference at byte 7).  The pinned
+  strings did not move -- Xe q4 and the Pi q4 both still print
+  `我是MiniMind，一个高效的小参数AI模型，专注于` -- but PPL does.
+
+**Adoption.**  Default on for the dense FFN gate; `Q4_FMT=0` restores the
+packed view for an A/B in one binary.  Two refusals, both measured: the hybrid
+(LFM2.5 q4 dies on an incomplete FBO with the gate bound as texels, cause not
+yet known) and the unchunked FFN path (`ffn_split` reads packed nibbles).  Both
+keep the packed view and say so if the switch was asked for.  qkv, wo and w2
+keep the packed view -- extending the format there is where the next 5% is, and
+it is a separate kernel each.

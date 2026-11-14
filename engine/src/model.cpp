@@ -164,8 +164,28 @@ void Model::split_ffn(int max_dim){
     }
 
 void Model::apply_q4_fmt(){
+        // Adopted 2026-11-15: the 4-bit view is the default for the dense FFN
+        // gate.  It measured -6% on a q4 token on the Pi (286.2 -> 270.6,
+        // three interleaved pairs, load 0.12) and -8% on the gate's own
+        // marginal cost (MATVEC_DUP=ffn: 134.5 -> 123.9).  `Q4_FMT=0` restores
+        // the packed view inside the same binary, which is the A/B the
+        // measurement rules ask for.
         const char* v = getenv("Q4_FMT");
-        if (!v || strcmp(v, "rgba4") != 0) return;
+        if (v && strcmp(v, "0") == 0) return;
+        // The hybrid (conv + attention) model dies on an incomplete FBO with
+        // the gate bound as 4-bit texels and the root cause is not yet known
+        // (LFM2.5 q4, 2026-11-15, before the first token).  Until it is
+        // understood the hybrid keeps the packed view.
+        if (hybrid) {
+                if (v) cerr << "Q4_FMT: not supported on the hybrid model; using the packed view\n";
+                return;
+        }
+        // Only the fused, chunked gate reads the 4-bit view.  The unchunked
+        // path (ffn_split -> matvec_to_row + swiglu_2row) reads packed nibbles.
+        if (!ffn_chunked) {
+                if (v) cerr << "Q4_FMT: the unchunked FFN path is not supported; using the packed view\n";
+                return;
+        }
         auto mark = [](Mat& m) {
                 if (m.rows > 0 && m.type == WeightType::INT4) m.fmt4 = true;
         };

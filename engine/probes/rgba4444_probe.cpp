@@ -34,6 +34,7 @@
 
 #include <GLES2/gl2ext.h>
 #include <cstdint>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -345,6 +346,64 @@ int main() {
             }
             printf("E verdict   %d/%d sampled nibbles match the packed bytes\n", checked - bad,
                    checked);
+        }
+    }
+
+    // ---- G: what does one 4-bit texel cost? -------------------------------
+    // The gate kernel's fetch pattern: 96 weight texels per fragment, one row
+    // per fragment.  Same shader, same texel count, 4 bytes a texel against 2.
+    // If the 4-bit format is slower per texel here, no zero-decode kernel can
+    // reach the q8 gate's shape and the format is capped by the sampler.
+    {
+        const int rows = 1216, tw = 192, iters = 200, reps = 5;
+        std::vector<uint8_t> b8((size_t)rows * tw * 4, 0x5a);
+        std::vector<uint16_t> b4((size_t)rows * tw, 0x5555);
+        GLuint t8 = 0, t4 = 0;
+        glGenTextures(1, &t8); glBindTexture(GL_TEXTURE_2D, t8); params();
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tw, rows, 0, GL_RGBA, GL_UNSIGNED_BYTE, b8.data());
+        const int e8 = gl_errors("G RGBA8 upload");
+        glGenTextures(1, &t4); glBindTexture(GL_TEXTURE_2D, t4); params();
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tw, rows, 0, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4, b4.data());
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+        const int e4 = gl_errors("G RGBA4 upload");
+        printf("G uploads   8-bit %s, 4-bit %s\n", e8 ? "REFUSED" : "ok", e4 ? "REFUSED" : "ok");
+        if (!e8 && !e4) {
+            const char* FS_ROWS =
+                "precision highp float;uniform sampler2D W;uniform float tw,rows;"
+                "void main(){float r=floor(gl_FragCoord.y);float a=0.0;"
+                "for(int i=0;i<96;i++){vec4 c=texture2D(W,vec2((float(i)+0.5)/tw,(r+0.5)/rows));"
+                "a+=c.r+c.g+c.b+c.a;}"
+                "gl_FragColor=vec4(a*1e-6,0.0,0.0,1.0);}";
+            GLuint pg = program("rows", FS_ROWS);
+            Target out = make_target(tw, 1);
+            glBindFramebuffer(GL_FRAMEBUFFER, out.fbo);
+            glViewport(0, 0, tw, 1);
+            glUseProgram(pg);
+            glUniform1i(glGetUniformLocation(pg, "W"), 0);
+            glUniform1f(glGetUniformLocation(pg, "tw"), (float)tw);
+            glUniform1f(glGetUniformLocation(pg, "rows"), (float)rows);
+            GLuint loc = glGetAttribLocation(pg, "p");
+            glEnableVertexAttribArray(loc);
+            glVertexAttribPointer(loc, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+            auto time_it = [&](GLuint tex) {
+                glBindTexture(GL_TEXTURE_2D, tex);
+                for (int i = 0; i < 20; ++i) glDrawArrays(GL_TRIANGLES, 0, 3);
+                glFinish();
+                double best = 1e9;
+                for (int r = 0; r < reps; ++r) {
+                    auto t0 = std::chrono::steady_clock::now();
+                    for (int i = 0; i < iters; ++i) glDrawArrays(GL_TRIANGLES, 0, 3);
+                    glFinish();
+                    const double ms = std::chrono::duration<double, std::milli>(
+                                          std::chrono::steady_clock::now() - t0).count() / iters;
+                    if (ms < best) best = ms;
+                }
+                return best;
+            };
+            const double m8 = time_it(t8), m4 = time_it(t4);
+            printf("G texel cost %d x 96 fetches: 8-bit %.3f ms/draw, 4-bit %.3f ms/draw  (%+.0f%%)\n",
+                   tw, m8, m4, (m4 / m8 - 1.0) * 100.0);
         }
     }
 
