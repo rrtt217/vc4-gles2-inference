@@ -169,28 +169,8 @@ void GPU::upload(Mat& m){
 
 GLuint GPU::upload_input(const vector<float>& x){ return upload_activations(x); }
 
-void GPU::matvec_to(const Mat& m, GLuint x, Target& out){
-        matvec_to_row(m, x, out, 0);
-    }
 
-void GPU::matvec_to_row(const Mat& m, GLuint x, Target& out, int row){
-        if (out.tex == 0 || out.w != m.rows || out.h <= row) out = make_target(m.rows, row + 1);
-        draw(m, x, out, row);
-        layer_finish("NF_MAT");
-        ffn_sync();
-    }
 
-vector<float> GPU::matvec_from(const Mat& m, GLuint x){
-        Target& t = target_for(m.rows);
-        draw(m, x, t);
-        vector<int32_t> raw = read_i32(t, m.rows, 1);
-        vector<float> out(m.rows);
-        for (int i = 0; i < m.rows; ++i) {
-            int v = raw[i]; if (v >= 32768) v -= 65536;
-            out[i] = (float)v / ACT_SCALE;
-        }
-        return out;
-    }
 
 
 
@@ -249,49 +229,12 @@ vector<float> GPU::matvec_from(const Mat& m, GLuint x){
 
 
 
-bool GPU::logits_pair() const{
-        if (getenv("LOGITS_SPLIT")) return false;
-        return act_fmt_ != XFormat::I8_4;
-    }
 
 // The paired kernel is q8-only; a q4 checkpoint keeps q4 vocabulary tiles and
 // therefore the unpacked path (byte-identical to before this change).
-bool GPU::logits_pair_ok(const vector<Mat>& tiles) const{
-        if (!logits_pair()) return false;
-        for (size_t i = 0; i < tiles.size(); ++i)
-            if (tiles[i].type != WeightType::INT8) return false;
-        return true;
-    }
 
 // Logits pass.  The paired path renders two vocabulary rows per fragment and
 // packs both q16 logits into one texel, so the target is half as wide.
-void GPU::logits_pass(const vector<Mat>& tiles, GLuint x){
-        const int rows = (int)tiles.size();
-        if (logits_pair_ok(tiles)) {
-            if (logits_target_.tex == 0 || logits_target_.h != rows || logits_target_.w != kLogitsGridPacked)
-                logits_target_ = make_target(kLogitsGridPacked, rows);
-            logits_packed_ = true;
-            for (int i = 0; i < rows; ++i) {
-                const Mat& m = tiles[i];
-                const bool wr = m.has_row_scale();
-                GLuint p = x_q8_pair_logits(m.rows, m.cols, wr);
-                bind_fbo(logits_target_.fbo);
-                use_program(p);
-                bind_tex(0, m.tex); set_sampler(p, "W", 0);
-                bind_tex(1, x); set_sampler(p, "X", 1);
-                glUniform1f(uloc(p, "ws"), m.scale);
-                if (wr) { bind_tex(2, m.row_scale_tex); set_sampler(p, "WS", 2); }
-                setup_attrib(p);
-                glViewport(0, i, (m.rows + 1) / 2, 1);
-                glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
-            }
-            return;
-        }
-        if (logits_target_.tex == 0 || logits_target_.h != rows || logits_target_.w != kLogitsGrid)
-            logits_target_ = make_target(kLogitsGrid, rows);
-        logits_packed_ = false;
-        for (int i = 0; i < rows; ++i) draw(tiles[i], x, logits_target_, i);
-    }
 
 // Read the logits target back as floats, unpacking the texel pairs when the
 // paired pass ran.
@@ -327,145 +270,7 @@ vector<float> GPU::read_logits_full(const vector<Mat>& tiles){
         return out;
     }
 
-vector<float> GPU::logits(const vector<Mat>& tiles, const vector<float>& x){
-        GLuint xt = upload_activations(x);
-        logits_pass(tiles, xt);
-        if (needs_finish()) { glFlush(); glFinish(); }
-        return read_logits_full(tiles);
 
-    }
-CandidateResult GPU::logits_candidates(const vector<Mat>& tiles, const vector<float>& x,
-                                      int topk, float temp, float top_p){
-        return logits_candidates_from(tiles, upload_activations(x), topk, temp, top_p);
-    }
-
-CandidateResult GPU::logits_candidates_from(const vector<Mat>& tiles, GLuint xt,
-                                           int topk, float temp, float top_p){
-        const int rows = (int)tiles.size();
-        logits_pass(tiles, xt);
-        // The candidate pass samples logits_target_ as a texture.  On VC4 the
-        // tile pipeline does not order that sample after the FBO renders, so
-        // finish the logits pass before starting Top-K.
-        if (needs_finish()) { glFlush(); glFinish(); }
-
-        if (getenv("TOPK_FAST")) {
-            const int chunk = 16;
-            int max_chunks = 0;
-            for (auto& t : tiles) max_chunks = max(max_chunks, (t.rows + chunk - 1) / chunk);
-            const int out_w = max_chunks * 2;
-            if (candidate_target_.tex == 0 || candidate_target_.w != out_w || candidate_target_.h != rows)
-                candidate_target_ = make_target(out_w, rows);
-            for (int i = 0; i < rows; ++i) {
-                int chunks = (tiles[i].rows + chunk - 1) / chunk;
-                GLuint p = logits_packed_ ? x_top2_fast_packed(tiles[i].rows, chunk)
-                          : x_top2_fast(tiles[i].rows, chunk);
-                bind_fbo(candidate_target_.fbo);
-                glViewport(0, i, chunks * 2, 1);
-                use_program(p);
-                bind_tex(0, logits_target_.tex);
-                set_sampler(p, "L", 0);
-                glUniform1f(uloc(p, "tr"), (float)i);
-                glUniform1f(uloc(p, "nr"), (float)rows);
-                setup_attrib(p);
-                glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
-            }
-            if (needs_finish()) { glFlush(); glFinish(); }
-            vector<uint8_t> raw = read_bytes(candidate_target_, out_w, rows);
-            vector<Candidate> cand;
-            for (int r = 0; r < rows; ++r) {
-                int M = tiles[r].rows;
-                int chunks = (M + chunk - 1) / chunk;
-                for (int c = 0; c < chunks * 2; ++c) {
-                    int o = ((size_t)r * out_w + c) * 4;
-                    int value = (int)raw[o] * 256 + raw[o + 1];
-                    if (value >= 32768) value -= 65536;
-                    int idx = (int)raw[o + 2] * 256 + raw[o + 3];
-                    if (idx < M) cand.push_back({(float)value / ACT_SCALE, r * kLogitsGrid + idx});
-                }
-            }
-            sort(cand.begin(), cand.end(), [](const Candidate& a, const Candidate& b) { return a.value > b.value; });
-            if ((int)cand.size() > topk) cand.resize(topk);
-            CandidateResult res; res.cand = cand; res.complete = true; res.strict = false;
-            return res;
-        }
-
-        const int chunk = 16;
-        int max_chunks = 0;
-        for (auto& t : tiles) max_chunks = max(max_chunks, (t.rows + chunk - 1) / chunk);
-        const int out_w = max_chunks * 3;
-        if (candidate_target_.tex == 0 || candidate_target_.w != out_w || candidate_target_.h != rows)
-            candidate_target_ = make_target(out_w, rows);
-        for (int i = 0; i < rows; ++i) {
-            int chunks = (tiles[i].rows + chunk - 1) / chunk;
-            GLuint p = logits_packed_ ? x_top2_packed(tiles[i].rows, chunk)
-                          : x_top2(tiles[i].rows, chunk);
-            bind_fbo(candidate_target_.fbo);
-            glViewport(0, i, chunks * 3, 1);
-            use_program(p);
-            bind_tex(0, logits_target_.tex);
-            set_sampler(p, "L", 0);
-            glUniform1f(uloc(p, "tr"), (float)i);
-            glUniform1f(uloc(p, "nr"), (float)rows);
-            glUniform1f(uloc(p, "invt"), 1.0f / max(0.0001f, temp));
-            setup_attrib(p);
-            glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
-        }
-        if (needs_finish()) { glFlush(); glFinish(); }
-        vector<uint8_t> raw = read_bytes(candidate_target_, out_w, rows);
-        vector<Candidate> cand;
-        vector<vector<float>> cmax(rows), csum(rows);
-        float gmax = -1e30f;
-        for (int r = 0; r < rows; ++r) {
-            int M = tiles[r].rows;
-            int chunks = (M + chunk - 1) / chunk;
-            cmax[r].assign(chunks, -1e30f);
-            csum[r].assign(chunks, 0.0f);
-            for (int c = 0; c < chunks; ++c) {
-                for (int rank = 0; rank < 3; ++rank) {
-                    int o = ((size_t)r * out_w + c * 3 + rank) * 4;
-                    if (rank < 2) {
-                        int value = (int)raw[o] * 256 + raw[o + 1];
-                        if (value >= 32768) value -= 65536;
-                        int idx = (int)raw[o + 2] * 256 + raw[o + 3];
-                        if (idx < M) {
-                            float v = (float)value / ACT_SCALE;
-                            cand.push_back({v, r * kLogitsGrid + idx});
-                            cmax[r][c] = max(cmax[r][c], v);
-                            gmax = max(gmax, v);
-                        }
-                    } else {
-                        int value = (int)raw[o] * 256 + raw[o + 1];
-                        if (value >= 32768) value -= 65536;
-                        int sumq = (int)raw[o + 2] * 256 + raw[o + 3];
-                        float mx = (float)value / ACT_SCALE;
-                        cmax[r][c] = max(cmax[r][c], mx);
-                        csum[r][c] = (float)sumq / 2048.0f;
-                        gmax = max(gmax, mx);
-                    }
-                }
-            }
-        }
-        sort(cand.begin(), cand.end(), [](const Candidate& a, const Candidate& b) { return a.value > b.value; });
-        float denom = 0;
-        for (int r = 0; r < rows; ++r)
-            for (size_t c = 0; c < cmax[r].size(); ++c)
-                denom += csum[r][c] * expf((cmax[r][c] - gmax) / max(0.0001f, temp));
-
-        if ((int)cand.size() > topk) cand.resize(topk);
-        float cum = 0;
-        for (auto& c : cand) cum += expf((c.value - gmax) / max(0.0001f, temp)) / denom;
-
-        CandidateResult res;
-        res.cand = cand; res.logsumexp = logf(denom) + gmax / max(0.0001f, temp); res.denom = denom; res.strict = true;
-        res.max_logit = gmax;
-        if (cum + 1e-6f >= top_p) {
-            res.complete = true;
-            return res;
-        }
-        res.cand.clear();
-        res.full = read_logits_full(tiles);
-        return res;
-    }
 
 bool GPU::gpu_attn_enabled() const{
         return env_flag("GPU_ATTN");
@@ -573,70 +378,8 @@ GLuint GPU::rmsnorm(GLuint x, GLuint w, Target& out){
         return out.tex;
     }
 
-void GPU::matvec_add(const Mat& m, GLuint x, GLuint residual, Target& out, XFormat xf){
-        const bool pair = res_pack_ && m.type == WeightType::INT8;
-        const bool pair4 = res_pack_ && m.type == WeightType::INT4;
-        const int ow = (pair || pair4) ? (m.rows + 1) / 2 : m.rows;
-        if (out.tex == 0 || out.w != ow) out = make_target(ow, 1);
-        // The packed residual layout is a property of the model, not of the
-        // weight format: a row-scale q8 matrix must still write the packed
-        // texel the rmsnorm reads, so the paired kernel grows a wrow variant
-        // rather than the writer switching layouts.
-        const bool wr = m.type == WeightType::INT8 && m.has_row_scale();
-        GLuint p = pair4 ? x_i4_add_pair(m.rows, m.cols, xf)
-                  : pair ? x_q8_add_pair(m.rows, m.cols, xf, wr)
-                  : (m.type == WeightType::INT8) ? x_q8_add(m.rows, m.cols, xf, wr)
-                  : (m.type == WeightType::INT4) ? x_i4_add(m.rows, m.cols, xf)
-                                                 : x_i16_add(m.rows, m.cols, xf);
-        bind_fbo(out.fbo);
-        use_program(p);
-        bind_tex(0, m.tex);
-        set_sampler(p, "W", 0);
-        bind_tex(1, x);
-        set_sampler(p, "X", 1);
-        if (m.type == WeightType::INT4) {
-            // P takes unit 2 on the q4 kernels, so R moves to 3.
-            bind_tex(2, m.q4_param_tex);
-            set_sampler(p, "P", 2);
-            bind_tex(3, residual);
-            set_sampler(p, "R", 3);
-            glUniform1f(uloc(p, "ps"), m.q4_param_scale);
-        } else {
-            bind_tex(2, residual);
-            set_sampler(p, "R", 2);
-        }
-        // The q4 kernels take their scale as "ps"; "ws" does not exist there.
-        if (m.type != WeightType::INT4) glUniform1f(uloc(p, "ws"), m.scale);
-        if (wr) { bind_tex(3, m.row_scale_tex); set_sampler(p, "WS", 3); }
-        setup_attrib(p);
-        // Same rule as draw(): a single draw never exceeds 1024 fragments.  A
-        // full-target-width draw is what gets dropped (docs/engine-internals.md
-        // section 2), and a 1536-row matrix is exactly that for its own target.
-        // The old special case split 1536 into 768+768 and left every other
-        // width in one pass; the cap covers all of them, and `ow` is the
-        // fragment count (rows/2 for the paired kernels), not the row count.
-        // Same experimental override as draw(): MATVEC_STRIP caps the fragment
-        // count per draw so a suspected full-width draw can be A/B-ed.
-        const char* msv = getenv("MATVEC_STRIP");
-        const int cap = (msv && atoi(msv) > 0) ? atoi(msv) : kDrawCap;
-        const int strip = min(cap, ow);
-        for (int x0 = 0; x0 < ow; x0 += strip) {
-            int w = min(strip, ow - x0);
-            glViewport(x0, 0, w, 1);
-            glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
-        }
-        layer_finish("NF_MAT");
-    }
 
-vector<float> GPU::logits_from(const vector<Mat>& tiles, GLuint x){
-        logits_pass(tiles, x);
-        if (needs_finish()) { glFlush(); glFinish(); }
-        return read_logits_full(tiles);
-    }
 
-void GPU::logits_pass_only(const vector<Mat>& tiles, GLuint x){
-        logits_pass(tiles, x);
-    }
 
 vector<uint8_t> GPU::read_bytes(Target& t, int w, int h){
         bind_fbo(t.fbo);
@@ -748,48 +491,14 @@ void GPU::check_program_runs(GLuint p, const string& key){
     }
 
 
-GLuint GPU::x_q8(int rows, int cols, bool wrow){
-        return x_prog("xq8_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(act_fmt_) +
-                      (wrow ? "_wr" : ""),
-                      matvec_q8(rows, cols, act_fmt_, wrow));
-    }
 
-GLuint GPU::x_q6(int rows, int cols, bool wrow){
-        return x_prog("xq6_" + to_string(rows) + "_" + to_string(cols) + "_" +
-                      x_format_name(act_fmt_) + (wrow ? "_wr" : ""),
-                      matvec_i6(rows, cols, act_fmt_, wrow));
-    }
 
-GLuint GPU::x_q8_pair(int rows, int cols, bool wrow){
-        return x_prog("xq8p_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(act_fmt_) +
-                      (wrow ? "_wr" : ""),
-                      matvec_q8_pair(rows, cols, act_fmt_, wrow));
-    }
 
-GLuint GPU::x_q8_pair_swiglu(int rows, int cols, bool wrow, int hs){
-        // Inline I16_2 decode is the default; FFN_SW_INLINE=0 restores the
-        // generic X4Q form in the same binary, so both can be A/B-ed
-        // interleaved on one binary.
-        const char* v = getenv("FFN_SW_INLINE");
-        const bool inl = !(v && strcmp(v, "0") == 0);
-        return x_prog("xq8ps_" + to_string(rows) + "_" + to_string(cols) + "_" +
-                      x_format_name(act_fmt_) + (inl ? "" : "_gen") + (wrow ? "_wr" : "") +
-                      (hs ? "_h" + to_string(hs) : ""),
-                      matvec_q8_pair_swiglu(rows, cols, act_fmt_, inl, wrow, hs));
-    }
 
 // Gate pair matvec for two rows per fragment plus swiglu, straight into a q16
 // pair texture that the w2 matvec can read: one draw instead of two.
 
-GLuint GPU::x_q8_gate2(int rows, int cols){
-        return x_prog("xq8g2_" + to_string(rows) + "_" + to_string(cols),
-                      matvec_q8_gate2(rows, cols));
-    }
 
-GLuint GPU::x_q8_p2(int rows, int cols, bool wrow){
-        return x_prog("xq8p2_" + to_string(rows) + "_" + to_string(cols) + (wrow ? "_wr" : ""),
-                      matvec_q8_p2(rows, cols, wrow));
-    }
 
 // Position A then position B in one texture, one row wide: the 2-position
 // kernels read A at texel [0,axw) and B at [axw,2*axw).  Keyed by length like
@@ -819,57 +528,12 @@ GLuint GPU::upload_input2(const vector<float>& a, const vector<float>& b){
 // Two-position FFN gate: one draw for both positions (see matvec_q8_gate2).
 
 // Two-position w2: reads the P2 gate output, writes one P2 q16 texel per row.
-void GPU::matvec_p2(const Mat& m, GLuint xp2, Target& out){
-        if (out.tex == 0 || out.w != m.rows) out = make_target(m.rows, 1);
-        const bool wr = m.has_row_scale();
-        GLuint p = x_q8_p2(m.rows, m.cols, wr);
-        bind_fbo(out.fbo);
-        use_program(p);
-        bind_tex(0, m.tex); set_sampler(p, "W", 0);
-        bind_tex(1, xp2); set_sampler(p, "X", 1);
-        glUniform1f(uloc(p, "ws"), m.scale);
-        if (wr) { bind_tex(3, m.row_scale_tex); set_sampler(p, "WS", 3); }
-        setup_attrib(p);
-        for (int x0 = 0; x0 < m.rows; x0 += kDrawCap) {
-            const int w = min(kDrawCap, m.rows - x0);
-            glViewport(x0, 0, w, 1);
-            glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
-        }
-        if (ffn_flush_wanted(layer_fast_finish_)) glFlush();
-        else layer_finish("NF_FFN");
-        ffn_sync();
-    }
 
-GLuint GPU::x_rms_stats2(){
-        return x_prog("xrms2s_" + to_string(att_dim_) + "_" + x_format_name(res_fmt_),
-                      ::rms_stats2(att_dim_, res_fmt_));
-    }
 
-GLuint GPU::x_rms_norm_pair2(bool use_eps_uniform){
-        return x_prog("xrms2n_" + to_string(att_dim_) + "_" + x_format_name(res_fmt_) +
-                          (use_eps_uniform ? "_e" : ""),
-                      ::rms_norm_pair2(att_dim_, res_fmt_, use_eps_uniform));
-    }
 
-GLuint GPU::x_q8_gate2_p2(int rows, int cols, bool wrow){
-        return x_prog("xq8g2p2_" + to_string(rows) + "_" + to_string(cols) + (wrow ? "_wr" : ""),
-                      ::matvec_q8_gate2_p2(rows, cols, wrow));
-    }
 
-GLuint GPU::x_q8_p2_add_p2(int rows, int cols, bool wrow){
-        return x_prog("xq8p2a2_" + to_string(rows) + "_" + to_string(cols) + (wrow ? "_wr" : ""),
-                      ::matvec_q8_p2_add_p2(rows, cols, wrow));
-    }
 
-GLuint GPU::x_q8_p2_add(int rows, int cols, bool wrow){
-        return x_prog("xq8p2a_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(res_fmt_) + (wrow ? "_wr" : ""),
-                      ::matvec_q8_p2_add(rows, cols, res_fmt_, wrow));
-    }
 
-GLuint GPU::x_p2_split(int rows){
-        return x_prog("xp2sp_" + to_string(rows) + "_" + x_format_name(res_fmt_),
-                      ::p2_split(rows, res_fmt_));
-    }
 
 // Prefill step 7d: two per-position FFN residuals -> one P2 texture in two
 // draws (sum of squares for both positions, then one normalising pass).
@@ -906,52 +570,9 @@ GLuint GPU::rmsnorm_pair2(GLuint xa, GLuint xb, GLuint w, Target& out){
 // carries both positions value r, so the add reads one texel, and the
 // expression order (add inside the kernel, before the q16 encode) is the
 // serial one that step 7c had to preserve.
-void GPU::matvec_p2_add_p2(const Mat& m, GLuint xp2, GLuint rp2, Target& out){
-        if (out.tex == 0 || out.w != m.rows) out = make_target(m.rows, 1);
-        const bool wr = m.has_row_scale();
-        GLuint p = x_q8_p2_add_p2(m.rows, m.cols, wr);
-        bind_fbo(out.fbo);
-        use_program(p);
-        bind_tex(0, m.tex); set_sampler(p, "W", 0);
-        bind_tex(1, xp2); set_sampler(p, "X", 1);
-        bind_tex(2, rp2); set_sampler(p, "RA", 2);
-        glUniform1f(uloc(p, "ws"), m.scale);
-        if (wr) { bind_tex(4, m.row_scale_tex); set_sampler(p, "WS", 4); }
-        setup_attrib(p);
-        for (int x0 = 0; x0 < m.rows; x0 += kDrawCap) {
-            const int w = min(kDrawCap, m.rows - x0);
-            glViewport(x0, 0, w, 1);
-            glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
-        }
-        if (ffn_flush_wanted(layer_fast_finish_)) glFlush();
-        else layer_finish("NF_FFN");
-        ffn_sync();
-    }
 
 // Two-position w2 including the residual add: one draw per FFN chunk for both
 // positions, reading each position residual stream (step 7c).
-void GPU::matvec_p2_add(const Mat& m, GLuint xp2, GLuint ra, GLuint rb, Target& out){
-        if (out.tex == 0 || out.w != m.rows) out = make_target(m.rows, 1);
-        const bool wr = m.has_row_scale();
-        GLuint p = x_q8_p2_add(m.rows, m.cols, wr);
-        bind_fbo(out.fbo);
-        use_program(p);
-        bind_tex(0, m.tex); set_sampler(p, "W", 0);
-        bind_tex(1, xp2); set_sampler(p, "X", 1);
-        bind_tex(2, ra); set_sampler(p, "RA", 2);
-        bind_tex(3, rb); set_sampler(p, "RB", 3);
-        glUniform1f(uloc(p, "ws"), m.scale);
-        if (wr) { bind_tex(4, m.row_scale_tex); set_sampler(p, "WS", 4); }
-        setup_attrib(p);
-        for (int x0 = 0; x0 < m.rows; x0 += kDrawCap) {
-            const int w = min(kDrawCap, m.rows - x0);
-            glViewport(x0, 0, w, 1);
-            glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
-        }
-        if (ffn_flush_wanted(layer_fast_finish_)) glFlush();
-        else layer_finish("NF_FFN");
-        ffn_sync();
-    }
 
 // One position of a P2 row into its residual stream (which = 0 A, 1 B).
 void GPU::p2_split(GLuint xp2, Target& out, int which){
@@ -994,28 +615,8 @@ GLuint GPU::ffn_pair_i4_swiglu_chunk(const Mat& w1, const Mat& w3, GLuint x, int
         return out.tex;
 }
 
-GLuint GPU::x_q8_pair_fused(int rows, int cols, bool wrow){
-        return x_prog("xq8pf_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(act_fmt_) +
-                      (wrow ? "_wr" : ""),
-                      matvec_q8_pair_fused(rows, cols, act_fmt_, wrow));
-    }
 
-GLuint GPU::x_i4_pair(int rows, int cols){
-        const string key = "xi4p_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(act_fmt_);
-        auto it = programs_.find(key);
-        if (it != programs_.end()) return it->second;
-        g_prog_key = key;
-        GLuint p = link_program(matvec_i4_pair(rows, cols, act_fmt_));
-        programs_[key] = p;
-        return p;
-    }
 
-GLuint GPU::x_i4_pair_swiglu(int rows, int cols, int hs){
-        const bool inl = q4_inline("gate");
-        return x_prog("xi4ps_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(act_fmt_) + (inl ? "" : "_gen") +
-                      (hs ? "_h" + to_string(hs) : ""),
-                      matvec_i4_pair_swiglu(rows, cols, act_fmt_, inl, hs));
-    }
 
 // GL binding state is context-wide (GLES2 has no VAOs and the engine owns the
 // context), so these live at file scope: the static texture helpers below bind
@@ -1087,129 +688,32 @@ GLint GPU::uloc(GLuint prog, const char* name) {
         return loc;
     }
 
-GLuint GPU::x_q8_add(int rows, int cols, XFormat xf, bool wrow){
-        return x_prog("xq8a_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(xf) + "_" +
-                      x_format_name(res_fmt_) + (wrow ? "_wr" : ""),
-                      matvec_q8_add(rows, cols, xf, res_fmt_, wrow));
-    }
-
-GLuint GPU::x_q8_add_pair(int rows, int cols, XFormat xf, bool wrow){
-        // The inline I16_2 decode is the default; Q8AP_INLINE=0 restores the
-        // generic X4Q form in the same binary, so the two can be A/B-ed
-        // interleaved without a second build.
-        const char* v = getenv("Q8AP_INLINE");
-        const bool inl = !(v && strcmp(v, "0") == 0);
-        return x_prog("xq8ap_" + to_string(rows) + "_" + to_string(cols) + "_" +
-                      x_format_name(xf) + (inl ? "" : "_gen") + (wrow ? "_wr" : ""),
-                      matvec_q8_add_pair(rows, cols, xf, inl, wrow));
-    }
-
-GLuint GPU::x_i4_add_pair(int rows, int cols, XFormat xf){
-        const bool inl = q4_inline("w2");
-        const string key = "xi4ap_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(xf) + (inl ? "" : "_gen");
-        auto it = programs_.find(key);
-        if (it != programs_.end()) return it->second;
-        g_prog_key = key;
-        GLuint p = link_program(matvec_i4_add_pair(rows, cols, xf, inl));
-        programs_[key] = p;
-        return p;
-    }
 
 
-GLuint GPU::x_i16(int rows, int cols){
-        return x_prog("xi16_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(act_fmt_),
-                      matvec_i16(rows, cols, act_fmt_));
-    }
 
-GLuint GPU::x_i16_add(int rows, int cols, XFormat xf){
-        return x_prog("xi16a_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(xf) + "_" + x_format_name(res_fmt_),
-                      matvec_i16_add(rows, cols, xf, res_fmt_));
-    }
 
-GLuint GPU::x_i4(int rows, int cols){
-        const bool inl = q4_inline("qkv");
-        return x_prog("xi4_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(act_fmt_) + (inl ? "" : "_gen"),
-                      matvec_i4(rows, cols, act_fmt_, inl));
-    }
 
-GLuint GPU::x_i4_add(int rows, int cols, XFormat xf){
-        return x_prog("xi4a_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(xf) + "_" + x_format_name(res_fmt_),
-                      matvec_i4_add(rows, cols, xf, res_fmt_));
-    }
 
-GLuint GPU::x_swiglu_pair(int hidden, int hs){
-        return x_prog("xswp_" + to_string(hidden) + "_" + x_format_name(ffn_fmt_) +
-                          (hs ? "_h" + to_string(hs) : ""),
-                      swiglu_pair(hidden, ffn_fmt_, hs));
-    }
 
-GLuint GPU::x_swiglu_2row(int hidden, int hs){
-        return x_prog("xsw2_" + to_string(hidden) + "_" + x_format_name(ffn_fmt_) +
-                          (hs ? "_h" + to_string(hs) : ""),
-                      ::swiglu_2row(hidden, ffn_fmt_, hs));
-    }
 
-GLuint GPU::x_swiglu(int hidden, bool fused, int hs){
-        return x_prog(string("xsw_") + (fused ? "f_" : "s_") + to_string(hidden) + "_" + x_format_name(ffn_fmt_) +
-                          (hs ? "_h" + to_string(hs) : ""),
-                      swiglu(hidden, fused, ffn_fmt_, hs));
-    }
 
-GLuint GPU::x_rms_split(){
-        return x_prog("xrmss_" + to_string(att_dim_) + "_" + x_format_name(res_fmt_),
-                      rms_stats_split(att_dim_, res_fmt_));
-    }
 
-GLuint GPU::x_rms_reduce(){ return x_prog("xrmsr", rms_stats_reduce()); }
 
-GLuint GPU::x_rms_norm(bool use_eps_uniform){
-        const bool fused = rms_fused() && act_fmt_ != XFormat::I8_4;
-        return x_prog("xrmsn_" + to_string(att_dim_) + "_" + x_format_name(res_fmt_) + "_" +
-                          x_format_name(act_fmt_) + (fused ? "_f" : "") +
-                          (use_eps_uniform ? "_e" : ""),
-                      rms_norm(att_dim_, res_fmt_, act_fmt_, fused, use_eps_uniform));
-    }
 
-GLuint GPU::x_v(){
-        return x_prog("xv_" + to_string(att_dim_) + "_" + x_format_name(act_fmt_),
-                      ::att_v(att_cfg(), act_fmt_));
-    }
 
-GLuint GPU::x_kv_rope(){ return x_prog("xkv", att_kv_rope(att_cfg())); }
 
-GLuint GPU::x_vscale(){ return x_prog("xvscale", ::att_vscale(att_cfg())); }
 
-GLuint GPU::x_qnorm(){ return x_prog("xqn", att_qnorm_scale(att_cfg())); }
 
-GLuint GPU::x_qrot(){ return x_prog("xqr", att_qrot(att_cfg())); }
 
-GLuint GPU::x_score(){ return x_prog("xsc", att_score(att_cfg())); }
 
-GLuint GPU::x_stats(){ return x_prog("xst", ::att_stats(att_cfg())); }
 
-GLuint GPU::x_prob(){ return x_prog("xpr", att_prob(att_cfg())); }
 
-GLuint GPU::x_top2_fast(int rows, int chunk){
-        return x_prog("xt2f_" + to_string(rows) + "_" + to_string(chunk), top2_fast(rows, chunk));
-    }
 
-GLuint GPU::x_top2(int rows, int chunk){
-        return x_prog("xt2_" + to_string(rows) + "_" + to_string(chunk), top2(rows, chunk));
-    }
 
-GLuint GPU::x_q8_pair_logits(int rows, int cols, bool wrow){
-        return x_prog("xq8pl_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(act_fmt_) +
-                      (wrow ? "_wr" : ""),
-                      matvec_q8_pair_logits(rows, cols, act_fmt_, wrow));
-    }
 
-GLuint GPU::x_top2_fast_packed(int rows, int chunk){
-        return x_prog("xt2fp_" + to_string(rows) + "_" + to_string(chunk), top2_fast_packed(rows, chunk));
-    }
 
-GLuint GPU::x_top2_packed(int rows, int chunk){
-        return x_prog("xt2p_" + to_string(rows) + "_" + to_string(chunk), top2_packed(rows, chunk));
-    }
+
+
 
 // The q4 decode wants ESSL 3.00 for its bitwise nibble split (b>>4 / b&15;
 // ESSL 1.00 forbids them).  It is on by default and resolved in two steps: the
