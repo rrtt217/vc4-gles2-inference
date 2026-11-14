@@ -32,6 +32,9 @@ jobs:
       - name: build
         run: make -C engine -B engine_mm3
 
+      - name: no warnings from src/ (vendored third_party/ is filtered)
+        run: make -C engine warncheck
+
       - name: documentation drift
         run: sh engine/scripts/docs_check.sh
 

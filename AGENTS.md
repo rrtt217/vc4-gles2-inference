@@ -103,10 +103,16 @@ Build for the target and do not reuse a stale binary:
   be Raspbian; Debian's armhf is ARMv7).
 - Probes: `make -C engine -B probes/<name>[_pi]` — see the targets in
   `engine/Makefile`.
+- Before pushing: `make -C engine check` — the same no-GPU half, one command
+  (warncheck, `docs_check.sh`, `shader_hashes.sh`, `check_q16_decode.sh`,
+  `check_target_reset.sh`, `server/selftest.py`).  `-Wall -Wextra` is on by
+  default and `warncheck` fails the target if `src/` produces any warning; the
+  eight warnings the vendored Jinja headers produce are filtered, not silenced,
+  so the flag keeps working for our own code.
 - CI: `.github/workflows/gate.yml` runs the **no-GPU half** of the gate on every
-  push: build, `docs_check.sh`, `shader_hashes.sh`, `check_target_reset.sh`,
-  `server/selftest.py`, the eval case file's `--selftest`, shell and Python
-  syntax, and the tool CLIs.  The model-dependent half (golden strings, PPL,
+  push: build, `warncheck`, `docs_check.sh`, `shader_hashes.sh`,
+  `check_target_reset.sh`, `server/selftest.py`, the eval case file's
+  `--selftest`, shell and Python syntax, and the tool CLIs.  The model-dependent half (golden strings, PPL,
   `swap_matrix.py`) needs the containers and a GL driver, so it stays local —
   run `scripts/regression.sh` before pushing anything that touches numerics.
 
@@ -331,9 +337,12 @@ prompt).  `scripts/regression.sh --rebaseline` prints the new values; keep them
 in the machine's override, not here.
 
 The same command **without** `--system` must print the same text; that is the
-check that the compiled default has not moved.  If it differs, change
-`kDefaultSystem`, this gate, `engine/scripts/regression.sh` and
-`docs/performance.md` together, never one of them alone.
+check that the container's default system prompt (metadata key 6) and the packer
+that wrote it agree with the gate.  There is no compiled default any more --
+`kDefaultSystem` was dead code and is gone since 2026-11-14; the engine uses the
+container's prompt and `--system` overrides it.  If it differs, change the
+container, this gate, `engine/scripts/regression.sh` and `docs/performance.md`
+together, never one of them alone.
 
 The older strings (`MiniMind是一个高效的小...` for q8,
 `我是MiniMind，一个由jingyaogong...` for q4) were measured with the pre-`c1bb4f6`

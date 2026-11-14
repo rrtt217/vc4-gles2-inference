@@ -24,7 +24,10 @@ CORE := $(SRC)/engine.cpp $(SRC)/common.cpp $(SRC)/xformat.cpp \
         $(SRC)/tokenizer.cpp $(SRC)/model.cpp $(SRC)/session.cpp $(SRC)/prefix_cache.cpp $(SRC)/lineedit.cpp \
         $(SRC)/sampling.cpp $(SRC)/tools.cpp $(SRC)/chattmpl.cpp $(JINJA)
 HEADERS := $(wildcard $(SRC)/*.h)
-INCS := -I$(SRC) -I$(TP)
+# third_party is -isystem: it is vendored code (llama.cpp's Jinja engine) and its
+# own warnings are not this repository's to fix, but they must not drown ours --
+# before this, a full build printed 11 warnings from jinja headers and 1 from src/.
+INCS := -I$(SRC) -isystem $(TP)
 # The Jinja engine is large and only one path uses it; let the linker drop what
 # this build never reaches (-947 KB -> -1.19 MB stripped, measured on Xe).
 SECTIONS := -ffunction-sections -fdata-sections
@@ -79,7 +82,7 @@ CROSS_CXXFLAGS ?= --sysroot=$(CROSS_SYSROOT) \
                  -ffast-math -std=c++17
 CROSS_LDLIBS ?= -L$(CROSS_TARGETLIB) -lEGL -lGLESv2 -lm
 
-.PHONY: pi armv6 check-cross clean probes check
+.PHONY: pi armv6 check-cross clean probes check warncheck
 
 pi: engine_mm3_pi
 
@@ -117,7 +120,7 @@ check-cross:
 # -march=armv6 on our own objects does not stop ARMv7 startfiles from raising
 # Tag_CPU_arch.  The .comment line names the runtime that was actually linked.
 engine_mm3_pi: $(CORE) $(HEADERS) | check-cross
-	$(CROSS_CXX) $(CROSS_CXXFLAGS) $(SECTIONS) $(INCS) -o $@ $(CORE) $(CROSS_LDLIBS) $(LDFLAGS)
+	$(CROSS_CXX) $(CROSS_CXXFLAGS) $(WARN) $(SECTIONS) $(INCS) -o $@ $(CORE) $(CROSS_LDLIBS) $(LDFLAGS)
 	@if [ -n "$(CROSS_READELF)" ]; then \
 	  attrs=$$($(CROSS_READELF) -A $@); \
 	  echo "$$attrs" | grep -q 'Tag_CPU_arch: v6' || { \
@@ -138,7 +141,7 @@ armv6: $(CORE) $(HEADERS)
 	  echo "armv6 builds on the Pi itself; this host targets $$($(CXX) -dumpmachine)." >&2; \
 	  echo "  To build the Pi binary from here: make -C engine -B pi CROSS_SYSROOT=<sysroot>" >&2; \
 	  exit 2; }
-	$(CXX) $(ARMV6_CXXFLAGS) $(SECTIONS) $(INCS) -o engine_mm3 $(CORE) $(LDLIBS) $(LDFLAGS)
+	$(CXX) $(ARMV6_CXXFLAGS) $(WARN) $(SECTIONS) $(INCS) -o engine_mm3 $(CORE) $(LDLIBS) $(LDFLAGS)
 	@echo "  built engine_mm3 for this host (a Pi Zero reports ARMv6/VFPv2)"
 
 probes/vc4_probe: probes/vc4_probe.cpp
@@ -152,29 +155,29 @@ probes/vc4_topk_probe: probes/vc4_topk_probe.cpp
 
 # No GL, no model: the logits grid is a text and source question.
 probes/logits_grid_probe: probes/logits_grid_probe.cpp $(SRC)/shaders_attn.cpp \
-                          $(SRC)/shaders.h $(SRC)/xformat.cpp $(SRC)/xformat.h
+                          $(SRC)/shaders.h $(SRC)/xformat.cpp $(SRC)/xformat.h $(HEADERS)
 	$(CXX) $(ALL_CXXFLAGS) -I$(SRC) -o $@ probes/logits_grid_probe.cpp $(SRC)/shaders_attn.cpp $(SRC)/xformat.cpp
 
-probes/matvec_probe: probes/matvec_probe.cpp $(SRC)/common.cpp $(SRC)/common.h
+probes/matvec_probe: probes/matvec_probe.cpp $(SRC)/common.cpp $(SRC)/common.h $(HEADERS)
 	$(CXX) $(ALL_CXXFLAGS) -I$(SRC) -o $@ probes/matvec_probe.cpp $(SRC)/common.cpp $(LDLIBS)
 
-probes/texsize_probe: probes/texsize_probe.cpp $(SRC)/common.cpp $(SRC)/common.h
+probes/texsize_probe: probes/texsize_probe.cpp $(SRC)/common.cpp $(SRC)/common.h $(HEADERS)
 	$(CXX) $(ALL_CXXFLAGS) -I$(SRC) -o $@ probes/texsize_probe.cpp $(SRC)/common.cpp $(LDLIBS)
 
 # Does a per-row q8 scale plane reach the shader?  Links the engine's own
 # shader builders, so the fragment program under test is the shipped one.
-probes/wrow_probe: probes/wrow_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp
+probes/wrow_probe: probes/wrow_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(HEADERS)
 	$(CXX) $(ALL_CXXFLAGS) -I$(SRC) -o $@ probes/wrow_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(LDLIBS)
 
 # Do the conv block's fetches work on this driver?  Links the engine's own
 # shader builders, so sections B and C run the shipped text.
-probes/conv_probe: probes/conv_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp
+probes/conv_probe: probes/conv_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(HEADERS)
 	$(CXX) $(ALL_CXXFLAGS) -I$(SRC) -o $@ probes/conv_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(LDLIBS)
 
-probes/conv_probe_pi: probes/conv_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp | check-cross
+probes/conv_probe_pi: probes/conv_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp | check-cross $(HEADERS)
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -I$(SRC) -o $@ probes/conv_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(CROSS_LDLIBS)
 
-probes/wrow_probe_pi: probes/wrow_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp | check-cross
+probes/wrow_probe_pi: probes/wrow_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp | check-cross $(HEADERS)
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -I$(SRC) -o $@ probes/wrow_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(CROSS_LDLIBS)
 
 # Standalone VC4 format probes: no engine sources, cross-built for the Pi.
@@ -197,12 +200,27 @@ probes/load_probe_pi: probes/load_probe.cpp | check-cross
 
 # The half of the gate that needs no GPU and no model: what a contributor can run
 # before pushing, and what .github/workflows/gate.yml runs on every push.
-check:
+check: warncheck
 	sh scripts/docs_check.sh
 	sh scripts/shader_hashes.sh
 	sh scripts/check_q16_decode.sh
 	sh scripts/check_target_reset.sh
 	python3 ../server/selftest.py
+
+# Warnings from src/ are a defect: -Wall -Wextra is on by default and this makes a
+# clean build an assertion rather than a hope.  Warnings from third_party/ are
+# the vendored Jinja engine's own (eight static helpers instantiated in four
+# translation units) and are filtered here instead of silenced globally, so the
+# flag keeps working for our code.
+warncheck:
+	@log=$$(mktemp); \
+	if $(MAKE) -B engine_mm3 > $$log 2>&1; then :; else cat $$log; rm -f $$log; exit 1; fi; \
+	if grep -qE '^src/[^:]+:[0-9]+:[0-9]+: warning' $$log; then \
+	    echo "warnings from src/ (a clean build is required):"; \
+	    grep -E '^src/[^:]+:[0-9]+:[0-9]+: warning' $$log; rm -f $$log; exit 1; \
+	fi; \
+	n=$$(grep -c 'warning:' $$log || true); echo "warncheck: 0 warnings from src/ ($${n:-0} from vendored third_party/ only)"; \
+	rm -f $$log
 
 clean:
 	rm -f engine engine_mm3 engine_mm3_pi
@@ -218,22 +236,22 @@ probes/glsl_probe_pi: probes/glsl_probe.cpp | check-cross
 probes/packunpack_probe_pi: probes/packunpack_probe.cpp | check-cross
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -o $@ $< $(CROSS_LDLIBS)
 
-probes/q4mv_probe_pi: probes/q4mv_probe.cpp $(SRC)/gpu.cpp $(SRC)/shaders.cpp $(SRC)/shaders_attn.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp | check-cross
+probes/q4mv_probe_pi: probes/q4mv_probe.cpp $(SRC)/gpu.cpp $(SRC)/shaders.cpp $(SRC)/shaders_attn.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp | check-cross $(HEADERS)
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -I$(SRC) -o $@ $^ $(CROSS_LDLIBS)
 
 # Native build of the same probe: the q4 decode A/B (Q4_NOUNPACK, Q4_BFAST,
 # Q4_SHIFT=0) is a per-texel difference of a few ALU ops, and a whole-token
 # decode average on Xe is too noisy to resolve it (15/23/44 ms/token for the
 # same arm in one session), so the kernel needs its own instrument.
-probes/q4mv_probe: probes/q4mv_probe.cpp $(SRC)/gpu.cpp $(SRC)/shaders.cpp $(SRC)/shaders_attn.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp
+probes/q4mv_probe: probes/q4mv_probe.cpp $(SRC)/gpu.cpp $(SRC)/shaders.cpp $(SRC)/shaders_attn.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(HEADERS)
 	$(CXX) $(ALL_CXXFLAGS) -I$(SRC) -o $@ $^ $(LDLIBS)
 
 # Prices a draw, an rmsnorm and the q8 matvec shapes on the real driver
 # (WORKLOG item 7: the cost model behind prefill batching).
-probes/draw_probe_pi: probes/draw_probe.cpp $(SRC)/gpu.cpp $(SRC)/shaders.cpp $(SRC)/shaders_attn.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp | check-cross
+probes/draw_probe_pi: probes/draw_probe.cpp $(SRC)/gpu.cpp $(SRC)/shaders.cpp $(SRC)/shaders_attn.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp | check-cross $(HEADERS)
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -I$(SRC) -o $@ $^ $(CROSS_LDLIBS)
 
 # Prices 2-position packing: one weight fetch feeding two positions, and the
 # P2 layout it writes (WORKLOG item 7b).
-probes/ffn2_probe_pi: probes/ffn2_probe.cpp $(SRC)/gpu.cpp $(SRC)/shaders.cpp $(SRC)/shaders_attn.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp | check-cross
+probes/ffn2_probe_pi: probes/ffn2_probe.cpp $(SRC)/gpu.cpp $(SRC)/shaders.cpp $(SRC)/shaders_attn.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp | check-cross $(HEADERS)
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -I$(SRC) -o $@ $^ $(CROSS_LDLIBS)

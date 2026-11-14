@@ -67,11 +67,10 @@ static std::string dump_escape(const std::string& t){
     return o;
 }
 
-// One short English prompt for every chat model.  MiniMind3's old Chinese
-// prompt was longer and made the default behave differently from the Qwen
-// template; a single ASCII prompt keeps prefill small and is easy to override
-// with --system.
-static const char* kDefaultSystem = "You are a helpful assistant.";
+// The default system prompt is *not* compiled in: it comes from the container's
+// metadata (key 6) and `--system` overrides it (see system_prompt below).  A
+// literal here would be dead code that reads like the default and is not --
+// `-Wunused-variable` found exactly that on 2026-11-14.
 
 static const char* kVersion = "1.0";
 
