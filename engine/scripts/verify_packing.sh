@@ -10,8 +10,9 @@
 # The model files are MMCF containers, so the template, tokenizer and rope come
 # from the file; passing --template here would be silently ignored.
 set -eu
-cd "$(dirname "$0")/.."
-export GPU_LAYER=1 KV_PACK=16 TIMING=1
+. "$(dirname "$0")/lib.sh"
+measure_env
+require_bin "$BIN"
 REF="${REF:-/tmp/engine_base}"
 PROMPT="用一句话介绍你自己。"
 
@@ -26,7 +27,7 @@ timing_of() {
 }
 
 for model in ../models/minimind3/minimind3.q8.mmcf ../models/minimind3/minimind3.q4.mmcf; do
-    new=$(text_of "$model" ./engine_mm3)
+    new=$(text_of "$model" "$BIN")
     printf '%s\n  new: %s\n' "$model" "$new"
     if [ -x "$REF" ]; then
         base=$(text_of "$model" "$REF")
@@ -35,6 +36,6 @@ for model in ../models/minimind3/minimind3.q8.mmcf ../models/minimind3/minimind3
     else
         echo "  (no $REF; rebuild the baseline to compare)"
     fi
-    printf '  %s\n' "$(timing_of "$model" ./engine_mm3)"
+    printf '  %s\n' "$(timing_of "$model" "$BIN")"
     [ -x "$REF" ] && printf '  ref %s\n' "$(timing_of "$model" "$REF")"
 done

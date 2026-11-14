@@ -3,15 +3,13 @@
 # Usage: bash bench.sh [prompt] [gen]
 # Prints one line per config: tag, prefill seconds, decode ms/token, CmaFree delta.
 set -u
-cd "$(dirname "$0")/.." || exit 1
+# Root, binary, models, the measurement environment, cma_free and the TIMING parse
+# come from lib.sh (one copy for the five measurement scripts).
+. "$(dirname "$0")/lib.sh"
+measure_env
+require_bin "$BIN"
 PROMPT="${1:-用一句话介绍你自己。}"
 GEN="${2:-16}"
-export GPU_LAYER=1
-export TIMING=1
-Q8=../models/minimind3/minimind3.q8.mmcf
-Q4=../models/minimind3/minimind3.q4.mmcf
-
-cma_free() { awk '/^CmaFree:/{print $2}' /proc/meminfo; }
 
 run() {
   local tag="$1" model="$2"; shift 2

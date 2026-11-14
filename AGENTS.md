@@ -75,7 +75,8 @@ the file format in [`docs/model-formats.md`](docs/model-formats.md) and
 | `check_att.py` | offline oracle for `ATT_DUMP`: score, softmax stats and `att_out` reproduced from the integers the shaders consumed |
 | `cmp_logits.py` | compares two `LOGITS_OUT` dumps tile by tile |
 | `verify_packing.sh` | byte-for-byte check of the packed-activation layout against a known-good binary |
-| `bench.sh`, `bench_ab.sh`, `bench_plain_ab.sh`, `longctx.sh` | timings; the `ab` ones interleave two binaries to cancel drift |
+| `bench.sh`, `bench_ab.sh`, `bench_plain_ab.sh`, `longctx.sh` | timings; the `ab` ones interleave two binaries to cancel drift.  All of them source `scripts/lib.sh` for the one copy of the tree root, the default model, the measurement environment, the load guard and the min/median summary |
+| `lib.sh` | the shared half of the measurement scripts: `ENGINE`/`ROOT`, the model defaults (including the runtime-root fallback), `measure_env`, `cma_free`, `load_guard`, `timing_line`/`timing_fields` (chat) and `plain_decode` (plain), and the min/median statistics |
 | `swap_matrix.py` | acceptance for `/model`: swaps containers inside one process over the q8, q4, i16, hybrid and mixed-precision families (three template kinds, a round trip, a quantisation change, a repeat run) and requires every turn to be byte-identical to a fresh process.  Needs the GPU and `models/`; about three minutes on Xe |
 | `check_q16_decode.sh` | every q16 decode in `--dump-shaders=raw` folds the negative rail and uses one of the two documented thresholds (`32767.5`, `32768.0`); a third spelling or a dropped fold fails here instead of on the board.  Ten spellings share the rule -- the text is the numerics, so this checks it rather than rewriting it.  No GPU, no model |
 | `check_target_reset.sh` | every scratch `Target` in `gpu.h` is cleared by `GPU::reset_targets()`, so a released scene cannot be reused with a deleted texture name.  Runs without a GPU or a model |

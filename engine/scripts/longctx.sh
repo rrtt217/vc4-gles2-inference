@@ -2,11 +2,11 @@
 # Long-context decode cost: does KV packing matter once the cache is deep?
 # Usage: bash longctx.sh [repeats]
 set -u
-cd "$(dirname "$0")/.." || exit 1
+. "$(dirname "$0")/lib.sh"
+measure_env
+require_bin "$BIN"
 REPEATS="${1:-45}"
-export GPU_LAYER=1 TIMING=1
 export SEQ="${SEQN:-768}"
-MODEL=../models/minimind3/minimind3.q8.mmcf
 FILLER=$(python3 -c "print('树莓派是一块很小的电脑板。' * $REPEATS + '只回答两个字：收到')")
 
 for pack in 16 8 0; do

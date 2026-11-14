@@ -12,13 +12,10 @@
 # fixes: user is the GL command stream built in-process, sys is the kernel side of
 # every ioctl.  Runs alternate A/B so thermal drift and background load hit both.
 set -eu
-cd "$(dirname "$0")/.."
-
-# Works from engine/ (../models) and from the runtime root (models).
-if [ -d ../models/minimind3 ]; then _m=../models/minimind3; else _m=models/minimind3; fi
-MODEL=${MODEL:-$_m/minimind3.q8.mmcf}
-export MODEL TOKENIZER=${TOKENIZER:-}
-export GPU_LAYER=${GPU_LAYER:-1} KV_PACK=${KV_PACK:-16} SEQ=${SEQ:-768}
+. "$(dirname "$0")/lib.sh"
+measure_env
+export_model
+export SEQ=${SEQ:-768}
 
 A=${1:?usage: bench_plain_ab.sh binA binB [gen] [reps]}
 B=${2:?}
@@ -28,8 +25,7 @@ LONG=${LONG_GEN:-128}
 PROMPT=${PROMPT:-Once upon a time, there was a little}
 
 decode_of() { # decode_of <bin> <gen>
-    _d=$("$1" --prompt "$PROMPT" --gen "$2" --greedy 2>&1 |
-        sed -n 's/^decode avg \([0-9.]*\) ms\/token$/\1/p' | tail -1)
+      _d=$("$1" --prompt "$PROMPT" --gen "$2" --greedy 2>&1 | plain_decode)
     if [ -z "$_d" ]; then
         echo "decode_of: no timing line from $1 (gen $2) — model path or run failed" >&2
         exit 2
@@ -38,27 +34,18 @@ decode_of() { # decode_of <bin> <gen>
 }
 
 rusage_of() { # rusage_of <bin> <gen> -> "user sys"
+    # The engine's own stderr lands in the same file as `time`'s report unless it is
+    # discarded explicitly, and then awk reads "template: minimind3" as the numbers:
+    # that is why CPU/token printed 0.0 for as long as this script existed.  Only
+    # the "0.123 0.045" line is kept.
     _f=$(mktemp)
     { TIMEFORMAT='%U %S'; time "$1" --prompt "$PROMPT" \
-        --gen "$2" --greedy >/dev/null ; } 2>"$_f"
-    awk '{print $1, $2}' "$_f"
+        --gen "$2" --greedy >/dev/null 2>/dev/null ; } 2>"$_f"
+    awk 'NF == 2 && $1 ~ /^[0-9.]+$/ && $2 ~ /^[0-9.]+$/ {print $1, $2}' "$_f" | tail -1
     rm -f "$_f"
 }
 
-summary() { # summary <label> <decodes...>
-    _l=$1; shift
-    printf '%s\n' "$@" | sort -n | awk -v tag="$_l" '
-        { v[NR] = $1 }
-        END {
-            n = NR
-            med = (n % 2) ? v[(n + 1) / 2] : (v[n / 2] + v[n / 2 + 1]) / 2
-            printf "%-4s decode min %7.1f  median %7.1f ms/token\n", tag, v[1], med
-            printf "%s %s\n", v[1], med
-        }'
-}
-
-LOAD=$(awk '{print $1}' /proc/loadavg)
-awk -v l="$LOAD" 'BEGIN { if (l > 1.5) printf "warning: load %s — expect noise\n", l }' >&2
+load_guard
 
 aD=""; bD=""
 i=0
@@ -69,9 +56,9 @@ while [ "$i" -lt "$REPS" ]; do
 done
 
 # shellcheck disable=SC2086
-A_SUM=$(summary A $aD); A_MIN=$(printf '%s\n' "$A_SUM" | tail -1 | cut -d' ' -f1)
+A_SUM=$(printf "%s\n" $aD | min_median_list A); A_MIN=$(printf '%s\n' "$A_SUM" | tail -1 | cut -d' ' -f1)
 # shellcheck disable=SC2086
-B_SUM=$(summary B $bD); B_MIN=$(printf '%s\n' "$B_SUM" | tail -1 | cut -d' ' -f1)
+B_SUM=$(printf "%s\n" $bD | min_median_list B); B_MIN=$(printf '%s\n' "$B_SUM" | tail -1 | cut -d' ' -f1)
 printf '%s\n%s\n' "$(printf '%s\n' "$A_SUM" | head -1)" "$(printf '%s\n' "$B_SUM" | head -1)"
 
 cpu_line() { # cpu_line <label> <bin> <genmin> <genmax>
