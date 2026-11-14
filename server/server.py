@@ -63,6 +63,27 @@ class EngineWorker:
         self._open(engine, model, tokenizer, seq, gpu_layer, log_path, prefix_cache, kv_pack)
 
     def _open(self, engine, model, tokenizer, seq, gpu_layer, log_path, prefix_cache, kv_pack):
+        if prefix_cache:
+            # A cache is machine- and model-specific, and a stale one does not
+            # fail: it misses, and the request pays a full prefill (83 s against
+            # 14.4 s on the Pi Zero for the 2026-11-02 tool header).  That is the
+            # silent slowdown this refuses to start with.  The engine writes a
+            # `<cache>.json` describing itself; without one there is nothing to
+            # compare the model, SEQ and packing against.
+            pc = Path(prefix_cache)
+            if not pc.exists():
+                raise WorkerError("--prefix-cache %s does not exist" % pc)
+            cands = sorted(pc.glob("*.kv")) if pc.is_dir() else [pc]
+            if not cands:
+                raise WorkerError("--prefix-cache %s contains no *.kv" % pc)
+            missing = [c for c in cands if not Path(str(c) + ".json").exists()]
+            if missing:
+                raise WorkerError(
+                    "%s has no sidecar; rebuild it with "
+                    "`python3 server/build_prefix_cache.py build --model ... --out ...`. "
+                    "The engine writes the .json next to every cache it builds, and a cache "
+                    "without one cannot be checked against the model, the SEQ or the packing "
+                    "-- a stale cache is a silent slowdown, not an error." % missing[0])
         env = os.environ.copy()
         env["MODEL"] = model
         if tokenizer:

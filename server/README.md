@@ -361,7 +361,9 @@ switch reloads the right one.  The **engine builds the cache** too
 (`--build-prefix-cache - OUT` renders the header with the container's own template)
 and writes the `<cache>.json` sidecar; `build_prefix_cache.py` is only the trigger
 and the checker around it, because rendering the header in Python was a second
-renderer hard-coded to ChatML.
+renderer hard-coded to ChatML.  The server **refuses to start** with a `.kv` that
+has no sidecar (or a `--prefix-cache` path that does not exist): a stale cache
+does not fail, it silently prefills everything again.
 
 ## Python overhead
 

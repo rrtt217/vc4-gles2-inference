@@ -60,15 +60,24 @@ The worker can load a saved prefix at startup and keep it as the initial chain.
 Build it with the same model, precision, device, and `SEQ`:
 
 ```bash
-cd engine
-SEQ=768 GPU_LAYER=1 ./engine_mm3 \
-  --build-prefix-cache ../server/prefix_tools.txt \
-  ../server/prefix_tools_pi768.kv
+# The engine renders the header with the container's own template, prefills it,
+# writes the KV and writes a `<cache>.json` describing it (2026-11-14; the Python
+# builder used to render the header itself, hard-coded to ChatML).
+cd server
+python3 build_prefix_cache.py build \
+  --model ../models/minimind3/minimind3.q8.mmcf --seq 768 --kv-pack 16 \
+  --system "You are a helpful assistant." \
+  --tools system_status get_current_time \
+  --out pfx_tools_pi768.kv
 
-cd ../server
-python3 server.py --seq 768 \
-  --prefix-cache prefix_tools_pi768.kv
+python3 server.py --seq 768 --prefix-cache pfx_tools_pi768.kv
 ```
+
+`--prefix-cache` may also name a **directory**: the engine loads the entry whose
+header matches the model it is holding, so several models share one directory and
+a model swap picks the right one.  A `.kv` without its `.json` is refused at
+server startup -- a stale cache does not fail, it silently prefills everything
+again, which is the 83 s against 14.4 s case above.
 
 The system+tools prefix is 417 tokens, 9.8 MB (8 layers × 768 KV columns ×
 417 positions × 4 bytes).  Pi Zero measurements:
@@ -137,11 +146,11 @@ the neutral English system prompt also invalidates old tool/chat caches;
 Build a packed disk cache with the same packing mode:
 
 ```bash
-KV_PACK=16 SEQ=768 GPU_LAYER=1 ./engine_mm3 \
-  --build-prefix-cache prefix_tools.txt prefix_tools_pack16_768.kv
+python3 build_prefix_cache.py build \
+  --model ../models/minimind3/minimind3.q8.mmcf --seq 768 --kv-pack 16 \
+  --out pfx_tools_pi768.kv
 
-python3 server.py --seq 768 --kv-pack 16 \
-  --prefix-cache prefix_tools_pack16_768.kv
+python3 server.py --seq 768 --kv-pack 16 --prefix-cache pfx_tools_pi768.kv
 ```
 
 The cache header records the packing mode and the `KV_SCALE` grid; loading

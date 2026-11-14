@@ -489,8 +489,10 @@ before concluding anything from it.
 The OpenAI-compatible Python server lives in [../server/](../server/):
 
 ```bash
+python3 server/build_prefix_cache.py build --model ../models/minimind3/minimind3.q8.mmcf \
+  --seq 768 --kv-pack 16 --out pfx_tools_pi768.kv        # writes pfx_tools_pi768.kv.json too
 python3 server.py --seq 768 --kv-pack 16 \
-  --prefix-cache prefix_tools_pack16_768.kv
+  --prefix-cache pfx_tools_pi768.kv
 ```
 
 See [server/README.md](../server/README.md).

@@ -100,8 +100,10 @@ GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
 
 ```bash
 cd server
+python3 build_prefix_cache.py build --model ../models/minimind3/minimind3.q8.mmcf \
+  --seq 768 --kv-pack 16 --out pfx_tools_pi768.kv        # writes pfx_tools_pi768.kv.json too
 python3 server.py --seq 768 --kv-pack 16 \
-  --prefix-cache prefix_tools_pack16_768.kv
+  --prefix-cache pfx_tools_pi768.kv
 ```
 
 接口、工具和缓存细节见 [server/README.zh-CN.md](server/README.zh-CN.md)。
