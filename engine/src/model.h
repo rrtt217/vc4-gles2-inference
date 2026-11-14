@@ -147,19 +147,10 @@ public:
 
 
 private:
-    void read_exact(void* p, size_t n);
-
-    template <typename T> void read_seq(vector<T>& v, const T*& ext, size_t n){
-        const size_t bytes = n * sizeof(T);
-        if (fpos_ + bytes > fsize_) { cerr << "truncated checkpoint\n"; exit(1); }
-        if (borrow_ && (fpos_ % sizeof(T)) == 0) {
-            ext = (const T*)(fbase_ + fpos_);
-        } else {
-            v.resize(n);
-            memcpy(v.data(), fbase_ + fpos_, bytes);
-        }
-        fpos_ += bytes;
-    }
+    // `read_exact`/`read_seq` were declared here and never called (0 sites on
+    // 2026-11-14); `read_seq` was also the audit's worst exit() example -- a header
+    // that terminates the process.  The loader reads through mmcf_* instead, which
+    // returns bool.
 
     // The checkpoint stays mapped for the process lifetime: borrowed weights
     // point into it.  Those pages are page cache - reclaimable, never swapped -

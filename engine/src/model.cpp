@@ -87,6 +87,17 @@ Model::~Model(){
 // resident file pages from this process - they stay in the page cache, so the
 // next start is still warm - and clears the borrowed pointers so nothing can
 // read a stale view of a mapping that no longer exists.
+// A container this build cannot run.  The three sites below are *prepare-time*
+// refusals (an FFN hidden that needs more than two chunks, per-part precision on a
+// MoE container): by the time they fire the model is half-built, so returning an
+// error would hand the caller a model that cannot be used or freed coherently.
+// Everything a caller *can* recover from -- missing file, bad magic, short read, a
+// version this build does not know -- is a `false` from `Model::load()`.
+[[noreturn]] static void refuse(const std::string& what) {
+        std::cerr << "mmcf: " << what << "\n";
+        exit(1);
+}
+
 void Model::release_map(){
     if (map_) munmap(map_, map_size_);
     map_ = nullptr; map_size_ = 0;
@@ -115,7 +126,7 @@ void Model::split_ffn(int max_dim){
                 // its own; the sliced Mats share the mapping, so this only adds
                 // texture descriptors.
                 if (moe_hidden <= 2048) return;
-                if (moe_hidden > 4096) { cerr << "expert hidden too large for two FFN chunks\n"; exit(1); }
+                if (moe_hidden > 4096) refuse("expert hidden too large for two FFN chunks");
                 ffn_chunked = true;
                 ffn_chunk = (moe_hidden + 1) / 2;
                 for (auto& layer : moe) {
@@ -138,11 +149,9 @@ void Model::split_ffn(int max_dim){
         // to be the literal 4096, which refused LFM2-350M's 4608 hidden even
         // though a 2304-wide chunk is legal on Xe (2026-11-12).
         const int chunk_limit = max_dim > 0 ? max_dim : 2048;
-        if (hidden > 2 * chunk_limit) {
-                cerr << "hidden " << hidden << " needs two FFN chunks wider than the "
-                     << "GL target limit " << chunk_limit << "\n";
-                exit(1);
-        }
+        if (hidden > 2 * chunk_limit)
+                refuse("hidden " + std::to_string(hidden) + " needs two FFN chunks wider than the "
+                       "GL target limit " + std::to_string(chunk_limit));
         ffn_chunked = true;
         ffn_chunk = (hidden + 1) / 2;
         for (int l = 0; l < layers; ++l) {
@@ -278,10 +287,8 @@ bool Model::quantize_q4_weights(const string& scope){
 
 void Model::apply_precision(const string& layers_spec, const string& parts_spec){
         if (is_moe()) {
-                cerr << "Q8_PARTS: per-part precision is not implemented for a MoE "
-                        "container; the expert FFNs carry their own precision from the "
-                        "packer (re-pack with --quant)\n";
-                exit(1);
+                refuse("Q8_PARTS is not implemented for a MoE container; the expert FFNs "
+                       "carry their own precision from the packer (re-pack with --quant)");
         }
         auto has_part = [&](const char* name) {
             if (parts_spec.empty() || parts_spec == "all") return true;
@@ -347,11 +354,6 @@ void Model::apply_precision(const string& layers_spec, const string& parts_spec)
         if (has_part("logits")) for (auto& m : logits_tiles) convert(m);
     }
 
-void Model::read_exact(void* p, size_t n){
-        if (n > fsize_ - fpos_) { cerr << "truncated checkpoint\n"; exit(1); }
-        memcpy(p, fbase_ + fpos_, n);
-        fpos_ += n;
-    }
 
 
 

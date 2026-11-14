@@ -315,3 +315,14 @@ generation on the literal token ids 1 and 2, which is MiniMind3's coincidence.
 TinyBrainBot's EOS is 7, so it never stopped and emitted `<|end|>` until the
 length limit.  The CLI now uses the container's EOS/stop ids everywhere, like
 the worker already did.
+
+### The loader's error contract
+
+`Model::load()` returns `false` for everything a caller can recover from: a
+missing file, a bad magic, a header this build does not know, a truncated
+read.  Three conditions are refused at *prepare* time instead -- an FFN hidden
+that would need more than two chunks, and `Q8_PARTS` on a MoE container --
+because by then the model is half-built: `refuse()` prints and terminates
+(`src/model.cpp`, one site for all three).  A header can no longer terminate
+the process: the `read_seq` template that did was dead code and is gone
+(2026-11-14).
