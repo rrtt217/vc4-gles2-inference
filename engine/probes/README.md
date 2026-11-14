@@ -15,7 +15,7 @@ own copy of the surfaceless-EGL setup.
 | `packunpack_probe` | which GLSL ES pack/unpack builtins does this driver actually run?  Every language feature the engine relies on, one draw each | `packunpack_probe_pi` |
 | `glsl_probe` | which GLSL ES dialect does the vc4 ES2 context really give us, and can the q4 nibble unpack use integer ops? | `glsl_probe_pi` |
 | `q4fmt_probe` | what does the VC4 texture unit return for a small UNORM component?  The q4 split layout depends on the exact rounding | `q4fmt_probe_pi` |
-| `rgba4444_probe` | does this driver give a real 4-bit-per-channel texture?  The q4 weight path is 4 bits per channel | — |
+| `rgba4444_probe` | does this driver give a real 4-bit-per-channel texture?  The q4 weight path is 4 bits per channel.  **Answered on VC4 (2026-11-14): yes** — exact `n/15`, same component order as Xe, 144/144 nibbles right on a 1216x192 matrix; see [`docs/performance.md`](../../docs/performance.md) | `rgba4444_probe`, `rgba4444_probe_pi` |
 | `texsize_probe` | what texture height does this driver accept?  The engine allocates weight textures `rows` tall | `texsize_probe` |
 | `matvec_probe` | how much of the engine's matvec time is int8 decode?  Synthetic weights, no model | `matvec_probe` |
 | `q4mv_probe` | synthetic INT4 kernels at 64x64 and the fused FFN gate, with and without the unpack cost | `q4mv_probe`, `q4mv_probe_pi` |
@@ -53,7 +53,8 @@ nothing about the board.
 
 ## Known duplication
 
-Eight probes carry their own surfaceless-EGL initialisation (50–60 lines each,
-four of them copied from one commit).  It is not shared yet; whoever adds the next
-probe should extract `probes/egl_surfaceless.h` first rather than copy it a ninth
-time.
+Eight probes still carry their own surfaceless-EGL initialisation (50–60 lines
+each, four of them copied from one commit).  `probes/egl_surfaceless.h` is the
+extraction that was asked for when the ninth probe was added: include it, do not
+copy the set-up again.  The eight older files can move over one at a time — a
+probe's only contract is that its numbers stay the same.

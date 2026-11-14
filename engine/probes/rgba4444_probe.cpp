@@ -24,12 +24,12 @@
 //   E  the real shape: a 1216 x 768 q4 matrix as RGBA4, sampled at known
 //      positions and compared against the bytes it was built from.  This is
 //      where a row-stride or tiling surprise would show up.
-//   F  is 4444 *renderable* (GL_RGBA4 renderbuffer).  Expected NO on vc4
-//      (vc4_formats.c lists the render-target type as RT_NO); this is the
-//      question the two "no RGBA4" statements are actually about.
-#include <EGL/egl.h>
-#include <EGL/eglext.h>
-#include <GLES2/gl2.h>
+//   F  is 4444 *renderable* (GL_RGBA4 renderbuffer).  vc4_formats.c lists the
+//      render-target type as RT_NO, so NO was the expectation; measured on the
+//      board 2026-11-14 it is ACCEPTED and the FBO is complete, which is why
+//      this probe asks the driver instead of reading its table.
+#include "egl_surfaceless.h"
+
 #include <GLES2/gl2ext.h>
 #include <cstdint>
 #include <cstdio>
@@ -167,26 +167,8 @@ static std::vector<uint8_t> read_back(int w, int h) {
 
 int main() {
     setvbuf(stdout, nullptr, _IONBF, 0);
-    auto get_platform_display =
-        (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress("eglGetPlatformDisplayEXT");
-    if (!get_platform_display) { printf("no eglGetPlatformDisplayEXT\n"); return 1; }
-    EGLDisplay dpy = get_platform_display(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr);
-    EGLint major = 0, minor = 0;
-    if (!eglInitialize(dpy, &major, &minor)) { printf("eglInitialize failed\n"); return 1; }
-    eglBindAPI(EGL_OPENGL_ES_API);
-    const EGLint cfg_attr[] = { EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8,
-                                EGL_ALPHA_SIZE, 8, EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
-                                EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT, EGL_NONE };
-    EGLConfig cfg;
-    EGLint n = 0;
-    eglChooseConfig(dpy, cfg_attr, &cfg, 1, &n);
-    const EGLint ctx_attr[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
-    EGLContext ctx = eglCreateContext(dpy, cfg, EGL_NO_CONTEXT, ctx_attr);
-    if (ctx == EGL_NO_CONTEXT) { printf("context creation failed\n"); return 1; }
-    if (!eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, ctx)) {
-        printf("eglMakeCurrent(surfaceless) failed\n");
-        return 1;
-    }
+    EglSurfaceless egl = egl_surfaceless_init(2);
+    if (!egl.ok()) return 1;
 
     // ---- A: what are we on? ------------------------------------------------
     printf("A renderer  %s\n", glGetString(GL_RENDERER));

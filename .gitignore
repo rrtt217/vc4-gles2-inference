@@ -38,6 +38,7 @@ __pycache__/
 # every sibling was listed, that one was not.  Negate on the sources instead.
 /engine/probes/*
 !/engine/probes/*.cpp
+!/engine/probes/*.h
 !/engine/probes/README*
 
 # Editor / OS

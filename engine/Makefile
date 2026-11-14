@@ -175,6 +175,16 @@ probes/wrow_probe_pi: probes/wrow_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cp
 # Standalone VC4 format probes: no engine sources, cross-built for the Pi.
 probes/q4fmt_probe_pi: probes/q4fmt_probe.cpp | check-cross
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -o $@ $< $(CROSS_LDLIBS)
+
+# 4-bit-per-channel texture support.  Standalone (EGL + GLES2, no engine
+# objects), so it still builds while engine/src is being split, and it is the
+# probe that answers this on the board rather than from the driver's format
+# table.  The board has gcc and the Mesa headers, so the native recipe is the
+# one usually used: g++ -O2 -std=c++17 -o rgba4444_probe ... -lEGL -lGLESv2.
+probes/rgba4444_probe: probes/rgba4444_probe.cpp probes/egl_surfaceless.h
+	$(CXX) $(CXXFLAGS) -o $@ $< $(LDLIBS)
+probes/rgba4444_probe_pi: probes/rgba4444_probe.cpp probes/egl_surfaceless.h | check-cross
+	$(CROSS_CXX) $(CROSS_CXXFLAGS) -o $@ $< $(CROSS_LDLIBS)
 probes/progbinary_probe_pi: probes/progbinary_probe.cpp | check-cross
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -o $@ $< $(CROSS_LDLIBS)
 probes/load_probe_pi: probes/load_probe.cpp | check-cross
@@ -183,7 +193,7 @@ probes/load_probe_pi: probes/load_probe.cpp | check-cross
 clean:
 	rm -f engine engine_mm3 engine_mm3_pi
 	rm -f probes/vc4_probe probes/vc4_ffn_probe probes/vc4_topk_probe probes/load_probe_pi
-	rm -f probes/matvec_probe probes/texsize_probe probes/q4fmt_probe_pi probes/glsl_probe_pi probes/q4mv_probe_pi probes/draw_probe_pi probes/packunpack_probe probes/packunpack_probe_pi probes/logits_grid_probe probes/wrow_probe probes/wrow_probe_pi probes/conv_probe probes/conv_probe_pi
+	rm -f probes/matvec_probe probes/texsize_probe probes/q4fmt_probe_pi probes/glsl_probe_pi probes/q4mv_probe_pi probes/draw_probe_pi probes/packunpack_probe probes/packunpack_probe_pi probes/logits_grid_probe probes/wrow_probe probes/wrow_probe_pi probes/conv_probe probes/conv_probe_pi probes/rgba4444_probe probes/rgba4444_probe_pi
 
 probes/glsl_probe_pi: probes/glsl_probe.cpp | check-cross
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -o $@ $< $(CROSS_LDLIBS)
