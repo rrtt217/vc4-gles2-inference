@@ -118,14 +118,18 @@ class TinyContextWorker:
         self.alive = True
         self.restarts = 0
         self.prompts = []
+        self.chat_template = True   # every stand-in engine carries a template
 
     def ensure_alive(self):
         pass
 
     def generate(self, prompt, max_tokens, temperature, top_p, seed, on_token=None, penalties=None,
                  messages=None, top_k=0):
-        self.prompts.append(prompt if messages is None else json.dumps(messages, sort_keys=True))
-        if self.marker in prompt and (self.fail_always or len(self.prompts) == 1):
+        # The server sends messages and no prompt text, so the marker has to be
+        # looked for in whatever actually travelled.
+        sent = prompt if messages is None else json.dumps(messages, sort_keys=True)
+        self.prompts.append(sent)
+        if self.marker in sent and (self.fail_always or len(self.prompts) == 1):
             raise srv.ContextFull("[context full]")
         return "ok", "length", {"prompt_tokens": 1, "completion_tokens": 1}
 
@@ -142,6 +146,9 @@ class StubWorker:
         self.alive = True
         self.last_penalties = None
         self.last_top_k = 0
+        # The engine is the only renderer, so a stub without a template would
+        # make every /v1/chat/completions request a 400.
+        self.chat_template = True
 
     def ensure_alive(self) -> None:
         if not self.alive:
@@ -284,9 +291,8 @@ two_tools = {"model": "minimind3-64m",
              "tools": [{"type": "function", "function": local_tools.TOOL_SPECS["calculate_math"]},
                        {"type": "function", "function": local_tools.TOOL_SPECS["system_status"]}]}
 http("POST", "/v1/chat/completions", two_tools)
-prompt = worker.last_prompt
-check("only-tool prompt keeps calculate_math", '"name": "calculate_math"' in prompt, prompt[-300:])
-check("only-tool prompt drops system_status", '"name": "system_status"' not in prompt, prompt[-300:])
+forwarded = [f.get("function", {}).get("name") for f in (worker.last_messages or {}).get("tools", [])]
+check("only-tool keeps calculate_math", forwarded == ["calculate_math"], str(forwarded))
 httpd.only_tool = None
 
 print("== server: tool_choice none skips tools ==")
@@ -350,23 +356,23 @@ print("== tool definitions are canonicalised for the prefix cache ==")
 para = [{"type": "function", "function": {"name": "calculate_math",
          "description": "some other wording", "parameters": {"type": "object", "properties": {}}}}]
 canon = [{"type": "function", "function": srv.local_tools.TOOL_SPECS["calculate_math"]}]
-p_para, _ = srv.build_prompt({"messages": [{"role": "user", "content": "hi"}], "tools": para})
-p_canon, _ = srv.build_prompt({"messages": [{"role": "user", "content": "hi"}], "tools": canon})
-check("paraphrased tool renders identically", p_para == p_canon)
-check("paraphrased wording is dropped", "some other wording" not in p_para)
+p_para = srv.build_messages({"messages": [{"role": "user", "content": "hi"}], "tools": para})
+p_canon = srv.build_messages({"messages": [{"role": "user", "content": "hi"}], "tools": canon})
+check("paraphrased tool forwards identically", p_para == p_canon)
+check("paraphrased wording is dropped", "some other wording" not in str(p_para))
 
 reordered = [{"type": "function", "function": srv.local_tools.TOOL_SPECS[n]}
              for n in ("disk_usage", "system_status")]
 in_order = [{"type": "function", "function": srv.local_tools.TOOL_SPECS[n]}
             for n in ("system_status", "disk_usage")]
-r1, _ = srv.build_prompt({"messages": [{"role": "user", "content": "hi"}], "tools": reordered})
-r2, _ = srv.build_prompt({"messages": [{"role": "user", "content": "hi"}], "tools": in_order})
+r1 = srv.build_messages({"messages": [{"role": "user", "content": "hi"}], "tools": reordered})
+r2 = srv.build_messages({"messages": [{"role": "user", "content": "hi"}], "tools": in_order})
 check("tool order is normalised", r1 == r2)
 
 custom = [{"type": "function", "function": {"name": "my_tool", "description": "x",
            "parameters": {"type": "object", "properties": {}}}}]
-p_custom, _ = srv.build_prompt({"messages": [{"role": "user", "content": "hi"}], "tools": custom})
-check("unknown tools pass through", "my_tool" in p_custom)
+p_custom = srv.build_messages({"messages": [{"role": "user", "content": "hi"}], "tools": custom})
+check("unknown tools pass through", "my_tool" in str(p_custom))
 
 print("== request stats ==")
 stats_path = str(Path(tempfile.mkdtemp()) / "stats.jsonl")
@@ -417,35 +423,26 @@ code, body = http("GET", "/health")
 check("/health 200 after recovery", code == 200 and body.get("worker_alive") is True, str(body))
 
 
-print("== chat template comes from the checkpoint ==")
-chatml, _ = srv.build_prompt({"messages": [{"role": "user", "content": "hi"}]})
-WANT_CHATML = ("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
-               "<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n"
-               "<think>\n\n</think>\n\n")
-check("chatml renderer unchanged", chatml == WANT_CHATML, repr(chatml))
-mm3, _ = srv.build_prompt({"messages": [{"role": "user", "content": "hi"}]}, "minimind3")
-check("minimind3 name keeps the chatml renderer", mm3 == chatml, repr(mm3))
-
-tbb_body = {"messages": [{"role": "system", "content": "be terse"},
-                         {"role": "user", "content": "hi"},
-                         {"role": "assistant", "content": "Hello!"},
-                         {"role": "user", "content": "who are you?"}]}
-tbb, tbb_thinking = srv.build_prompt(tbb_body, "tinybrainbot")
-WANT_TBB = "<|user|> hi<|assistant|> Hello!<|end|><|user|> who are you?<|assistant|> "
-check("tinybrainbot prompt is its own template", tbb == WANT_TBB, repr(tbb))
-check("tinybrainbot drops the chatml markers and the system turn",
-      "<|im_start|>" not in tbb and "be terse" not in tbb, repr(tbb))
-check("tinybrainbot has no thinking block", tbb_thinking is False and "<think>" not in tbb, repr(tbb))
-
-# The worker reports the template in its ready event; the HTTP path must follow.
-worker.template = "tinybrainbot"
-httpd.worker = worker
-code, body = http("GET", "/health")
-check("/health reports the template", body.get("template") == "tinybrainbot", str(body))
+print("== the engine is the only renderer ==")
+# A container with a template: the server forwards messages and no prompt text.
 code, resp = http("POST", "/v1/chat/completions",
                   {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 4})
-check("HTTP request is rendered with the checkpoint template",
-      worker.last_prompt == "<|user|> hi<|assistant|> ", repr(worker.last_prompt))
+fwd = worker.last_messages or {}
+check("HTTP request is forwarded as messages",
+      code == 200 and isinstance(fwd.get("messages"), list)
+      and fwd["messages"][-1] == {"role": "user", "content": "hi"}, str(fwd)[:200])
+check("no prompt text is rendered here", worker.last_prompt == "", repr(worker.last_prompt))
+
+# A container without one: refuse instead of inventing ChatML for it.
+before = worker.calls
+worker.chat_template = False
+code, resp = http("POST", "/v1/chat/completions", {"messages": [{"role": "user", "content": "hi"}]})
+msg = str((resp.get("error") or {}).get("message", ""))
+check("container without a template is refused", code == 400, str(code))
+check("refusal names the packer flag", "--chat-template" in msg, msg[:200])
+check("refusal does not reach the engine", worker.calls == before, f"calls={worker.calls}")
+worker.chat_template = True
+
 worker.template = "chatml"
 httpd.shutdown()
 httpd.server_close()

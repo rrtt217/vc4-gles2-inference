@@ -40,15 +40,17 @@ python3 server.py --seq 768 --kv-pack 16
 
 ## 对话模板
 
-模板由 checkpoint 自己声明（MMCF 元数据 kind 3 = TinyBrainBot，2 = MiniMind3，
-1 = chatml，0 = plain），worker 在 `ready` 事件里上报；服务器按这个模板渲染
-prompt，而不是永远拼 ChatML。`GET /health` 的 `template` 字段就是它。
+**引擎是唯一的渲染器**：它用容器自带的 Jinja 模板（MMCF 元数据 key 9）渲染，
+与 `llama.cpp` 的 `tokenizer.chat_template` 同一个思路。服务器只发 messages、
+不再拼任何 prompt 文本。`ready` 事件里的 `"chat_template": true|false` 决定
+能不能服务 `/v1/chat/completions`：为 false 时直接返回 400 并提示用
+`mmcf_pack.py --chat-template <file>.jinja` 重新打包——过去那种"猜一个格式"的
+回退，会把模型没见过的 ChatML 标记塞到它前面。仓库里所有对话容器都带 key 9，
+只有 `stories*` 补全模型没有（它们也没有对话轮可渲染）。`GET /health` 的
+`template` 字段就是容器声明的模板名。
 
-| template | prompt |
-|---|---|
-| `minimind3` / `chatml` | 与之前完全一致：`<|im_start|>system ...` 加 `<think>` 块 |
-| `tinybrainbot` | `<|user|> {q}<|assistant|> `，无 system turn、无 `<think>`；历史轮以 `<|end|>` 结尾 |
-| `plain` / 未知 | 回退到 chatml，并打印一次警告 |
+system 轮仍是服务器的策略：Chatbox 的运行时元数据会被剥掉、客户端没给时填入中性默认值，
+所以引擎收到的永远是一份具体的 messages。
 
 TinyBrainBot 还需要 `--no-gpu-layer`：它在 VC4 上的整层 GPU 路径目前不正确
 （见 docs/performance.md 的 item 12），可部署的是 CPU 路径。

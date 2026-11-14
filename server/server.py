@@ -8,9 +8,10 @@ Protocol to engine --worker, one request at a time:
   stdin : base64(prompt) \t max_tokens \t temperature \t top_p \t seed
   stdout: JSONL events: ready/start/token/done/error
 
-The worker does not render chat: the server builds the prompt text, and it
-picks the renderer from the template the checkpoint reports in the ready event
-(chatml / minimind3 keep the renderer below; tinybrainbot has its own).
+The worker renders chat: this process sends the message list and never a prompt
+string, and the engine renders it with the container's own Jinja template.  A
+container packed without one cannot serve /v1/chat/completions (see the 400 in
+the handler).
 """
 from __future__ import annotations
 
@@ -72,13 +73,12 @@ class EngineWorker:
         self.log = open(log_path, "ab", buffering=0)
         # The container names its chat template (kind 3 TinyBrainBot, 2
         # MiniMind3, 1 chatml, 0 plain) and the worker reports the effective one
-        # in its ready event.  The server still renders the text - the worker
-        # protocol carries a prompt string - but it picks the renderer from that
-        # report, never from a flag or from the file name.
-        self.template = "chatml"   # pre-ready default: the historical renderer
+        # in its ready event; /health prints it, so a wrong template shows up
+        # there instead of in the prompt.
+        self.template = "chatml"   # pre-ready default
         # True when the container carries its own Jinja template (MMCF key 9).
-        # Then the *engine* renders the prompt and this process only ships
-        # messages; otherwise the renderers below still run here.
+        # The engine is the only renderer, so this decides whether
+        # /v1/chat/completions can be served at all.
         self.chat_template = False
         cmd = [engine, "--worker"]
         if prefix_cache:
@@ -313,23 +313,6 @@ def canonical_tools(tools):
         fn = t.get("function") if isinstance(t, dict) else None
         return order.get((fn or {}).get("name"), len(order))
     return sorted(out, key=key)
-
-
-def render_tools(tools) -> str:
-    if not tools:
-        return ""
-    lines = []
-    for t in canonical_tools(tools):
-        lines.append(json.dumps(t, ensure_ascii=False))
-    return (
-        "\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\n"
-        "You are provided with function signatures within <tools></tools> XML tags:\n<tools>\n"
-        + "\n".join(lines) +
-        "\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n"
-        "<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call>"
-    )
-
-
 def parse_tool_calls(text: str):
     calls = []
     spans = []
@@ -474,37 +457,6 @@ def normalize_system_prompt(system: str) -> str:
 
 
 # One warning per unknown template name, not one per request.
-_TEMPLATE_WARNED: set[str] = set()
-
-
-def build_prompt_tinybrainbot(body: dict) -> tuple[str, bool]:
-    """TinyBrainBot own prompt: ``<|user|> ...<|assistant|> ``, no system turn.
-
-    The model was trained on ``<|user|> {q}<|assistant|> {a}<|end|>`` with no
-    BOS and no system turn (docs/model-formats.md), so the chatml text this
-    server used to build for every container was a prompt it had never seen.
-    Assistant turns already in the history are closed with ``<|end|>``, the
-    token the model emits itself; a tool message has no representation in this
-    template and arrives as a plain user turn.  There is no ``<think>`` block.
-    """
-    messages = body.get("messages")
-    if not isinstance(messages, list) or not messages:
-        raise ValueError("messages must be a non-empty array")
-    text = ""
-    for msg in messages:
-        if not isinstance(msg, dict):
-            continue
-        role = msg.get("role")
-        if role == "system":
-            continue        # no system turn here; the engine CLI drops it too
-        if role == "assistant":
-            text += "<|assistant|> " + content_text(msg) + "<|end|>"
-        else:
-            text += "<|user|> " + content_text(msg)
-    text += "<|assistant|> "
-    return text, False
-
-
 def build_messages(body: dict) -> dict:
     """Turn an OpenAI body into the worker's message payload.
 
@@ -548,70 +500,6 @@ def request_chars(req) -> int:
     if isinstance(req, str):
         return len(req)
     return sum(len(str(m.get("content") or "")) for m in req.get("messages", []))
-
-
-def build_prompt(body: dict, template: str = "chatml") -> tuple[str, bool]:
-    """Render the chat for the template the checkpoint reported.
-
-    Only tinybrainbot has its own renderer; the chatml/minimind3 path below is
-    unchanged, so a MiniMind3 prompt stays byte-identical to what it was.
-    """
-    if template not in ("chatml", "minimind3", "tinybrainbot"):
-        # A container that says "plain" (or names a template this build does not
-        # know) has no renderer here; keep the historical text and say so once.
-        if template not in _TEMPLATE_WARNED:
-            _TEMPLATE_WARNED.add(template)
-            print(f"note: no renderer for template {template!r}; using chatml", file=sys.stderr)
-    if template == "tinybrainbot":
-        return build_prompt_tinybrainbot(body)
-    messages = body.get("messages")
-    if not isinstance(messages, list) or not messages:
-        raise ValueError("messages must be a non-empty array")
-    tools = body.get("tools") or []
-    system = DEFAULT_SYSTEM
-    for msg in messages:
-        if isinstance(msg, dict) and msg.get("role") == "system":
-            system = normalize_system_prompt(content_text(msg)) or system
-            break
-    text = "<|im_start|>system\n" + system + render_tools(tools) + "<|im_end|>\n"
-    for msg in messages:
-        if not isinstance(msg, dict):
-            continue
-        role = msg.get("role")
-        if role == "system":
-            continue
-        if role == "user":
-            text += "<|im_start|>user\n" + content_text(msg) + "<|im_end|>\n"
-        elif role == "assistant":
-            text += "<|im_start|>assistant\n"
-            if msg.get("reasoning_content"):
-                text += "<think>\n" + str(msg.get("reasoning_content")) + "\n</think>\n\n"
-            else:
-                text += "<think>\n\n</think>\n\n"
-            text += content_text(msg)
-            calls = msg.get("tool_calls") or []
-            for c in calls:
-                fn = c.get("function", {}) if isinstance(c, dict) else {}
-                args = fn.get("arguments", "{}")
-                try:
-                    args_obj = json.loads(args) if isinstance(args, str) else args
-                except Exception:
-                    args_obj = {}
-                text += "\n<tool_call>\n" + json.dumps(
-                    {"name": fn.get("name", ""), "arguments": args_obj},
-                    ensure_ascii=False,
-                ) + "\n</tool_call>"
-            text += "<|im_end|>\n"
-        elif role == "tool":
-            text += "<|im_start|>user\n<tool_response>\n" + content_text(msg) + "\n</tool_response><|im_end|>\n"
-        else:
-            text += "<|im_start|>user\n" + content_text(msg) + "<|im_end|>\n"
-    thinking = thinking_from_request(body)
-    text += "<|im_start|>assistant\n"
-    text += "<think>\n" if thinking else "<think>\n\n</think>\n\n"
-    return text, thinking
-
-
 def prune_messages(messages):
     """Drop the oldest non-system message, or shorten the last one.
 
@@ -987,7 +875,6 @@ class Handler(BaseHTTPRequestHandler):
         self._rec = {"ts": time.time()}
         # The renderer follows the checkpoint (the worker reports its template
         # in the ready event), not a server flag and not a file name.
-        template = getattr(self.server.worker, "template", "chatml")
         try:
             n = int(self.headers.get("Content-Length", "0"))
             body = json.loads(self.rfile.read(n).decode("utf-8"))
@@ -1001,16 +888,17 @@ class Handler(BaseHTTPRequestHandler):
                         if isinstance(t, dict)
                         and (t.get("function") or {}).get("name") == only_tool]
                 body["tools"] = kept or body["tools"]
-            # A container that carries its template is rendered by the engine:
-            # this process sends messages and never a prompt string.
-            use_tmpl = bool(getattr(self.server.worker, "chat_template", False))
-            if use_tmpl:
-                req = build_messages(body)
-                thinking = bool(req["open_thinking"])
-                prompt = ""
-            else:
-                prompt, thinking = build_prompt(body, template)
-                req = prompt
+            # The engine is the only renderer.  A container packed without
+            # --chat-template has nothing to render with, and guessing a format
+            # here (this process used to fall back to ChatML) put markers in
+            # front of the model that its training never saw.
+            if not getattr(self.server.worker, "chat_template", False):
+                raise ValueError(
+                    "this container carries no chat template (metadata key 9), so "
+                    "/v1/chat/completions has nothing to render it with; repack it "
+                    "with mmcf_pack.py --chat-template <file>.jinja")
+            req = build_messages(body)
+            prompt = ""
             max_tokens = int(body.get("max_tokens", body.get("max_completion_tokens", 64)) or 64)
             if max_tokens < 1:
                 max_tokens = 1
@@ -1075,11 +963,7 @@ class Handler(BaseHTTPRequestHandler):
                 if trimmed is None:
                     break
                 body["messages"] = trimmed
-                if use_tmpl:
-                    req = build_messages(body)
-                else:
-                    prompt, _thinking = build_prompt(body, template)
-                    req = prompt
+                req = build_messages(body)
 
         if not stream:
             # A long chat must not fail outright: if the engine says the prompt
@@ -1088,7 +972,7 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     text, finish, usage = self.server.worker.generate(
                         prompt, max_tokens, temperature, top_p, seed, penalties=penalties,
-                        messages=req if use_tmpl else None, top_k=top_k)
+                        messages=req, top_k=top_k)
                     break
                 except ContextFull as e:
                     trimmed = prune_messages(body.get("messages") or [])
@@ -1097,11 +981,7 @@ class Handler(BaseHTTPRequestHandler):
                                     "context_length_exceeded")
                         return
                     body["messages"] = trimmed
-                    if use_tmpl:
-                        req = build_messages(body)
-                    else:
-                        prompt, _thinking = build_prompt(body, template)
-                        req = prompt
+                    req = build_messages(body)
                 except WorkerError as e:
                     self._error(str(e), 500, "server_error")
                     return
@@ -1172,7 +1052,7 @@ class Handler(BaseHTTPRequestHandler):
                 # <tool_call> block is complete; do not stream partial JSON.
                 text, finish, usage = self.server.worker.generate(
                     prompt, max_tokens, temperature, top_p, seed, penalties=penalties,
-                    messages=req if use_tmpl else None, top_k=top_k)
+                    messages=req, top_k=top_k)
                 if stops:
                     text, stopped = apply_stop_text(text, stops)
                     if stopped:
@@ -1191,7 +1071,7 @@ class Handler(BaseHTTPRequestHandler):
                 text, finish, usage = self.server.worker.generate(
                     prompt, max_tokens, temperature, top_p, seed,
                     on_token=stop_filter.feed, penalties=penalties,
-                    messages=req if use_tmpl else None, top_k=top_k)
+                    messages=req, top_k=top_k)
                 stop_filter.finish()
                 if stop_filter.hit:
                     finish = "stop"

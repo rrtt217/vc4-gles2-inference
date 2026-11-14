@@ -37,22 +37,18 @@ Defaults:
 
 ## Chat template
 
-Two cases, decided by the worker's `ready` event — never by a flag or a file
-name.
+The engine is the only renderer: it renders from the container's own Jinja
+template (MMCF metadata key 9), exactly as `llama.cpp` does with
+`tokenizer.chat_template`.  This process sends the message list and never a
+prompt string.  `ready` reports `"chat_template": true|false`; when it is false
+the request is refused with a 400 naming the packer flag, because the
+alternative — guessing a format here — is what used to put ChatML markers in
+front of a model that had never seen them.  Every shipped chat container carries
+key 9; only the `stories*` completion models do not, and they have no chat turn
+to render.  Repack with `mmcf_pack.py --chat-template <file>.jinja`.  `GET
+/health` prints the template name under `template`.
 
-**The container carries its own Jinja template** (MMCF metadata key 9).
-`ready` then has `"chat_template": true`, and this process stops rendering
-prompts entirely: it sends the message list and the engine renders it with the
-model's own template, exactly as `llama.cpp` does with
-`tokenizer.chat_template`.  That is the only way a template this build has never
-seen can work, because only the engine has the Jinja engine.
-
-**It does not.**  `ready` reports the template *kind* (3 TinyBrainBot, 2
-MiniMind3, 1 chatml, 0 plain) and the renderers in this file still build the
-prompt, which is what every container written before key 9 needs.  `GET
-/health` prints the name under `template`.
-
-Either way the system turn is this process's policy: Chatbox's runtime metadata
+The system turn is still this process's policy: Chatbox's runtime metadata
 is stripped and the neutral default is filled in when the client sends none.
 
 > The server's KV layout is not the CLI's. `server.py` leaves `KV_PACK` unset
@@ -387,7 +383,7 @@ message (for `calculate_math` the message text is the expression; a leading
 `/math` is stripped).  Anything malformed returns
 `{"ok": false, "error": "..."}` with HTTP 400 instead of being executed.
 
-`--only-tool NAME` prunes the tool list rendered into the prompt to a single
+`--only-tool NAME` prunes the forwarded tool list to a single
 tool.  The model still chooses (badly), but with one option the choice stops
 being a coin flip.
 
@@ -455,9 +451,10 @@ Column 11 is the message-based request: base64 of
 ```
 
 When it is present column 1 is empty and the engine renders the prompt from the
-container's chat template.  A container without one rejects the request with an
-`error` event rather than guessing a template, so a server that has not read
-`chat_template` from `ready` cannot silently send the wrong shape.
+container's chat template — this is the only shape the server sends now.  A
+container without one is refused by the server with a 400 before the engine is
+touched (and the engine would reject it anyway, with an `error` event, rather
+than guessing a template).
 
 Events:
 
