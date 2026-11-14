@@ -22,6 +22,10 @@ import threading
 import time
 from pathlib import Path
 
+# Carries the engine's per-token logprobs from generate() to the handler; removed
+# from `usage` before it is sent, because a client must not see it.
+LOGPROBS_KEY = "_logprobs"
+
 class WorkerError(RuntimeError):
     pass
 
