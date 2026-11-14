@@ -1,4 +1,5 @@
 #pragma once
+#include <iostream>
 
 // Shared vocabulary for the engine: quantized matrices, render targets and the
 // fixed-point conventions used by every kernel.
@@ -80,6 +81,33 @@ struct Target {
 extern volatile sig_atomic_t g_stop;
 void install_stop_handlers();
 double elapsed_ms(Clock::time_point a, Clock::time_point b);
+
+struct TurnTiming {
+        Clock::time_point start = Clock::now();
+        Clock::time_point decode_start {};
+        int generated = 0;
+        bool decoding = false;
+        const char* cut = nullptr;
+
+        void begin_decode() {
+                decode_start = Clock::now();
+                decoding = true;
+        }
+        ~TurnTiming() {
+                const char* on = getenv("TIMING");
+                if (!on || !*on) return;
+                const auto now = Clock::now();
+                const double prefill = elapsed_ms(start, decoding ? decode_start : now) / 1000.0;
+                const double avg = (decoding && generated)
+                                       ? elapsed_ms(decode_start, now) / generated
+                                       : 0.0;
+                cerr << "TIMING prefill=" << prefill << "s decode_avg=" << avg
+                     << "ms/token gen=" << generated;
+                if (cut) cerr << " cut=" << cut;
+                cerr << "\n";
+        }
+};
+
 
 inline int16_t quantize_act(float x) {
     long v = lrintf(x * ACT_SCALE);
