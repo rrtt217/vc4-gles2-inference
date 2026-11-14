@@ -75,7 +75,7 @@ the file format in [`docs/model-formats.md`](docs/model-formats.md) and
 | `cmp_logits.py` | compares two `LOGITS_OUT` dumps tile by tile |
 | `verify_packing.sh` | byte-for-byte check of the packed-activation layout against a known-good binary |
 | `bench.sh`, `bench_ab.sh`, `bench_plain_ab.sh`, `longctx.sh` | timings; the `ab` ones interleave two binaries to cancel drift |
-| `swap_matrix.py` | acceptance for `/model`: swaps containers inside one process and requires every turn to be byte-identical to a fresh process, across three template kinds and both precisions, plus a round trip and a repeat run.  Needs the GPU and `models/`; about a minute on Xe |
+| `swap_matrix.py` | acceptance for `/model`: swaps dense q8/q4 containers inside one process and requires every turn to be byte-identical to a fresh process, over three template kinds, with a round trip and a repeat run.  i16 and the hybrid are excluded until the reload drift below is found.  Needs the GPU and `models/`; about a minute on Xe |
 | `check_target_reset.sh` | every scratch `Target` in `gpu.h` is cleared by `GPU::reset_targets()`, so a released scene cannot be reused with a deleted texture name.  Runs without a GPU or a model |
 | `docs_check.sh` | documentation drift: every switch the source reads is in `docs/test-hooks.md`, every in-tree path a document names exists, and nothing calls a live switch dead.  Runs without a model or a GPU |
 | `bench_mc.py` | "can this model answer a multiple-choice question": letter-logit accuracy, calibrated accuracy and format compliance from `LOGITS_OUT`, one engine run per item, no sampler.  Data in `scripts/eval/mc_zh.jsonl` and `mc_en.jsonl` |
@@ -179,6 +179,21 @@ The acceptance is `scripts/swap_matrix.py`: every turn of a swap chain has to be
 byte-identical to a fresh process on the same container, over three template
 kinds, both precisions and a round trip.  A single golden string would not catch
 a wrong program or a stale target -- some models answer correctly anyway.
+
+**Known open issue (2026-11-14): a swap moves the numbers.** Reloading the very
+same container gives logits that differ from a fresh process by about one unit
+in the last q16 place (cosine 0.9998 on q8/q4/i16), which is enough to flip a
+greedy 16-token answer on `minimind3.i16`; the hybrid (lfm2.5) drifts much more
+(cosine 0.96, max logit difference 5.97) and changes its answer on both of its
+containers.  Two things are ruled out: the emitted GLSL is identical across
+reloads (26 unique program keys, no key with two texts), and two *fresh*
+processes are bit-identical, so the difference is created by the reload itself.
+Zeroing the freshly created targets and the staging textures changed nothing;
+the first divergence is layer 0's **FFN output** (its xb/att/x1/xbf dumps all
+match, layer 1's xb is the first difference).  Until that is found, `/model` is
+fine for interactive use and for measuring *time*, and must not be used where
+the numbers have to match a fresh process: 14 of the 17 chat-capable containers
+happen to answer identically, and 3 do not.
 
 ## The container is the only format
 
