@@ -22,6 +22,7 @@ responsibility, not by line count:
 | `src/cli.h/.cpp` | `Options` and the one argument parser (the usage text lives here too) |
 | `src/ppl.cpp` | `--ppl`: one sliding window at a time, BOS included, the gate's number |
 | `src/prefix_build.cpp` | `--build-prefix-cache`: render the header, prefill, save the KV plus the sidecar |
+| `src/chat.h/.cpp` | the chat path: `run_turn`/`run_tool_turn` (the template, the tool rounds, the marker mask, the prefix-cache reuse), `repl()` (the `--chat` REPL with `/model`) and `complete()` (one prefill, one decode loop).  `main()` is 135 lines of wiring around these |
 | `src/worker.h/.cpp` | the `--worker` protocol: request line, JSONL events, control ops (`load`/`cancel`/`stats`), its own stdin reader (a cancel must be seen mid-request) and `proc_meminfo_kb` for the diagnostics |
 | `src/chat_format.h/.cpp` | strip a tool-call block, split a `<think>` block, render tool calls for the template |
 | `src/engine.cpp` | the entry point: worker protocol, chat loop, capability/template handling, and the wiring around the modules above |
