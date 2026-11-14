@@ -41,6 +41,9 @@ jobs:
       - name: shader text digests
         run: sh engine/scripts/shader_hashes.sh
 
+      - name: draw-cap literal
+        run: sh engine/scripts/check_draw_cap.sh
+
       - name: target-reset ledger
         run: sh engine/scripts/check_target_reset.sh
 

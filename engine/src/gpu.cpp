@@ -948,7 +948,7 @@ void GPU::matvec_add(const Mat& m, GLuint x, GLuint residual, Target& out, XForm
         // Same experimental override as draw(): MATVEC_STRIP caps the fragment
         // count per draw so a suspected full-width draw can be A/B-ed.
         const char* msv = getenv("MATVEC_STRIP");
-        const int cap = (msv && atoi(msv) > 0) ? atoi(msv) : 1024;
+        const int cap = (msv && atoi(msv) > 0) ? atoi(msv) : kDrawCap;
         const int strip = min(cap, ow);
         for (int x0 = 0; x0 < ow; x0 += strip) {
             int w = min(strip, ow - x0);
@@ -1296,8 +1296,8 @@ GLuint GPU::ffn_pair_swiglu_chunk2(const Mat& w1, const Mat& w3, GLuint x2, int 
         glUniform1f(uloc(p, "ws1"), w1.scale);
         glUniform1f(uloc(p, "ws2"), w3.scale);
         setup_attrib(p);
-        for (int x0 = 0; x0 < rows; x0 += 1024) {
-            const int w = min(1024, rows - x0);
+        for (int x0 = 0; x0 < rows; x0 += kDrawCap) {
+            const int w = min(kDrawCap, rows - x0);
             glViewport(x0, 0, w, 1);
             glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         }
@@ -1319,8 +1319,8 @@ void GPU::matvec_p2(const Mat& m, GLuint xp2, Target& out){
         glUniform1f(uloc(p, "ws"), m.scale);
         if (wr) { bind_tex(3, m.row_scale_tex); set_sampler(p, "WS", 3); }
         setup_attrib(p);
-        for (int x0 = 0; x0 < m.rows; x0 += 1024) {
-            const int w = min(1024, m.rows - x0);
+        for (int x0 = 0; x0 < m.rows; x0 += kDrawCap) {
+            const int w = min(kDrawCap, m.rows - x0);
             glViewport(x0, 0, w, 1);
             glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         }
@@ -1406,8 +1406,8 @@ GLuint GPU::ffn_pair_swiglu_chunk2_p2(const Mat& w1, const Mat& w3, GLuint xp2, 
             bind_tex(4, w3.row_scale_tex); set_sampler(p, "WS2", 4);
         }
         setup_attrib(p);
-        for (int x0 = 0; x0 < rows; x0 += 1024) {
-            const int w = min(1024, rows - x0);
+        for (int x0 = 0; x0 < rows; x0 += kDrawCap) {
+            const int w = min(kDrawCap, rows - x0);
             glViewport(x0, 0, w, 1);
             glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         }
@@ -1433,8 +1433,8 @@ void GPU::matvec_p2_add_p2(const Mat& m, GLuint xp2, GLuint rp2, Target& out){
         glUniform1f(uloc(p, "ws"), m.scale);
         if (wr) { bind_tex(4, m.row_scale_tex); set_sampler(p, "WS", 4); }
         setup_attrib(p);
-        for (int x0 = 0; x0 < m.rows; x0 += 1024) {
-            const int w = min(1024, m.rows - x0);
+        for (int x0 = 0; x0 < m.rows; x0 += kDrawCap) {
+            const int w = min(kDrawCap, m.rows - x0);
             glViewport(x0, 0, w, 1);
             glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         }
@@ -1458,8 +1458,8 @@ void GPU::matvec_p2_add(const Mat& m, GLuint xp2, GLuint ra, GLuint rb, Target& 
         glUniform1f(uloc(p, "ws"), m.scale);
         if (wr) { bind_tex(4, m.row_scale_tex); set_sampler(p, "WS", 4); }
         setup_attrib(p);
-        for (int x0 = 0; x0 < m.rows; x0 += 1024) {
-            const int w = min(1024, m.rows - x0);
+        for (int x0 = 0; x0 < m.rows; x0 += kDrawCap) {
+            const int w = min(kDrawCap, m.rows - x0);
             glViewport(x0, 0, w, 1);
             glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         }
@@ -2107,7 +2107,7 @@ void GPU::draw(const Mat& m, GLuint x, Target& t, int row ){
         // MATVEC_STRIP overrides the cap for experiments.
         const char* sv = getenv("MATVEC_STRIP");
         const int env_strip = sv ? atoi(sv) : 0;
-        const int cap = (env_strip > 0) ? env_strip : 1024;
+        const int cap = (env_strip > 0) ? env_strip : kDrawCap;
         const int strip = std::min(cap, m.rows);
         for (int x0 = 0; x0 < m.rows; x0 += strip) {
             int w = min(strip, m.rows - x0);

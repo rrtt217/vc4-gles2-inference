@@ -204,6 +204,7 @@ check: warncheck
 	sh scripts/docs_check.sh
 	sh scripts/shader_hashes.sh
 	sh scripts/check_q16_decode.sh
+	sh scripts/check_draw_cap.sh
 	sh scripts/check_target_reset.sh
 	python3 scripts/test_mmcf_format.py
 	python3 ../server/selftest.py

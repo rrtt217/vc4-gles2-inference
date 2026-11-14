@@ -20,3 +20,12 @@ extern GLuint g_cur_fbo;
 extern GLuint g_cur_prog;
 
 void gl_state_forget_bindings();
+
+// The largest number of fragments one draw may cover.  VC4 processes a fragment
+// per cycle and the driver's scratch target is 2048 wide, so a wider strip either
+// exceeds the target or stalls the block; 1024 is what keeps `draw()` and
+// `matvec_add()` splitting (docs/engine-internals.md, "draw splitting").  It was a
+// bare 1024 in seven places with no name and no check, and a wrong width fails
+// *silently* -- the read-back returns the previous contents of the target, which
+// looks like a plausible number.  scripts/check_draw_cap.sh keeps it named.
+constexpr int kDrawCap = 1024;
