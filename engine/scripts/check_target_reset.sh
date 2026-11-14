@@ -7,16 +7,18 @@
 # visible error.  Adding a Target member without listing it in reset_targets()
 # is a two-line mistake; this check costs milliseconds, needs no GPU or model,
 # and does not sort - collation order would make the comparison locale-dependent.
+# It searches src/*.cpp, not one file: a translation unit split must not be able to
+# hide the ledger (gpu_state.cpp holds the function since 2026-11-14).
 set -u
 cd "$(dirname "$0")/.." || exit 1
 
 members=$(sed -n 's/^[[:space:]]*Target \([a-z_0-9_][a-z_0-9_, ]*\);$/\1/p' src/gpu.h |
           tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$')
-reset=$(sed -n '/^void GPU::reset_targets/,/^    }$/p' src/gpu.cpp |
+reset=$(sed -n '/^void GPU::reset_targets/,/^    }$/p' src/*.cpp |
         sed -n 's/^[[:space:]]*\([a-z_0-9_]*\) = Target();$/\1/p')
 containers=$(sed -n 's/^[[:space:]]*\(std::\)\{0,1\}vector<Target> \([a-z_0-9_]*\);.*$/\2/p' src/gpu.h
             sed -n 's/^[[:space:]]*[a-z_:]*map<[^>]*Target[^>]*> \([a-z_0-9_]*\);.*$/\1/p' src/gpu.h)
-cleared=$(sed -n '/^void GPU::reset_targets/,/^    }$/p' src/gpu.cpp |
+cleared=$(sed -n '/^void GPU::reset_targets/,/^    }$/p' src/*.cpp |
           sed -n 's/^[[:space:]]*\([a-z_0-9_]*\)\.clear();$/\1/p')
 
 # membership test without sort/comm: collation differs between locales

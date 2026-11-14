@@ -1,4 +1,5 @@
 #include "gpu.h"
+#include "gpu_internal.h"
 #include "logits_grid.h"
 #include <algorithm>
 #include <iostream>
@@ -14,18 +15,13 @@
 
 // Defined next to the bind cache helpers further down; declared here because the
 // debug dump and the prefix cache invalidate the cache from earlier in the file.
-static void gl_state_forget_bindings();
 // Startup upload accounting (SHADER_TIME=1 / UPLOAD_TIME=1): the weight
 // upload is the last large, controllable part of a cold start on this board.
-static int g_up_tex = 0;
-static double g_up_tex_ms = 0.0;
 // Scene ledgers: everything this context created that belongs to a model or a
 // session rather than to a shader program.  File-static for the same reason the
 // bind cache is - one GL context per process - and they are what lets a model
 // be replaced without rebuilding the context (docs/performance.md: 1.89 s of
 // program links and 4.23 s of EGL context on the board, per process).
-static std::vector<GLuint> g_scene_tex;
-static std::vector<GLuint> g_scene_fbo;
 int gpu_upload_textures(){ return g_up_tex; }
 double gpu_upload_texture_ms(){ return g_up_tex_ms; }
 
@@ -85,119 +81,6 @@ GPU::GPU(){
         if (max_target_dim_ <= 0) max_target_dim_ = 2048;
     }
 
-void GPU::reset_format_plan(){
-        res_pack_ = false;
-        act_fmt_ = XFormat::I16_2;
-        ffn_fmt_ = XFormat::I16_2;
-        res_fmt_ = XFormat::I16_1;
-    }
-
-void GPU::reset_targets(){
-        // Every scratch target this GPU owns, in one place: release_scene()
-        // deletes their textures, and a Target that still carried a deleted
-        // name would be *reused* by the guarded create sites in this file
-        // ("if (t.tex == 0 || ...)") - silent garbage instead of a new one.
-        // scripts/check_target_reset.sh fails if a Target member is added
-        // without being listed here.
-        conv_t_b_ = Target();
-        conv_t_c_ = Target();
-        conv_t_x_ = Target();
-        conv_cv_ = Target();
-        conv_y_ = Target();
-        logits_target_ = Target();
-        candidate_target_ = Target();
-        sum_target_ = Target();
-        ffn_a_ = Target();
-        ffn_b_ = Target();
-        ffn_h_ = Target();
-        ffn_ab_ = Target();
-        ffn_ab_a_ = Target();
-        ffn_ab_b_ = Target();
-        ffn_h_a_ = Target();
-        ffn_h_b_ = Target();
-        qkv_target_ = Target();
-        att_scores_ = Target();
-        att_stats_ = Target();
-        att_probs_ = Target();
-        att_out_ = Target();
-        qrot_target_ = Target();
-        qscale_target_ = Target();
-        hidden_a_ = Target();
-        hidden_b_ = Target();
-        xb_ = Target();
-        xbf_ = Target();
-        xf_ = Target();
-        rms_stats_ = Target();
-        rms_partial_ = Target();
-        rms_partial2_ = Target();
-        ffn_pair_a_ = Target();
-        ffn_pair_b_ = Target();
-        pp_a_ = Target();
-        pp_a2_ = Target();
-        pp_a3_ = Target();
-        pp_b_ = Target();
-        pp_b2_ = Target();
-        pp_b3_ = Target();
-        pp_in2_ = Target();
-        pp_g_ = Target();
-        pp_w2_ = Target();
-        pp_w2b_ = Target();
-        xb2_ = Target();
-        xbf2_ = Target();
-        probe_ = Target();
-        conv_state_.clear();
-        vs_targets_.clear();
-        kv_cache_.clear();
-        // target_for(rows) caches by row count and is filled lazily *during*
-        // generation, so it is the one Target store that only exists after a
-        // turn has run: leaving it behind made a model swap reuse deleted
-        // handles, and only when the old model had already generated.
-        targets_.clear();
-    }
-
-void GPU::release_scene(){
-        // Deleting a name that is already gone is a no-op in GL, so a texture
-        // rebuilt in place (the conv kernel) can sit in the list twice.
-
-        for (GLuint t : g_scene_tex) glDeleteTextures(1, &t);
-        for (GLuint f : g_scene_fbo) glDeleteFramebuffers(1, &f);
-        g_scene_tex.clear();
-        g_scene_fbo.clear();
-        // The per-layer handle vectors point at names that are gone.  Keeping
-        // them would make a reload reuse or re-delete stale names; the textures
-        // themselves are already in the ledger above.
-        reset_targets();
-        // The upload cache is keyed by slot number and still holds the deleted
-        // names; without this the next model would draw into textures that no
-        // longer exist (the first swap's answer came back empty exactly so).
-        input_textures_.clear();
-        input_textures2_.clear();
-        conv_k_tex_.clear();
-        rms_att_tex_.clear();
-        rms_ffn_tex_.clear();
-        q_norm_tex_.clear();
-        k_norm_tex_.clear();
-        gl_state_forget_bindings();
-        glFinish();
-        // A deletion that goes wrong shows up here and nowhere else: nothing in
-        // the engine reads glGetError, so this is the one check on the ledger.
-        if (GLenum err = glGetError())
-            fprintf(stderr, "RELEASE: gl error 0x%04x after scene release\n", err);
-    }
-
-GPU::~GPU(){
-        if (dpy_ == EGL_NO_DISPLAY) return;
-        // Run the same path a model swap runs, so it is exercised by every run
-        // of the gate rather than only when someone changes models.
-        release_scene();
-        eglMakeCurrent(dpy_, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-        if (ctx_ != EGL_NO_CONTEXT) {
-            eglDestroyContext(dpy_, ctx_);
-            ctx_ = EGL_NO_CONTEXT;
-        }
-        eglTerminate(dpy_);
-        dpy_ = EGL_NO_DISPLAY;
-    }
 
 void GPU::upload(Mat& m){
         // Weights may be borrowed straight from the checkpoint mmap, so every
@@ -1899,25 +1782,6 @@ GLuint GPU::x_i4_pair_swiglu(int rows, int cols, int hs){
 // GL binding state is context-wide (GLES2 has no VAOs and the engine owns the
 // context), so these live at file scope: the static texture helpers below bind
 // on their own and can forget the cache without an instance.
-static GLuint g_bound_tex[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-static GLuint g_cur_fbo = 0xFFFFFFFFu;
-static GLuint g_cur_prog = 0xFFFFFFFFu;
-
-static void gl_state_forget_bindings() {
-    for (int i = 0; i < 8; i++) g_bound_tex[i] = 0xFFFFFFFFu;
-    g_cur_fbo = 0xFFFFFFFFu;
-}
-
-GLint GPU::aloc(GLuint prog, const char* name) {
-        if (prog != aloc_prog_ || !aloc_tab_) {
-            aloc_tab_ = &aloc_cache_[prog];
-            aloc_prog_ = prog;
-        }
-        for (const auto& e : *aloc_tab_) if (e.name == name) return e.loc;
-        GLint loc = glGetAttribLocation(prog, name);
-        aloc_tab_->push_back({name, loc});
-        return loc;
-    }
 
 void GPU::bind_tex(int unit, GLuint tex) {
         if (unit < 0 || unit > 7 || g_bound_tex[unit] == tex) return;
@@ -2234,77 +2098,6 @@ GLuint GPU::link_program(const string& fs_in){
                     (size_t)std::hash<string>{}(fs), g_prog_key.c_str(), total);
         }
         return p;
-    }
-
-GLuint GPU::make_texture(int w, int h, const void* data){
-        const double t0 = shader_time_ms();
-        GLuint t = 0; glGenTextures(1, &t); g_scene_tex.push_back(t);
-        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, t); gl_state_forget_bindings();
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        glFlush(); glFinish();
-        g_up_tex_ms += shader_time_ms() - t0; ++g_up_tex;
-        return t;
-    }
-
-GLuint GPU::make_q24_texture(const vector<float>& x, float scale){
-        vector<uint8_t> data((size_t)x.size() * 4);
-        for (size_t i = 0; i < x.size(); ++i) {
-            int64_t q = (int64_t)llrintf(x[i] * scale) + 8388608;
-            if (q < 0) q = 0;
-            if (q > 16777215) q = 16777215;
-            size_t o = i * 4;
-            data[o + 0] = 0;
-            data[o + 1] = (uint8_t)(q >> 16);
-            data[o + 2] = (uint8_t)(q >> 8);
-            data[o + 3] = (uint8_t)q;
-        }
-        return make_texture((int)x.size(), 1, data.data());
-    }
-
-// RMS weight vectors packed two q16 per texel: the norm pass writes two (or
-// four) outputs per fragment, so a pair read halves its W fetches.
-GLuint GPU::make_q16_pair_texture(const vector<float>& x){
-        vector<uint8_t> data = x_pack(x, XFormat::I16_2);
-        return make_texture(x_texels((int)x.size(), XFormat::I16_2), 1, data.data());
-    }
-
-GLuint GPU::make_q16_texture(const vector<float>& x){
-        vector<uint8_t> data((size_t)x.size() * 4);
-        for (size_t i = 0; i < x.size(); ++i) {
-            uint16_t u = (uint16_t)quantize_act(x[i]);
-            data[i * 4 + 0] = u >> 8; data[i * 4 + 1] = u & 255;
-            data[i * 4 + 2] = 0; data[i * 4 + 3] = 255;
-        }
-        return make_texture((int)x.size(), 1, data.data());
-    }
-
-Target GPU::make_target(int w, int h){
-        if (w <= 0 || h <= 0 || w > max_target_dim_ || h > max_target_dim_) {
-            cerr << "target " << w << "x" << h
-                 << " exceeds GL target limit " << max_target_dim_ << "\n";
-            exit(1);
-        }
-        Target t; t.w = w; t.h = h;
-        t.tex = make_texture(w, h, nullptr);
-        glGenFramebuffers(1, &t.fbo); g_scene_fbo.push_back(t.fbo);
-        bind_fbo(t.fbo);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t.tex, 0);
-        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-            cerr << "FBO incomplete\n"; exit(1);
-        }
-        return t;
-    }
-
-Target& GPU::target_for(int rows){
-        auto it = targets_.find(rows);
-        if (it != targets_.end()) return it->second;
-        Target t = make_target(rows, 1);
-        targets_[rows] = t;
-        return targets_[rows];
     }
 
 GLuint GPU::upload_activations(const vector<float>& x){
