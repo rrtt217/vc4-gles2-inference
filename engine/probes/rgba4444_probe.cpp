@@ -25,9 +25,11 @@
 //      positions and compared against the bytes it was built from.  This is
 //      where a row-stride or tiling surprise would show up.
 //   F  is 4444 *renderable* (GL_RGBA4 renderbuffer).  vc4_formats.c lists the
-//      render-target type as RT_NO, so NO was the expectation; measured on the
-//      board 2026-11-14 it is ACCEPTED and the FBO is complete, which is why
-//      this probe asks the driver instead of reading its table.
+//      render-target type as RT_NO.  On VC4 the API disagrees -- storage is
+//      accepted, the FBO is complete and GL_RENDERBUFFER_INTERNAL_FORMAT even
+//      reports GL_RGBA4 -- while a 0.1/0.5/0.9 clear reads back 26/128/230 on
+//      VC4 and 34/136/238 on Xe, i.e. VC4 substituted an 8-bit surface.  The
+//      clear is the measurement; the three queries above it are not.
 #include "egl_surfaceless.h"
 
 #include <GLES2/gl2ext.h>
@@ -347,22 +349,41 @@ int main() {
     }
 
     // ---- F: is 4444 renderable? -------------------------------------------
-    // ES2 requires RGBA4 as a renderbuffer format, so this separates "the
-    // driver can render to it" from "the sampler can read it" -- the two claims
-    // that "vc4 has no RGBA4" conflates.
+    // "accepted" is not the answer.  ES2 requires RGBA4 as a renderbuffer
+    // format, so a driver that cannot render to 4444 has three legal-looking
+    // options and only one honest one: refuse, substitute a wider format
+    // silently, or render to it.  Mesa's state tracker substitutes, so the
+    // *storage* counter below is the measurement and the acceptance is only a
+    // hint.  0.1/0.5/0.9 through a real 4444 surface quantises to a multiple of
+    // 1/15 (17, 136, 238 in bytes); through an 8-bit one it does not (26, 128,
+    // 230).
     {
         GLuint rb = 0, fb = 0;
         glGenRenderbuffers(1, &rb);
         glBindRenderbuffer(GL_RENDERBUFFER, rb);
         glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA4, 64, 4);
         const int ef = gl_errors("F glRenderbufferStorage(GL_RGBA4)");
+        GLint got = 0;
+        glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_INTERNAL_FORMAT, &got);
         glGenFramebuffers(1, &fb);
         glBindFramebuffer(GL_FRAMEBUFFER, fb);
         glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rb);
         const GLenum st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-        printf("F renderable  RGBA4 renderbuffer: %s; FBO %s (0x%x)\n",
+        const char* gn = got == GL_RGBA4 ? "GL_RGBA4" : got == GL_RGBA ? "GL_RGBA" : "something else";
+        printf("F renderable  RGBA4 renderbuffer: %s; FBO %s (0x%x); storage 0x%x = %s\n",
                ef ? "REFUSED" : "accepted",
-               st == GL_FRAMEBUFFER_COMPLETE ? "complete" : "INCOMPLETE", st);
+               st == GL_FRAMEBUFFER_COMPLETE ? "complete" : "INCOMPLETE", st, got, gn);
+        if (st == GL_FRAMEBUFFER_COMPLETE) {
+            glViewport(0, 0, 4, 4);
+            glClearColor(0.1f, 0.5f, 0.9f, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glFinish();
+            std::vector<uint8_t> px = read_back(4, 4);
+            const int r = px[0], g = px[1], b = px[2];
+            const bool q4 = (r % 17 == 0 && g % 17 == 0 && b % 17 == 0);
+            printf("F precision   clear 0.1/0.5/0.9 reads %d/%d/%d -> %s\n", r, g, b,
+                   q4 ? "4-bit surface (a multiple of 1/15)" : "8-bit surface (format substituted)");
+        }
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
 

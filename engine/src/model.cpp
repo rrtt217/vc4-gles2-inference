@@ -415,7 +415,7 @@ bool Model::load_mmcf(){
             data_off < (uint64_t)n_tensors * rec_size) { cerr << "mmcf: bad section offsets\n"; return false; }
 
         bool have_model = false, have_rope = false, have_quant = false;
-        int scheme = 1, group = 0, split = 0;
+        int group = 0, split = 0;
         const uint64_t table_off = data_off - (uint64_t)n_tensors * rec_size;
         if (table_off < (uint64_t)meta_off + meta_size || (table_off % 16) != 0) {
                 cerr << "mmcf: tensor table does not follow the metadata block\n";
@@ -438,7 +438,7 @@ bool Model::load_mmcf(){
                         qk_norm = payload[5] != 0;
                         have_rope = true;
                 } else if (key == 3 && type == 1 && len >= 4) {
-                        scheme = payload[0]; group = payload[1]; split = payload[3];
+                        group = payload[1]; split = payload[3];
                         have_quant = true;
                 } else if (key == 4 && type == 1 && len >= 3) {
                         template_kind = (int)payload[0];

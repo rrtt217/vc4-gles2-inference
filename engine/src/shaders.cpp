@@ -1310,7 +1310,6 @@ static string mul_act_read(const char* tex, const char* var, XFormat f, int dim,
 string mul_act(int dim, XFormat xf, XFormat af, XFormat bf) {
     if (xf != XFormat::I16_2)
         { fprintf(stderr, "shader mul_act: the conv block is q16 only\n"); exit(2); }
-    const int tw = x_texels(dim, xf);
     // Output is the q16 pair the next matvec_add reads.  A 24-bit operand is
     // real-valued (x_i24q), so the product is real and x_st2 is the right store
     // for both mixes; an I16_2 operand is raw q16, hence the /256.

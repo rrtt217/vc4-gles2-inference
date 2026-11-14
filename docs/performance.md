@@ -5810,3 +5810,35 @@ only when someone runs it on the target.
 g++ -O2 -std=c++17 -o rgba4444_probe rgba4444_probe.cpp -lEGL -lGLESv2
 ./rgba4444_probe
 ```
+
+## 2026-11-14, later — the "renderable" row was a false positive: only pixels tell
+
+An hour after the entry above, the same probe grew the two checks that separate
+"the API accepted it" from "the hardware rendered to it", and the answer flips:
+
+| on the Pi | result |
+|---|---|
+| `glRenderbufferStorage(GL_RGBA4)` | accepted, no GL error |
+| `glCheckFramebufferStatus` | `GL_FRAMEBUFFER_COMPLETE` |
+| `GL_RENDERBUFFER_INTERNAL_FORMAT` | `0x8056` = **GL_RGBA4** |
+| clear to 0.1/0.5/0.9 and read it back | **26/128/230 = an 8-bit surface** |
+
+On Xe the same probe reads 34/136/238 — 2/8/14 in fifteenths, a real 4-bit
+surface.  On VC4 the clear is not a multiple of 1/15: Mesa's state tracker
+substituted RGBA8 for the storage and **reported the requested format back**.
+So `vc4_formats.c`'s `RT_NO` was right, the 2026-11-13 bullet *"Not renderable"*
+was right, and conclusion 1 of the entry above — which called that bullet wrong
+— is the wrong one.  The sampler results are unaffected: B/C/D/E still stand,
+4444 sampling is exact at the real matrix shape, and the q4 design only ever
+*samples* the texture.
+
+Two things worth keeping:
+
+* **A capability query is not a measurement.**  Acceptance, FBO completeness and
+  the format query all said 4444; a 0.1/0.5/0.9 clear said 8-bit.  Same shape as
+  the `CONV_GPU` lesson, one layer down: the layer that answers is the one that
+  produces pixels, and `progbinary_probe.cpp:135`'s `GL_RGBA4` renderbuffer was
+  never a 4444 surface either.
+* It closes a design nobody had proposed yet: "unpack the nibbles once on the
+  GPU into a 4444 texture" cannot work on VC4, because nothing can be rendered
+  into one.  The unpack stays in the shader, or the format stays 8-bit.

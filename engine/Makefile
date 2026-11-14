@@ -1,5 +1,13 @@
 CXX ?= g++
-CXXFLAGS ?= -O2 -std=c++17
+# -std is not in CXXFLAGS: `CXXFLAGS ?=` let a caller's `make CXXFLAGS='-g'`
+# silently drop the standard (and the optimisation) with it.  Warnings are on by
+# default, because a fresh clone that builds without them is how a dead lambda sat
+# in main() unnoticed (2026-11-14).
+CXXSTD := -std=c++17
+OPT ?= -O2
+WARN ?= -Wall -Wextra
+CXXFLAGS ?=
+ALL_CXXFLAGS := $(CXXSTD) $(OPT) $(CXXFLAGS) $(WARN)
 LDLIBS ?= -lEGL -lGLESv2 -lm
 
 SRC := src
@@ -22,11 +30,8 @@ INCS := -I$(SRC) -I$(TP)
 SECTIONS := -ffunction-sections -fdata-sections
 LDFLAGS ?= -Wl,--gc-sections
 
-engine: $(CORE) $(HEADERS)
-	$(CXX) $(CXXFLAGS) $(SECTIONS) $(INCS) -o $@ $(CORE) $(LDLIBS) $(LDFLAGS)
-
 engine_mm3: $(CORE) $(HEADERS)
-	$(CXX) $(CXXFLAGS) $(SECTIONS) $(INCS) -o $@ $(CORE) $(LDLIBS) $(LDFLAGS)
+	$(CXX) $(ALL_CXXFLAGS) $(SECTIONS) $(INCS) -o $@ $(CORE) $(LDLIBS) $(LDFLAGS)
 
 
 # ARMv6 cross build for the Pi Zero.  Two independent installs meet here: the
@@ -74,7 +79,7 @@ CROSS_CXXFLAGS ?= --sysroot=$(CROSS_SYSROOT) \
                  -ffast-math -std=c++17
 CROSS_LDLIBS ?= -L$(CROSS_TARGETLIB) -lEGL -lGLESv2 -lm
 
-.PHONY: pi armv6 check-cross clean probes
+.PHONY: pi armv6 check-cross clean probes check
 
 pi: engine_mm3_pi
 
@@ -137,34 +142,34 @@ armv6: $(CORE) $(HEADERS)
 	@echo "  built engine_mm3 for this host (a Pi Zero reports ARMv6/VFPv2)"
 
 probes/vc4_probe: probes/vc4_probe.cpp
-	$(CXX) $(CXXFLAGS) -o $@ $< $(LDLIBS)
+	$(CXX) $(ALL_CXXFLAGS) -o $@ $< $(LDLIBS)
 
 probes/vc4_ffn_probe: probes/vc4_ffn_probe.cpp
-	$(CXX) $(CXXFLAGS) -o $@ $< $(LDLIBS)
+	$(CXX) $(ALL_CXXFLAGS) -o $@ $< $(LDLIBS)
 
 probes/vc4_topk_probe: probes/vc4_topk_probe.cpp
-	$(CXX) $(CXXFLAGS) -o $@ $< $(LDLIBS)
+	$(CXX) $(ALL_CXXFLAGS) -o $@ $< $(LDLIBS)
 
 # No GL, no model: the logits grid is a text and source question.
 probes/logits_grid_probe: probes/logits_grid_probe.cpp $(SRC)/shaders_attn.cpp \
                           $(SRC)/shaders.h $(SRC)/xformat.cpp $(SRC)/xformat.h
-	$(CXX) $(CXXFLAGS) -I$(SRC) -o $@ probes/logits_grid_probe.cpp $(SRC)/shaders_attn.cpp $(SRC)/xformat.cpp
+	$(CXX) $(ALL_CXXFLAGS) -I$(SRC) -o $@ probes/logits_grid_probe.cpp $(SRC)/shaders_attn.cpp $(SRC)/xformat.cpp
 
 probes/matvec_probe: probes/matvec_probe.cpp $(SRC)/common.cpp $(SRC)/common.h
-	$(CXX) $(CXXFLAGS) -I$(SRC) -o $@ probes/matvec_probe.cpp $(SRC)/common.cpp $(LDLIBS)
+	$(CXX) $(ALL_CXXFLAGS) -I$(SRC) -o $@ probes/matvec_probe.cpp $(SRC)/common.cpp $(LDLIBS)
 
 probes/texsize_probe: probes/texsize_probe.cpp $(SRC)/common.cpp $(SRC)/common.h
-	$(CXX) $(CXXFLAGS) -I$(SRC) -o $@ probes/texsize_probe.cpp $(SRC)/common.cpp $(LDLIBS)
+	$(CXX) $(ALL_CXXFLAGS) -I$(SRC) -o $@ probes/texsize_probe.cpp $(SRC)/common.cpp $(LDLIBS)
 
 # Does a per-row q8 scale plane reach the shader?  Links the engine's own
 # shader builders, so the fragment program under test is the shipped one.
 probes/wrow_probe: probes/wrow_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp
-	$(CXX) $(CXXFLAGS) -I$(SRC) -o $@ probes/wrow_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(LDLIBS)
+	$(CXX) $(ALL_CXXFLAGS) -I$(SRC) -o $@ probes/wrow_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(LDLIBS)
 
 # Do the conv block's fetches work on this driver?  Links the engine's own
 # shader builders, so sections B and C run the shipped text.
 probes/conv_probe: probes/conv_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp
-	$(CXX) $(CXXFLAGS) -I$(SRC) -o $@ probes/conv_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(LDLIBS)
+	$(CXX) $(ALL_CXXFLAGS) -I$(SRC) -o $@ probes/conv_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(LDLIBS)
 
 probes/conv_probe_pi: probes/conv_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp | check-cross
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -I$(SRC) -o $@ probes/conv_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(CROSS_LDLIBS)
@@ -182,7 +187,7 @@ probes/q4fmt_probe_pi: probes/q4fmt_probe.cpp | check-cross
 # table.  The board has gcc and the Mesa headers, so the native recipe is the
 # one usually used: g++ -O2 -std=c++17 -o rgba4444_probe ... -lEGL -lGLESv2.
 probes/rgba4444_probe: probes/rgba4444_probe.cpp probes/egl_surfaceless.h
-	$(CXX) $(CXXFLAGS) -o $@ $< $(LDLIBS)
+	$(CXX) $(ALL_CXXFLAGS) -o $@ $< $(LDLIBS)
 probes/rgba4444_probe_pi: probes/rgba4444_probe.cpp probes/egl_surfaceless.h | check-cross
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -o $@ $< $(CROSS_LDLIBS)
 probes/progbinary_probe_pi: probes/progbinary_probe.cpp | check-cross
@@ -190,10 +195,20 @@ probes/progbinary_probe_pi: probes/progbinary_probe.cpp | check-cross
 probes/load_probe_pi: probes/load_probe.cpp | check-cross
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -o $@ $< $(CROSS_LDLIBS)
 
+# The half of the gate that needs no GPU and no model: what a contributor can run
+# before pushing, and what .github/workflows/gate.yml runs on every push.
+check:
+	sh scripts/docs_check.sh
+	sh scripts/shader_hashes.sh
+	sh scripts/check_q16_decode.sh
+	sh scripts/check_target_reset.sh
+	python3 ../server/selftest.py
+
 clean:
 	rm -f engine engine_mm3 engine_mm3_pi
 	rm -f probes/vc4_probe probes/vc4_ffn_probe probes/vc4_topk_probe probes/load_probe_pi
-	rm -f probes/matvec_probe probes/texsize_probe probes/q4fmt_probe_pi probes/glsl_probe_pi probes/q4mv_probe_pi probes/draw_probe_pi probes/packunpack_probe probes/packunpack_probe_pi probes/logits_grid_probe probes/wrow_probe probes/wrow_probe_pi probes/conv_probe probes/conv_probe_pi probes/rgba4444_probe probes/rgba4444_probe_pi
+	rm -f probes/matvec_probe probes/texsize_probe probes/q4fmt_probe_pi probes/glsl_probe_pi probes/q4mv_probe_pi probes/draw_probe_pi probes/packunpack_probe probes/packunpack_probe_pi probes/logits_grid_probe probes/wrow_probe probes/wrow_probe_pi probes/conv_probe probes/conv_probe_pi \
+	rm -f probes/q4mv_probe probes/progbinary_probe_pi probes/ffn2_probe_pi probes/rgba4444_probe probes/rgba4444_probe_pi
 
 probes/glsl_probe_pi: probes/glsl_probe.cpp | check-cross
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -o $@ $< $(CROSS_LDLIBS)
@@ -211,7 +226,7 @@ probes/q4mv_probe_pi: probes/q4mv_probe.cpp $(SRC)/gpu.cpp $(SRC)/shaders.cpp $(
 # decode average on Xe is too noisy to resolve it (15/23/44 ms/token for the
 # same arm in one session), so the kernel needs its own instrument.
 probes/q4mv_probe: probes/q4mv_probe.cpp $(SRC)/gpu.cpp $(SRC)/shaders.cpp $(SRC)/shaders_attn.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp
-	$(CXX) $(CXXFLAGS) -I$(SRC) -o $@ $^ $(LDLIBS)
+	$(CXX) $(ALL_CXXFLAGS) -I$(SRC) -o $@ $^ $(LDLIBS)
 
 # Prices a draw, an rmsnorm and the q8 matvec shapes on the real driver
 # (WORKLOG item 7: the cost model behind prefill batching).
