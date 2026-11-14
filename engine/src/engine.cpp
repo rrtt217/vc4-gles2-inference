@@ -38,6 +38,7 @@
 #include "shaders.h"
 #include "xformat.h"
 #include "gpu.h"
+#include "chat_format.h"
 #include "cli.h"
 #include "ppl.h"
 #include "model.h"
@@ -185,10 +186,6 @@ int main(int argc, char** argv) {
     // No default: the engine only reads MMCF containers, so a bare run has
     // nothing sensible to load and "set MODEL=" is a better answer than a magic
     // number from a file that happens to sit at the old llama2.c path.
-    string model_path = getenv("MODEL") ? getenv("MODEL") : "";
-    string tokenizer_path = getenv("TOKENIZER") ? getenv("TOKENIZER") : "../models/llama2c/tokenizer.bin";
-    string prompt = "One day, Lily";
-    string system_prompt;
     Options opt;
     bool quiet = g_quiet;
     int cli_exit = 0;
@@ -1074,68 +1071,6 @@ int main(int argc, char** argv) {
     // The assistant turn is re-rendered from the template, so the raw
     // <tool_call> blocks must not also travel inside `content` or the template
     // would emit them twice.
-    auto strip_tool_calls = [](const string& text) {
-        string out;
-        size_t pos = 0;
-        while (true) {
-            size_t a = text.find("<tool_call>", pos);
-            size_t la = text.find("<|tool_call_start|>", pos);
-            if (la != string::npos && (a == string::npos || la < a)) {
-                out += text.substr(pos, la - pos);
-                size_t b = text.find("<|tool_call_end|>", la);
-                if (b == string::npos) break;
-                pos = b + strlen("<|tool_call_end|>");
-                continue;
-            }
-            if (a == string::npos) { out += text.substr(pos); break; }
-            out += text.substr(pos, a - pos);
-            size_t b = text.find("</tool_call>", a);
-            if (b == string::npos) break;
-            pos = b + strlen("</tool_call>");
-        }
-        string trimmed;
-        for (char c : out) if (!isspace((unsigned char)c)) { trimmed += c; }
-        return trimmed.empty() ? string() : out;
-    };
-    // LFM2.5/similar: the answer may open with <think> ... </think>.  The
-    // reasoning goes into the message's reasoning field (the template renders
-    // it as reasoning_content when preserve_thinking is set) and the content
-    // the caller sees is the answer without it.
-    auto take_thinking = [](const string& text, string& reasoning) {
-        size_t a = text.find("<think>");
-        if (a == string::npos) return text;
-        size_t b = text.find("</think>", a);
-        // No closing tag: the model opened a block and stopped.  Keeping the
-        // text is the honest choice -- swallowing the tail would print an
-        // empty answer for a truncated generation.
-        if (b == string::npos) return text;
-        size_t cs = a + 7;
-        size_t ce = (b == string::npos) ? text.size() : b;
-        reasoning = text.substr(cs, ce - cs);
-        size_t s0 = reasoning.find_first_not_of(" \t\r\n");
-        size_t s1 = reasoning.find_last_not_of(" \t\r\n");
-        reasoning = (s0 == string::npos) ? string()
-                                        : reasoning.substr(s0, s1 - s0 + 1);
-        size_t cut = (b == string::npos) ? text.size() : b + 8;
-        return text.substr(0, a) + text.substr(cut);
-    };
-    auto tool_calls_json = [](const vector<ToolCall>& calls) {
-        common_json out = common_json::array();
-        for (const auto& c : calls) {
-            // `arguments` is an object, not an OpenAI-style JSON string: the
-            // LFM2.5 template reads `func_args.items()` and throws on a string
-            // (the render aborted the process before this).  A model that emits
-            // unparseable arguments therefore gets {} rather than raw text.
-            common_json args = common_json::parse_no_throw(c.args);
-            common_json call = common_json::object();
-            call["type"] = string("function");
-            call["function"]["name"] = c.name;
-            call["function"]["arguments"] =
-                args.is_discarded() || !args.is_object() ? common_json::object() : args;
-            out.push_back(call);
-        }
-        return out.dump();
-    };
 
     auto run_tool_turn = [&](const string& user, bool first, vector<ChatMsg>* hist = nullptr) {
         string sys = opt.system_prompt.empty()
