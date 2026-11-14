@@ -2,6 +2,11 @@
 
 #include "common.h"
 
+// Tool arguments and results are JSON documents.  common_json is the vendored
+// wrapper the chat-template engine already carries: a pimpl over the same
+// nlohmann build, so no other translation unit pays its compile cost.
+#include "jinja/json.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -28,93 +33,6 @@ string json_escape(const string& s) {
         }
     }
     return o;
-}
-
-void json_skip_ws(const string& s, size_t& p) {
-    while (p < s.size() && (s[p] == ' ' || s[p] == '\n' || s[p] == '\r' || s[p] == '\t')) ++p;
-}
-
-bool json_key_pos(const string& obj, const string& key, size_t& p) {
-    string pat = "\"" + key + "\"";
-    size_t k = obj.find(pat);
-    if (k == string::npos) return false;
-    p = k + pat.size();
-    json_skip_ws(obj, p);
-    if (p >= obj.size() || obj[p] != ':') return false;
-    ++p;
-    json_skip_ws(obj, p);
-    return true;
-}
-
-bool json_get_string(const string& obj, const string& key, string& out) {
-    size_t p = 0;
-    if (!json_key_pos(obj, key, p)) return false;
-    if (p >= obj.size() || obj[p] != '"') return false;
-    ++p;
-    out.clear();
-    while (p < obj.size()) {
-        char c = obj[p++];
-        if (c == '"') return true;
-        if (c != '\\') { out += c; continue; }
-        if (p >= obj.size()) return false;
-        char e = obj[p++];
-        switch (e) {
-            case '"': out += '"'; break;
-            case '\\': out += '\\'; break;
-            case '/': out += '/'; break;
-            case 'n': out += '\n'; break;
-            case 'r': out += '\r'; break;
-            case 't': out += '\t'; break;
-            case 'b': out += '\b'; break;
-            case 'f': out += '\f'; break;
-            case 'u': {
-                if (p + 4 > obj.size()) return false;
-                unsigned v = 0;
-                for (int i = 0; i < 4; ++i) {
-                    char h = obj[p++]; v <<= 4;
-                    if (h >= '0' && h <= '9') v |= h - '0';
-                    else if (h >= 'a' && h <= 'f') v |= h - 'a' + 10;
-                    else if (h >= 'A' && h <= 'F') v |= h - 'A' + 10;
-                    else return false;
-                }
-                if (v < 0x80) out += (char)v;
-                else if (v < 0x800) {
-                    out += (char)(0xC0 | (v >> 6));
-                    out += (char)(0x80 | (v & 0x3F));
-                } else {
-                    out += (char)(0xE0 | (v >> 12));
-                    out += (char)(0x80 | ((v >> 6) & 0x3F));
-                    out += (char)(0x80 | (v & 0x3F));
-                }
-                break;
-            }
-            default: return false;
-        }
-    }
-    return false;
-}
-
-bool json_get_object(const string& obj, const string& key, string& out) {
-    size_t p = 0;
-    if (!json_key_pos(obj, key, p) || p >= obj.size() || obj[p] != '{') return false;
-    size_t start = p;
-    int depth = 0; bool in_str = false, esc = false;
-    for (; p < obj.size(); ++p) {
-        char c = obj[p];
-        if (in_str) {
-            if (esc) esc = false;
-            else if (c == '\\') esc = true;
-            else if (c == '"') in_str = false;
-            continue;
-        }
-        if (c == '"') in_str = true;
-        else if (c == '{') ++depth;
-        else if (c == '}') {
-            --depth;
-            if (depth == 0) { out = obj.substr(start, p - start + 1); return true; }
-        }
-    }
-    return false;
 }
 
 namespace {
@@ -144,13 +62,35 @@ vector<string> split_top(const string& s) {
     return out;
 }
 
-// One Python-ish literal -> JSON text.  The LFM2.5 tool calls are Pythonic
+// A tool argument document arrives from a model, so a parse failure has to
+// degrade to "no arguments" instead of throwing into the generation loop.
+common_json parse_object_tolerant(const string& text) {
+    common_json j = common_json::parse_no_throw(text);
+    return j.is_discarded() || !j.is_object() ? common_json::object() : j;
+}
+
+string json_arg(const common_json& obj, const char* key) {
+    if (!obj.is_object() || !obj.contains(key)) return string();
+    const common_json& v = obj.at(key);
+    return v.is_string() ? v.get<string>() : string();
+}
+
+// `arguments` is normally an object; a few templates emit it as a JSON string,
+// and both shapes have to reach the tool as a document.
+string json_arg_document(const common_json& obj, const char* key) {
+    if (!obj.is_object() || !obj.contains(key)) return "{}";
+    const common_json& v = obj.at(key);
+    if (v.is_string()) return v.get<string>();
+    return v.is_object() ? v.dump() : string("{}");
+}
+
+// One Python-ish literal -> a JSON value.  The LFM2.5 tool calls are Pythonic
 // (`f(city="Paris", n=3)`), so a quoted string, a number, a bool/None or one
 // level of list/dict is all that shows up in practice; anything else becomes a
 // JSON string rather than an invalid document.
-string py_json(const string& in) {
-    string v = trim_copy(in);
-    if (v.empty()) return "null";
+common_json py_json(const string& in) {
+    const string v = trim_copy(in);
+    if (v.empty()) return common_json();
     const char c = v[0];
     if (c == '"' || c == '\'') {
         string body;
@@ -167,43 +107,35 @@ string py_json(const string& in) {
             if (ch == c) break;
             body += ch;
         }
-        return "\"" + json_escape(body) + "\"";
+        return common_json(body);
     }
-    if (v == "True" || v == "true") return "true";
-    if (v == "False" || v == "false") return "false";
-    if (v == "None" || v == "null") return "null";
+    if (v == "True" || v == "true") return common_json(true);
+    if (v == "False" || v == "false") return common_json(false);
+    if (v == "None" || v == "null") return common_json();
     if (c == '[' || c == '(') {
-        string inner = v.substr(1, v.size() > 2 ? v.size() - 2 : 0);
-        string out = "[";
-        bool first = true;
-        for (auto& item : split_top(inner)) {
-            if (!first) out += ",";
-            first = false;
-            out += py_json(item);
-        }
-        return out + "]";
+        common_json arr = common_json::array();
+        for (auto& item : split_top(v.substr(1, v.size() > 2 ? v.size() - 2 : 0)))
+            arr.push_back(py_json(item));
+        return arr;
     }
     if (c == '{') {
-        string inner = v.substr(1, v.size() > 2 ? v.size() - 2 : 0);
-        string out = "{";
-        bool first = true;
-        for (auto& kv : split_top(inner)) {
-            size_t colon = kv.find(':');
+        common_json obj = common_json::object();
+        for (auto& kv : split_top(v.substr(1, v.size() > 2 ? v.size() - 2 : 0))) {
+            const size_t colon = kv.find(':');
             if (colon == string::npos) continue;
-            if (!first) out += ",";
-            first = false;
-            out += py_json(kv.substr(0, colon)) + ":" + py_json(kv.substr(colon + 1));
+            const common_json key = py_json(kv.substr(0, colon));
+            obj[key.is_string() ? key.get<string>() : key.dump()] = py_json(kv.substr(colon + 1));
         }
-        return out + "}";
+        return obj;
     }
     // A bare number stays a number; anything else is quoted so the JSON
     // document is still valid.
-    bool numeric = !v.empty();
-    for (char ch : v)
-        if (!(isdigit((unsigned char)ch) || ch == '-' || ch == '+' || ch == '.' ||
-              ch == 'e' || ch == 'E'))
-            numeric = false;
-    return numeric ? v : "\"" + json_escape(v) + "\"";
+    // A bare number stays a number; anything else is quoted so the document is
+    // still valid.  Pasting the text through, as this used to, turned `+1` into
+    // invalid JSON; now the contract is "the result parses".
+    const common_json num = common_json::parse_no_throw(v);
+    if (!num.is_discarded() && num.is_number()) return num;
+    return common_json(v);
 }
 
 // <|tool_call_start|>[f(a="x"), g(b=1)]<|tool_call_end|>
@@ -224,18 +156,13 @@ vector<ToolCall> parse_lfm_calls(const string& text) {
             string name = trim_copy(call.substr(0, p));
             size_t q = call.rfind(')');
             string argv = (q == string::npos || q <= p) ? string() : call.substr(p + 1, q - p - 1);
-            string js = "{";
-            bool first = true;
+            common_json args = common_json::object();
             for (auto& kv : split_top(argv)) {
-                size_t eq = kv.find('=');
+                const size_t eq = kv.find('=');
                 if (eq == string::npos) continue;
-                if (!first) js += ",";
-                first = false;
-                js += "\"" + json_escape(trim_copy(kv.substr(0, eq))) + "\":" +
-                      py_json(kv.substr(eq + 1));
+                args[trim_copy(kv.substr(0, eq))] = py_json(kv.substr(eq + 1));
             }
-            js += "}";
-            if (!name.empty()) out.push_back(ToolCall{name, js});
+            if (!name.empty()) out.push_back(ToolCall{name, args.dump()});
         }
         pos = b + close.size();
     }
@@ -255,9 +182,12 @@ vector<ToolCall> parse_tool_calls(const string& text) {
         size_t b = text.find(close, a);
         if (b == string::npos) break;
         string body = text.substr(a, b - a);
-        ToolCall c;
-        if (json_get_string(body, "name", c.name)) {
-            if (!json_get_object(body, "arguments", c.args)) c.args = "{}";
+        const common_json call = parse_object_tolerant(body);
+        const string name = json_arg(call, "name");
+        if (!name.empty()) {
+            ToolCall c;
+            c.name = name;
+            c.args = json_arg_document(call, "arguments");
             out.push_back(std::move(c));
         }
         pos = b + close.size();
@@ -367,9 +297,9 @@ struct ExprParser {
 };
 
 string run_tool(const string& name, const string& args) {
+    const common_json a = parse_object_tolerant(args);
     if (name == "get_current_time") {
-        string tz;
-        json_get_string(args, "timezone", tz);
+        const string tz = json_arg(a, "timezone");
         string old_tz;
         const char* old = getenv("TZ");
         if (old) old_tz = old;
@@ -384,20 +314,24 @@ string run_tool(const string& name, const string& args) {
             else unsetenv("TZ");
             tzset();
         }
-        return "{\"datetime\":\"" + json_escape(buf) + "\",\"timezone\":\"" +
-               json_escape(tz.empty() ? string("local") : tz) + "\"}";
+        return common_json::object({{"datetime", string(buf)},
+                                    {"timezone", tz.empty() ? string("local") : tz}}).dump();
     }
     if (name == "calculate_math") {
-        string expr;
-        if (!json_get_string(args, "expression", expr)) return "{\"error\":\"missing expression\"}";
+        const bool have_expr =
+            a.is_object() && a.contains("expression") && a.at("expression").is_string();
+        if (!have_expr)
+            return common_json::object({{"error", string("missing expression")}}).dump();
+        const string expr = a.at("expression").get<string>();
         ExprParser ep(expr);
         double v = ep.expr();
         ep.ws();
-        if (!ep.ok || *ep.p != '\0') return "{\"error\":\"invalid expression\"}";
+        if (!ep.ok || *ep.p != '\0')
+            return common_json::object({{"error", string("invalid expression")}}).dump();
         char buf[64];
         if (fabs(v - round(v)) < 1e-9) snprintf(buf, sizeof(buf), "%.0f", v);
         else snprintf(buf, sizeof(buf), "%.6g", v);
-        return "{\"result\":\"" + string(buf) + "\"}";
+        return common_json::object({{"result", string(buf)}}).dump();
     }
     if (name == "system_status" || name.find("status") != string::npos) {
         double mem_free = 0, mem_avail = 0;
@@ -431,12 +365,18 @@ string run_tool(const string& name, const string& args) {
         double disk_free_mb = 0;
         struct statvfs st {};
         if (statvfs("/", &st) == 0) disk_free_mb = (double)st.f_bavail * st.f_frsize / 1048576.0;
-        char buf[512];
-        snprintf(buf, sizeof(buf),
-                 "{\"temp_c\":%.1f,\"mem_free_mb\":%.1f,\"mem_avail_mb\":%.1f,"
-                 "\"disk_free_mb\":%.1f,\"uptime_s\":%.0f,\"load1\":%.2f}",
-                 temp_c, mem_free, mem_avail, disk_free_mb, uptime_s, load1);
-        return string(buf);
+        // Same precision the printf had, so the numbers a model sees do not
+        // change; only the trailing zeros are the library's business now.
+        const auto r1 = [](double v) { return std::round(v * 10.0) / 10.0; };
+        const auto r2 = [](double v) { return std::round(v * 100.0) / 100.0; };
+        return common_json::object({
+            {"temp_c", r1(temp_c)},
+            {"mem_free_mb", r1(mem_free)},
+            {"mem_avail_mb", r1(mem_avail)},
+            {"disk_free_mb", r1(disk_free_mb)},
+            {"uptime_s", (long long) llround(uptime_s)},
+            {"load1", r2(load1)},
+        }).dump();
     }
-    return "{\"error\":\"unknown tool\"}";
+    return common_json::object({{"error", string("unknown tool")}}).dump();
 }
