@@ -42,64 +42,13 @@ from mmcf_hf import (ACTIVATION_RAIL, RESIDUAL_RAIL, RESIDUAL_WARN, is_llama2c,
 # `aux` (the expert index) inside v2's tail padding, so a v2 file still parses
 # with aux = 0.  A container with expert tensors is version 3; a dense one stays
 # version 2 and keeps its 48-byte table.
-REC_SIZE_V2 = 48
-REC_SIZE_V3 = 64
+# The record layout lives in mmcf_format.py (one copy for the packer, the dump tool
+# and the requantiser); `header_magic` etc. below are legacy checkpoint magics,
+# which only this tool reads.
+from mmcf_format import (MAGIC, REC_SIZE_V2, REC_SIZE_V3, rec_size,  # noqa: E402
+                         rec_unpack, pack_rec, tlv, crc32)
 
 
-def rec_size(version):
-    return REC_SIZE_V3 if version >= 3 else REC_SIZE_V2
-
-
-def rec_unpack(rec):
-    """(id, dtype, flags, group, rows, cols, off, bytes, crc, scale, aux)."""
-    tid, dt, flags, group, _pad = struct.unpack("<HBBBB", rec[:6])
-    rows, cols = struct.unpack("<II", rec[6:14])
-    off, blen = struct.unpack("<QQ", rec[14:30])
-    crc, = struct.unpack("<I", rec[30:34])
-    scale, = struct.unpack("<f", rec[34:38])
-    aux, = struct.unpack("<H", rec[38:40]) if len(rec) >= 40 else (0,)
-    return tid, dt, flags, group, rows, cols, off, blen, crc, scale, aux
-
-
-def pack_rec(tid, dt, flags, group, rows, cols, off, blen, crc, scale, aux=0, size=REC_SIZE_V3):
-    b = struct.pack("<HBBBB", tid, dt, flags, group, 0)
-    b += struct.pack("<II", rows, cols)
-    b += struct.pack("<QQ", off, blen)
-    b += struct.pack("<I", crc)
-    b += struct.pack("<f", float(scale))
-    b += struct.pack("<H", aux)
-    return b.ljust(size, b"\0")
-
-
-def unpack_rec(rec):
-    tid, dt, _flags, _group, rows, cols, off, blen, crc, scale, _aux = rec_unpack(rec)
-    return tid, dt, rows, cols, off, blen, crc, scale
-import sys
-from pathlib import Path
-
-MAGIC = b"MMCF"
-VERSION = 3          # newest this writer emits; a dense container is still v2
-HEADER_SIZE = 64
-ALIGN = 16
-
-DT_F32 = 0
-DT_I16 = 1
-DT_Q8U8 = 2   # q8, already biased to 0..255 (the upload is a copy)
-DT_Q8I8 = 3   # q8, signed (the upload flips the sign bit)
-DT_Q4 = 4
-DT_BLOB = 5
-
-# Tensor ids.  kind in the low byte, layer in bits 8..13, part in bits 14..15
-# (part 0 = the tensor itself, 1/2 = the q4 group scale and min planes).
-T_EMB, T_EMB_SCALE, T_RMS_ATT, T_RMS_FFN, T_RMS_FINAL = 1, 2, 3, 4, 5
-T_Q_NORM, T_K_NORM = 6, 7
-T_QKV, T_WO, T_W1, T_W3, T_W13, T_W2 = 0x10, 0x11, 0x12, 0x13, 0x14, 0x15
-T_ROUTER = 0x16   # MoE gate, rows = experts, cols = dim (v3 containers only)
-T_LOGITS = 0x20
-T_TOKENIZER = 0x30
-T_EMB_I16 = 8
-
-# from engine/src/common.h
 MAGIC_Q8 = 0x51384D31      # Q8M1
 MAGIC_Q8_V2 = 0x51384D32   # Q8M2
 MAGIC_I16 = 0x4931364D     # I16M1

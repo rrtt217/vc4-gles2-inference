@@ -18,21 +18,12 @@ import struct
 import sys
 import zlib
 
-KINDS = {
-    1: "embedding", 2: "embedding_scale", 3: "rms_att", 4: "rms_ffn",
-    5: "rms_final", 6: "q_norm", 7: "k_norm", 8: "embedding_i16",
-    0x10: "qkv", 0x11: "wo", 0x12: "w1", 0x13: "w3", 0x14: "w13", 0x15: "w2",
-    0x16: "router", 0x20: "logits_tile", 0x30: "tokenizer_blob",
-}
-# 6 is the 6-bit embedding body mmcf_hf.py writes for `--head-q6`: two
-# planes per row (4 bits then 2 bits, `dim/2` and `dim/4` bytes).
-DTYPES = {0: "f32", 1: "i16", 2: "q8u8", 3: "q8i8", 4: "q4", 5: "blob", 6: "q6"}
-SCHEMES = {0: "i16", 1: "q8", 2: "q4"}
-TEMPLATE_KINDS = {0: "plain", 1: "chatml/qwen", 2: "minimind3", 3: "tinybrainbot"}
-# bit 3 is reserved: the packer never sets it and Model::load_mmcf() reads the
-# caps word only to discard it.  It used to be printed as "thinking", which was
-# never implemented either.
-CAPS = [(1, "chat"), (2, "tools"), (4, "vision"), (8, "reserved")]
+# The tables live in mmcf_format.py: one copy for all three tools.  `KINDS`,
+# `DTYPES`, `SCHEMES` and `CAPS` are imported under these names because the rest
+# of this file (and its output) uses them; `TEMPLATE_KINDS` here is kind -> name,
+# the reverse of the packer's name -> kind.
+from mmcf_format import (KINDS, DTYPES, SCHEMES, CAPS,  # noqa: E402
+                         TEMPLATE_KIND_NAMES as TEMPLATE_KINDS)
 
 
 def rd(raw, off, fmt):

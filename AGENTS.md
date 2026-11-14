@@ -57,6 +57,7 @@ the file format in [`docs/model-formats.md`](docs/model-formats.md) and
 | Tool | Use it when |
 |---|---|
 | `mmcf_pack.py` | converting an HF directory (safetensors + config) or a legacy checkpoint (Q8M1/Q8M2, Q4M1, I16M1/I16M2) into an MMCF container |
+| `mmcf_format.py` | the layout in one place: magic, header, record format, TLV, CRC, the dtype/kind/template tables.  Imported by the three tools above rather than copied into each; `scripts/test_mmcf_format.py` round-trips every container in `models/` through it and compares its constants with `engine/src/model.cpp` |
 | `mmcf_dump.py` | answering "what does the engine actually read from this file" — the whole metadata block, from the file alone (`--check` verifies every CRC) |
 | `mmcf_requant_q8.py` | rebuilding the q8 matrices of a container from its i16 sibling (`--clip P` for a percentile scale) |
 | `ref_forward.py` | a numpy forward pass over an HF safetensors source: separates "bad conversion / bad tokenizer / engine bug" |

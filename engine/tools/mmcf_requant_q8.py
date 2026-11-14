@@ -17,8 +17,7 @@ import zlib
 import numpy as np
 
 ALIGN = 16
-REC_SIZE_V2 = 48
-REC_SIZE_V3 = 64
+from mmcf_format import REC_SIZE_V2, REC_SIZE_V3  # one copy: mmcf_format.py
 MAT_BASES = (0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x20)
 EMB_BASES = (1, 8)
 

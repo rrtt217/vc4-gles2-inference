@@ -205,6 +205,7 @@ check: warncheck
 	sh scripts/shader_hashes.sh
 	sh scripts/check_q16_decode.sh
 	sh scripts/check_target_reset.sh
+	python3 scripts/test_mmcf_format.py
 	python3 ../server/selftest.py
 
 # Warnings from src/ are a defect: -Wall -Wextra is on by default and this makes a

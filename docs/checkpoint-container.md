@@ -243,6 +243,11 @@ and two more logits draws per token, and the unpacked logits target is
 `LOGITS_GRID` texels wide, so it must stay within the driver's texture/FBO
 limit (2048 on VC4).
 
+The Python side of this layout lives in `engine/tools/mmcf_format.py` (one copy
+for `mmcf_pack.py`, `mmcf_dump.py` and `mmcf_requant_q8.py`), and
+`engine/scripts/test_mmcf_format.py` round-trips every container in `models/`
+through it and checks its constants against `engine/src/model.cpp`.
+
 dtypes: `0` f32, `1` i16, `2` q8u8 (biased, so the upload is a copy), `3` q8i8,
 `4` q4, `5` blob, `6` q6 (the 6-bit embedding body `mmcf_hf.py --head-q6` writes:
 two planes per row, `dim/2` bytes of 4 bits then `dim/4` bytes of 2, with a

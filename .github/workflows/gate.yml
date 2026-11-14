@@ -44,6 +44,9 @@ jobs:
       - name: target-reset ledger
         run: sh engine/scripts/check_target_reset.sh
 
+      - name: container layout round trip + C++ constants
+        run: python3 engine/scripts/test_mmcf_format.py
+
       - name: server self-test (stub worker, no engine needed)
         run: python3 server/selftest.py
 
