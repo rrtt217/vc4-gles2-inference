@@ -254,6 +254,12 @@ private:
     EGLDisplay dpy_ = EGL_NO_DISPLAY;
     EGLContext ctx_ = EGL_NO_CONTEXT;
     unordered_map<string, GLuint> programs_;
+    // Which shader text each key in programs_ was built from.  A key alone is
+    // not enough: the same key produces different GLSL for another model or
+    // format plan, and the entry used to be returned without looking at the
+    // text at all (found by swapping a model: the second model ran the first
+    // model's attention shaders).
+    unordered_map<string, size_t> prog_key_hash_;
     unordered_map<size_t, GLuint> text_programs_;  // program text hash -> program
     struct ULocRec { const char* name; GLint loc; };
     unordered_map<GLuint, vector<ULocRec>> uloc_cache_;

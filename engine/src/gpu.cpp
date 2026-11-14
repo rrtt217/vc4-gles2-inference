@@ -148,11 +148,17 @@ void GPU::reset_targets(){
         conv_state_.clear();
         vs_targets_.clear();
         kv_cache_.clear();
+        // target_for(rows) caches by row count and is filled lazily *during*
+        // generation, so it is the one Target store that only exists after a
+        // turn has run: leaving it behind made a model swap reuse deleted
+        // handles, and only when the old model had already generated.
+        targets_.clear();
     }
 
 void GPU::release_scene(){
         // Deleting a name that is already gone is a no-op in GL, so a texture
         // rebuilt in place (the conv kernel) can sit in the list twice.
+
         for (GLuint t : g_scene_tex) glDeleteTextures(1, &t);
         for (GLuint f : g_scene_fbo) glDeleteFramebuffers(1, &f);
         g_scene_tex.clear();
@@ -165,6 +171,7 @@ void GPU::release_scene(){
         // names; without this the next model would draw into textures that no
         // longer exist (the first swap's answer came back empty exactly so).
         input_textures_.clear();
+        input_textures2_.clear();
         conv_k_tex_.clear();
         rms_att_tex_.clear();
         rms_ffn_tex_.clear();
@@ -1516,16 +1523,26 @@ GLuint GPU::x_prog(const string& key, const string& src){
                 if (key.find(f) != string::npos)
                         fprintf(stderr, "==== %s ====\n%s==== end %s ====\n",
                                 key.c_str(), src.c_str(), key.c_str());
-        auto it = programs_.find(key);
-        if (it != programs_.end()) return it->second;
         // Two keys can build byte-identical text (xq8pl and xqkvp both do): a
         // program is a pure function of its shaders, so share the object and
         // skip the second compile.  64-bit hash; a collision would need two
         // different texts and is not a practical risk here.
         const size_t h = std::hash<string>{}(src);
+        auto it = programs_.find(key);
+        if (it != programs_.end()) {
+            // Only a hit when the key still stands for this text.  A model
+            // swap reuses keys (the builders name programs by kernel, not by
+            // shape) while the GLSL changes with the head width, the qk-norm
+            // presence and the activation format, so a key hit on its own
+            // would run the previous model's kernel -- which is silent garbage
+            // rather than a compile error.
+            auto kh = prog_key_hash_.find(key);
+            if (kh != prog_key_hash_.end() && kh->second == h) return it->second;
+        }
         auto t = text_programs_.find(h);
         if (t != text_programs_.end()) {
             programs_[key] = t->second;
+            prog_key_hash_[key] = h;
             if (shader_time_on())
                 fprintf(stderr, "SHADER_TIME reuse key %s (identical text)\n", key.c_str());
             return t->second;
@@ -1534,6 +1551,7 @@ GLuint GPU::x_prog(const string& key, const string& src){
         GLuint p = link_program(src);
         check_program_runs(p, key);
         programs_[key] = p;
+        prog_key_hash_[key] = h;
         text_programs_[h] = p;
         return p;
     }

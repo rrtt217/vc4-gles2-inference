@@ -11,7 +11,7 @@ responsibility, not by line count:
 | `src/shaders.h/.cpp` | matvec / FFN / RMS shader builders |
 | `src/shaders_attn.cpp` | attention, KV and logits shader builders |
 | `src/dump_shaders.h/.cpp` | the `--dump-shaders` matrix: every builder's emitted GLSL, digested |
-| `src/gpu.h/.cpp` | EGL context, textures, targets, program cache, GPU passes |
+| `src/gpu.h/.cpp` | EGL context, textures, targets, program cache (keyed by name **and** shader text -- the name alone collides across models), GPU passes |
 | `src/model.h/.cpp` | model metadata, the MMCF reader, q4/q8/i16 conversion, FFN split |
 | `src/session.h/.cpp` | KV cache, RoPE, attention, transformer forward, prefix cache |
 | `src/tokenizer.h/.cpp` | llama2.c tokenizer and byte-level BPE, embedded-blob loader |

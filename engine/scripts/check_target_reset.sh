@@ -14,7 +14,8 @@ members=$(sed -n 's/^[[:space:]]*Target \([a-z_0-9_][a-z_0-9_, ]*\);$/\1/p' src/
           tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$')
 reset=$(sed -n '/^void GPU::reset_targets/,/^    }$/p' src/gpu.cpp |
         sed -n 's/^[[:space:]]*\([a-z_0-9_]*\) = Target();$/\1/p')
-containers=$(sed -n 's/^[[:space:]]*\(std::\)\{0,1\}vector<Target> \([a-z_0-9_]*\);.*$/\2/p' src/gpu.h)
+containers=$(sed -n 's/^[[:space:]]*\(std::\)\{0,1\}vector<Target> \([a-z_0-9_]*\);.*$/\2/p' src/gpu.h
+            sed -n 's/^[[:space:]]*[a-z_:]*map<[^>]*Target[^>]*> \([a-z_0-9_]*\);.*$/\1/p' src/gpu.h)
 cleared=$(sed -n '/^void GPU::reset_targets/,/^    }$/p' src/gpu.cpp |
           sed -n 's/^[[:space:]]*\([a-z_0-9_]*\)\.clear();$/\1/p')
 
