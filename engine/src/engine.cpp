@@ -263,21 +263,35 @@ int main(int argc, char** argv) {
     if (getenv("SHADER_TIME")) fprintf(stderr, "STARTUP %7.1f ms  model loaded\n", run_time_ms());
     GPU gpu;
     if (getenv("SHADER_TIME")) fprintf(stderr, "STARTUP %7.1f ms  egl ready\n", run_time_ms());
-    if (getenv("Q8_PARTS")) model.apply_precision(getenv("Q8_LAYERS") ? getenv("Q8_LAYERS") : "", getenv("Q8_PARTS"));
-    model.split_ffn(gpu.max_target_dim());
-    model.apply_hidden_scale();
-    if (getenv("SHADER_TIME")) fprintf(stderr, "STARTUP %7.1f ms  ffn split\n", run_time_ms());
-    if (getenv("Q4_WEIGHTS")) model.quantize_q4_weights(getenv("Q4_SCOPE") ? getenv("Q4_SCOPE") : "all");
-    if (!tools_json.empty() && model.seq < 768) model.seq = 768;
-    if ((worker || !build_cache_prompt.empty()) && model.seq < 1024 && !getenv("SEQ")) model.seq = 1024;
-    const int target_limit = gpu.max_target_dim();
-    if (model.seq > target_limit) {
-        cerr << "SEQ " << model.seq << " exceeds GL target limit " << target_limit
-             << "; clamping to " << target_limit << "\n";
-        model.seq = target_limit;
-    }
-    if (model.seq < 16) model.seq = 16;
-    if (system_prompt.empty() && !model.default_system.empty()) system_prompt = model.default_system;
+    // Everything the engine does to the model between reading it and uploading
+    // it.  A model swap has to repeat *all* of it: split_ffn decides the FFN
+    // kernel width (chunked 1216 or whole 2432 on minimind3), apply_hidden_scale
+    // applies metadata key 15, and apply_precision/quantize_q4_weights rewrite
+    // Mats.  Running only some of them is not a crash but a different kernel
+    // set and a different scaling, i.e. numbers that no longer match a fresh
+    // process -- measured as logits cosine 0.9998 for the dense models and 0.96
+    // for the hybrid, whose hidden scale is the larger half of the difference.
+    const bool system_from_cli = !system_prompt.empty();
+    auto prepare_model = [&]() {
+        if (getenv("Q8_PARTS"))
+            model.apply_precision(getenv("Q8_LAYERS") ? getenv("Q8_LAYERS") : "", getenv("Q8_PARTS"));
+        model.split_ffn(gpu.max_target_dim());
+        model.apply_hidden_scale();
+        if (getenv("SHADER_TIME")) fprintf(stderr, "STARTUP %7.1f ms  ffn split\n", run_time_ms());
+        if (getenv("Q4_WEIGHTS"))
+            model.quantize_q4_weights(getenv("Q4_SCOPE") ? getenv("Q4_SCOPE") : "all");
+        if (!tools_json.empty() && model.seq < 768) model.seq = 768;
+        if ((worker || !build_cache_prompt.empty()) && model.seq < 1024 && !getenv("SEQ")) model.seq = 1024;
+        const int target_limit = gpu.max_target_dim();
+        if (model.seq > target_limit) {
+            cerr << "SEQ " << model.seq << " exceeds GL target limit " << target_limit
+                 << "; clamping to " << target_limit << "\n";
+            model.seq = target_limit;
+        }
+        if (model.seq < 16) model.seq = 16;
+        if (!system_from_cli && !model.default_system.empty()) system_prompt = model.default_system;
+    };
+    prepare_model();
     // The checkpoint names its template (a kind byte plus a name), so --template
     // is only needed to override it.  The kind is authoritative; the name is the
     // fallback for a kind this build does not know.
@@ -1342,6 +1356,7 @@ int main(int argc, char** argv) {
                              << "); leaving\n";
                         return 2;
                     }
+                    prepare_model();          // FFN split, hidden scale, seq clamp
                     if (!setup_from_model()) return 2;
                     upload_weights();
                     session.reset();

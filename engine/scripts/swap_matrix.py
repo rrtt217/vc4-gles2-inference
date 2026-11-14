@@ -18,14 +18,12 @@ What it covers, in one run:
 Needs the GPU and the containers under ../models; takes about a minute on Xe.
 Not part of regression.sh, which has to run without a GPU.
 
-Scope: the chains are dense q8 and q4 containers on purpose.  Swapping the
-*same* container already moves the numbers by about one unit in the last q16
-place (logits cosine 0.9998 against a fresh process), which flips the greedy
-text on minimind3.i16 and, much more strongly, on both lfm2.5 containers
-(cosine 0.96 -- the conv path reads across positions).  Those three are therefore
-not in the chains until that drift is found; a chain that includes them fails
-here for a reason that is real and already known, and adding them now would only
-hide it.  See AGENTS.md, "Known open issue" in the swap section.
+The chains cover q8, q4, i16 and the hybrid (conv) container, because each of
+them broke in a different way: the dense q8/q4 chains hid a 1-ULP drift (the
+second load ran the whole-width FFN where the first ran two chunks) and the
+hybrid one lost metadata key 15 entirely.  A chain that only exercises dense
+containers would pass with the bug present, which is exactly what happened
+before prepare_model() was shared with the swap.
 
     python3 scripts/swap_matrix.py            # the chains above
     python3 scripts/swap_matrix.py --gen 8    # shorter generations
@@ -99,8 +97,20 @@ def main():
           "../models/llama2c/minimind2-small.q4.mmcf",
           "../models/feng30m/feng.q4.mmcf",
           "../models/minimind3/minimind3.q4.mmcf"]
+    # i16 and the hybrid are here because they were *not* passable until
+    # prepare_model() was shared with the swap: without split_ffn() the second
+    # load ran the whole-width FFN where the first ran two chunks, and without
+    # apply_hidden_scale() the hybrid lost metadata key 15.  Both were 1-ULP
+    # invisible on the dense q8/q4 chains and changed answers here.
+    i16 = ["../models/minimind3/minimind3.i16.mmcf",
+           "../models/llama2c/minimind2-small.i16.mmcf",
+           "../models/llama2c/TinyChat15M.i16.mmcf",
+           "../models/minimind3/minimind3.i16.mmcf"]
+    hybrid = ["../models/lfm2.5-230m/lfm2.5.q4.dedup.mmcf",
+              "../models/lfm2.5-230m/lfm2.5.q4.q6.mmcf",
+              "../models/lfm2.5-230m/lfm2.5.q4.dedup.mmcf"]
     fail = 0
-    for tag, seq in (("q8", q8), ("q4", q4)):
+    for tag, seq in (("q8", q8), ("q4", q4), ("i16", i16), ("hybrid", hybrid)):
         print(f"== {tag} chain: {len(seq)-1} swaps ==")
         ref = {}
         for m in seq:

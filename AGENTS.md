@@ -75,7 +75,7 @@ the file format in [`docs/model-formats.md`](docs/model-formats.md) and
 | `cmp_logits.py` | compares two `LOGITS_OUT` dumps tile by tile |
 | `verify_packing.sh` | byte-for-byte check of the packed-activation layout against a known-good binary |
 | `bench.sh`, `bench_ab.sh`, `bench_plain_ab.sh`, `longctx.sh` | timings; the `ab` ones interleave two binaries to cancel drift |
-| `swap_matrix.py` | acceptance for `/model`: swaps dense q8/q4 containers inside one process and requires every turn to be byte-identical to a fresh process, over three template kinds, with a round trip and a repeat run.  i16 and the hybrid are excluded until the reload drift below is found.  Needs the GPU and `models/`; about a minute on Xe |
+| `swap_matrix.py` | acceptance for `/model`: swaps containers inside one process over the q8, q4, i16 and hybrid families (three template kinds, a round trip, a repeat run) and requires every turn to be byte-identical to a fresh process.  Needs the GPU and `models/`; about two minutes on Xe |
 | `check_target_reset.sh` | every scratch `Target` in `gpu.h` is cleared by `GPU::reset_targets()`, so a released scene cannot be reused with a deleted texture name.  Runs without a GPU or a model |
 | `docs_check.sh` | documentation drift: every switch the source reads is in `docs/test-hooks.md`, every in-tree path a document names exists, and nothing calls a live switch dead.  Runs without a model or a GPU |
 | `bench_mc.py` | "can this model answer a multiple-choice question": letter-logit accuracy, calibrated accuracy and format compliance from `LOGITS_OUT`, one engine run per item, no sampler.  Data in `scripts/eval/mc_zh.jsonl` and `mc_en.jsonl` |
@@ -180,20 +180,28 @@ byte-identical to a fresh process on the same container, over three template
 kinds, both precisions and a round trip.  A single golden string would not catch
 a wrong program or a stale target -- some models answer correctly anyway.
 
-**Known open issue (2026-11-14): a swap moves the numbers.** Reloading the very
-same container gives logits that differ from a fresh process by about one unit
-in the last q16 place (cosine 0.9998 on q8/q4/i16), which is enough to flip a
-greedy 16-token answer on `minimind3.i16`; the hybrid (lfm2.5) drifts much more
-(cosine 0.96, max logit difference 5.97) and changes its answer on both of its
-containers.  Two things are ruled out: the emitted GLSL is identical across
-reloads (26 unique program keys, no key with two texts), and two *fresh*
-processes are bit-identical, so the difference is created by the reload itself.
-Zeroing the freshly created targets and the staging textures changed nothing;
-the first divergence is layer 0's **FFN output** (its xb/att/x1/xbf dumps all
-match, layer 1's xb is the first difference).  Until that is found, `/model` is
-fine for interactive use and for measuring *time*, and must not be used where
-the numbers have to match a fresh process: 14 of the 17 chat-capable containers
-happen to answer identically, and 3 do not.
+**A third invariant, found the hard way: the swap must repeat every post-load
+model step.**  `main` used to do more to the model than read it: `split_ffn()`
+decided the FFN kernel width (minimind3 runs two 1216-wide chunks, not one
+2432-wide pass), `apply_hidden_scale()` applied metadata key 15, and
+`apply_precision()` / `quantize_q4_weights()` rewrite Mats.  A swap that skipped
+them still answered, but with the *whole-width* FFN and no hidden scale: logits
+moved by one unit in the last q16 place on the dense models (cosine 0.9998,
+enough to flip a greedy answer on minimind3.i16) and by a lot more on the hybrid
+(cosine 0.96, both lfm2.5 containers).  These now live in one `prepare_model()`
+that startup and the swap both call, before the upload -- the step slices Mats,
+so it has to run first.  `scripts/swap_matrix.py` carries an i16 chain and a
+hybrid chain for exactly this reason: a dense-only matrix passed with the bug
+present.
+
+How the drift was found, in case the next one looks like it: two *fresh*
+processes are bit-identical, so it was the reload; the emitted GLSL was identical
+across reloads (26 program keys, no key with two texts), so it was not the
+program cache; zeroing the new targets and the staging textures changed nothing;
+the first divergence was layer 0's FFN output.  `SHADER_SRC=` prints the GLSL of
+every program as it is used, and the two requests' key sets differed
+(`xq8p2a_768_1216` against `xq8p2a_768_2432`) -- that is what named the missing
+`split_ffn()`.  A stage dump shows where, `SHADER_SRC=` shows which kernel.
 
 ## The container is the only format
 
