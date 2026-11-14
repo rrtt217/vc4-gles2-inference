@@ -5711,3 +5711,50 @@ make -C engine -B probes/q4mv_probe_pi CROSS_SYSROOT=<sysroot>
 Q4MV_ITERS=2000 ./q4mv_probe_pi                      # default arm
 Q4MV_ITERS=2000 Q4_NOUNPACK=1 ./q4mv_probe_pi        # ceiling, wrong weights
 ```
+
+## Replacing a model without rebuilding the GL context (2026-11-14, Xe)
+
+`/model PATH` in the chat REPL and `{"op":"load"}` on the worker replace the
+container while keeping the EGL context and its compiled programs.  On the Pi
+Zero the parts that survive are priced in "Where the first token goes" above:
+4.23 s of EGL context and 1.89 s of program links per process, against 6.12 s to
+read a 69 MB container and 2.99 s to upload it.  **Those board numbers are the
+reason the command exists; they are not measurements of the command.**  What was
+actually measured is Xe, greedy, `SEQ=512 GPU_LAYER=1 KV_PACK=16`, one discarded
+warm-up request before each swap:
+
+| quantity | Xe |
+|---|---:|
+| a fresh process, to its first answer | 561 / 605 / 634 ms |
+| `/model` handler, minimind3.q8 -> minimind2-small.q8 | 37 / 47 / 64 ms |
+| same, worker `{"op":"load"}` (minimind3.q8 -> minimind2-small.q8 -> minimind3.q4) | 29 / 53 ms |
+| RSS across a 13-swap alternating chain | 112-180 MB, sawtooth (the peak is the container read) |
+
+So on Xe a swap costs about a tenth of a start.  The board is the machine that
+matters and it was down for this; a Pi number for the same command is still
+missing, and so is `CmaFree` after a swap, which is what decides whether the
+release is actually complete on VC4.
+
+**Correctness, not just cost.**  A swap is only worth having if it is
+invisible: every turn after a swap must be what a fresh process would print.
+That is `engine/scripts/swap_matrix.py`, and it found three real defects before
+it passed:
+
+- the program cache was keyed by name only, so the second model ran the first
+  model's attention kernels (text hash now validated on a cache hit);
+- the scene teardown missed the lazily filled `target_for()` map and the
+  second activation cache;
+- `main` did more to a model than read it -- `split_ffn()` (two 1216-wide chunks
+  against one 2432-wide pass), `apply_hidden_scale()` (metadata key 15),
+  `apply_precision()`/`quantize_q4_weights()` -- and a swap repeated none of
+  them, which moved logits by 1 ULP on the dense models (cosine 0.9998, enough
+  to flip a minimind3.i16 answer) and by 5.97 at the max on the hybrid.
+
+A less obvious one, and the reason the worker needed a fix of its own: the
+rolling prefix cache belongs to the model that produced it.  After a `load` the
+next request skipped prefill against a prefix the new model never computed and
+answered with repeated syllables ("德德德德..."); the REPL already cleared its
+`kv_tokens`, the worker did not.
+
+With all of that, a quantisation change inside one process is bit-identical too
+(q8 -> q4 -> i16), which is why the `/model` command no longer refuses one.
