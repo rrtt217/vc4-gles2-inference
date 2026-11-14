@@ -1207,6 +1207,12 @@ string matvec_i4_pair_swiglu(int rows, int cols, XFormat xf, bool inl, int hs) {
 //   Q4_4X4_NOP=1    drop the four P fetches and the scale/min decode per group
 //                   (uses a constant), leaving the weight taps untouched
 static bool q4x4_nop(){ return getenv("Q4_4X4_NOP") != nullptr; }
+// Three more arms that remove one *stage* each, to attribute the residual 1.52x
+// the metadata arms do not explain: the second matrix, the second row, and the
+// swiglu/output.  Wrong results on purpose.
+static bool q4x4_onew(){ return getenv("Q4_4X4_ONEW") != nullptr; }
+static bool q4x4_onerow(){ return getenv("Q4_4X4_ONEROW") != nullptr; }
+static bool q4x4_noout(){ return getenv("Q4_4X4_NOOUT") != nullptr; }
 
 string matvec_i4_pair_swiglu_4x4(int rows, int cols, XFormat xf, bool inl, int hs) {
     need_shape("matvec_i4_pair_swiglu_4x4", rows, cols, 32);
@@ -1254,23 +1260,27 @@ string matvec_i4_pair_swiglu_4x4(int rows, int cols, XFormat xf, bool inl, int h
         "float xsum=0.0,d1=0.0,d2=0.0,e1=0.0,e2=0.0;"
         "for(int q=0;q<4;q++){int c=g*32+q*8;" +
         q4_act(xf, cols, inl) + q4_xsum() +
-        "float c0=(float(g*8+q*2)+0.5)*itw,c1=c0+itw;"
-        "vec4 wt0=texture2D(W1,vec2(c0,v0r)),wt1=texture2D(W1,vec2(c1,v0r));"
-        "vec4 wt2=texture2D(W2,vec2(c0,v0r)),wt3=texture2D(W2,vec2(c1,v0r));"
-        "vec4 wt4=texture2D(W1,vec2(c0,v1r)),wt5=texture2D(W1,vec2(c1,v1r));"
-        "vec4 wt6=texture2D(W2,vec2(c0,v1r)),wt7=texture2D(W2,vec2(c1,v1r));"
+        + "float c0=(float(g*8+q*2)+0.5)*itw,c1=c0+itw;"
         // make_q4_texture reversed the nibbles at upload, so the texel is in
         // natural column order and no .wzyx is needed (that operand measured
-        // 52 ms of the gate; Q4_4X4_NOSWZ was the arm that found it).
-        "d1+=dot(wt0,xa)+dot(wt1,xb);"
-        "d2+=dot(wt2,xa)+dot(wt3,xb);"
-        "e1+=dot(wt4,xa)+dot(wt5,xb);"
-        "e2+=dot(wt6,xa)+dot(wt7,xb);}" +
+        // 52 ms of the gate; it was the first thing this decomposition found).
+        + "vec4 wt0=texture2D(W1,vec2(c0,v0r)),wt1=texture2D(W1,vec2(c1,v0r));"
+          "d1+=dot(wt0,xa)+dot(wt1,xb);"
+        + (q4x4_onew() ? string()
+                        : "vec4 wt2=texture2D(W2,vec2(c0,v0r)),wt3=texture2D(W2,vec2(c1,v0r));"
+                          "d2+=dot(wt2,xa)+dot(wt3,xb);")
+        + (q4x4_onerow() ? string()
+                         : "vec4 wt4=texture2D(W1,vec2(c0,v1r)),wt5=texture2D(W1,vec2(c1,v1r));"
+                           "e1+=dot(wt4,xa)+dot(wt5,xb);"
+                           "vec4 wt6=texture2D(W2,vec2(c0,v1r)),wt7=texture2D(W2,vec2(c1,v1r));"
+                           "e2+=dot(wt6,xa)+dot(wt7,xb);")
+        + "}" +
         "s10+=sa1*d1" + MA1 + ";s20+=sa2*d2" + MA2 + ";"
         "s11+=sb1*e1" + MB1 + ";s21+=sb2*e2" + MB2 + ";}"
         "float v0=sl(qz(s10),qz(s20))" + HM + ";"
         "float v1=(r0+1<" + ROWS + ")?sl(qz(s11),qz(s21))" + HM + ":0.0;"
-        "gl_FragColor=x_st2(v0,v1);}";
+        + (q4x4_noout() ? string("gl_FragColor=vec4(0.0);}")
+                        : "gl_FragColor=x_st2(v0,v1);}");
 }
 
 

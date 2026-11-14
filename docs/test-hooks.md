@@ -160,6 +160,12 @@ binary.  They are measurement hooks, not production settings.
 - `Q4_SHIFT=0` — force the float nibble decode instead of the ESSL 3.00 shift
   decode (`Q4_SHIFT_NO_MESA`, `Q4_SHIFT_VERBOSE` are VC4-specific overrides).
   `gpu_q4_shift()` reports the choice at startup.
+- `Q4_4X4_ONEW=1`, `Q4_4X4_ONEROW=1`, `Q4_4X4_NOOUT=1` — stage-removal arms for
+  the 4-bit gate: one matrix, one row, and the swiglu/output.  **`NOOUT` is not
+  a price**: discarding the fragment value lets the driver eliminate the whole
+  kernel, so it measures 0.8 ms against 8.2 and means nothing.  The other two
+  are real: 8.18 -> 6.31 (one matrix) and 5.71 (one row), i.e. sub-linear, so a
+  fixed ~4-5 ms a draw sits under the per-matrix-row work.
 - `Q4_4X4_NOP=1` — pricing arm for the 4-bit gate above, the `Q4_NOUNPACK`
   methodology: it drops the four P fetches and the scale/min decode per group
   (constant scale), with wrong weights on purpose.  It measured 84 ms of the

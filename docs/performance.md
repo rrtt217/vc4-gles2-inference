@@ -5977,3 +5977,31 @@ Two things follow, and only one of them is free:
   logits (a packer decision with a quality cost, and the docs' "logits stay q8"
   is deliberate); the other routes -- low-rank logits, a coarse-then-refine
   top-k -- are model transforms, not engine ones.
+
+### The q4 gate's residual 1.52x is not in any single stage
+
+Kernel level, Pi, 1216 rows, 1000-2000 pipelined draws (`q4mv_probe`):
+
+| arm | ms/draw | reading |
+|---|---:|---|
+| q8 | 4.435 | the reference |
+| 4-bit | 8.181 | |
+| one matrix (`Q4_4X4_ONEW`) | 6.311 | -1.87 |
+| one row (`Q4_4X4_ONEROW`) | 5.711 | -2.47 |
+| no min term (`Q4_NOMIN`) | 6.738 | -1.44 |
+| no group plane (`Q4_4X4_NOP`) | 6.846 | -1.34 |
+| no output (`Q4_4X4_NOOUT`) | 0.798 | **not a price** |
+
+The last row is the trap: discarding the fragment value lets the driver
+eliminate the entire kernel (the output target is untouched, `nz 0`), so it
+prices nothing.  It is kept in the tree as the control that makes that visible.
+
+The four real arms remove half the matrices (-23%), half the rows (-30%), the
+min term (-18%) and the group plane (-16%), and none of them is additive: two
+halves of the work cost 6.3 and 5.7 against 8.2, so roughly 4-5 ms a draw is
+fixed cost under the per-matrix-row work.  Removing every piece of q4 metadata
+(min term *and* group plane) lands at ~6.7 against q8's 4.4, so **1.5x survives
+the complete removal of everything that distinguishes a q4 kernel from a q8
+one** -- same weight-texel count, same four-lane dots, fewer activation
+fetches.  That is below the resolution of the arms available here, and the
+honest state is that the q4/q8 gap is not explained.
