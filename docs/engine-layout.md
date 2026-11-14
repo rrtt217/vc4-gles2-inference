@@ -92,6 +92,15 @@ repeat the decode inline on purpose, so the repetition is generated from the
 shared `k*` constants in `shaders.cpp` / `shaders_attn.cpp` rather than copied:
 one definition, same bytes.
 
+JSON documents — the `--worker` event stream, tool arguments and results, and
+the chat-template context — are built with `common_json` from
+`third_party/jinja/json.h`, never by string concatenation.  It keeps object keys
+in insertion order (so the worker stream stays byte-stable), escapes for you,
+and is a pimpl: the vendored `nlohmann` stays confined to `json.cpp`, so no
+other translation unit pays its compile cost.  The only `{"…"}` left in the
+sources is the tool-call example inside the CLI's system prompt, which is text
+for the model rather than a document.
+
 The vocabulary grid is the one constant that is not a C++ detail: the packer
 splits the logits matrix at the same stride, the host uses it as the read-back
 stride and the token formula, and the four Top-K kernels divide by it.  It lives

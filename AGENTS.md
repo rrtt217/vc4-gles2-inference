@@ -412,7 +412,13 @@ entries; correct them with a new section that says what was wrong.
 The engine is split into `engine/src/` modules; see `docs/engine-layout.md`.
 Shader text belongs in `shaders.cpp` / `shaders_attn.cpp`, and activation
 layout knowledge belongs in `xformat.h/.cpp`. Do not reintroduce per-shader
-activation-layout strings. Run q8, q4 and `--ppl` comparisons after any GPU or
+activation-layout strings.  JSON (the worker event stream, tool arguments and
+results, the chat-template context) is built with `common_json` from
+`third_party/jinja/json.h` and never by concatenation: it keeps key insertion
+order, which the worker protocol's byte-compatibility relies on, and its pimpl
+keeps `nlohmann` in `json.cpp`.
+
+Run q8, q4 and `--ppl` comparisons after any GPU or
 format change, and run `engine/scripts/regression.sh` (determinism, behaviour,
 pinned strings, PPL).  A shader refactor also runs
 `engine/scripts/shader_hashes.sh`: the emitted text is the numerics, so a
