@@ -156,7 +156,8 @@ tokenizer, chat template and the session's targets are replaced; the compiled
 programs stay.  The conversation is dropped, because the previous model's
 history and template mean nothing to the new one.  Changing precision (q8 <-> q4)
 is refused: it needs a restart, and that restriction is the honest state of the
-code, not a policy choice.
+code, not a policy choice.  `scripts/swap_matrix.py` is the acceptance: every turn
+of a swap chain must be byte-identical to a fresh process on the same container.
 
 The REPL **keeps the conversation**: every turn re-renders the whole exchange
 through the container's template, so the model sees the same prompt shape it was

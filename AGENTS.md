@@ -75,6 +75,7 @@ the file format in [`docs/model-formats.md`](docs/model-formats.md) and
 | `cmp_logits.py` | compares two `LOGITS_OUT` dumps tile by tile |
 | `verify_packing.sh` | byte-for-byte check of the packed-activation layout against a known-good binary |
 | `bench.sh`, `bench_ab.sh`, `bench_plain_ab.sh`, `longctx.sh` | timings; the `ab` ones interleave two binaries to cancel drift |
+| `swap_matrix.py` | acceptance for `/model`: swaps containers inside one process and requires every turn to be byte-identical to a fresh process, across three template kinds and both precisions, plus a round trip and a repeat run.  Needs the GPU and `models/`; about a minute on Xe |
 | `check_target_reset.sh` | every scratch `Target` in `gpu.h` is cleared by `GPU::reset_targets()`, so a released scene cannot be reused with a deleted texture name.  Runs without a GPU or a model |
 | `docs_check.sh` | documentation drift: every switch the source reads is in `docs/test-hooks.md`, every in-tree path a document names exists, and nothing calls a live switch dead.  Runs without a model or a GPU |
 | `bench_mc.py` | "can this model answer a multiple-choice question": letter-logit accuracy, calibrated accuracy and format compliance from `LOGITS_OUT`, one engine run per item, no sampler.  Data in `scripts/eval/mc_zh.jsonl` and `mc_en.jsonl` |
@@ -173,6 +174,11 @@ Two invariants it depends on, both paid for:
   `target_for()` map), the per-layer handle vectors and the activation caches
   are cleared, and `scripts/check_target_reset.sh` fails the gate if a `Target`
   member is ever added without being cleared.
+
+The acceptance is `scripts/swap_matrix.py`: every turn of a swap chain has to be
+byte-identical to a fresh process on the same container, over three template
+kinds, both precisions and a round trip.  A single golden string would not catch
+a wrong program or a stale target -- some models answer correctly anyway.
 
 ## The container is the only format
 
