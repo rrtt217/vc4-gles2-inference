@@ -238,3 +238,63 @@ GLuint GPU::ffn_pair_swiglu_chunk2_p2(const Mat& w1, const Mat& w3, GLuint xp2, 
         ffn_sync();
         return out.tex;
     }
+
+// Paired gate matvec + swiglu for one FFN chunk.
+GLuint GPU::ffn_pair_chunk(const Mat& w1, const Mat& w3, GLuint x, int hidden, Target& pair_buf, Target& out, int hs){
+        if (pair_buf.tex == 0 || pair_buf.w != hidden) pair_buf = make_target(hidden, 1);
+        const int aw = x_texels(hidden, ffn_fmt_);
+        if (out.tex == 0 || out.w != aw) out = make_target(aw, 1);
+        const bool i4 = (w1.type == WeightType::INT4);
+        const bool wr = !i4 && w1.has_row_scale() && w3.has_row_scale();
+        GLuint pp = i4 ? x_i4_pair(hidden, w1.cols) : x_q8_pair(hidden, w1.cols, wr);
+        bind_fbo(pair_buf.fbo);
+        glViewport(0, 0, hidden, 1);
+        use_program(pp);
+        bind_tex(0, w1.tex);
+        set_sampler(pp, "W1", 0);
+        bind_tex(1, w3.tex);
+        set_sampler(pp, "W2", 1);
+        bind_tex(2, x);
+        set_sampler(pp, "X", 2);
+        if (i4) {
+            bind_tex(3, w1.q4_param_tex);
+            set_sampler(pp, "P1", 3);
+            bind_tex(4, w3.q4_param_tex);
+            set_sampler(pp, "P2", 4);
+            glUniform1f(uloc(pp, "ps1"), w1.q4_param_scale);
+            glUniform1f(uloc(pp, "ps2"), w3.q4_param_scale);
+        } else {
+            glUniform1f(uloc(pp, "ws1"), w1.scale);
+            glUniform1f(uloc(pp, "ws2"), w3.scale);
+            if (wr) {
+                bind_tex(3, w1.row_scale_tex); set_sampler(pp, "WS1", 3);
+                bind_tex(4, w3.row_scale_tex); set_sampler(pp, "WS2", 4);
+            }
+        }
+        setup_attrib(pp);
+        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+        if (ffn_flush_wanted(layer_fast_finish_)) glFlush();
+
+        GLuint ps = x_swiglu_pair(hidden, hs);
+        bind_fbo(out.fbo);
+        glViewport(0, 0, aw, 1);
+        use_program(ps);
+        bind_tex(0, pair_buf.tex);
+        set_sampler(ps, "A", 0);
+        setup_attrib(ps);
+        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+        if (ffn_flush_wanted(layer_fast_finish_)) glFlush();
+        else layer_finish("NF_FFN");
+        ffn_sync();
+        return out.tex;
+    }
+
+void GPU::layer_finish(const char* skip_env){
+        bool skip = skip_env && getenv(skip_env);
+        if (skip_env && layer_fast_finish_ && !getenv("LAYER_SAFE_FINISH")) {
+            string s(skip_env);
+            if (s == "NF_RMS" || s == "NF_MAT" || s == "NF_ATT") skip = true;
+        }
+        if (skip) return;
+        if (needs_finish()) { glFlush(); glFinish(); }
+    }

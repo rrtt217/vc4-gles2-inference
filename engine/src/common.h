@@ -82,6 +82,13 @@ extern volatile sig_atomic_t g_stop;
 void install_stop_handlers();
 double elapsed_ms(Clock::time_point a, Clock::time_point b);
 
+// TIMING has to survive every way a turn can end: Ctrl-C during prefill, Ctrl-C
+// during decode, a context that filled up, or the normal stop.  The early
+// returns that mark an interruption are exactly the runs someone wants numbers
+// for, which is why the old inline print - at the end of the happy path - was
+// silent in every case that mattered.  A destructor runs on all of them; `cut`
+// names the reason when the turn did not finish on its own, so a short `gen=`
+// is never ambiguous.
 struct TurnTiming {
         Clock::time_point start = Clock::now();
         Clock::time_point decode_start {};

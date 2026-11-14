@@ -16,6 +16,12 @@
 #include <string>
 #include <vector>
 
+// Default-off probe (ATTN_DUP=qkv,rope,qknorm,qrot,score,stats,v or all):
+// replay one attention pass per layer.  Every shader involved is deterministic
+// and writes the same FBO from unchanged inputs, so the second draw reproduces
+// the same texels and the output stays byte-identical.  The end-to-end delta is
+// the true marginal cost of that pass, unlike the LAYER_PROFILE laps, whose glFinish
+// also retires the draw issued before the lap started.
 static bool attn_dup(const char* name){
     static const std::string env = getenv("ATTN_DUP") ? getenv("ATTN_DUP") : "";
     if (env.empty()) return false;
@@ -335,6 +341,30 @@ void GPU::att_v(int layer, int pos){
         }
         bind_tex(1, kv_cache_[layer].tex);
         set_sampler(p, "KV", 1);
+        if (att_kv_vstep_) {
+            bind_tex(3, vs_targets_[layer].tex);
+            set_sampler(p, "VS", 3);
+        }
+        glUniform1f(uloc(p, "pos"), (float)pos);
+        setup_attrib(p);
+        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+        att_finish();
+    }
+
+
+void GPU::kv_rope_write(int layer, int pos){
+        GLuint p = x_kv_rope();
+        bind_fbo(kv_cache_[layer].fbo);
+        glViewport(0, pos, att_kv_width_, 1);
+        use_program(p);
+        bind_tex(0, qkv_target_.tex);
+        set_sampler(p, "QKV", 0);
+        bind_tex(1, rope_tex_);
+        set_sampler(p, "RT", 1);
+        if (att_qk_norm_) {
+            bind_tex(2, k_norm_tex_[layer]);
+            set_sampler(p, "KN", 2);
+        }
         if (att_kv_vstep_) {
             bind_tex(3, vs_targets_[layer].tex);
             set_sampler(p, "VS", 3);

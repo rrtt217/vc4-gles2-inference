@@ -36,6 +36,10 @@ static long long proc_meminfo_kb(const char* key) {
 }
 
 
+// Requests and control lines arrive on stdin, and a *cancel* has to be seen
+// while a request is generating -- which getline() cannot do without swallowing
+// the next request.  One buffer, filled from the raw fd, serves both: blocking
+// lines for the request loop, and a non-consuming peek for the token loop.
 static std::string g_inbuf;
 
 static bool stdin_fill(int timeout_ms) {

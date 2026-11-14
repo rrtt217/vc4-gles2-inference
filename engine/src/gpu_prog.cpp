@@ -16,6 +16,10 @@
 #include <string>
 #include <vector>
 
+// Q4_INLINE selects the INT4 activation-decode form per kernel group, so the
+// generic and the inline build can be A/B-ed from one binary (the program
+// cache key carries the choice).  Unset = all inline; Q4_INLINE=0 = all
+// generic; otherwise a comma list of gate,w2,qkv enables only those.
 bool q4_inline(const char* name){
     static const char* env = getenv("Q4_INLINE");
     if (!env) return true;

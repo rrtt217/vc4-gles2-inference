@@ -13,9 +13,9 @@ SEQ 4096 exceeds GL target limit 2048; clamping to 2048
 
 `GPU::max_target_dim_` is the smallest of `GL_MAX_TEXTURE_SIZE`,
 `GL_MAX_RENDERBUFFER_SIZE` and `GL_MAX_VIEWPORT_DIMS`, read at startup
-(`gpu.cpp:70`).  On VC4 that is **2048**; on Iris Xe it is 16384.
+(`GPU::GPU`, which takes the smallest of the three limits).  On VC4 that is **2048**; on Iris Xe it is 16384.
 
-Per session (`GPU::set_model`, `gpu.cpp:623-665`):
+Per session (`GPU::init_attention`):
 
 | target | shape | limit it imposes |
 |---|---|---|

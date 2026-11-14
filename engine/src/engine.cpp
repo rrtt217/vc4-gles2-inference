@@ -58,30 +58,12 @@
 #include "tools.h"
 #include "lineedit.h"
 
-// The default system prompt is *not* compiled in: it comes from the container's
-// metadata (key 6) and `--system` overrides it (see system_prompt below).  A
-// literal here would be dead code that reads like the default and is not --
-// `-Wunused-variable` found exactly that on 2026-11-14.
-
 
 // Informational stderr lines (template, tokenizer, specials, rope, cache) are
 // useful when something is wrong and noise when it is not; -q turns them off.
 static bool g_quiet = false;
 
-// TIMING has to survive every way a turn can end: Ctrl-C during prefill, Ctrl-C
-// during decode, a context that filled up, or the normal stop.  The early
-// returns that mark an interruption are exactly the runs someone wants numbers
-// for, which is why the old inline print - at the end of the happy path - was
-// silent in every case that mattered.  A destructor runs on all of them; `cut`
-// names the reason when the turn did not finish on its own, so a short `gen=`
-// is never ambiguous.
 
-
-
-// Requests and control lines arrive on stdin, and a *cancel* has to be seen
-// while a request is generating -- which getline() cannot do without swallowing
-// the next request.  One buffer, filled from the raw fd, serves both: blocking
-// lines for the request loop, and a non-consuming peek for the token loop.
 int main(int argc, char** argv) {
     install_stop_handlers();
     gpu_set_run_t0(Clock::now());

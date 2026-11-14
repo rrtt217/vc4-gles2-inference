@@ -355,8 +355,6 @@ void Model::apply_precision(const string& layers_spec, const string& parts_spec)
     }
 
 
-
-
 // MMCF container.  Layout and field list: docs/checkpoint-container.md.
 namespace {
 struct MmcfRec {
