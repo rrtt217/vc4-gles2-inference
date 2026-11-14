@@ -42,6 +42,16 @@ public:
 
     void upload(Mat& m);
 
+    // Everything this context created that is *scene* rather than *program*:
+    // weight textures, per-layer tables, scratch/FBO targets, the upload cache.
+    // Shader programs are the expensive part (docs/performance.md, "Where the
+    // first token goes": 13 links cost 1.89 s on the board) and they survive
+    // release_scene(), which is what makes replacing a model in one process
+    // worth anything at all.  Handles are recorded as they are created, so a
+    // swap cannot silently leave a texture behind (that would be a CMA leak on
+    // the Pi, where one model barely fits).
+    void release_scene();
+
     vector<float> matvec(const Mat& m, const vector<float>& x);
     // Same, with the activation scaled by 2^k so a small input keeps its
     // resolution on the q16 grid (see the comment in gpu.cpp).

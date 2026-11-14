@@ -19,6 +19,13 @@ static void gl_state_forget_bindings();
 // upload is the last large, controllable part of a cold start on this board.
 static int g_up_tex = 0;
 static double g_up_tex_ms = 0.0;
+// Scene ledgers: everything this context created that belongs to a model or a
+// session rather than to a shader program.  File-static for the same reason the
+// bind cache is - one GL context per process - and they are what lets a model
+// be replaced without rebuilding the context (docs/performance.md: 1.89 s of
+// program links and 4.23 s of EGL context on the board, per process).
+static std::vector<GLuint> g_scene_tex;
+static std::vector<GLuint> g_scene_fbo;
 int gpu_upload_textures(){ return g_up_tex; }
 double gpu_upload_texture_ms(){ return g_up_tex_ms; }
 
@@ -78,9 +85,26 @@ GPU::GPU(){
         if (max_target_dim_ <= 0) max_target_dim_ = 2048;
     }
 
+void GPU::release_scene(){
+        // Deleting a name that is already gone is a no-op in GL, so a texture
+        // rebuilt in place (the conv kernel) can sit in the list twice.
+        for (GLuint t : g_scene_tex) glDeleteTextures(1, &t);
+        for (GLuint f : g_scene_fbo) glDeleteFramebuffers(1, &f);
+        g_scene_tex.clear();
+        g_scene_fbo.clear();
+        gl_state_forget_bindings();
+        glFinish();
+        // A deletion that goes wrong shows up here and nowhere else: nothing in
+        // the engine reads glGetError, so this is the one check on the ledger.
+        if (GLenum err = glGetError())
+            fprintf(stderr, "RELEASE: gl error 0x%04x after scene release\n", err);
+    }
+
 GPU::~GPU(){
         if (dpy_ == EGL_NO_DISPLAY) return;
-        glFinish();
+        // Run the same path a model swap runs, so it is exercised by every run
+        // of the gate rather than only when someone changes models.
+        release_scene();
         eglMakeCurrent(dpy_, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
         if (ctx_ != EGL_NO_CONTEXT) {
             eglDestroyContext(dpy_, ctx_);
@@ -2118,7 +2142,8 @@ GLuint GPU::link_program(const string& fs_in){
 
 GLuint GPU::make_texture(int w, int h, const void* data){
         const double t0 = shader_time_ms();
-        GLuint t = 0; glGenTextures(1, &t); glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, t); gl_state_forget_bindings();
+        GLuint t = 0; glGenTextures(1, &t); g_scene_tex.push_back(t);
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, t); gl_state_forget_bindings();
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
@@ -2169,7 +2194,7 @@ Target GPU::make_target(int w, int h){
         }
         Target t; t.w = w; t.h = h;
         t.tex = make_texture(w, h, nullptr);
-        glGenFramebuffers(1, &t.fbo);
+        glGenFramebuffers(1, &t.fbo); g_scene_fbo.push_back(t.fbo);
         bind_fbo(t.fbo);
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t.tex, 0);
         if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
