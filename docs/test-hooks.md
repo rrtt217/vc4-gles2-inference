@@ -66,6 +66,12 @@ without moving the gate:
   per layer; the end-to-end delta is that pass's marginal cost.
 - `PASS_DUP=embed,rms_att,rms_ffn,rms_final,logits,logits_draw|all` — the same
   for the fixed per-token passes (`logits_draw` also skips the read-back).
+- `MATVEC_DUP=wo,ffn,w2|all` — the same for the weight-matrix passes, which the
+  two probes above leave as one residual (they are ~78% of a q4 token).  `ffn`
+  prices the whole split-chunked FFN (gate + swiglu), `w2` both column halves.
+  The w2 halves cannot be replayed in place: `w2b` writes the texture `w2a`
+  reads as its residual, so a replay after the fact doubles it — each replay
+  goes to its own scratch target instead.
 - `DRAWCOUNT=1` — print draws per generated token.
 - `LAYER_PROFILE=1` — per-pass marks.  The `glFinish` in the lap also retires
   the draw issued before it, so use the replay probes to price a pass; keep

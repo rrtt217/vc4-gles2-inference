@@ -16,10 +16,19 @@
 // reproduces the same texels and the output stays byte-identical; the end-to-end
 // delta is that pass's true marginal cost.  Prices what is left after the
 // matvec kernels: the fixed passes, the read-back and the per-token sync.
-static bool pass_dup(const char* name){
-    static const std::string env = getenv("PASS_DUP") ? getenv("PASS_DUP") : "";
-    if (env.empty()) return false;
-    const std::string want(name);
+// Default-off probe (MATVEC_DUP=wo,ffn,w2 or all): replay one weight-matrix
+// pass per layer.  It exists because ATTN_DUP and PASS_DUP between them leave
+// the four matvec kernels as a single ~200 ms residual, and that residual is
+// where the q4/q8 gap lives (FFN gate + w2 carry ~57 of the 102 ms).  Same
+// contract as the other two: every shader involved is deterministic and writes
+// the same target from unchanged inputs, so the replay reproduces the same
+// texels and the output stays byte-identical; the end-to-end delta is that
+// kernel's true marginal cost.  `ffn` prices the whole split-chunked FFN
+// (gate + swiglu), `w2` prices both column halves.
+static bool dup_env(const char* envname, const char* name){
+    const char* e = getenv(envname);
+    if (!e || !*e) return false;
+    const std::string env(e), want(name);
     size_t p = 0;
     while (p <= env.size()) {
         const size_t q = env.find(",", p);
@@ -30,6 +39,11 @@ static bool pass_dup(const char* name){
     }
     return false;
 }
+static bool pass_dup(const char* name){ return dup_env("PASS_DUP", name); }
+// Scratch destination for the w2 replays (see the note at the call site); the
+// contents are never read, so one target serves every layer and token.
+static Target w2_replay_;
+static bool matvec_dup(const char* name){ return dup_env("MATVEC_DUP", name); }
 
 
 // KV8_SIM probe (default off): quantise the CPU float KV cache to 8 bits at
@@ -497,6 +511,8 @@ GLuint Session::forward_gpu_hidden(int token, int pos, bool want_logits){
                 }
                 mark("attn", l);
                 gpu_.matvec_add(m_.wo[l], att_tex, h, gpu_.hidden_b_, gpu_.act_fmt_);
+                if (matvec_dup("wo"))
+                    gpu_.matvec_add(m_.wo[l], att_tex, h, gpu_.hidden_b_, gpu_.act_fmt_);
                 if (getenv("STAGE_DUMP"))
                     gpu_.dump_cpu_row(read_hidden(gpu_.hidden_b_), gpu_.act_fmt_, "x1", 4096);
                 mark("wo", l);
@@ -528,14 +544,27 @@ GLuint Session::forward_gpu_hidden(int token, int pos, bool want_logits){
                 GLuint ha, hb;
                 gpu_.ffn_split_chunked(*f.w1a, *f.w3a, *f.w1b, *f.w3b, xbf,
                                        m_.ffn_chunk, f.width - m_.ffn_chunk, ha, hb, hs);
+                if (matvec_dup("ffn"))
+                    gpu_.ffn_split_chunked(*f.w1a, *f.w3a, *f.w1b, *f.w3b, xbf,
+                                           m_.ffn_chunk, f.width - m_.ffn_chunk, ha, hb, hs);
                 if (getenv("FFN_DUMP") && l == 0) {
                     gpu_.sync();
                     gpu_.dump_target(gpu_.ffn_h_a_, "ha", 8);
                     gpu_.dump_target(gpu_.ffn_h_b_, "hb", 8);
                 }
                 mark("ffn", l);
+                // The two w2 halves are NOT replay-safe in place: w2b writes
+                // gpu_.hidden_b_, which is exactly the texture `x1` names as
+                // w2a's residual.  Replaying the pair after the fact fed w2a a
+                // residual of the layer's *output* and doubled it (the greedy
+                // answer moved).  Each replay therefore goes into its own
+                // scratch target, and w2a's happens before w2b clobbers x1.
                 gpu_.matvec_add(*f.w2a, ha, x1, gpu_.hidden_a_, gpu_.ffn_fmt_);
+                if (matvec_dup("w2"))
+                    gpu_.matvec_add(*f.w2a, ha, x1, w2_replay_, gpu_.ffn_fmt_);
                 gpu_.matvec_add(*f.w2b, hb, gpu_.hidden_a_.tex, gpu_.hidden_b_, gpu_.ffn_fmt_);
+                if (matvec_dup("w2"))
+                    gpu_.matvec_add(*f.w2b, hb, gpu_.hidden_a_.tex, w2_replay_, gpu_.ffn_fmt_);
                 mark("w2", l);
                 h = gpu_.hidden_b_.tex;
             if (getenv("HIDDEN_DUMP"))
