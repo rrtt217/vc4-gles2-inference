@@ -13,71 +13,69 @@
 #include <string>
 #include <vector>
 
-// first hidden chunk; second is hidden - ffn_chunk
-
-    // The checkpoint is mapped once and kept for the process lifetime.  The
-    // loaders then point each Mat straight at its bytes in the map instead of
-    // allocating a private copy: on this 426 MB board the 69 MB q8 copy is
-    // what pushed the kernel into swap and evicted the file (and the Mesa
-    // driver) between runs, so a warm start read 69 MB from the SD card at
-    // 11 MB/s in every single run.  Borrowed pages are page cache: reclaimable,
-    // never swapped, and free to re-read.
-    bool Model::load(const string& path){
-        int fd = open(path.c_str(), O_RDONLY);
-        if (fd < 0) { cerr << "cannot open model: " << path << "\n"; return false; }
-        struct stat st {};
-        if (fstat(fd, &st) != 0 || st.st_size < 4) {
-            close(fd); cerr << "cannot stat model: " << path << "\n"; return false;
-        }
-        void* base = mmap(nullptr, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-        close(fd);
-        if (base == MAP_FAILED) { cerr << "mmap failed: " << path << "\n"; return false; }
-        source_size = (uint64_t)st.st_size;
-        source_mtime = (uint64_t)st.st_mtime;
-        fbase_ = (const uint8_t*)base;
-        fsize_ = (size_t)st.st_size;
-        // Start the SD read now: it overlaps the EGL/Mesa init that follows, and
-        // a warm start then finds every page already in the page cache.
-        madvise(base, (size_t)st.st_size, MADV_WILLNEED);
-        fpos_ = 0;
-        borrow_ = !(getenv("MODEL_BORROW") && !strcmp(getenv("MODEL_BORROW"), "0"));
-        uint32_t magic = 0; memcpy(&magic, fbase_, 4);
-        bool ok = false;
-        if (magic != 0x46434D4DU) {   // "MMCF"
-                cerr << "not an MMCF container (magic 0x" << std::hex << magic << std::dec
-                     << "); the legacy Q8M1/Q4M1/I16M1/llama2c readers are gone, convert with "
-                        "engine/tools/mmcf_pack.py\n";
-                munmap(base, (size_t)st.st_size);
-                return false;
-        }
-        ok = load_mmcf();
-        fbase_ = nullptr; fsize_ = fpos_ = 0;
-        if (ok && !borrow_ && tok_blob && tok_blob_bytes) {
-                // load_mmcf() borrows the tokenizer blob from the mapping that
-                // this path unmaps below; copy it before the munmap or the
-                // tokenizer (read after load()) decodes a released page.
-                const uint8_t* p = (const uint8_t*)tok_blob;
-                tok_owned.assign(p, p + tok_blob_bytes);
-                tok_blob = tok_owned.data();
-        }
-        if (ok && getenv("MODEL_DUMP")) {
-                auto head = [](const char* n, const Mat& m) {
-                        if (m.rows == 0) { cerr << "DUMP " << n << " empty\n"; return; }
-                        char b[64]; int k = 0;
-                        for (int i = 0; i < 8 && i < m.rows * m.cols; ++i)
-                                k += snprintf(b + k, sizeof(b) - k, "%d ", (int)m.w8()[i]);
-                        cerr << "DUMP " << n << " " << m.rows << "x" << m.cols << " s=" << m.scale
-                             << " pb=" << m.prebiased << " [" << b << "]\n";
-                };
-                head("qkv0", qkv.empty() ? Mat() : qkv[0]);
-                head("w2_0", w2.empty() ? Mat() : w2[0]);
-                if (has_q8_emb) cerr << "DUMP emb0 [" << (int)emb_q8[0] << " " << (int)emb_q8[1] << "] es0=" << emb_scale[0] << "\n";
-                cerr << "DUMP rms_att0=" << (rms_att.empty() ? 0.0f : rms_att[0]) << " theta=" << rope_theta << " half=" << rope_half << " qk=" << qk_norm << "\n";
-        }
-        if (borrow_ && ok) { map_ = base; map_size_ = (size_t)st.st_size; }
-        else munmap(base, (size_t)st.st_size);
-        return ok;
+// The checkpoint is mapped once and kept for the process lifetime.  The
+// loaders then point each Mat straight at its bytes in the map instead of
+// allocating a private copy: on this 426 MB board the 69 MB q8 copy is
+// what pushed the kernel into swap and evicted the file (and the Mesa
+// driver) between runs, so a warm start read 69 MB from the SD card at
+// 11 MB/s in every single run.  Borrowed pages are page cache: reclaimable,
+// never swapped, and free to re-read.
+bool Model::load(const string& path){
+    int fd = open(path.c_str(), O_RDONLY);
+    if (fd < 0) { cerr << "cannot open model: " << path << "\n"; return false; }
+    struct stat st {};
+    if (fstat(fd, &st) != 0 || st.st_size < 4) {
+        close(fd); cerr << "cannot stat model: " << path << "\n"; return false;
     }
+    void* base = mmap(nullptr, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (base == MAP_FAILED) { cerr << "mmap failed: " << path << "\n"; return false; }
+    source_size = (uint64_t)st.st_size;
+    source_mtime = (uint64_t)st.st_mtime;
+    fbase_ = (const uint8_t*)base;
+    fsize_ = (size_t)st.st_size;
+    // Start the SD read now: it overlaps the EGL/Mesa init that follows, and
+    // a warm start then finds every page already in the page cache.
+    madvise(base, (size_t)st.st_size, MADV_WILLNEED);
+    fpos_ = 0;
+    borrow_ = !(getenv("MODEL_BORROW") && !strcmp(getenv("MODEL_BORROW"), "0"));
+    uint32_t magic = 0; memcpy(&magic, fbase_, 4);
+    bool ok = false;
+    if (magic != 0x46434D4DU) {   // "MMCF"
+            cerr << "not an MMCF container (magic 0x" << std::hex << magic << std::dec
+                 << "); the legacy Q8M1/Q4M1/I16M1/llama2c readers are gone, convert with "
+                    "engine/tools/mmcf_pack.py\n";
+            munmap(base, (size_t)st.st_size);
+            return false;
+    }
+    ok = load_mmcf();
+    fbase_ = nullptr; fsize_ = fpos_ = 0;
+    if (ok && !borrow_ && tok_blob && tok_blob_bytes) {
+            // load_mmcf() borrows the tokenizer blob from the mapping that
+            // this path unmaps below; copy it before the munmap or the
+            // tokenizer (read after load()) decodes a released page.
+            const uint8_t* p = (const uint8_t*)tok_blob;
+            tok_owned.assign(p, p + tok_blob_bytes);
+            tok_blob = tok_owned.data();
+    }
+    if (ok && getenv("MODEL_DUMP")) {
+            auto head = [](const char* n, const Mat& m) {
+                    if (m.rows == 0) { cerr << "DUMP " << n << " empty\n"; return; }
+                    char b[64]; int k = 0;
+                    for (int i = 0; i < 8 && i < m.rows * m.cols; ++i)
+                            k += snprintf(b + k, sizeof(b) - k, "%d ", (int)m.w8()[i]);
+                    cerr << "DUMP " << n << " " << m.rows << "x" << m.cols << " s=" << m.scale
+                         << " pb=" << m.prebiased << " [" << b << "]\n";
+            };
+            head("qkv0", qkv.empty() ? Mat() : qkv[0]);
+            head("w2_0", w2.empty() ? Mat() : w2[0]);
+            if (has_q8_emb) cerr << "DUMP emb0 [" << (int)emb_q8[0] << " " << (int)emb_q8[1] << "] es0=" << emb_scale[0] << "\n";
+            cerr << "DUMP rms_att0=" << (rms_att.empty() ? 0.0f : rms_att[0]) << " theta=" << rope_theta << " half=" << rope_half << " qk=" << qk_norm << "\n";
+    }
+    if (borrow_ && ok) { map_ = base; map_size_ = (size_t)st.st_size; }
+    else munmap(base, (size_t)st.st_size);
+    return ok;
+}
 
 Model::~Model(){
     if (map_) munmap(map_, map_size_);

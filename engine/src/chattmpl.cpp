@@ -10,10 +10,6 @@
 
 using namespace jinja;
 
-namespace {
-
-}  // namespace
-
 struct ChatTemplate::Impl {
     bool ok = false;
     std::string error;
