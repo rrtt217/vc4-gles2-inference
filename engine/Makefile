@@ -20,7 +20,7 @@ JINJA := $(TP)/jinja/lexer.cpp $(TP)/jinja/parser.cpp $(TP)/jinja/runtime.cpp \
          $(TP)/jinja/unicode.cpp
 CORE := $(SRC)/engine.cpp $(SRC)/common.cpp $(SRC)/xformat.cpp \
         $(SRC)/shaders.cpp $(SRC)/shaders_attn.cpp $(SRC)/dump_shaders.cpp \
-        $(SRC)/gpu.cpp $(SRC)/gpu_state.cpp $(SRC)/gpu_conv.cpp \
+        $(SRC)/gpu.cpp $(SRC)/gpu_state.cpp $(SRC)/gpu_conv.cpp $(SRC)/gpu_diag.cpp \
         $(SRC)/tokenizer.cpp $(SRC)/model.cpp $(SRC)/session.cpp $(SRC)/prefix_cache.cpp $(SRC)/lineedit.cpp \
         $(SRC)/sampling.cpp $(SRC)/tools.cpp $(SRC)/ppl.cpp $(SRC)/cli.cpp $(SRC)/chat_format.cpp $(SRC)/prefix_build.cpp $(SRC)/app.cpp $(SRC)/worker.cpp $(SRC)/chat.cpp $(SRC)/chattmpl.cpp $(JINJA)
 HEADERS := $(wildcard $(SRC)/*.h)
