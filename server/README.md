@@ -326,7 +326,11 @@ JSON arguments are not useful to clients.
 ## Prefix KV cache
 
 The worker token/KV prefix reuse, disk `MMKV1` format, and packed KV modes
-are documented in [../docs/prefix-cache.md](../docs/prefix-cache.md).
+are documented in [../docs/prefix-cache.md](../docs/prefix-cache.md).  The path
+may be a **directory**: the engine then loads the entry whose header matches the
+model it is holding, so several models share one cache directory and a model
+switch reloads the right one.  Building a cache also writes an engine-authored
+`<cache>.json` sidecar; compare that instead of re-deriving the fields.
 
 ## Python overhead
 

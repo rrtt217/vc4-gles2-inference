@@ -41,6 +41,8 @@
 #include "model.h"
 #include "chattmpl.h"
 #include "jinja/json.h"
+#include <algorithm>
+#include <filesystem>
 #include "session.h"
 #include "tokenizer.h"
 #include "sampling.h"
@@ -456,6 +458,32 @@ int main(int argc, char** argv) {
     if (getenv("SHADER_TIME")) fprintf(stderr, "STARTUP %7.1f ms  weights uploaded\n", run_time_ms());
 
     Session session(model, gpu);
+
+    // A cache path may be a single file or a directory.  With a directory the
+    // engine picks the entry whose *header* matches this model (container size
+    // and mtime, the shape, the KV packing and the scale), so one setting serves
+    // several models: after a model swap the cache that belongs to the new
+    // container is loaded and the others are ignored.  The header is the
+    // authority; the file name is not.
+    auto load_prefix_cache_any = [&](const string& path, vector<int>& toks) -> bool {
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        if (fs::is_directory(path, ec)) {
+            vector<string> files;
+            for (const auto& e : fs::directory_iterator(path, ec))
+                if (e.path().extension() == ".kv") files.push_back(e.path().string());
+            std::sort(files.begin(), files.end());
+            for (const string& f : files) {
+                toks.clear();
+                if (session.load_prefix_cache(f, toks)) {
+                    if (!g_quiet) cerr << "PREFIX_CACHE " << f << " " << toks.size() << " tokens\n";
+                    return true;
+                }
+            }
+            return false;
+        }
+        return session.load_prefix_cache(path, toks);
+    };
     if (getenv("SHADER_TIME")) fprintf(stderr, "STARTUP %7.1f ms  session ready\n", run_time_ms());
 
     if (!ppl_path.empty()) {
@@ -572,12 +600,8 @@ int main(int argc, char** argv) {
         // Process-level defaults (CLI flags / env vars), restored before each request.
         const SamplingSettings base_sampling = g_sampling;
         vector<int> cache_tokens;
-        if (!prefix_cache_path.empty()) {
-            if (session.load_prefix_cache(prefix_cache_path, cache_tokens))
-                cerr << "PREFIX_CACHE loaded " << cache_tokens.size() << " tokens\n";
-            else
-                cerr << "PREFIX_CACHE ignored " << prefix_cache_path << "\n";
-        }
+        if (!prefix_cache_path.empty() && !load_prefix_cache_any(prefix_cache_path, cache_tokens))
+            cerr << "PREFIX_CACHE ignored " << prefix_cache_path << "\n";
         // The HTTP layer renders the prompt text itself, so it has to know which
         // template this checkpoint wants.  The container states it (kind + name)
         // and the resolution above already turned it into these three flags, so
@@ -629,6 +653,12 @@ int main(int argc, char** argv) {
                 // syllables ("德德德德...").  Same reason the REPL clears
                 // kv_tokens.
                 cache_tokens.clear();
+                // The cache belongs to a container: the one loaded for the
+                // previous model went with session.reset(), so the new
+                // container's is loaded here.  With a directory this is the
+                // whole per-model story; with a single file the header check
+                // refuses it and the swap runs uncached.
+                if (!prefix_cache_path.empty()) load_prefix_cache_any(prefix_cache_path, cache_tokens);
                 // The template and the chat support belong to the *container*,
                 // so a client that caches them (the server decides from these
                 // whether a chat completion can be served) has to be told.
@@ -863,7 +893,7 @@ int main(int argc, char** argv) {
 
     vector<int> cli_cache_tokens;
     if (!worker && !prefix_cache_path.empty()) {
-        if (session.load_prefix_cache(prefix_cache_path, cli_cache_tokens)) {
+        if (load_prefix_cache_any(prefix_cache_path, cli_cache_tokens)) {
             cerr << "PREFIX_CACHE loaded " << cli_cache_tokens.size() << " tokens\n";
             // Probe: write the just-loaded rows straight back out, so a built
             // file and a loaded file can be compared byte for byte.

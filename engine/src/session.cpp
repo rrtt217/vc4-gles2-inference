@@ -1,4 +1,5 @@
 #include "session.h"
+#include "jinja/json.h"   // the cache sidecar: JSON is built, never concatenated
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -284,7 +285,47 @@ bool Session::save_prefix_cache(const string& path, const vector<int>& toks){
             f.write((char*)data.data(), (size_t)vsw * n * 4);
         }
         gpu_.forget_state();
-        return (bool)f;
+        if (!f) return false;
+        // The sidecar says what this file *is*, written by the only component
+        // that knows: the engine holds the KV layout, the packing flags, the
+        // model identity (size and mtime of the container) and the token list.
+        // A rebuild trigger (the server, a run script) compares these fields
+        // instead of re-deriving them, which is what the old Python builder did
+        // -- a second renderer and a second set of hashes.
+        {
+            uint64_t fnv = 1469598103934665603ull;
+            for (int tok : toks) {
+                const uint32_t v = (uint32_t) tok;
+                for (int b = 0; b < 4; ++b) {
+                    fnv ^= (uint8_t) (v >> (8 * b));
+                    fnv *= 1099511628211ull;
+                }
+            }
+            char hex[32];
+            snprintf(hex, sizeof(hex), "%016llx", (unsigned long long) fnv);
+            common_json meta = common_json::object();
+            meta["format"] = string("mmkv");
+            meta["version"] = (long long) (m_.hybrid ? 4 : vsw > 0 ? 3 : 2);
+            meta["source_size"] = (long long) m_.source_size;
+            meta["source_mtime"] = (long long) m_.source_mtime;
+            meta["dim"] = m_.dim;       meta["hidden"] = m_.hidden;
+            meta["layers"] = m_.layers; meta["heads"] = m_.heads;
+            meta["kv_heads"] = m_.kv_heads; meta["vocab"] = m_.vocab;
+            meta["seq"] = m_.seq;       meta["head_dim"] = m_.head_dim;
+            meta["rope_theta"] = (double) m_.rope_theta;
+            meta["kv_bits"] = gpu_.att_kv_bits_;
+            meta["act_fmt"] = string(x_format_name(gpu_.act_fmt_));
+            meta["hybrid"] = m_.hybrid;
+            meta["kv_scale"] = (double) gpu_.att_kv_scale_;
+            meta["kv_width"] = gpu_.att_kv_width_;
+            meta["vstep"] = vsw;
+            meta["n_tokens"] = (long long) toks.size();
+            meta["tokens_fnv64"] = string(hex);
+            meta["template"] = m_.template_name;
+            ofstream sm(path + ".json");
+            if (sm) sm << meta.dump_safe() << "\n";
+        }
+        return true;
     }
 
 bool Session::load_prefix_cache(const string& path, vector<int>& toks){

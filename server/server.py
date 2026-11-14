@@ -1240,8 +1240,30 @@ def main():
 
     os.makedirs(os.path.dirname(os.path.abspath(a.worker_log)), exist_ok=True)
     default_model = str(repo / "models/minimind3/minimind3.q8.mmcf")
-    paths = list(a.model) if a.model else [default_model]
+    # `--model ID=PATH` is the spelling the eval batteries use, so accept it here
+    # too; a plain path keeps its id from --model-id or from the file name.
+    raw = list(a.model) if a.model else [default_model]
+    inline_ids, paths = [], []
+    for item in raw:
+        if "=" in item and "/" not in item.split("=", 1)[0]:
+            mid, path = item.split("=", 1)
+            inline_ids.append(mid)
+            paths.append(path)
+        else:
+            inline_ids.append(None)
+            paths.append(item)
     ids = list(a.model_id) if a.model_id else []
+    # An explicit ID=PATH wins for its position; --model-id fills the gaps in
+    # order for the plain paths.
+    given = [x for x in inline_ids if x]
+    merged, gi = [], 0
+    for i, x in enumerate(inline_ids):
+        if x:
+            merged.append(x)
+        else:
+            merged.append(ids[gi] if gi < len(ids) else "")
+            gi += 1
+    ids = [x for x in merged if x]
     if not ids and paths == [default_model]:
         ids = ["minimind3-64m"]          # keeps the historical default id
     while len(ids) < len(paths):
