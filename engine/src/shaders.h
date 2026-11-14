@@ -58,6 +58,7 @@ std::string matvec_i4_pair_swiglu(int rows, int cols, XFormat xf, bool inl = tru
 // shader hash) cannot move.
 std::string matvec_i4_pair_swiglu_4x4(int rows, int cols, XFormat xf, bool inl = true, int hs = 0);
 std::string matvec_i4_add_pair(int rows, int cols, XFormat xf, bool inl = true);
+std::string matvec_i4_add_pair_4x4(int rows, int cols, XFormat xf, bool inl = true);
 
 // `hs` is the container's per-layer FFN-hidden scale exponent (metadata key
 // 15): the hidden is written as value * 2^-hs so it fits the q16 activation

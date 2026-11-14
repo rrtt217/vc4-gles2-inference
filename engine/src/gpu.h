@@ -225,7 +225,7 @@ private:
     GLuint x_i4_pair_swiglu(int rows, int cols, int hs = 0, bool fmt4 = false);
     GLuint x_q8_add(int rows, int cols, XFormat xf, bool wrow = false);
     GLuint x_q8_add_pair(int rows, int cols, XFormat xf, bool wrow = false);
-    GLuint x_i4_add_pair(int rows, int cols, XFormat xf);
+    GLuint x_i4_add_pair(int rows, int cols, XFormat xf, bool fmt4 = false);
     GLuint x_i16(int rows, int cols);
     GLuint x_i16_add(int rows, int cols, XFormat xf);
     GLuint x_i4(int rows, int cols);

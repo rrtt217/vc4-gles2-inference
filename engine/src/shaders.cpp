@@ -1049,6 +1049,41 @@ string matvec_i4_add_pair(int rows, int cols, XFormat xf, bool inl) {
         "gl_FragColor=x_st2q(s0+res0,s1+res1);}";
 }
 
+// Q4_FMT=rgba4 residual-add: w2 (and wo) with the weights bound as 4-bit
+// texels, two per eight weights, no decode, and the group scale folded as in
+// the gate.  The nibble reversal at upload (make_q4_texture) is what lets the
+// dot read the texel in natural column order.
+string matvec_i4_add_pair_4x4(int rows, int cols, XFormat xf, bool inl) {
+    need_shape("matvec_i4_add_pair_4x4", rows, cols, 32);
+    const int texw = cols / 4;
+    const int groups = (cols + 31) / 32;
+    const int rw = (rows + 1) / 2;
+    const string ROWS = to_string(rows), GROUPS = to_string(groups), TEXW = to_string(texw);
+    return q4_head(xf, inl) + x_residual_glsl(XFormat::I16_2) +
+        "uniform sampler2D W,P,X,R;uniform float ps;"
+        "void main(){int t=int(gl_FragCoord.x);int r0=2*t;int r1=r0+1;"
+        "float s0=0.0,s1=0.0;"
+        "float v0r=(float(r0)+0.5)/float(" + ROWS + "),v1r=(float(r1)+0.5)/float(" + ROWS + ");"
+        "float itw=1.0/float(" + TEXW + ");"
+        "for(int g=0;g<" + GROUPS + ";g++){"
+        "vec4 pa=texture2D(P,vec2((float(g)+0.5)/float(" + GROUPS + "),v0r));"
+        "vec4 pb=texture2D(P,vec2((float(g)+0.5)/float(" + GROUPS + "),v1r));"
+        "float u1s=65280.0*15.0*ps,v1s=255.0*15.0*ps;"
+        "float sa=pa.r*u1s+pa.g*v1s,sb=pb.r*u1s+pb.g*v1s;"
+        "float ma=x_i16raw(pa.ba)*ps,mb=x_i16raw(pb.ba)*ps;"
+        "float xsum=0.0,dota=0.0,dotb=0.0;"
+        "for(int q=0;q<4;q++){int c=g*32+q*8;" +
+        q4_act(xf, cols, inl) + q4_xsum() +
+        "float c0=(float(g*8+q*2)+0.5)*itw,c1=c0+itw;"
+        "vec4 wq0=texture2D(W,vec2(c0,v0r)),wq1=texture2D(W,vec2(c1,v0r));"
+        "dota+=dot(wq0,xa)+dot(wq1,xb);"
+        "vec4 wr0=texture2D(W,vec2(c0,v1r)),wr1=texture2D(W,vec2(c1,v1r));"
+        "dotb+=dot(wr0,xa)+dot(wr1,xb);}"
+        "s0+=sa*dota+ma*xsum;s1+=sb*dotb+mb*xsum;}"
+        "float res0=R1Q(R,r0," + to_string(rw) + ".0),res1=R1Q(R,r1," + to_string(rw) + ".0);"
+        "gl_FragColor=x_st2q(s0+res0,s1+res1);}";
+}
+
 // q4 FFN gate, paired: one fragment computes w1[r] and w3[r], sharing the
 // activation decode, and writes both as a raw q16 pair for swiglu.
 string matvec_i4_pair(int rows, int cols, XFormat xf) {
@@ -1194,14 +1229,22 @@ string matvec_i4_pair_swiglu_4x4(int rows, int cols, XFormat xf, bool inl, int h
         + (q4x4_nop()
                ? string("float sa1=15.0*ps1,ma1=ps1,sa2=15.0*ps2,ma2=ps2,"
                         "sb1=15.0*ps1,mb1=ps1,sb2=15.0*ps2,mb2=ps2;")
+               // The scale is unsigned, so its 16-bit reconstruction folds into
+               // the two constants below and needs no negative-rail select; the
+               // min still needs one.  The plane is the gate's last big q4-only
+               // cost (Q4_4X4_NOP prices it), and this is the half that costs no
+               // precision.  Folded here only: the packed builder keeps its text
+               // so scripts/shader_hashes.txt does not move for a fallback.
                : "vec4 q1=texture2D(P1,vec2((float(g)+0.5)/float(" + GROUPS + "),(u0+0.5)/float(" + ROWS + ")));"
                  "vec4 q2=texture2D(P2,vec2((float(g)+0.5)/float(" + GROUPS + "),(u0+0.5)/float(" + ROWS + ")));"
                  "vec4 p1=texture2D(P1,vec2((float(g)+0.5)/float(" + GROUPS + "),(u1+0.5)/float(" + ROWS + ")));"
                  "vec4 p2=texture2D(P2,vec2((float(g)+0.5)/float(" + GROUPS + "),(u1+0.5)/float(" + ROWS + ")));"
-                 "float sa1=15.0*x_i16raw(q1.rg)*ps1,ma1=x_i16raw(q1.ba)*ps1;"
-                 "float sa2=15.0*x_i16raw(q2.rg)*ps2,ma2=x_i16raw(q2.ba)*ps2;"
-                 "float sb1=15.0*x_i16raw(p1.rg)*ps1,mb1=x_i16raw(p1.ba)*ps1;"
-                 "float sb2=15.0*x_i16raw(p2.rg)*ps2,mb2=x_i16raw(p2.ba)*ps2;") +
+                 "float u1s=65280.0*15.0*ps1,v1s=255.0*15.0*ps1;"
+                 "float u2s=65280.0*15.0*ps2,v2s=255.0*15.0*ps2;"
+                 "float sa1=q1.r*u1s+q1.g*v1s,sa2=q2.r*u2s+q2.g*v2s;"
+                 "float sb1=p1.r*u1s+p1.g*v1s,sb2=p2.r*u2s+p2.g*v2s;"
+                 "float ma1=x_i16raw(q1.ba)*ps1,ma2=x_i16raw(q2.ba)*ps2;"
+                 "float mb1=x_i16raw(p1.ba)*ps1,mb2=x_i16raw(p2.ba)*ps2;") +
         "float xsum=0.0,d1=0.0,d2=0.0,e1=0.0,e2=0.0;"
         "for(int q=0;q<4;q++){int c=g*32+q*8;" +
         q4_act(xf, cols, inl) + q4_xsum() +

@@ -232,7 +232,7 @@ void GPU::matvec_add(const Mat& m, GLuint x, GLuint residual, Target& out, XForm
         // texel the rmsnorm reads, so the paired kernel grows a wrow variant
         // rather than the writer switching layouts.
         const bool wr = m.type == WeightType::INT8 && m.has_row_scale();
-        GLuint p = pair4 ? x_i4_add_pair(m.rows, m.cols, xf)
+        GLuint p = pair4 ? x_i4_add_pair(m.rows, m.cols, xf, m.fmt4)
                   : pair ? x_q8_add_pair(m.rows, m.cols, xf, wr)
                   : (m.type == WeightType::INT8) ? x_q8_add(m.rows, m.cols, xf, wr)
                   : (m.type == WeightType::INT4) ? x_i4_add(m.rows, m.cols, xf)
@@ -467,13 +467,15 @@ GLuint GPU::x_q8_add_pair(int rows, int cols, XFormat xf, bool wrow){
                       matvec_q8_add_pair(rows, cols, xf, inl, wrow));
     }
 
-GLuint GPU::x_i4_add_pair(int rows, int cols, XFormat xf){
+GLuint GPU::x_i4_add_pair(int rows, int cols, XFormat xf, bool fmt4){
         const bool inl = q4_inline("w2");
-        const string key = "xi4ap_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(xf) + (inl ? "" : "_gen");
+        const string key = string(fmt4 ? "xi4ap4_" : "xi4ap_") + to_string(rows) + "_" +
+                           to_string(cols) + "_" + x_format_name(xf) + (inl ? "" : "_gen");
         auto it = programs_.find(key);
         if (it != programs_.end()) return it->second;
         g_prog_key = key;
-        GLuint p = link_program(matvec_i4_add_pair(rows, cols, xf, inl));
+        GLuint p = link_program(fmt4 ? matvec_i4_add_pair_4x4(rows, cols, xf, inl)
+                                     : matvec_i4_add_pair(rows, cols, xf, inl));
         programs_[key] = p;
         return p;
     }
