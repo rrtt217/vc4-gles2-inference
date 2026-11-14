@@ -29,6 +29,7 @@ void gl_state_forget_bindings();
 extern std::string g_prog_key;
 extern bool g_q4_shift_ok;
 bool q4_inline(const char* name);
+bool q4_shift_wanted();   // Q4_SHIFT: ask for ESSL 3.00 q4 kernels
 
 // FFN_FLUSH / FFN_SYNC are measurement hooks: flushing the command stream after
 // each FFN pass makes a per-pass timing meaningful, and FFN_SYNC adds the wait.

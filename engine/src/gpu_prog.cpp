@@ -108,6 +108,29 @@ static string es3ify(const string& src, bool vertex){
                "#define gl_FragColor frag_color\n" + src;
     }
 
+bool q4_shift_wanted(){
+        const char* e = getenv("Q4_SHIFT");
+        return !(e && strcmp(e, "0") == 0);
+    }
+
+bool gpu_q4_shift(){ return g_q4_shift_ok; }
+
+void gpu_force_q4_shift(bool on){ g_q4_shift_ok = on; }
+
+GLuint GPU::compile_shader(GLenum type, const string& src){
+        GLuint s = glCreateShader(type);
+        const char* p = src.c_str();
+        glShaderSource(s, 1, &p, nullptr);
+        glCompileShader(s);
+        GLint ok = 0; glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+        if (!ok) {
+            char log[8192]; glGetShaderInfoLog(s, sizeof(log), nullptr, log);
+            cerr << "shader compile failed:\n" << log << "\n"; exit(1);
+        }
+        return s;
+    }
+
+
 GLuint GPU::link_program(const string& fs_in){
         const bool needs_es3 = g_q4_shift_ok && fs_in.find("&15") != string::npos;
         const string fs = needs_es3 ? es3ify(fs_in, false) : fs_in;
