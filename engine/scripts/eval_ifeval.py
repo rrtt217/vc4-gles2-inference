@@ -44,6 +44,7 @@ import subprocess
 from worker_engine import WorkerEngine
 import sys
 import time
+from evalkit import Engine, load_jsonl  # the one engine client and JSONL loader
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 NL = chr(10)
@@ -156,60 +157,6 @@ def run_checks(checks, text):
     return bad
 
 
-class Engine:
-    def __init__(self, binary, model, env, system, sampling):
-        self.binary = binary
-        self.model = model
-        self.env = dict(env)
-        self.system = system
-        self.sampling = dict(sampling)
-
-    def chat(self, prompt, gen, seed):
-        env = dict(os.environ)
-        env.update(self.env)
-        cmd = [self.binary, "--chat", "--system", self.system,
-               "--model", self.model, "--prompt", prompt, "--gen", str(gen),
-               "--seed", str(seed)]
-        for k, v in sorted(self.sampling.items()):
-            if k == "greedy":
-                cmd.append("--greedy")
-            elif k == "temp":
-                cmd += ["--temp", str(v)]
-            elif k == "top-k":
-                cmd += ["--top-k", str(v)]
-            elif k == "top-p":
-                cmd += ["--topp", str(v)]
-            elif k == "repeat-penalty":
-                cmd += ["--repeat-penalty", str(v)]
-            else:
-                raise SystemExit("unknown sampling knob %r" % k)
-        t0 = time.time()
-        try:
-            p = subprocess.run(cmd, env=env, cwd=ROOT,
-                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        except OSError as e:
-            return None, str(e), (time.time() - t0) * 1000.0
-        out = p.stdout.decode("utf-8", "replace")
-        err = p.stderr.decode("utf-8", "replace")
-        if "Assistant: " not in out:
-            return None, "no Assistant line; rc %s: %s" % (p.returncode,
-                                                          err[-300:]), 0.0
-        out = out.split("Assistant: ", 1)[1]
-        # the engine prints one newline of its own after the reply
-        return out.rstrip(chr(10)), err, (time.time() - t0) * 1000.0
-
-
-def load_cases(path, limit=None):
-    cases = []
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("//"):
-                continue
-            cases.append(json.loads(line))
-    return cases[:limit] if limit else cases
-
-
 def selftest(cases):
     bad = 0
     for c in cases:
@@ -286,7 +233,7 @@ def main(argv=None):
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args(argv)
 
-    cases = load_cases(args.data, args.limit or None)
+    cases = load_jsonl(args.data, args.limit or None)
     if not cases:
         raise SystemExit("no cases in %s" % args.data)
     if args.selftest:

@@ -53,6 +53,7 @@ import struct
 import subprocess
 import sys
 import time
+from evalkit import Engine, read_floats, read_ints  # the one engine client
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 LETTERS = "ABCD"
@@ -84,28 +85,6 @@ def content_free():
     return SUFFIX.lstrip(chr(10))
 
 
-def read_floats(path):
-    try:
-        with open(path, "rb") as f:
-            b = f.read()
-    except OSError:
-        return None
-    if not b or len(b) % 4:
-        return None
-    return list(struct.unpack("<%df" % (len(b) // 4), b))
-
-
-def read_ints(path):
-    try:
-        with open(path, "rb") as f:
-            b = f.read()
-    except OSError:
-        return None
-    if not b or len(b) % 4:
-        return None
-    return list(struct.unpack("<%di" % (len(b) // 4), b))
-
-
 def argmax(xs):
     best, bi = -1e30, 0
     for i, v in enumerate(xs):
@@ -119,41 +98,6 @@ def softmax(vals):
     e = [math.exp(v - m) for v in vals]
     s = sum(e)
     return [x / s for x in e]
-
-
-class Engine:
-    """One prefill per question, no decode: LOGITS_OUT is the whole answer."""
-
-    def __init__(self, binary, model, env, system):
-        self.binary = binary
-        self.model = model
-        self.env = dict(env)
-        self.system = system
-
-    def run(self, prompt, want_logits=True):
-        t0 = time.time()
-        tag = "%d_%.6f" % (os.getpid(), t0)
-        lg = "/tmp/bench_mc_%s.lg" % tag
-        tk = "/tmp/bench_mc_%s.tk" % tag
-        env = dict(os.environ)
-        env.update(self.env)
-        if want_logits:
-            env["LOGITS_OUT"] = lg
-        env["TOKENS_OUT"] = tk
-        cmd = [self.binary, "--chat", "--system", self.system,
-               "--model", self.model, "--prompt", prompt, "--gen", "0"]
-        try:
-            p = subprocess.run(cmd, env=env, cwd=ROOT,
-                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            rc, err = p.returncode, p.stderr.decode("utf-8", "replace")
-        except OSError as e:
-            return None, None, str(e), (time.time() - t0) * 1000.0, 127
-        logits = read_floats(lg) if want_logits else None
-        ids = read_ints(tk)
-        for q in (lg, tk):
-            if os.path.exists(q):
-                os.remove(q)
-        return logits, ids, err, (time.time() - t0) * 1000.0, rc
 
 
 PROBE_ITEM = {"question": "1+1\u7b49\u4e8e\u51e0\uff1f",

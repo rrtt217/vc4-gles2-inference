@@ -59,6 +59,7 @@ import subprocess
 from worker_engine import WorkerEngine
 import sys
 import time
+from evalkit import Engine, load_jsonl  # the one engine client and JSONL loader
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 NL = chr(10)
@@ -141,52 +142,6 @@ def score(item, hyp):
     }
 
 
-class Engine:
-    def __init__(self, binary, model, env, system, sampling):
-        self.binary = binary
-        self.model = model
-        self.env = dict(env)
-        self.system = system
-        self.sampling = dict(sampling)
-
-    def chat(self, prompt, gen, seed):
-        env = dict(os.environ)
-        env.update(self.env)
-        cmd = [self.binary, "--chat", "--system", self.system,
-               "--model", self.model, "--prompt", prompt,
-               "--gen", str(gen), "--seed", str(seed)]
-        if self.sampling.get("greedy"):
-            cmd.append("--greedy")
-        else:
-            for k, v in sorted(self.sampling.items()):
-                cmd += [{"temp": "--temp", "top-k": "--top-k",
-                        "top-p": "--topp", "repeat-penalty": "--repeat-penalty"}[k],
-                       str(v)]
-        t0 = time.time()
-        try:
-            p = subprocess.run(cmd, env=env, cwd=ROOT,
-                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        except OSError as e:
-            return None, str(e), 0.0
-        out = p.stdout.decode("utf-8", "replace")
-        err = p.stderr.decode("utf-8", "replace")
-        if "Assistant: " not in out:
-            return None, "no Assistant line; rc %s: %s" % (p.returncode,
-                                                          err[-300:]), 0.0
-        return out.split("Assistant: ", 1)[1].rstrip(chr(10)), err, (time.time() - t0) * 1000.0
-
-
-def load_items(path, limit=None):
-    items = []
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("//"):
-                continue
-            items.append(json.loads(line))
-    return items[:limit] if limit else items
-
-
 def summarize(name, rows):
     good = [r for r in rows if "error" not in r]
     s = {"model": name, "n": len(good), "errors": len(rows) - len(good)}
@@ -243,7 +198,7 @@ def main(argv=None):
             if v is not None:
                 sampling[k] = v
 
-    items = load_items(args.data, args.limit or None)
+    items = load_jsonl(args.data, args.limit or None)
     if not items:
         raise SystemExit("no items in %s" % args.data)
     env = {"GPU_LAYER": "1", "KV_PACK": "16"}
