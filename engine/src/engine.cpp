@@ -595,6 +595,45 @@ int main(int argc, char** argv) {
         while (getline(cin, line)) {
             if (g_stop) break;
             if (line.empty()) continue;
+            // A control line: one JSON object, e.g. {"op":"load","model":"..."}.
+            // A request line starts with base64 of the prompt, whose alphabet has
+            // no '{', so the two cannot be confused and the tab-separated
+            // request format (and its byte-compatible events) is untouched.
+            if (line[0] == '{') {
+                const common_json op = common_json::parse_no_throw(line);
+                const string kind = (op.is_discarded() || !op.is_object() || !op.contains("op") ||
+                                     !op.at("op").is_string()) ? string() : (string) op.at("op");
+                if (kind != "load") { emit_error("unknown op \"" + kind + "\""); continue; }
+                const string want = (op.contains("model") && op.at("model").is_string())
+                                        ? (string) op.at("model") : string();
+                if (want.empty()) { emit_error("load: no model path"); continue; }
+                // Same sequence as the REPL's /model and as startup, in the same
+                // order: release the scene (CMA), read, prepare (FFN split and
+                // hidden scale -- the Mats), template/tokenizer, upload, session.
+                const auto t_load = Clock::now();
+                gpu.release_scene();
+                model.reset();
+                if (!model.load(want)) {
+                    emit_error("load: cannot read " + want);
+                    // No model is loaded any more, so every later request would
+                    // fail differently.  A driver deserves one clear failure.
+                    return 1;
+                }
+                prepare_model();
+                if (!setup_from_model()) return 2;
+                upload_weights();
+                session.reset();
+                // The rolling prefix cache belongs to the model that produced
+                // it: keeping it made the next request skip prefill against a
+                // prefix the new model never saw, which answered with repeated
+                // syllables ("德德德德...").  Same reason the REPL clears
+                // kv_tokens.
+                cache_tokens.clear();
+                emit(common_json::object({{"event", string("loaded")},
+                                          {"model", want},
+                                          {"load_ms", (double) elapsed_ms(t_load, Clock::now())}}));
+                continue;
+            }
             vector<string> f;
             size_t start = 0;
             while (start <= line.size()) {

@@ -16,6 +16,8 @@ What it covers, in one run:
   hybrid     lfm2.5 dedup -> lfm2.5 q6 -> back   (conv path)
   mixed      minimind3.q8 -> .q4 -> minimind2.q4 -> feng.q8 -> lfm2.5.q4 -> back
   slash line a line that starts with "/" but is not a command is still a prompt
+  worker     the protocol's {"op":"load"} line: two loads inside one worker,
+             answers byte-identical to fresh workers, and a bad op is an error
   determinism the same chain twice prints the same bytes
 
 Needs the GPU and the containers under ../models; takes about a minute on Xe.
@@ -31,7 +33,7 @@ before prepare_model() was shared with the swap.
     python3 scripts/swap_matrix.py            # the chains above
     python3 scripts/swap_matrix.py --gen 8    # shorter generations
 """
-import argparse, os, subprocess, sys
+import argparse, base64, json, os, subprocess, sys
 
 SYS = "You are a helpful assistant."
 GEN = 16
@@ -152,6 +154,44 @@ def main():
     g1, _ = chain(q8); g2, _ = chain(q8)
     print(f"  {'ok  ' if g1 == g2 else 'FAIL'} identical")
     fail += 0 if g1 == g2 else 1
+    print("== worker protocol load op ==")
+    def wrun(lines, model):
+        e = dict(ENV, MODEL=model)
+        out = subprocess.run([BIN, "--worker"], input="".join(lines), capture_output=True,
+                             text=True, env=e, timeout=900).stdout
+        return out
+    def wreq(msg, n=16, seed=42):
+        doc = {"messages": [{"role": "user", "content": msg}]}
+        b = base64.b64encode(json.dumps(doc, ensure_ascii=False,
+                                        separators=(",", ":")).encode()).decode()
+        return "\t%d\t0\t1\t%d\t\t\t\t\t\t%s\t\n" % (n, seed, b)
+    def wsegs(out):
+        segs, cur = [], []
+        for line in out.splitlines():
+            ev = json.loads(line)
+            if ev.get("event") == "token": cur.append(ev.get("text", ""))
+            elif ev.get("event") == "done": segs.append("".join(cur)); cur = []
+        return segs
+    wq = "用一句话介绍你自己。"
+    wa, wb, wc = (q8[0], q8[4], q4[0])          # minimind3.q8, minimind2-small.q8, minimind3.q4
+    fa = wsegs(wrun([wreq(wq)], wa))[0]
+    fb = wsegs(wrun([wreq(wq)], wb))[0]
+    fc = wsegs(wrun([wreq(wq)], wc))[0]
+    mixed = wrun([wreq(wq),
+                  json.dumps({"op": "load", "model": wb}) + "\n", wreq(wq),
+                  json.dumps({"op": "load", "model": wc}) + "\n", wreq(wq)], wa)
+    got = wsegs(mixed)
+    ok = got == [fa, fb, fc]
+    print(f"  {'ok  ' if ok else 'FAIL'} load op: {len(got)} answers across 2 loads "
+          f"(q8 -> q8 -> q4), byte-identical to fresh workers")
+    fail += 0 if ok else 1
+    # a bad op must be an error event, not a crash
+    bad_out = wrun(['{"op":"nope"}\n'], wa)
+    errs = [json.loads(l) for l in bad_out.splitlines() if '"error"' in l]
+    ok2 = bool(errs) and "unknown op" in errs[0].get("message", "")
+    print(f"  {'ok  ' if ok2 else 'FAIL'} unknown op reported as an error event")
+    fail += 0 if ok2 else 1
+
     print("RESULT:", "PASS" if fail == 0 else f"{fail} FAILURES")
     if fail:
         print("Each line named FAIL above prints the post-swap answer next to the\n"

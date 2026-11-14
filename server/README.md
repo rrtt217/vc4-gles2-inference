@@ -452,6 +452,25 @@ base64(prompt) \t max_tokens \t temperature \t top_p \t seed
                \t [base64(request JSON) \t [top_k \t [request id \t [logprobs]]]]
 ```
 
+A line that starts with `{` is a **control line**, not a request: a request's
+first column is base64 of the prompt and base64 has no `{`, so the two cannot be
+confused.  The one operation today replaces the model while keeping the EGL
+context and its compiled programs (on a Pi Zero that is 4.23 s of context and
+1.89 s of program links, against 6.12 s to read a container and 2.99 s to
+upload it -- `docs/performance.md`, "Where the first token goes"):
+
+```json
+{"op": "load", "model": "../models/minimind3/minimind3.q4.mmcf"}
+```
+
+The reply is one event, `{"event":"loaded","model":...,"load_ms":...}`, or an
+`error` event; a container that cannot be read ends the process, because leaving
+a worker with no model would turn one clear failure into a stream of confusing
+ones.  The rolling prefix cache is dropped with the model, for the same reason
+the REPL drops its `kv_tokens`: a prefix the new model never computed is not a
+prefix.  `engine/scripts/swap_matrix.py` checks that two loads inside one worker
+answer exactly like two fresh workers, including a quantisation change.
+
 The first five columns are required; columns 6-10 and 12 are optional and may be
 empty (`\t\t`), which keeps an old server speaking to a new engine.  The engine resets
 `g_sampling` to its process defaults before applying them, so a penalty on one

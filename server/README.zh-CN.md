@@ -19,6 +19,12 @@ cd server
 python3 server.py --host 127.0.0.1 --port 8000
 ```
 
+以 `{` 开头的一行是**控制行**而不是请求（请求第一列是 base64 的 prompt，base64 没有 `{`）。
+目前只支持一个操作：`{"op":"load","model":"..."}`，它不重建 EGL 上下文与已编译程序地换模型
+（板上省下 4.23 s 上下文 + 1.89 s 程序链接，代价是 6.12 s 读容器 + 2.99 s 上载，见
+`docs/performance.md`）。回复一个 `loaded` 事件（含 `load_ms`）或一个 `error` 事件；容器读不出来
+时进程直接退出，滚动前缀缓存随模型一起丢弃。验收见 `engine/scripts/swap_matrix.py`。
+
 默认：
 
 - engine：`../engine/engine_mm3`
