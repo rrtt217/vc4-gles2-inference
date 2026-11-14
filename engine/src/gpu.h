@@ -228,8 +228,8 @@ private:
     GLuint x_i4_add_pair(int rows, int cols, XFormat xf, bool fmt4 = false);
     GLuint x_i16(int rows, int cols);
     GLuint x_i16_add(int rows, int cols, XFormat xf);
-    GLuint x_i4(int rows, int cols);
-    GLuint x_i4_add(int rows, int cols, XFormat xf);
+    GLuint x_i4(int rows, int cols, bool fmt4 = false);
+    GLuint x_i4_add(int rows, int cols, XFormat xf, bool fmt4 = false);
     GLuint x_swiglu_pair(int hidden, int hs = 0);
     GLuint x_swiglu_2row(int hidden, int hs = 0);
     GLuint x_swiglu(int hidden, bool fused, int hs = 0);

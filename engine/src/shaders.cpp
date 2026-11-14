@@ -1284,6 +1284,63 @@ string matvec_i4_pair_swiglu_4x4(int rows, int cols, XFormat xf, bool inl, int h
 }
 
 
+// Q4_FMT=rgba4 for qkv (one row a fragment) and wo (residual add).  Same
+// transformation as the gate: two 4-bit texels per eight weights, no decode,
+// the group scale folded into two constants, nibbles reversed at upload.
+string matvec_i4_4x4(int rows, int cols, XFormat xf, bool inl) {
+    need_shape("matvec_i4_4x4", rows, cols, 32);
+    const int texw = cols / 4;
+    const int groups = (cols + 31) / 32;
+    const string ROWS = to_string(rows), GROUPS = to_string(groups), TEXW = to_string(texw);
+    const bool nom = q4_nomin();
+    const string MA = nom ? "" : "+mn*xsum";
+    return q4_head(xf, inl) + q24_helpers() +
+        "uniform sampler2D W,P,X;uniform float ps;"
+        "void main(){int r=int(gl_FragCoord.x);float s=0.0;"
+        "float vr=(float(r)+0.5)/float(" + ROWS + "),itw=1.0/float(" + TEXW + ");"
+        "for(int g=0;g<" + GROUPS + ";g++){"
+        "vec4 p=texture2D(P,vec2((float(g)+0.5)/float(" + GROUPS + "),vr));"
+        "float u=65280.0*15.0*ps,v=255.0*15.0*ps;"
+        "float sc=p.r*u+p.g*v,mn=x_i16raw(p.ba)*ps;"
+        "float xsum=0.0,d=0.0;"
+        "for(int t=0;t<4;t++){int c=g*32+t*8;" +
+        q4_act(xf, cols, inl) + q4_xsum() +
+        "float c0=(float(g*8+t*2)+0.5)*itw,c1=c0+itw;"
+        "vec4 w0=texture2D(W,vec2(c0,vr)),w1=texture2D(W,vec2(c1,vr));"
+        "d+=dot(w0,xa)+dot(w1,xb);}"
+        "s+=sc*d" + MA + ";}"
+        "gl_FragColor=x_i24encq(s);}";
+}
+
+string matvec_i4_add_4x4(int rows, int cols, XFormat xf, XFormat rf) {
+    need_shape("matvec_i4_add_4x4", rows, cols, 32);
+    const int texw = cols / 4;
+    const int groups = (cols + 31) / 32;
+    const int axw = x_texels(cols, xf);
+    const string ROWS = to_string(rows), GROUPS = to_string(groups), TEXW = to_string(texw);
+    const bool nom = q4_nomin();
+    const string MA = nom ? "" : "+mn*xsum";
+    return head(xf) + x_residual_glsl(rf) +
+        "uniform sampler2D W,P,X,R;uniform float ps;"
+        "void main(){int r=int(gl_FragCoord.x);float s=0.0;"
+        "float vr=(float(r)+0.5)/float(" + ROWS + "),itw=1.0/float(" + TEXW + ");"
+        "for(int g=0;g<" + GROUPS + ";g++){"
+        "vec4 p=texture2D(P,vec2((float(g)+0.5)/float(" + GROUPS + "),vr));"
+        "float u=65280.0*15.0*ps,v=255.0*15.0*ps;"
+        "float sc=p.r*u+p.g*v,mn=x_i16raw(p.ba)*ps;"
+        "float xsum=0.0,d=0.0;"
+        "for(int t=0;t<4;t++){int c=g*32+t*8;"
+        "vec4 xa=X4Q(X,c," + to_string(axw) + ".0);"
+        "vec4 xb=X4Q(X,c+4," + to_string(axw) + ".0);"
+        + q4_xsum() +
+        "float c0=(float(g*8+t*2)+0.5)*itw,c1=c0+itw;"
+        "vec4 w0=texture2D(W,vec2(c0,vr)),w1=texture2D(W,vec2(c1,vr));"
+        "d+=dot(w0,xa)+dot(w1,xb);}"
+        "s+=sc*d" + MA + ";}"
+        "float res=R1Q(R,r," + to_string(x_texels(rows, rf)) + ".0);"
+        "gl_FragColor=XST1Q(s+res);}";
+}
+
 string matvec_i4_add(int rows, int cols, XFormat xf, XFormat rf) {
     need_shape("matvec_i4_add", rows, cols, 32);
     const int texw = cols / 8;

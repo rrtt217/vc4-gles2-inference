@@ -51,6 +51,8 @@ std::string matvec_i4(int rows, int cols, XFormat xf, bool inl = true);
 // per fragment, per-row scale plane when `wrow`.
 std::string matvec_i6(int rows, int cols, XFormat xf, bool wrow);
 std::string matvec_i4_add(int rows, int cols, XFormat xf, XFormat rf);
+std::string matvec_i4_4x4(int rows, int cols, XFormat xf, bool inl = true);
+std::string matvec_i4_add_4x4(int rows, int cols, XFormat xf, XFormat rf);
 std::string matvec_i4_pair(int rows, int cols, XFormat xf);
 std::string matvec_i4_pair_swiglu(int rows, int cols, XFormat xf, bool inl = true, int hs = 0);
 // Q4_FMT=rgba4: the same gate with the weights bound as 4-bit texels, four per

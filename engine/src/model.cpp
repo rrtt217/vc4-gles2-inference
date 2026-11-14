@@ -205,6 +205,7 @@ void Model::apply_q4_fmt(){
         for (int l = 0; l < layers; ++l) {
                 mark(w1a[l]); mark(w1b[l]); mark(w3a[l]); mark(w3b[l]);
                 mark(w2a[l]); mark(w2b[l]);
+                mark(qkv[l]); mark(wo[l]);
                 mark(w1[l]); mark(w3[l]);          // unchunked models keep them whole
         }
 }

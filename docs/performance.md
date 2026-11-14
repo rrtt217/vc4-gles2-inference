@@ -6005,3 +6005,23 @@ the complete removal of everything that distinguishes a q4 kernel from a q8
 one** -- same weight-texel count, same four-lane dots, fewer activation
 fetches.  That is below the resolution of the arms available here, and the
 honest state is that the q4/q8 gap is not explained.
+
+### 2026-11-15, later — the 4-bit view on all four matvecs
+
+`qkv` and `wo` join the gate and w2 (`matvec_i4_4x4`, `matvec_i4_add_4x4`), so
+every q4 matrix in the dense model is bound as 4-bit texels with no decode.
+
+Board, load 0.16, minimind3 q4, 16 greedy tokens, three interleaved pairs:
+
+    all four 4-bit   252.9 / 252.9
+    packed           286.1 / 305.3      -14.5%
+
+against the packed kernel, and -5% on top of the gate+w2 step (266.2).  The q4
+token is 252.9 against q8's ~190, i.e. **1.33x**, down from 1.45x.
+
+**PPL moved out of tolerance**: q4 PPL 330.5302 -> 326.1134 (-1.34%).  Every
+tap is now n/15 with the 15 folded into the group scale, and the four-term dot
+sums in a different order, so a sub-percent move was expected -- 1.34% is past
+the 1% the gate enforces, so `Q4_PPL_EXPECT` has to be re-baselined to 326.1134
+on Xe (and the board's row re-measured) in the same commit that adopts it.  The
+pinned strings did not move on either machine, and the suite is ACCEPT.

@@ -235,7 +235,7 @@ void GPU::matvec_add(const Mat& m, GLuint x, GLuint residual, Target& out, XForm
         GLuint p = pair4 ? x_i4_add_pair(m.rows, m.cols, xf, m.fmt4)
                   : pair ? x_q8_add_pair(m.rows, m.cols, xf, wr)
                   : (m.type == WeightType::INT8) ? x_q8_add(m.rows, m.cols, xf, wr)
-                  : (m.type == WeightType::INT4) ? x_i4_add(m.rows, m.cols, xf)
+                  : (m.type == WeightType::INT4) ? x_i4_add(m.rows, m.cols, xf, m.fmt4)
                                                  : x_i16_add(m.rows, m.cols, xf);
         bind_fbo(out.fbo);
         use_program(p);
@@ -490,15 +490,19 @@ GLuint GPU::x_i16_add(int rows, int cols, XFormat xf){
                       matvec_i16_add(rows, cols, xf, res_fmt_));
     }
 
-GLuint GPU::x_i4(int rows, int cols){
+GLuint GPU::x_i4(int rows, int cols, bool fmt4){
         const bool inl = q4_inline("qkv");
-        return x_prog("xi4_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(act_fmt_) + (inl ? "" : "_gen"),
-                      matvec_i4(rows, cols, act_fmt_, inl));
+        return x_prog(string(fmt4 ? "xi44_" : "xi4_") + to_string(rows) + "_" + to_string(cols) + "_" +
+                          x_format_name(act_fmt_) + (inl ? "" : "_gen"),
+                      fmt4 ? matvec_i4_4x4(rows, cols, act_fmt_, inl)
+                           : matvec_i4(rows, cols, act_fmt_, inl));
     }
 
-GLuint GPU::x_i4_add(int rows, int cols, XFormat xf){
-        return x_prog("xi4a_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(xf) + "_" + x_format_name(res_fmt_),
-                      matvec_i4_add(rows, cols, xf, res_fmt_));
+GLuint GPU::x_i4_add(int rows, int cols, XFormat xf, bool fmt4){
+        return x_prog(string(fmt4 ? "xi4a4_" : "xi4a_") + to_string(rows) + "_" + to_string(cols) + "_" +
+                          x_format_name(xf) + "_" + x_format_name(res_fmt_),
+                      fmt4 ? matvec_i4_add_4x4(rows, cols, xf, res_fmt_)
+                           : matvec_i4_add(rows, cols, xf, res_fmt_));
     }
 
 GLuint GPU::x_swiglu_pair(int hidden, int hs){
