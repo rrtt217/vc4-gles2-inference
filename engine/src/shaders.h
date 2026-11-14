@@ -53,6 +53,10 @@ std::string matvec_i6(int rows, int cols, XFormat xf, bool wrow);
 std::string matvec_i4_add(int rows, int cols, XFormat xf, XFormat rf);
 std::string matvec_i4_pair(int rows, int cols, XFormat xf);
 std::string matvec_i4_pair_swiglu(int rows, int cols, XFormat xf, bool inl = true, int hs = 0);
+// Q4_FMT=rgba4: the same gate with the weights bound as 4-bit texels, four per
+// texel and zero decode.  A separate builder so the packed text (and its
+// shader hash) cannot move.
+std::string matvec_i4_pair_swiglu_4x4(int rows, int cols, XFormat xf, bool inl = true, int hs = 0);
 std::string matvec_i4_add_pair(int rows, int cols, XFormat xf, bool inl = true);
 
 // `hs` is the container's per-layer FFN-hidden scale exponent (metadata key

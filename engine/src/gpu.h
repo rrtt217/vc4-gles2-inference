@@ -222,7 +222,7 @@ private:
     GLuint x_p2_split(int rows);
     GLuint x_q8_pair_fused(int rows, int cols, bool wrow = false);
     GLuint x_i4_pair(int rows, int cols);
-    GLuint x_i4_pair_swiglu(int rows, int cols, int hs = 0);
+    GLuint x_i4_pair_swiglu(int rows, int cols, int hs = 0, bool fmt4 = false);
     GLuint x_q8_add(int rows, int cols, XFormat xf, bool wrow = false);
     GLuint x_q8_add_pair(int rows, int cols, XFormat xf, bool wrow = false);
     GLuint x_i4_add_pair(int rows, int cols, XFormat xf);
@@ -348,6 +348,11 @@ private:
     void check_program_runs(GLuint p, const string& key);
 
     static GLuint make_texture(int w, int h, const void* data);
+    // INT4 matrices as 4-bit texels (Q4_FMT=rgba4): same bytes, twice the
+    // width, four weights per texel.  Measured on the board 2026-11-14:
+    // accepted, exact, and the sample lands in reverse column order (GL packs
+    // R into the most significant nibble).
+    static GLuint make_q4_texture(int w, int h, const void* data);
 
     static GLuint make_q24_texture(const vector<float>& x, float scale);
 

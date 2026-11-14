@@ -440,10 +440,13 @@ GLuint GPU::x_i4_pair(int rows, int cols){
         return p;
     }
 
-GLuint GPU::x_i4_pair_swiglu(int rows, int cols, int hs){
+GLuint GPU::x_i4_pair_swiglu(int rows, int cols, int hs, bool fmt4){
         const bool inl = q4_inline("gate");
-        return x_prog("xi4ps_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(act_fmt_) + (inl ? "" : "_gen") +
-                      (hs ? "_h" + to_string(hs) : ""),
+        const string tail = string(inl ? "" : "_gen") + (hs ? "_h" + to_string(hs) : "");
+        if (fmt4)
+                return x_prog("xi4ps4_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(act_fmt_) + tail,
+                              matvec_i4_pair_swiglu_4x4(rows, cols, act_fmt_, inl, hs));
+        return x_prog("xi4ps_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(act_fmt_) + tail,
                       matvec_i4_pair_swiglu(rows, cols, act_fmt_, inl, hs));
     }
 

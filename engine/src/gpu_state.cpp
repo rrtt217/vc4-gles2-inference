@@ -187,6 +187,24 @@ GLuint GPU::make_texture(int w, int h, const void* data){
         return t;
     }
 
+GLuint GPU::make_q4_texture(int w, int h, const void* data){
+        const double t0 = shader_time_ms();
+        GLuint t = 0; glGenTextures(1, &t); g_scene_tex.push_back(t);
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, t); gl_state_forget_bindings();
+        // A 4-bit texel is two bytes, so a row of w texels is 2w bytes; the
+        // default alignment of 4 only holds when that is a multiple of four.
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4, data);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glFlush(); glFinish();
+        g_up_tex_ms += shader_time_ms() - t0; ++g_up_tex;
+        return t;
+    }
+
 GLuint GPU::make_q24_texture(const vector<float>& x, float scale){
         vector<uint8_t> data((size_t)x.size() * 4);
         for (size_t i = 0; i < x.size(); ++i) {

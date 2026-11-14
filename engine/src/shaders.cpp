@@ -1158,6 +1158,58 @@ string matvec_i4_pair_swiglu(int rows, int cols, XFormat xf, bool inl, int hs) {
         "gl_FragColor=x_st2(v0,v1);}";
 }
 
+// Q4_FMT=rgba4 (default off): the same fused gate with the INT4 matrices bound
+// as 4-bit texels.  Four weights per texel and *no decode at all* -- the
+// sampler returns n/15, the group scale carries the 15, and the four weights of
+// a texel come back in reverse column order, so each texel pairs with
+// `xa.wzyx`.  It exists because the packed gate is 143 ms of a 286 ms q4 token
+// and only ~32 ms of that is the floor chain (Q4_NOUNPACK): the rest is eight
+// scalar taps and an eight-term scalar dot per texel, which is the shape a
+// four-lane texel does not need.
+string matvec_i4_pair_swiglu_4x4(int rows, int cols, XFormat xf, bool inl, int hs) {
+    need_shape("matvec_i4_pair_swiglu_4x4", rows, cols, 32);
+    const string HD = hid_scale_def(hs), HM = hid_scale_mul(hs);
+    const int texw = cols / 4;              // one 4-bit texel = four weights
+    const int groups = (cols + 31) / 32;
+    const string ROWS = to_string(rows), GROUPS = to_string(groups), TEXW = to_string(texw);
+    auto tap = [&](const char* W, const string& col, const char* row) {
+        return string("texture2D(") + W + ",vec2((float(" + col + ")+0.5)/float(" + TEXW +
+               "),(" + row + "+0.5)/float(" + ROWS + ")))";
+    };
+    const string I0 = "2*(g*4+q)", I1 = "2*(g*4+q)+1";
+    return q4_head(xf, inl) + HD +
+        "uniform sampler2D W1,W2,P1,P2,X;uniform float ps1,ps2;" + kQzSl +
+        "void main(){int t=int(gl_FragCoord.x);int r0=2*t;"
+        "int r1=min(r0+1," + to_string(rows - 1) + ");"
+        "float u0=float(r0),u1=float(r1);"
+        "float s10=0.0,s20=0.0,s11=0.0,s21=0.0;"
+        "for(int g=0;g<" + GROUPS + ";g++){"
+        "vec4 q1=texture2D(P1,vec2((float(g)+0.5)/float(" + GROUPS + "),(u0+0.5)/float(" + ROWS + ")));"
+        "vec4 q2=texture2D(P2,vec2((float(g)+0.5)/float(" + GROUPS + "),(u0+0.5)/float(" + ROWS + ")));"
+        "vec4 p1=texture2D(P1,vec2((float(g)+0.5)/float(" + GROUPS + "),(u1+0.5)/float(" + ROWS + ")));"
+        "vec4 p2=texture2D(P2,vec2((float(g)+0.5)/float(" + GROUPS + "),(u1+0.5)/float(" + ROWS + ")));"
+        "float sa1=15.0*x_i16raw(q1.rg)*ps1,ma1=x_i16raw(q1.ba)*ps1;"
+        "float sa2=15.0*x_i16raw(q2.rg)*ps2,ma2=x_i16raw(q2.ba)*ps2;"
+        "float sb1=15.0*x_i16raw(p1.rg)*ps1,mb1=x_i16raw(p1.ba)*ps1;"
+        "float sb2=15.0*x_i16raw(p2.rg)*ps2,mb2=x_i16raw(p2.ba)*ps2;"
+        "float xsum=0.0,d1=0.0,d2=0.0,e1=0.0,e2=0.0;"
+        "for(int q=0;q<4;q++){int c=g*32+q*8;" +
+        q4_act(xf, cols, inl) + q4_xsum() +
+        "vec4 wt0=" + tap("W1", I0, "u0") + ",wt1=" + tap("W1", I1, "u0") + ";"
+        "vec4 wt2=" + tap("W2", I0, "u0") + ",wt3=" + tap("W2", I1, "u0") + ";"
+        "vec4 wt4=" + tap("W1", I0, "u1") + ",wt5=" + tap("W1", I1, "u1") + ";"
+        "vec4 wt6=" + tap("W2", I0, "u1") + ",wt7=" + tap("W2", I1, "u1") + ";"
+        "d1+=dot(wt0,xa.wzyx)+dot(wt1,xb.wzyx);"
+        "d2+=dot(wt2,xa.wzyx)+dot(wt3,xb.wzyx);"
+        "e1+=dot(wt4,xa.wzyx)+dot(wt5,xb.wzyx);"
+        "e2+=dot(wt6,xa.wzyx)+dot(wt7,xb.wzyx);}"
+        "s10+=sa1*d1+ma1*xsum;s20+=sa2*d2+ma2*xsum;"
+        "s11+=sb1*e1+mb1*xsum;s21+=sb2*e2+mb2*xsum;}"
+        "float v0=sl(qz(s10),qz(s20))" + HM + ";"
+        "float v1=(r0+1<" + ROWS + ")?sl(qz(s11),qz(s21))" + HM + ":0.0;"
+        "gl_FragColor=x_st2(v0,v1);}";
+}
+
 
 string matvec_i4_add(int rows, int cols, XFormat xf, XFormat rf) {
     need_shape("matvec_i4_add", rows, cols, 32);

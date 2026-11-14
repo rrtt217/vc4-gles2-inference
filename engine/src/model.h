@@ -145,6 +145,10 @@ public:
 
 
     void split_ffn(int max_dim);
+        // Q4_FMT=rgba4 probe: bind the FFN gate matrices as 4-bit texels (see
+        // matvec_i4_pair_swiglu_4x4).  Must run after split_ffn and before the
+        // upload; leaves every other INT4 matrix on the packed view.
+        void apply_q4_fmt();
 
     static bool quantize_q4(Mat& m);
 

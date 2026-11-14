@@ -105,7 +105,8 @@ void GPU::upload(Mat& m){
             const uint8_t* src4 = m.w4();
             const int16_t* s4 = m.s4();
             const int16_t* mn4 = m.m4();
-            m.tex = make_texture((m.cols + 7) / 8, m.rows, src4);
+            m.tex = m.fmt4 ? make_q4_texture(m.cols / 4, m.rows, src4)
+                           : make_texture((m.cols + 7) / 8, m.rows, src4);
             vector<uint8_t> pd((size_t)m.rows * m.groups * 4);
             for (int r = 0; r < m.rows; ++r) {
                 for (int g = 0; g < m.groups; ++g) {
@@ -293,7 +294,7 @@ void GPU::p2_split(GLuint xp2, Target& out, int which){
 GLuint GPU::ffn_pair_i4_swiglu_chunk(const Mat& w1, const Mat& w3, GLuint x, int rows, Target& out, int hs){
         const int aw = x_texels(rows, ffn_fmt_);
         if (out.tex == 0 || out.w != aw) out = make_target(aw, 1);
-        GLuint p = x_i4_pair_swiglu(rows, w1.cols, hs);
+        GLuint p = x_i4_pair_swiglu(rows, w1.cols, hs, w1.fmt4);
         bind_fbo(out.fbo);
         glViewport(0, 0, aw, 1);
         use_program(p);

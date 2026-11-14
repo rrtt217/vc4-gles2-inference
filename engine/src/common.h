@@ -71,6 +71,10 @@ struct Mat {
     // MMCF q8u8 tensors carry the +128 bias already applied, so the upload
     // copies the bytes to the texture instead of flipping the sign bit.
     bool prebiased = false;
+    // Default-off probe (Q4_FMT=rgba4): bind an INT4 matrix as GL_RGBA4 at
+    // twice the width, so one texel is four weights and the kernel decodes
+    // nothing.  The bytes are the container's own; only the view changes.
+    bool fmt4 = false;
 };
 
 struct Target {

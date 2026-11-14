@@ -15,6 +15,7 @@ void App::prepare_model() {
     if (getenv("Q8_PARTS"))
         model.apply_precision(getenv("Q8_LAYERS") ? getenv("Q8_LAYERS") : "", getenv("Q8_PARTS"));
     model.split_ffn(gpu.max_target_dim());
+    model.apply_q4_fmt();          // Q4_FMT=rgba4: gate matrices as 4-bit texels
     model.apply_hidden_scale();
     if (getenv("SHADER_TIME")) fprintf(stderr, "STARTUP %7.1f ms  ffn split\n", run_time_ms());
     if (getenv("Q4_WEIGHTS"))

@@ -160,6 +160,14 @@ binary.  They are measurement hooks, not production settings.
 - `Q4_SHIFT=0` — force the float nibble decode instead of the ESSL 3.00 shift
   decode (`Q4_SHIFT_NO_MESA`, `Q4_SHIFT_VERBOSE` are VC4-specific overrides).
   `gpu_q4_shift()` reports the choice at startup.
+- `Q4_FMT=rgba4` — bind the FFN gate's INT4 matrices as `GL_RGBA4` at twice the
+  width (four weights per texel, sampled as n/15, with 15 folded into the group
+  scale) instead of packed nibbles.  Zero decode in the kernel; the bytes are
+  the container's own, so no re-packing.  Default off, gate kernel only —
+  `matvec_i4_pair_swiglu_4x4`, a separate builder so the packed text and its
+  shader hash cannot move.  Not bit-exact: `15*(n/15)` is not exactly `n`, so
+  logits move by ~1 ULP even where the sampler is exact (Xe), and the greedy
+  string is the tripwire.
 - `KV_SCALE=N` — KV fixed-point scale (default 16384; q16 uses 2048, q8 uses 16).
 - `KV_PACK=16|8` — packed KV layout: two int16 per RGBA8 texel (width 384) or
   four int8 (width 192), instead of one 24-bit value (width 768).  A hybrid

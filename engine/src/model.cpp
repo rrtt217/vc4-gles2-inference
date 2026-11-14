@@ -163,6 +163,25 @@ void Model::split_ffn(int max_dim){
         w1.clear(); w3.clear(); w2.clear();
     }
 
+void Model::apply_q4_fmt(){
+        const char* v = getenv("Q4_FMT");
+        if (!v || strcmp(v, "rgba4") != 0) return;
+        auto mark = [](Mat& m) {
+                if (m.rows > 0 && m.type == WeightType::INT4) m.fmt4 = true;
+        };
+        if (is_moe()) {
+                for (auto& layer : moe)
+                        for (auto& e : layer) {
+                                mark(e.w1a); mark(e.w1b); mark(e.w3a); mark(e.w3b);
+                        }
+                return;
+        }
+        for (int l = 0; l < layers; ++l) {
+                mark(w1a[l]); mark(w1b[l]); mark(w3a[l]); mark(w3b[l]);
+                mark(w1[l]); mark(w3[l]);          // unchunked models keep them whole
+        }
+}
+
 // Metadata key 15: the SwiGLU hidden is written *2^-k by the FFN kernels, so
 // every w2 (and its chunks, after split_ffn) has to read back *2^k.  For a
 // power of two this is exact in float32 and costs one multiply here, with no
