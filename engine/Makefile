@@ -196,6 +196,13 @@ probes/packunpack_probe_pi: probes/packunpack_probe.cpp | check-cross
 probes/q4mv_probe_pi: probes/q4mv_probe.cpp $(SRC)/gpu.cpp $(SRC)/shaders.cpp $(SRC)/shaders_attn.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp | check-cross
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -I$(SRC) -o $@ $^ $(CROSS_LDLIBS)
 
+# Native build of the same probe: the q4 decode A/B (Q4_NOUNPACK, Q4_BFAST,
+# Q4_SHIFT=0) is a per-texel difference of a few ALU ops, and a whole-token
+# decode average on Xe is too noisy to resolve it (15/23/44 ms/token for the
+# same arm in one session), so the kernel needs its own instrument.
+probes/q4mv_probe: probes/q4mv_probe.cpp $(SRC)/gpu.cpp $(SRC)/shaders.cpp $(SRC)/shaders_attn.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp
+	$(CXX) $(CXXFLAGS) -I$(SRC) -o $@ $^ $(LDLIBS)
+
 # Prices a draw, an rmsnorm and the q8 matvec shapes on the real driver
 # (WORKLOG item 7: the cost model behind prefill batching).
 probes/draw_probe_pi: probes/draw_probe.cpp $(SRC)/gpu.cpp $(SRC)/shaders.cpp $(SRC)/shaders_attn.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp | check-cross

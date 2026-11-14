@@ -89,17 +89,24 @@ int main() {
             Target out;
             for (int i = 0; i < 2; ++i) gpu.ffn_pair_i4_swiglu_chunk(w1, w3, xt, rows, out);
             glFinish();
-            const int iters = 20, frags = (rows + 1) / 2;
+            // 20 iterations is 2 ms on Xe, where the same draw is 0.1 ms, so the
+            // arm-to-arm noise swamps the decode difference the probe exists to
+            // price.  Q4MV_ITERS raises the pipelined loop (the latency loop
+            // stays short: it pays a glFinish per draw and is not the ALU
+            // instrument).
+            const char* ie = getenv("Q4MV_ITERS");
+            const int iters = ie ? atoi(ie) : 20, liters = iters < 50 ? iters : 50;
+            const int frags = (rows + 1) / 2;
             Clock::time_point t0 = Clock::now();
             for (int i = 0; i < iters; ++i) gpu.ffn_pair_i4_swiglu_chunk(w1, w3, xt, rows, out);
             glFinish();
             const double thr = elapsed_ms(t0, Clock::now()) / iters;
             t0 = Clock::now();
-            for (int i = 0; i < iters; ++i) {
+            for (int i = 0; i < liters; ++i) {
                 gpu.ffn_pair_i4_swiglu_chunk(w1, w3, xt, rows, out);
                 glFinish();
             }
-            const double lat = elapsed_ms(t0, Clock::now()) / iters;
+            const double lat = elapsed_ms(t0, Clock::now()) / liters;
             vector<uint8_t> b = gpu.read_bytes(out, frags, 1);
             unsigned h = 2166136261u;
             size_t nz = 0;

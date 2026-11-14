@@ -5616,3 +5616,98 @@ Two older sections in this file still call the top table "the current matrix
 above" (the 2026-11-01 and 2026-11-02 reports, written when it was the newest
 build).  That table is history; the pointer at the top of this file and the
 2026-11-13 campaign are the authority.
+
+## 2026-11-13 — can q4 skip the nibble unpack?  Xe cannot answer it
+
+The question was whether a q4 weight can reach the ALU without a nibble
+decode.  Nothing in this file changes the answer measured on VC4 (2026-11-04/
+05): exactness needs a floor, floor is the cost, the split-plane format was
+built and lost 12%.  What this entry adds is that **the host GPU is the wrong
+instrument for the question, and the whole-token protocol cannot be used for
+it** — measured, not assumed, while the board was down.
+
+`probes/q4mv_probe` now builds natively (new `probes/q4mv_probe` target; only
+the `_pi` recipe existed) and takes `Q4MV_ITERS` for the pipelined loop.  Its
+default 20 iterations is 2 ms on Xe, where a 1216-row gate draw is 0.045 ms,
+so the arm-to-arm noise swamps the difference the probe exists to price.
+2000 iterations, min of six runs, `minimind3.q4` shapes:
+
+| arm | 1216-row gate draw, ms | vs default |
+|---|---:|---:|
+| default (ESSL 3.00 shift decode) | 0.044-0.046 | |
+| `Q4_NOUNPACK=1` (whole unpack removed, wrong weights) | 0.038-0.047 | ~-16% |
+| `Q4_SHIFT=0` (float decode) | 0.047-0.060 | +4-30% |
+| `Q4_BFAST=1` (byte floor dropped, wrong weights) | 0.054-0.154 | unusable |
+
+Three things follow.
+
+1. **The unpack is ~1% of a Xe token.**  The gate draw is about 5% of the
+   15.26 ms/token decode (15.26 = prefill-free, 32 greedy tokens, `SEQ=768`),
+   and removing *all* of the unpack moves that draw by 16%.  A 1% effect is
+   below the token-level noise, so no amount of token runs will price this on
+   Xe.  The same A/B on one binary in one session gave 15.1 / 23.3 / 44.6
+   ms/token for the *default* arm: that spread is the protocol failing, not the
+   machine.
+2. **`Q4_SHIFT` is a VC4 win only.**  On Xe the float decode is not slower than
+   the shift decode (both ~0.045 ms).  The shift decode's 32 ms of gate on the
+   Pi was a VC4 measurement and does not generalise.
+3. **Wrong-weight arms are not stable everywhere.**  `Q4_BFAST` and
+   `Q4_NOUNPACK` feed garbage into `matvec_i4_pair_swiglu`'s swiglu, whose
+   result goes through `exp`/divide, so the arm's timing depends on the
+   nonlinearity's input range: 0.054 to 0.154 ms for the same kernel.  The
+   default arm is stable to 2% in the same session.  The 2026-11-04 VC4 numbers
+   for these arms were stable across three interleaved runs each, so they stand
+   as measured — but the probe is only valid on a driver where it was validated,
+   and an arm that changes the arithmetic needs its own stability check before
+   its number is quoted.
+
+**A design note for when the board returns.**  The reverted `Q4_SPLIT`
+(9c91a68) repacked the nibbles on the CPU into hi/lo RGBA4 planes before
+upload.  That is not necessary: the same bytes bound as `GL_RGBA4` at **twice
+the width** are already 4 weights per texel.  The packer writes even columns in
+the low nibble and odd columns in the high one (`mmcf_hf.py:77`,
+`q[:, 0::2] | (q[:, 1::2] << 4)`), and `GL_UNSIGNED_SHORT_4_4_4_4` puts R in the
+**most** significant nibble — measured on Xe, not read off the spec: texels
+`(R=t, G=15-t, B=2t, A=t+7)` come back with shader `.r` = the bits 12-15 field.
+So texel `2q` is `(w[c+3], w[c+2], w[c+1], w[c])`, i.e. the four weights in
+**reverse** column order.  That costs one `.wzyx` on the sample (or the same
+swizzle on `xa`) and nothing else, so the format still costs two fetches per
+eight weights, zero ALU, zero repack, and **every existing q4 container works
+unchanged** — only the tap values change, from `n` to `n/15`, so the pins move
+and the containers do not.
+
+That is strictly cheaper than what 9c91a68 built (which also paid eight mads
+re-folding `c*15`), and it is the arm worth pricing: `Q4_PLANE` on the Pi, not
+another decode variant on Xe.  Expected from the 2026-11-04 split: one extra
+fetch ≈ +13%, removing the floors ≈ -34%, net ≈ -21% of q4 decode, which is why
+it is still worth a measurement.
+
+Two VC4 constraints the format has to clear, both from the driver source:
+
+* **Not renderable.**  `vc4_formats.c:94` has
+  `FORMAT(B4G4R4A4_UNORM, NO, RGBA4444, SWIZ(Y, Z, W, X))`: the TMU has an
+  `RGBA4444` texture type, but the render-target column is `NO` (vc4 renders to
+  RGBA8888 and RGB565 only).  A `GL_RGBA4` *renderbuffer* is therefore
+  unsupported — that is `probes/progbinary_probe.cpp:135`, a different question
+  from sampling one.
+* **Tiled only.**  `vc4_resource.c:get_resource_texture_format()` returns `~0`
+  (unsupported) for any non-RGBA8888 format on a **linear** resource; 4444 is
+  only sampleable from a T-tiled buffer.  `glTexImage2D` textures are tiled by
+  default, which is why the 2026-11-04 split worked, but any path that forces a
+  linear texture drops this format silently.
+
+The third piece of evidence is the board's own probe output: the 2026-11-04
+entry above records `c*15` as one ULP **below** `v` for v = 9..14, and an
+incomplete texture would have returned `-128`, not `-1`.  That evidence is not
+airtight — `q4fmt_probe` checks no GL error, and it asks for `GL_RGBA4` as an
+*internalformat*, which is ES3-only (the ES2 spelling is `GL_RGBA` +
+`GL_UNSIGNED_SHORT_4_4_4_4`), so on an ES2 context the upload may have been
+refused rather than accepted.  If the format turns out to be refused on the
+board, this design note is dead and the answer to the question above closes as
+"no path at all".
+
+```
+make -C engine -B probes/q4mv_probe_pi CROSS_SYSROOT=<sysroot>
+Q4MV_ITERS=2000 ./q4mv_probe_pi                      # default arm
+Q4MV_ITERS=2000 Q4_NOUNPACK=1 ./q4mv_probe_pi        # ceiling, wrong weights
+```
