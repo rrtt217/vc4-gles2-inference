@@ -424,10 +424,10 @@ bool Model::parse_header() {
     return true;
 }
 
-bool Model::load_mmcf(){
+bool Model::parse_metadata() {
     if (!parse_header()) return false;
         bool have_model = false, have_rope = false, have_quant = false;
-    int group = 0, split = 0;
+    int group = 0, split = 0;   // published as quant_group_/quant_split_
     for (uint64_t p = meta_off_; p + 8 <= (uint64_t)meta_off_ + meta_size_; ) {
                 const uint16_t key = rd16(fbase_ + p), type = rd16(fbase_ + p + 2);
                 const uint32_t len = rd32(fbase_ + p + 4);
@@ -513,7 +513,9 @@ bool Model::load_mmcf(){
                 }
                 p += 8 + len;
         }
-        if (!have_model) { cerr << "mmcf: no model metadata\n"; return false; }
+        quant_group_ = group;
+    quant_split_ = split != 0;
+    if (!have_model) { cerr << "mmcf: no model metadata\n"; return false; }
         if (!have_rope) rope_theta = 10000.0f;
         if (!have_quant) { cerr << "mmcf: no quant metadata\n"; return false; }
         if (getenv("SEQ")) seq = atoi(getenv("SEQ"));
@@ -544,6 +546,10 @@ bool Model::load_mmcf(){
         }
         (void)caps_;
 
+    return true;
+}
+
+bool Model::read_tables() {
         // One pass over the table, creating whatever the model needs.  Unknown
         // ids are ignored: that is what lets a future writer add tensors.
         vector<MmcfRec> recs;
@@ -582,7 +588,7 @@ bool Model::load_mmcf(){
                 else { m.q8.assign(p, p + (size_t)r.rows * r.cols); }
         };
 
-        // q4 matrices arrive as three tensors (nibbles, group scale, group min)
+        // q4 matrices arrive as three tensors (nibbles, quant_group_ scale, quant_group_ min)
         // sharing one id with `part` in the top two bits.  `aux` (the expert) is
         // part of the key: without it four experts would resolve to one Mat.
         struct Q4Parts { const MmcfRec* body = nullptr; const MmcfRec* scl = nullptr; const MmcfRec* mn = nullptr; };
@@ -603,7 +609,7 @@ bool Model::load_mmcf(){
         layers_qkv.resize(layers); layers_wo.resize(layers); layers_w2.resize(layers);
         layers_conv_in.resize(layers); layers_conv_out.resize(layers);
         layers_conv_w.resize(layers);
-        if (split) { layers_w1.resize(layers); layers_w3.resize(layers); }
+        if (quant_split_) { layers_w1.resize(layers); layers_w3.resize(layers); }
         else layers_w13.resize(layers);
         vector<Mat> layers_router;
         vector<vector<MoeExpert>> layers_moe;
@@ -767,10 +773,10 @@ bool Model::load_mmcf(){
                              << " expert " << expert << " does not match its matrix\n";
                         return false;
                 }
-                // A fused W13 (id 0x14, split=0) is the one matrix whose two
+                // A fused W13 (id 0x14, quant_split_=0) is the one matrix whose two
                 // rows per fragment sit rows apart, so its plane is paired the
                 // way the kernel reads it.
-                m->row_scale_hi = (kind == 0x14 && !split);
+                m->row_scale_hi = (kind == 0x14 && !quant_split_);
                 const float* p = (const float*)(fbase_ + data_off_ + r.off);
                 m->row_scale.assign(p, p + r.rows);
         }
@@ -831,7 +837,7 @@ bool Model::load_mmcf(){
                         else e.w2 = m;
                         continue;
                 }
-                // only the vector that exists for this file's `split` flag is
+                // only the vector that exists for this file's `quant_split_` flag is
                 // sized, so index by its own size (an empty vector would be UB)
                 if (kind == 0x10 && layer < (int)layers_qkv.size()) layers_qkv[layer] = m;
                 else if (kind == 0x11 && layer < (int)layers_wo.size()) layers_wo[layer] = m;
@@ -871,7 +877,7 @@ bool Model::load_mmcf(){
                              << "weight, which the runtime does not apply\n";
                         return false;
                 }
-                if (!split) {
+                if (!quant_split_) {
                         cerr << "mmcf: MoE container with a fused W13; expert FFNs are "
                              << "w1/w3/w2\n";
                         return false;
@@ -922,7 +928,7 @@ bool Model::load_mmcf(){
         for (int l = 0; l < layers; ++l) {
                 qkv.push_back(layers_qkv[l]);
                 wo.push_back(layers_wo[l]);
-                if (split) { w1.push_back(layers_w1[l]); w3.push_back(layers_w3[l]); }
+                if (quant_split_) { w1.push_back(layers_w1[l]); w3.push_back(layers_w3[l]); }
                 else w13.push_back(layers_w13[l]);
                 w2.push_back(layers_w2[l]);
         }
@@ -967,7 +973,7 @@ bool Model::load_mmcf(){
                 cerr << "MMCF dim=" << dim << " layers=" << layers << " hidden=" << hidden
                      << " heads=" << heads << " kv=" << kv_heads << " vocab=" << vocab
                      << " seq=" << seq << " theta=" << rope_theta << " half=" << rope_half
-                     << " qknorm=" << qk_norm << " split=" << split
+                     << " qknorm=" << qk_norm << " quant_split_=" << quant_split_
                      << " experts=" << experts << " top_k=" << top_k
                      << " moe_hidden=" << moe_hidden << "\n";
                 cerr << "MMCF qkv[0]=" << qkv[0].rows << "x" << qkv[0].cols << " scale=" << qkv[0].scale
@@ -1056,8 +1062,14 @@ bool Model::load_mmcf(){
                         return false;
                 }
         }
-        (void)group;
+        (void)quant_group_;
         return true;
+}
+
+bool Model::load_mmcf(){
+    if (!parse_header()) return false;
+    if (!parse_metadata()) return false;
+    return read_tables();
     }
 
 Mat Model::slice_rows(const Mat& src, int r0, int r1){

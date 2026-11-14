@@ -130,6 +130,8 @@ public:
     // the members below, `load_mmcf` then walks the metadata and the tensor table.
     // Pure host code: none of this needs a GL context.
     bool parse_header();
+    bool parse_metadata();
+    bool read_tables();
     bool load_mmcf();
     ~Model();
     // Drop the mapping once every weight is on the GPU.  The pages stay in the
@@ -165,6 +167,8 @@ private:
     int rec_size_ = 0;
     uint32_t n_tensors_ = 0, caps_ = 0, meta_off_ = 0, meta_size_ = 0;
     uint64_t data_off_ = 0, table_off_ = 0;
+    int quant_group_ = 0;    // metadata key 3: q8 group size
+    bool quant_split_ = false;  // metadata key 3: W13 stored fused
 
     const uint8_t* fbase_ = nullptr;
     size_t fsize_ = 0, fpos_ = 0;
