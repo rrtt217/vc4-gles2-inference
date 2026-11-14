@@ -736,7 +736,10 @@ int main(int argc, char** argv) {
             if (g_stop) break;
             int pos = (int)tokens.size();
             max_new = min(max_new, model.seq - pos);
-    mt19937 rng(opt.seed);
+    // The request's own seed (column 5 of the request line).  It was parsed
+    // and then never used -- `rng` was built from the CLI seed, so the seed the
+    // server sends on every request did nothing; -Wall found it on 2026-11-14.
+    mt19937 rng(seed);
             vector<common_json> lp_rows;   // one per generated token, when asked
             string pending, full, finish = "length";
             int generated = 0;

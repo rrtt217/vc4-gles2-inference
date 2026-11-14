@@ -24,7 +24,6 @@
 #include <vector>
 
 int run_ppl(const std::string& ppl_path, Model& model, GPU& gpu, Tokenizer& tokenizer) {
-if (!ppl_path.empty()) {
     string text;
     if (!read_text_file(ppl_path, text)) { cerr << "cannot read " << ppl_path << "\n"; return 1; }
     // BOS, because this path feeds raw text to the model and no template is
@@ -100,5 +99,4 @@ if (!ppl_path.empty()) {
     printf("PPL %.4f  nll=%.4f  tokens=%ld  windows=%d  span=%d  stride=%d\n",
            exp(nll / cnt), nll / cnt, cnt, windows, span, stride);
     return 0;
-}
 }
