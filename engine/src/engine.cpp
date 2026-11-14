@@ -39,6 +39,7 @@
 #include "xformat.h"
 #include "gpu.h"
 #include "chat_format.h"
+#include "prefix_build.h"
 #include "cli.h"
 #include "ppl.h"
 #include "model.h"
@@ -125,14 +126,6 @@ static long long proc_meminfo_kb(const char* key) {
     while (std::getline(f, line))
         if (line.compare(0, n, key) == 0) return atoll(line.c_str() + n + 1);
     return -1;
-}
-
-// 64-bit FNV-1a: the sidecar's provenance, not a cryptographic hash.  It only has
-// to notice that the system prompt or the tool list changed.
-static uint64_t fnv64(const std::string& s) {
-    uint64_t h = 1469598103934665603ull;
-    for (unsigned char c : s) { h ^= c; h *= 1099511628211ull; }
-    return h;
 }
 
 static std::string g_inbuf;
@@ -448,58 +441,9 @@ int main(int argc, char** argv) {
 
     if (!opt.ppl_path.empty()) return run_ppl(opt.ppl_path, model, gpu, tokenizer);
 
-    if (!opt.build_cache_prompt.empty()) {
-        vector<int> tokens;
-        const bool auto_header = opt.build_cache_prompt == "-" || opt.build_cache_prompt == "auto";
-        uint64_t system_fnv = 0, tools_fnv = 0;
-        if (auto_header) {
-            // Render the header the way a request would: the container's own
-            // template, the system prompt and the tool list.  This is the whole
-            // point of the mode -- the Python builder used to hard-code ChatML,
-            // which is wrong for every other template.
-            if (!chat_tmpl) {
-                cerr << "no chat template in this container; pass a prompt file instead of '-'\n";
-                return 1;
-            }
-            vector<ChatMsg> msgs;
-            ChatMsg sys;
-            sys.role = "system";
-            sys.content = opt.system_prompt;
-            msgs.push_back(sys);
-            vector<PromptPart> parts;
-            try {
-                parts = chat_tmpl->render(msgs, tools_array, /*add_generation_prompt=*/false,
-                                          opt.open_thinking, bos_str, eos_str);
-            } catch (const std::exception& e) {
-                cerr << "chat template failed: " << e.what() << "\n";
-                return 1;
-            }
-            tokens = tokenizer.encode_parts(parts, enc_bos, enc_bos);
-            system_fnv = fnv64(opt.system_prompt);
-            // The *raw* tools text, so a verifier can hash what it passed
-            // without reproducing the array normalisation.
-            tools_fnv = fnv64(opt.tools_json);
-            if (!g_quiet)
-                cerr << "CACHE_HEADER template=" << (model.template_name.empty() ? "(kind)" : model.template_name)
-                     << " system=" << opt.system_prompt.size() << " B tools=" << tools_array.size() << " B\n";
-        } else {
-            string text;
-            if (!read_text_file(opt.build_cache_prompt, text)) { cerr << "cannot read cache prompt\n"; return 1; }
-            tokens = tokenizer.encode(text, false, false);
-        }
-        if (tokens.empty() || (int)tokens.size() > model.seq) {
-            cerr << "cache prompt empty or too long (" << tokens.size() << ")\n"; return 1;
-        }
-        for (size_t i = 0; i < tokens.size(); ++i) {
-            if (g_stop) return 1;
-            session.step(tokens[i], (int)i, false);
-        }
-        if (!session.save_prefix_cache(opt.build_cache_out, tokens, system_fnv, tools_fnv)) {
-            cerr << "cannot save prefix cache (GPU attention required)\n"; return 1;
-        }
-        cout << "CACHE_SAVED " << opt.build_cache_out << " tokens=" << tokens.size() << "\n";
-        return 0;
-    }
+    if (!opt.build_cache_prompt.empty())
+        return build_prefix_cache(model, tokenizer, chat_tmpl.get(), opt, tools_array, enc_bos,
+                                  bos_str, eos_str, g_quiet, session);
 
     if (opt.worker) {
         // Every worker event is a JSON object; common_json decides the spelling

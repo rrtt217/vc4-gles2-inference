@@ -51,3 +51,9 @@ double env_double(const char* name, double def) {
     const char* v = getenv(name);
     return v ? atof(v) : def;
 }
+
+uint64_t fnv64(const std::string& s) {
+    uint64_t h = 1469598103934665603ull;
+    for (unsigned char ch : s) { h ^= ch; h *= 1099511628211ull; }
+    return h;
+}

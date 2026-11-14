@@ -92,6 +92,10 @@ inline float quantize_act_f(float x) { return (float)quantize_act(x) / ACT_SCALE
 
 bool read_text_file(const string& path, string& out);
 
+// 64-bit FNV-1a, hex in the sidecars: provenance, not cryptography.  It only has
+// to notice that an input changed (the system prompt, the tool list, the tokens).
+uint64_t fnv64(const std::string& s);
+
 // Environment switches, read one way.  The engine has 93 of them and 206 call
 // sites, and 21 of those read the same variable twice
 // (`getenv(X) ? atoi(getenv(X)) : d`), which is both slow in a per-layer loop and
