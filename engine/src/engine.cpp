@@ -40,6 +40,7 @@
 #include "gpu.h"
 #include "model.h"
 #include "chattmpl.h"
+#include "jinja/json.h"
 #include "session.h"
 #include "tokenizer.h"
 #include "sampling.h"
@@ -514,7 +515,12 @@ int main(int argc, char** argv) {
     }
 
     if (worker) {
-        auto emit = [&](const string& s) { cout << s << "\n" << flush; };
+        // Every worker event is a JSON object; common_json decides the spelling
+        // (escaping, numbers) so no line here assembles JSON by hand.
+        auto emit = [&](const common_json& j) { cout << j.dump() << "\n" << flush; };
+        auto emit_error = [&](const string& message) {
+            emit(common_json::object({{"event", string("error")}, {"message", message}}));
+        };
         // Process-level defaults (CLI flags / env vars), restored before each request.
         const SamplingSettings base_sampling = g_sampling;
         vector<int> cache_tokens;
@@ -531,9 +537,12 @@ int main(int argc, char** argv) {
         const char* effective_template = tbb_template ? "tinybrainbot"
                                         : minimind3_template ? "minimind3"
                                         : qwen_template ? "chatml" : "plain";
-        emit("{\"event\":\"ready\",\"prefix_cache_tokens\":" + to_string(cache_tokens.size()) +
-             ",\"template\":\"" + json_escape(effective_template) + "\"" +
-             ",\"chat_template\":" + (chat_tmpl ? "true" : "false") + "}");
+        emit(common_json::object({
+            {"event", string("ready")},
+            {"prefix_cache_tokens", (long long) cache_tokens.size()},
+            {"template", string(effective_template)},
+            {"chat_template", chat_tmpl != nullptr},
+        }));
         string line;
         while (getline(cin, line)) {
             if (g_stop) break;
@@ -546,7 +555,7 @@ int main(int argc, char** argv) {
                 if (tab == string::npos) break;
                 start = tab + 1;
             }
-            if (f.size() < 5) { emit("{\"event\":\"error\",\"message\":\"bad request line\"}"); continue; }
+            if (f.size() < 5) { emit_error("bad request line"); continue; }
             string prompt = base64_decode(f[0]);
             int max_new = max(0, atoi(f[1].c_str()));
             float wt = atof(f[2].c_str());
@@ -580,11 +589,11 @@ int main(int argc, char** argv) {
                 string req_tools, perr;
                 int req_thinking = -1;
                 if (!chat_parse_request(base64_decode(f[10]), req_msgs, req_tools, perr, req_thinking)) {
-                    emit("{\"event\":\"error\",\"message\":\"" + json_escape("bad request: " + perr) + "\"}");
+                    emit_error("bad request: " + perr);
                     continue;
                 }
                 if (!chat_tmpl) {
-                    emit("{\"event\":\"error\",\"message\":\"this checkpoint carries no chat template; send a prompt string\"}");
+                    emit_error("this checkpoint carries no chat template; send a prompt string");
                     continue;
                 }
                 req_parts = chat_tmpl->render(req_msgs, req_tools, true,
@@ -603,11 +612,11 @@ int main(int argc, char** argv) {
                 fprintf(stderr, "\n");
             }
             if (tokens.empty()) {
-                emit("{\"event\":\"error\",\"message\":\"empty prompt\"}");
+                emit_error("empty prompt");
                 continue;
             }
             if ((int)tokens.size() >= model.seq) {
-                emit("{\"event\":\"error\",\"message\":\"context full\"}");
+                emit_error("context full");
                 continue;
             }
             int common = 0;
@@ -620,9 +629,12 @@ int main(int argc, char** argv) {
             int prefill_from = common;
             if (prefill_from >= (int)tokens.size()) prefill_from = (int)tokens.size() - 1;
             int prefill_tokens = (int)tokens.size() - prefill_from;
-            emit("{\"event\":\"start\",\"prompt_tokens\":" + to_string(tokens.size()) +
-                 ",\"cached_tokens\":" + to_string(common) +
-                 ",\"prefill_tokens\":" + to_string(prefill_tokens) + "}");
+            emit(common_json::object({
+                {"event", string("start")},
+                {"prompt_tokens", (long long) tokens.size()},
+                {"cached_tokens", common},
+                {"prefill_tokens", prefill_tokens},
+            }));
             int req_top_k = top_k;
             if (f.size() > 11 && !f[11].empty()) req_top_k = atoi(f[11].c_str());
             if (req_top_k < 0) req_top_k = 0;
@@ -692,7 +704,7 @@ int main(int argc, char** argv) {
                 string text = utf8_take(pending);
                 if (!text.empty()) {
                     full += text;
-                    emit("{\"event\":\"token\",\"text\":\"" + json_escape(text) + "\"}");
+                    emit(common_json::object({{"event", string("token")}, {"text", text}}));
                 }
                 prev = next;
                 ++generated;
@@ -708,17 +720,20 @@ int main(int argc, char** argv) {
             if (!pending.empty()) {
                 string text = "\xEF\xBF\xBD";
                 full += text;
-                emit("{\"event\":\"token\",\"text\":\"" + json_escape(text) + "\"}");
+                emit(common_json::object({{"event", string("token")}, {"text", text}}));
             }
             if (g_stop) finish = "stop";
             if (g_stop) cache_tokens.clear();
             else cache_tokens = all_tokens;
-            emit("{\"event\":\"done\",\"text\":\"" + json_escape(full) +
-                 "\",\"finish_reason\":\"" + finish +
-                 "\",\"prompt_tokens\":" + to_string(tokens.size()) +
-                 ",\"completion_tokens\":" + to_string(generated) +
-                 ",\"cached_tokens\":" + to_string(common) +
-                 ",\"prefill_tokens\":" + to_string(prefill_tokens) + "}");
+            emit(common_json::object({
+                {"event", string("done")},
+                {"text", full},
+                {"finish_reason", finish},
+                {"prompt_tokens", (long long) tokens.size()},
+                {"completion_tokens", generated},
+                {"cached_tokens", common},
+                {"prefill_tokens", prefill_tokens},
+            }));
         }
         return 0;
     }
@@ -1010,16 +1025,21 @@ int main(int argc, char** argv) {
         return text.substr(0, a) + text.substr(cut);
     };
     auto tool_calls_json = [](const vector<ToolCall>& calls) {
-        string j = "[";
-        for (size_t i = 0; i < calls.size(); ++i) {
-            if (i) j += ",";
+        common_json out = common_json::array();
+        for (const auto& c : calls) {
             // `arguments` is an object, not an OpenAI-style JSON string: the
             // LFM2.5 template reads `func_args.items()` and throws on a string
-            // (the render aborted the process before this).
-            j += "{\"type\":\"function\",\"function\":{\"name\":\"" + json_escape(calls[i].name) +
-                 "\",\"arguments\":" + (calls[i].args.empty() ? "{}" : calls[i].args) + "}}";
+            // (the render aborted the process before this).  A model that emits
+            // unparseable arguments therefore gets {} rather than raw text.
+            common_json args = common_json::parse_no_throw(c.args);
+            common_json call = common_json::object();
+            call["type"] = string("function");
+            call["function"]["name"] = c.name;
+            call["function"]["arguments"] =
+                args.is_discarded() || !args.is_object() ? common_json::object() : args;
+            out.push_back(call);
         }
-        return j + "]";
+        return out.dump();
     };
 
     auto run_tool_turn = [&](const string& user, bool first, vector<ChatMsg>* hist = nullptr) {

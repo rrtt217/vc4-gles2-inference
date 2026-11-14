@@ -16,25 +16,6 @@
 #include <sstream>
 #include <sys/statvfs.h>
 
-string json_escape(const string& s) {
-    string o;
-    for (char c : s) {
-        switch (c) {
-            case '\\': o += "\\\\"; break;
-            case '"': o += "\\\""; break;
-            case '\n': o += "\\n"; break;
-            case '\r': o += "\\r"; break;
-            case '\t': o += "\\t"; break;
-            default:
-                if ((unsigned char)c < 0x20) {
-                    char b[8]; snprintf(b, sizeof(b), "\\u%04x", (unsigned char)c); o += b;
-                } else o += c;
-                break;
-        }
-    }
-    return o;
-}
-
 namespace {
 
 string trim_copy(const string& s) {
