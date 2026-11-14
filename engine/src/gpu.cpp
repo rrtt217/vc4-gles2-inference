@@ -92,6 +92,14 @@ void GPU::release_scene(){
         for (GLuint f : g_scene_fbo) glDeleteFramebuffers(1, &f);
         g_scene_tex.clear();
         g_scene_fbo.clear();
+        // The per-layer handle vectors point at names that are gone.  Keeping
+        // them would make a reload reuse or re-delete stale names; the textures
+        // themselves are already in the ledger above.
+        conv_k_tex_.clear();
+        rms_att_tex_.clear();
+        rms_ffn_tex_.clear();
+        q_norm_tex_.clear();
+        k_norm_tex_.clear();
         gl_state_forget_bindings();
         glFinish();
         // A deletion that goes wrong shows up here and nowhere else: nothing in

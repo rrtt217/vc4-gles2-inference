@@ -9,6 +9,7 @@
 #include <vector>
 
 bool Tokenizer::load_memory(const void* data, size_t bytes, int n){
+        reset();
         const uint8_t* p = (const uint8_t*)data;
         const uint8_t* end = p + bytes;
         int maxlen = 0;
@@ -35,6 +36,7 @@ bool Tokenizer::load_memory(const void* data, size_t bytes, int n){
     }
 
 bool Tokenizer::load(const string& path, int n){
+        reset();
         ifstream f(path, ios::binary);
         if (!f) { cerr << "cannot open tokenizer: " << path << "\n"; return false; }
         int maxlen = 0; f.read((char*)&maxlen, 4);

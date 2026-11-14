@@ -50,6 +50,12 @@ public:
     };
     vector<Mat> router;                // [layers]
     vector<vector<MoeExpert>> moe;     // [layers][experts]
+    // Drop everything this model owns, so the same object can hold a different
+    // container.  Assigning a fresh instance is deliberate: the field list is
+    // long (19 groups of vectors plus the scalars), and a hand-written reset
+    // would be one missed field away from a leak that only the board sees.
+    void reset() { *this = Model(); }
+
     bool is_moe() const { return experts > 0; }
     int ffn_width() const { return is_moe() ? moe_hidden : hidden; }
 

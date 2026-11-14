@@ -8,6 +8,10 @@
 
 class Tokenizer {
 public:
+    // Same contract as Model::reset(): a second load replaces the vocabulary
+    // instead of appending to it (load_memory() pushes into vocab_, so a reload
+    // without this would silently double the table).
+    void reset() { *this = Tokenizer(); }
     bool load(const string& path, int n);
     // MMCF stores the same blob inside the container; n is the vocab size.
     bool load_memory(const void* data, size_t bytes, int n);
