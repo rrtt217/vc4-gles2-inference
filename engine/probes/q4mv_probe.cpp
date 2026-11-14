@@ -43,6 +43,17 @@ static Mat make_mat(int rows, int cols) {
     return m;
 }
 
+static Mat make_mat8(int rows, int cols) {
+    Mat m;
+    m.rows = rows;
+    m.cols = cols;
+    m.type = WeightType::INT8;
+    m.q8.assign((size_t)rows * cols, 0);
+    for (size_t i = 0; i < m.q8.size(); ++i) m.q8[i] = (int8_t)(next() & 0xff);
+    m.scale = 1.0f / 2048.0f;
+    return m;
+}
+
 int main() {
     GPU gpu;
     // 1. plain matvec, 64x64
@@ -73,9 +84,22 @@ int main() {
         vector<float> x(cols);
         for (int i = 0; i < cols; ++i) x[i] = sinf(i * 0.37f);
         GLuint xt = gpu.upload_input(x);
+        // Two views of the same bytes: packed nibbles, and the 4-bit texel view
+        // the engine now defaults to (Q4_FMT=rgba4).  The token-level replay
+        // probes cannot resolve the difference (their spread is ~10 ms); this
+        // runs 2000 pipelined draws and prints ms/draw.
+        for (int fi = 0; fi < 3; ++fi)
         for (int si = 0; si < 4; ++si) {
             const int rows = sizes[si];
-            Mat w1 = make_mat(rows, cols), w3 = make_mat(rows, cols);
+            Mat w1 = fi == 2 ? make_mat8(rows, cols) : make_mat(rows, cols);
+            Mat w3 = fi == 2 ? make_mat8(rows, cols) : make_mat(rows, cols);
+            w1.fmt4 = w3.fmt4 = (fi == 1);
+            Target out;
+            // One draw, so the three views can share the timing loops below.
+            auto draw_once = [&]() {
+                if (fi == 2) gpu.ffn_pair_swiglu_chunk(w1, w3, xt, rows, out);
+                else gpu.ffn_pair_i4_swiglu_chunk(w1, w3, xt, rows, out);
+            };
             while (glGetError() != GL_NO_ERROR) {}
             gpu.upload(w1);
             GLenum e1 = glGetError();
@@ -86,8 +110,7 @@ int main() {
                        rows, e1, e2, max_tex);
                 continue;
             }
-            Target out;
-            for (int i = 0; i < 2; ++i) gpu.ffn_pair_i4_swiglu_chunk(w1, w3, xt, rows, out);
+            for (int i = 0; i < 2; ++i) draw_once();
             glFinish();
             // 20 iterations is 2 ms on Xe, where the same draw is 0.1 ms, so the
             // arm-to-arm noise swamps the decode difference the probe exists to
@@ -98,12 +121,12 @@ int main() {
             const int iters = ie ? atoi(ie) : 20, liters = iters < 50 ? iters : 50;
             const int frags = (rows + 1) / 2;
             Clock::time_point t0 = Clock::now();
-            for (int i = 0; i < iters; ++i) gpu.ffn_pair_i4_swiglu_chunk(w1, w3, xt, rows, out);
+            for (int i = 0; i < iters; ++i) draw_once();
             glFinish();
             const double thr = elapsed_ms(t0, Clock::now()) / iters;
             t0 = Clock::now();
             for (int i = 0; i < liters; ++i) {
-                gpu.ffn_pair_i4_swiglu_chunk(w1, w3, xt, rows, out);
+                draw_once();
                 glFinish();
             }
             const double lat = elapsed_ms(t0, Clock::now()) / liters;
@@ -111,8 +134,8 @@ int main() {
             unsigned h = 2166136261u;
             size_t nz = 0;
             for (size_t i = 0; i < b.size(); ++i) { h ^= b[i]; h *= 16777619u; nz += b[i] != 0; }
-            printf("GATE rows %d frags %d thr %.3f lat %.3f bytes %zu nz %zu hash %08x\n",
-                   rows, frags, thr, lat, b.size(), nz, h);
+            printf("GATE%s rows %d frags %d thr %.3f lat %.3f bytes %zu nz %zu hash %08x\n",
+                   fi == 1 ? "-4x4" : fi == 2 ? "-q8" : "", rows, frags, thr, lat, b.size(), nz, h);
             if (getenv("Q4MV_ALL"))
                 for (size_t i = 0; i < b.size(); ++i) printf("D %d %zu %u\n", rows, i, b[i]);
         }

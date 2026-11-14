@@ -18,6 +18,11 @@ TP  := third_party
 JINJA := $(TP)/jinja/lexer.cpp $(TP)/jinja/parser.cpp $(TP)/jinja/runtime.cpp \
          $(TP)/jinja/string.cpp $(TP)/jinja/value.cpp $(TP)/jinja/json.cpp \
          $(TP)/jinja/unicode.cpp
+# The GPU side without main(): what a probe links against.  It has to be a
+# wildcard because the refactor split gpu.cpp into gpu_*.cpp, and every probe
+# target that still listed the old file failed to link (2026-11-15).
+GPULIB := $(wildcard $(SRC)/gpu*.cpp) $(SRC)/shaders.cpp $(SRC)/shaders_attn.cpp \
+          $(SRC)/xformat.cpp $(SRC)/common.cpp
 CORE := $(SRC)/engine.cpp $(SRC)/common.cpp $(SRC)/xformat.cpp \
         $(SRC)/shaders.cpp $(SRC)/shaders_attn.cpp $(SRC)/dump_shaders.cpp \
         $(SRC)/gpu.cpp $(SRC)/gpu_state.cpp $(SRC)/gpu_conv.cpp $(SRC)/gpu_diag.cpp $(SRC)/gpu_prog.cpp $(SRC)/gpu_attn.cpp $(SRC)/gpu_ffn.cpp $(SRC)/gpu_matvec.cpp $(SRC)/gpu_upload.cpp $(SRC)/gpu_gl.cpp \
@@ -238,22 +243,22 @@ probes/glsl_probe_pi: probes/glsl_probe.cpp | check-cross
 probes/packunpack_probe_pi: probes/packunpack_probe.cpp | check-cross
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -o $@ $< $(CROSS_LDLIBS)
 
-probes/q4mv_probe_pi: probes/q4mv_probe.cpp $(SRC)/gpu.cpp $(SRC)/shaders.cpp $(SRC)/shaders_attn.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp | check-cross $(HEADERS)
+probes/q4mv_probe_pi: probes/q4mv_probe.cpp $(GPULIB) $(HEADERS) | check-cross
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -I$(SRC) -o $@ $^ $(CROSS_LDLIBS)
 
 # Native build of the same probe: the q4 decode A/B (Q4_NOUNPACK, Q4_BFAST,
 # Q4_SHIFT=0) is a per-texel difference of a few ALU ops, and a whole-token
 # decode average on Xe is too noisy to resolve it (15/23/44 ms/token for the
 # same arm in one session), so the kernel needs its own instrument.
-probes/q4mv_probe: probes/q4mv_probe.cpp $(SRC)/gpu.cpp $(SRC)/shaders.cpp $(SRC)/shaders_attn.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(HEADERS)
+probes/q4mv_probe: probes/q4mv_probe.cpp $(GPULIB) $(HEADERS)
 	$(CXX) $(ALL_CXXFLAGS) -I$(SRC) -o $@ $^ $(LDLIBS)
 
 # Prices a draw, an rmsnorm and the q8 matvec shapes on the real driver
 # (WORKLOG item 7: the cost model behind prefill batching).
-probes/draw_probe_pi: probes/draw_probe.cpp $(SRC)/gpu.cpp $(SRC)/shaders.cpp $(SRC)/shaders_attn.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp | check-cross $(HEADERS)
+probes/draw_probe_pi: probes/draw_probe.cpp $(GPULIB) | check-cross $(HEADERS)
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -I$(SRC) -o $@ $^ $(CROSS_LDLIBS)
 
 # Prices 2-position packing: one weight fetch feeding two positions, and the
 # P2 layout it writes (WORKLOG item 7b).
-probes/ffn2_probe_pi: probes/ffn2_probe.cpp $(SRC)/gpu.cpp $(SRC)/shaders.cpp $(SRC)/shaders_attn.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp | check-cross $(HEADERS)
+probes/ffn2_probe_pi: probes/ffn2_probe.cpp $(GPULIB) | check-cross $(HEADERS)
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -I$(SRC) -o $@ $^ $(CROSS_LDLIBS)
