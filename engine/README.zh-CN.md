@@ -132,7 +132,8 @@ TinyChat15M 是 llama-2 chat 格式的 15M 模型，不是补全模型：容器�
 交互式 `--chat` 里还有 `/clear`（忘记本轮对话）、`/help` 和 `/model PATH`：后者在
 不重建 GL 上下文的前提下换一个容器（板上上下文 4.23 s + 13 个程序链接 1.89 s 是省下来的
 那部分，见 `docs/performance.md`）。权重、分词器、聊天模板和 session 的 target 会被替换，
-已编译程序保留，对话历史清空。**跨精度（q8 <-> q4）会被拒绝**，需要重启。
+已编译程序保留，对话历史清空。精度与模板类型都可以换（q8 <-> q4 <-> i16、dense <-> hybrid），
+验收脚本 `scripts/swap_matrix.py` 要求每一轮都与独立进程逐字节相同。
 
 它们是 base completion 模型，不是 chat 模型；用普通 prompt，不要加 `--chat`：
 

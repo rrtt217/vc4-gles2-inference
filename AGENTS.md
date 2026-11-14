@@ -75,7 +75,7 @@ the file format in [`docs/model-formats.md`](docs/model-formats.md) and
 | `cmp_logits.py` | compares two `LOGITS_OUT` dumps tile by tile |
 | `verify_packing.sh` | byte-for-byte check of the packed-activation layout against a known-good binary |
 | `bench.sh`, `bench_ab.sh`, `bench_plain_ab.sh`, `longctx.sh` | timings; the `ab` ones interleave two binaries to cancel drift |
-| `swap_matrix.py` | acceptance for `/model`: swaps containers inside one process over the q8, q4, i16 and hybrid families (three template kinds, a round trip, a repeat run) and requires every turn to be byte-identical to a fresh process.  Needs the GPU and `models/`; about two minutes on Xe |
+| `swap_matrix.py` | acceptance for `/model`: swaps containers inside one process over the q8, q4, i16, hybrid and mixed-precision families (three template kinds, a round trip, a quantisation change, a repeat run) and requires every turn to be byte-identical to a fresh process.  Needs the GPU and `models/`; about three minutes on Xe |
 | `check_target_reset.sh` | every scratch `Target` in `gpu.h` is cleared by `GPU::reset_targets()`, so a released scene cannot be reused with a deleted texture name.  Runs without a GPU or a model |
 | `docs_check.sh` | documentation drift: every switch the source reads is in `docs/test-hooks.md`, every in-tree path a document names exists, and nothing calls a live switch dead.  Runs without a model or a GPU |
 | `bench_mc.py` | "can this model answer a multiple-choice question": letter-logit accuracy, calibrated accuracy and format compliance from `LOGITS_OUT`, one engine run per item, no sampler.  Data in `scripts/eval/mc_zh.jsonl` and `mc_en.jsonl` |
@@ -157,8 +157,10 @@ of context and 1.89 s of program links per process, against 6.12 s of container
 read and 2.99 s of upload, so this is the one expensive part that survives).
 What it replaces: weights, tokenizer, chat template, session targets, the
 conversation.  What it refuses: a container that does not advertise chat support
-when `--chat` is in effect (same policy as startup), and a precision change
-(q8 <-> q4), which still needs a restart -- that limit is real, not a policy.
+when `--chat` is in effect (same policy as startup).  It originally also refused
+a precision change (q8 <-> q4) because that produced repetitive garbage; the
+cause was the missing `prepare_model()` below, and a quantisation change is now
+bit-identical too (`scripts/swap_matrix.py`, "mixed" chain).
 
 Two invariants it depends on, both paid for:
 

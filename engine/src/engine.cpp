@@ -1332,19 +1332,10 @@ int main(int argc, char** argv) {
                 }
                 if (line.rfind("/model ", 0) == 0) {
                     const string path = line.substr(7);
-                    const auto q4_of = [](const Model& m) {
-                        for (const Mat& w : m.qkv) if (w.rows && w.type == WeightType::INT4) return true;
-                        return false;
-                    };
-                    const bool was_q4 = q4_of(model);
                     const auto t_swap = Clock::now();
                     gpu.release_scene();
                     model.reset();
                     if (!model.load(path)) { cerr << "no model loaded; leaving\n"; return 1; }
-                    if (q4_of(model) != was_q4) {
-                        cerr << "/model: changing quantisation needs a restart\n";
-                        return 1;
-                    }
                     // The startup path refuses a container that does not
                     // advertise chat support while --chat is in effect; a swap
                     // must apply the same rule instead of quietly running it

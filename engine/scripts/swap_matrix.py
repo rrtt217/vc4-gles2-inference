@@ -12,6 +12,9 @@ What it covers, in one run:
              -> back to minimind3   (three template kinds, 15M to 198M-A64M MoE,
              and a round trip, with one turn generated before every swap)
   q4 chain   minimind3 -> minimind2-small -> feng -> back
+  i16 chain  minimind3 -> minimind2-small -> TinyChat15M -> back
+  hybrid     lfm2.5 dedup -> lfm2.5 q6 -> back   (conv path)
+  mixed      minimind3.q8 -> .q4 -> minimind2.q4 -> feng.q8 -> lfm2.5.q4 -> back
   slash line a line that starts with "/" but is not a command is still a prompt
   determinism the same chain twice prints the same bytes
 
@@ -109,8 +112,18 @@ def main():
     hybrid = ["../models/lfm2.5-230m/lfm2.5.q4.dedup.mmcf",
               "../models/lfm2.5-230m/lfm2.5.q4.q6.mmcf",
               "../models/lfm2.5-230m/lfm2.5.q4.dedup.mmcf"]
+    # Quantisation changes inside one process: this is the case that answered
+    # with repetitive garbage before prepare_model() was shared (the format plan
+    # and the hidden scale belong to the model, and the second load inherited
+    # neither).  It walks q8 -> q4 -> q4 -> q8 -> hybrid q4 -> q8.
+    mixed = ["../models/minimind3/minimind3.q8.mmcf",
+             "../models/minimind3/minimind3.q4.mmcf",
+             "../models/llama2c/minimind2-small.q4.mmcf",
+             "../models/feng30m/feng.q8.mmcf",
+             "../models/lfm2.5-230m/lfm2.5.q4.dedup.mmcf",
+             "../models/minimind3/minimind3.q8.mmcf"]
     fail = 0
-    for tag, seq in (("q8", q8), ("q4", q4), ("i16", i16), ("hybrid", hybrid)):
+    for tag, seq in (("q8", q8), ("q4", q4), ("i16", i16), ("hybrid", hybrid), ("mixed", mixed)):
         print(f"== {tag} chain: {len(seq)-1} swaps ==")
         ref = {}
         for m in seq:
