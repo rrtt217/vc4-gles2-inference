@@ -51,6 +51,9 @@ public:
     // swap cannot silently leave a texture behind (that would be a CMA leak on
     // the Pi, where one model barely fits).
     void release_scene();
+    // Back to the constructor's format plan.  A new Session runs this first, so
+    // a swap cannot inherit the previous model's ACT8/RES_PACK choices.
+    void reset_format_plan();
     // Zeroes every scratch Target (textures and FBOs are in the ledger).  Kept
     // next to release_scene() because the two always run together, and
     // scripts/check_target_reset.sh keeps the list complete.

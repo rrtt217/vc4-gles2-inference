@@ -97,7 +97,21 @@ static int pick_expert(const vector<float>& gate){
     return best;
 }
 
+void Session::reset(){
+        // Capture the referents, destroy, reconstruct in place: the references
+        // cannot be rebound, and the two objects this points at outlive the
+        // session (they are main()'s Model and GPU).
+        Model* m = &m_;
+        GPU* g = &gpu_;
+        this->~Session();
+        new (this) Session(*m, *g);
+    }
+
 Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
+        // The format plan is decided from the model and the env, and the GPU
+        // outlives the session: start from the defaults so a previous model's
+        // choices (ACT8, RES_PACK) cannot leak into this one.
+        gpu_.reset_format_plan();
         gpu_layer_ = gpu_.gpu_layer_enabled();
         gpu_attn_ = gpu_layer_ || gpu_.gpu_attn_enabled();
         // Both loops are correct for a hybrid model since 2026-11-12: the q8

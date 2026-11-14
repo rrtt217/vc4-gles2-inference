@@ -10,6 +10,12 @@ class Session {
 public:
     Session(Model& model, GPU& gpu);
 
+    // Rebuild this session for the model the same object now holds.  Used by the
+    // REPL's /model: the GPU context and its compiled programs stay, the scene
+    // (textures, FBOs, scratch targets) is released by GPU::release_scene()
+    // before this runs, so every target is recreated from the new dimensions.
+    void reset();
+
     // A cache whose token prefix is not fully reused must not leave its conv
     // history behind: the history is a running state, and replaying the prompt
     // from token 0 with a history from another token stream is wrong.

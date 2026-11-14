@@ -85,6 +85,13 @@ GPU::GPU(){
         if (max_target_dim_ <= 0) max_target_dim_ = 2048;
     }
 
+void GPU::reset_format_plan(){
+        res_pack_ = false;
+        act_fmt_ = XFormat::I16_2;
+        ffn_fmt_ = XFormat::I16_2;
+        res_fmt_ = XFormat::I16_1;
+    }
+
 void GPU::reset_targets(){
         // Every scratch target this GPU owns, in one place: release_scene()
         // deletes their textures, and a Target that still carried a deleted
@@ -154,6 +161,10 @@ void GPU::release_scene(){
         // them would make a reload reuse or re-delete stale names; the textures
         // themselves are already in the ledger above.
         reset_targets();
+        // The upload cache is keyed by slot number and still holds the deleted
+        // names; without this the next model would draw into textures that no
+        // longer exist (the first swap's answer came back empty exactly so).
+        input_textures_.clear();
         conv_k_tex_.clear();
         rms_att_tex_.clear();
         rms_ffn_tex_.clear();

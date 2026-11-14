@@ -288,41 +288,6 @@ int main(int argc, char** argv) {
         fprintf(stderr, "chat: this checkpoint has no chat template (kind 0, plain); "
                         "using the built-in [INST] wrapper.  For a completion model drop "
                         "--chat and use --prompt.\n");
-    if (!model.template_name.empty() || model.template_kind >= 0) {
-        const int k = model.template_kind;
-        bool want_qwen = false, want_mm3 = false, want_tbb = false;
-        if (k == 3) { want_tbb = true; }
-        else if (k == 2) { want_qwen = want_mm3 = true; }
-        else if (k == 1) { want_qwen = true; }
-        else if (k == 0) { want_qwen = want_mm3 = false; }
-        else {   // unknown kind: fall back to the name
-            want_tbb = model.template_name == "tinybrainbot";
-            want_qwen = model.template_name == "qwen" || model.template_name == "minimind3";
-            want_mm3 = model.template_name == "minimind3";
-        }
-        const bool was_qwen = qwen_template, was_mm3 = minimind3_template;
-        qwen_template = qwen_template || want_qwen;
-        minimind3_template = minimind3_template || want_mm3;
-        tbb_template = tbb_template || want_tbb;
-        if (tbb_template) qwen_template = false;   // its own markers, not chatml
-        if ((!was_qwen && qwen_template) || (!was_mm3 && minimind3_template))
-            if (!g_quiet) cerr << "template: " << (model.template_name.empty() ? "kind " + std::to_string(k) : model.template_name)
-                 << " (from the checkpoint)\n";
-    }
-    // Metadata key 9: the model's own Jinja template.  When it is present it is
-    // the prompt builder; template_kind stays as the fallback for containers
-    // written before the key existed.  A template the vendored engine cannot
-    // parse is refused here, not silently swapped for a built-in one.
-    std::unique_ptr<ChatTemplate> chat_tmpl;
-    if (!model.chat_template.empty()) {
-        chat_tmpl.reset(new ChatTemplate(model.chat_template));
-        if (!chat_tmpl->ok()) {
-            cerr << "chat template rejected: " << chat_tmpl->error() << "\n";
-            return 2;
-        }
-        if (!g_quiet) cerr << "chat template: " << model.chat_template.size() << " B from the checkpoint ("
-             << model.chat_templates.size() << " variant(s))\n";
-    }
     // Capabilities: a checkpoint that says it is not a chat model must not be
     // driven through the chat template.
     if (model.have_capabilities && chat && !(model.capabilities & 1)) {
@@ -335,25 +300,73 @@ int main(int argc, char** argv) {
         gen = 128;
     }
     Tokenizer tokenizer;
-    if (model.tok_blob && !getenv("TOKENIZER")) {
-        if (!tokenizer.load_memory(model.tok_blob, model.tok_blob_bytes, model.vocab)) return 1;
-        if (!g_quiet) cerr << "tokenizer: " << model.tok_blob_bytes << " B embedded in the checkpoint\n";
-    } else if (!tokenizer.load(tokenizer_path, model.vocab)) {
-        return 1;
-    }
-    tokenizer.set_bos(model.have_specials ? model.id_bos : 1);
-    if (model.have_specials)
-        if (!g_quiet) cerr << "specials: bos " << model.id_bos << " eos " << model.id_eos
-             << " stop " << model.id_stop << " (from the checkpoint)\n";
-    // The template's `{{ bos_token }}` / `{{ eos_token }}` need the *text* of
-    // those ids, not just the id: LFM2.5's template starts with
-    // `{{- bos_token -}}`, and handing it "" dropped the BOS from every chat
-    // prompt (the tokenizer does not add one, because the template is supposed
-    // to).  llama.cpp passes the strings; so must this.
-    const string bos_str = tokenizer.id_text(model.id_bos);
-    const string eos_str = tokenizer.id_text(model.id_eos);
-    tokenizer.set_qwen(qwen_template || minimind3_template);
-    tokenizer.set_bytelevel(minimind3_template);
+    string bos_str, eos_str;
+    std::unique_ptr<ChatTemplate> chat_tmpl;
+    // Everything that comes from the container's own metadata: the template
+    // kind, the tokenizer and the Jinja template.  Called at startup and again
+    // by the REPL's /model, which is why it reads `model` instead of taking it
+    // as an argument.  Returns false when the container is unusable.
+    auto setup_from_model = [&]() -> bool {
+        chat_tmpl.reset();
+        qwen_template = minimind3_template = tbb_template = false;
+        if (!model.template_name.empty() || model.template_kind >= 0) {
+            const int k = model.template_kind;
+            bool want_qwen = false, want_mm3 = false, want_tbb = false;
+            if (k == 3) { want_tbb = true; }
+            else if (k == 2) { want_qwen = want_mm3 = true; }
+            else if (k == 1) { want_qwen = true; }
+            else if (k == 0) { want_qwen = want_mm3 = false; }
+            else {   // unknown kind: fall back to the name
+                want_tbb = model.template_name == "tinybrainbot";
+                want_qwen = model.template_name == "qwen" || model.template_name == "minimind3";
+                want_mm3 = model.template_name == "minimind3";
+            }
+            const bool was_qwen = qwen_template, was_mm3 = minimind3_template;
+            qwen_template = want_qwen;
+            minimind3_template = want_mm3;
+            tbb_template = want_tbb;
+            if (tbb_template) qwen_template = false;   // its own markers, not chatml
+            if (((!was_qwen && qwen_template) || (!was_mm3 && minimind3_template)) && !g_quiet)
+                cerr << "template: " << (model.template_name.empty() ? "kind " + std::to_string(k) : model.template_name)
+                     << " (from the checkpoint)\n";
+        }
+        // Metadata key 9: the model's own Jinja template.  When it is present it
+        // is the prompt builder; template_kind stays as the fallback for
+        // containers written before the key existed.  A template the vendored
+        // engine cannot parse is refused here, not silently swapped for a
+        // built-in one.
+        if (!model.chat_template.empty()) {
+            chat_tmpl.reset(new ChatTemplate(model.chat_template));
+            if (!chat_tmpl->ok()) {
+                cerr << "chat template rejected: " << chat_tmpl->error() << "\n";
+                return false;
+            }
+            if (!g_quiet) cerr << "chat template: " << model.chat_template.size()
+                 << " B from the checkpoint (" << model.chat_templates.size() << " variant(s))\n";
+        }
+        tokenizer.reset();
+        if (model.tok_blob && !getenv("TOKENIZER")) {
+            if (!tokenizer.load_memory(model.tok_blob, model.tok_blob_bytes, model.vocab)) return false;
+            if (!g_quiet) cerr << "tokenizer: " << model.tok_blob_bytes << " B embedded in the checkpoint\n";
+        } else if (!tokenizer.load(tokenizer_path, model.vocab)) {
+            return false;
+        }
+        tokenizer.set_bos(model.have_specials ? model.id_bos : 1);
+        if (model.have_specials && !g_quiet)
+            cerr << "specials: bos " << model.id_bos << " eos " << model.id_eos
+                 << " stop " << model.id_stop << " (from the checkpoint)\n";
+        // The template's `{{ bos_token }}` / `{{ eos_token }}` need the *text* of
+        // those ids, not just the id: LFM2.5's template starts with
+        // `{{- bos_token -}}`, and handing it "" dropped the BOS from every chat
+        // prompt (the tokenizer does not add one, because the template is
+        // supposed to).  llama.cpp passes the strings; so must this.
+        bos_str = tokenizer.id_text(model.id_bos);
+        eos_str = tokenizer.id_text(model.id_eos);
+        tokenizer.set_qwen(qwen_template || minimind3_template);
+        tokenizer.set_bytelevel(minimind3_template);
+        return true;
+    };
+    if (!setup_from_model()) return 2;
     // Tool definitions, normalised to one JSON array for the template context.
     const string tools_array = chat_tools_array(tools_json);
     // BOS policy: the container states it when it can (key 10); otherwise the
@@ -381,7 +394,13 @@ int main(int argc, char** argv) {
     if (getenv("SHADER_TIME"))
         cerr << "rmsnorm eps: " << model.rms_eps << " (container"
              << (model.rms_eps == 1e-5f ? "" : "-stated") << ")\n";
+    // Uploading the weights is a separate phase from reading the container, and
+    // a model swap has to repeat both.  Kept as one lambda so the two callers
+    // cannot drift: forgetting an upload leaves every Mat with tex == 0, and the
+    // forward pass then answers with EOS on the first token (measured: the first
+    // swap produced empty replies until this was shared).
     const auto up_t0 = Clock::now();
+    auto upload_weights = [&]() {
     for (auto& m : model.qkv) gpu.upload(m);
     for (auto& m : model.wo) gpu.upload(m);
     for (auto& m : model.conv_in_b) if (m.rows) gpu.upload(m);
@@ -410,6 +429,8 @@ int main(int argc, char** argv) {
     }
     for (auto& m : model.logits_tiles) gpu.upload(m);
     model.release_map();
+    };
+    upload_weights();
     if (getenv("SHADER_TIME") || getenv("UPLOAD_TIME"))
         fprintf(stderr, "UPLOAD %.2f s wall, %d textures, texture time %.0f ms\n",
                 elapsed_ms(up_t0, Clock::now()) / 1000.0, gpu_upload_textures(), gpu_upload_texture_ms());
