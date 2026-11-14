@@ -12,31 +12,6 @@ using namespace jinja;
 
 namespace {
 
-// JSON string escape.  The template context is built as JSON text so that
-// `global_from_json` can mark message values as caller input in one place.
-std::string jesc(const std::string& s) {
-    std::string o;
-    o.reserve(s.size() + 8);
-    for (unsigned char c : s) {
-        switch (c) {
-            case '"': o += "\\\""; break;
-            case '\\': o += "\\\\"; break;
-            case '\n': o += "\\n"; break;
-            case '\r': o += "\\r"; break;
-            case '\t': o += "\\t"; break;
-            default:
-                if (c < 0x20) {
-                    char b[8];
-                    snprintf(b, sizeof(b), "\\u%04x", c);
-                    o += b;
-                } else {
-                    o += (char)c;
-                }
-        }
-    }
-    return o;
-}
-
 }  // namespace
 
 struct ChatTemplate::Impl {
@@ -74,36 +49,37 @@ std::vector<PromptPart> ChatTemplate::render(const std::vector<ChatMsg>& msgs,
                                              const std::string& eos_token) const {
     if (!ok()) throw std::runtime_error("chat template did not compile: " + error());
 
-    std::string msgs_json = "[";
-    for (size_t i = 0; i < msgs.size(); ++i) {
-        if (i) msgs_json += ",";
-        msgs_json += "{\"role\":\"" + jesc(msgs[i].role) + "\",\"content\":\"" +
-                     jesc(msgs[i].content) + "\"";
-        if (!msgs[i].reasoning.empty())
-            msgs_json += ",\"reasoning_content\":\"" + jesc(msgs[i].reasoning) + "\"";
-        if (!msgs[i].tool_calls.empty())
-            msgs_json += ",\"tool_calls\":" + msgs[i].tool_calls;
-        msgs_json += "}";
+    // The context is a JSON document; build it as one.  `tool_calls` and
+    // `tools` arrive as JSON text from the caller and are parsed here, so an
+    // invalid document fails where it always did (common_json::parse throws and
+    // the caller sees the message) instead of being spliced into a larger
+    // string and reported as a syntax error at the wrong offset.
+    common_json ctx_json = common_json::object();
+    common_json msgs_json = common_json::array();
+    for (const auto& m : msgs) {
+        common_json msg = common_json::object();
+        msg["role"] = m.role;
+        msg["content"] = m.content;
+        if (!m.reasoning.empty()) msg["reasoning_content"] = m.reasoning;
+        if (!m.tool_calls.empty()) msg["tool_calls"] = common_json::parse(m.tool_calls);
+        msgs_json.push_back(msg);
     }
-    msgs_json += "]";
-
-    const std::string tools_json = tools.empty() ? std::string("[]") : tools;
     // Templates that render a reasoning field (LFM2.5) only keep it in history
     // when preserve_thinking is set; the engine sets it whenever a message
     // carries reasoning, and --thinking asks for it for the current turn.
     bool preserve_thinking = open_thinking;
     for (const auto& m : msgs)
         if (!m.reasoning.empty()) preserve_thinking = true;
-    const std::string ctx_json =
-        "{\"messages\":" + msgs_json + ",\"tools\":" + tools_json +
-        ",\"add_generation_prompt\":" + (add_generation_prompt ? "true" : "false") +
-        ",\"open_thinking\":" + (open_thinking ? "true" : "false") +
-        ",\"preserve_thinking\":" + (preserve_thinking ? "true" : "false") +
-        ",\"bos_token\":\"" + jesc(bos_token) + "\"" +
-        ",\"eos_token\":\"" + jesc(eos_token) + "\"}";
+    ctx_json["messages"] = msgs_json;
+    ctx_json["tools"] = tools.empty() ? common_json::array() : common_json::parse(tools);
+    ctx_json["add_generation_prompt"] = add_generation_prompt;
+    ctx_json["open_thinking"] = open_thinking;
+    ctx_json["preserve_thinking"] = preserve_thinking;
+    ctx_json["bos_token"] = bos_token;
+    ctx_json["eos_token"] = eos_token;
 
     context ctx(src_);
-    auto parsed = common_json::parse(ctx_json);
+    const common_json& parsed = ctx_json;
     // mark_input=true is the whole point: everything from the context (message
     // roles and contents, tool definitions) is caller text, never template text.
     global_from_json(ctx, parsed, /*mark_input=*/true);
