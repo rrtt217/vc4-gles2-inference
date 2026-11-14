@@ -172,17 +172,23 @@ void Model::apply_q4_fmt(){
         // measurement rules ask for.
         const char* v = getenv("Q4_FMT");
         if (v && strcmp(v, "0") == 0) return;
+        // Q4_FMT=force bypasses the two refusals below so the failure they
+        // guard against can be reproduced under the diagnostics in
+        // GPU::make_target / make_texture.  Diagnostics only: the hybrid path
+        // and the unchunked path are wrong with the 4-bit view until the cause
+        // is understood.
+        const bool force = v && strcmp(v, "force") == 0;
         // The hybrid (conv + attention) model dies on an incomplete FBO with
         // the gate bound as 4-bit texels and the root cause is not yet known
         // (LFM2.5 q4, 2026-11-15, before the first token).  Until it is
         // understood the hybrid keeps the packed view.
-        if (hybrid) {
+        if (hybrid && !force) {
                 if (v) cerr << "Q4_FMT: not supported on the hybrid model; using the packed view\n";
                 return;
         }
         // Only the fused, chunked gate reads the 4-bit view.  The unchunked
         // path (ffn_split -> matvec_to_row + swiglu_2row) reads packed nibbles.
-        if (!ffn_chunked) {
+        if (!ffn_chunked && !force) {
                 if (v) cerr << "Q4_FMT: the unchunked FFN path is not supported; using the packed view\n";
                 return;
         }

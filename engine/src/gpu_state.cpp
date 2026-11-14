@@ -15,6 +15,7 @@
 #include "gpu.h"
 #include "gpu_internal.h"
 
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -173,11 +174,44 @@ GPU::~GPU(){
         dpy_ = EGL_NO_DISPLAY;
     }
 
+// Every allocation failure on this box is a memory failure first; print the
+// budget with it.  CmaFree is the Pi's binding constraint (docs/performance.md:
+// the MoE model at q8 takes the CMA and the session's FBOs fail), and the
+// desktop driver has no CMA at all, so the line adapts.
+static void report_mem(const char* tag){
+        FILE* f = fopen("/proc/meminfo", "r");
+        if (!f) return;
+        char line[256];
+        long cma_free = -1, cma_total = -1, mem_free = -1;
+        while (fgets(line, sizeof line, f)) {
+                if (!strncmp(line, "CmaFree:", 8)) sscanf(line + 8, "%ld", &cma_free);
+                else if (!strncmp(line, "CmaTotal:", 9)) sscanf(line + 9, "%ld", &cma_total);
+                else if (!strncmp(line, "MemFree:", 8)) sscanf(line + 8, "%ld", &mem_free);
+        }
+        fclose(f);
+        if (cma_total > 0)
+                fprintf(stderr, "%s: CmaFree %ld kB of %ld kB, MemFree %ld kB\n",
+                        tag, cma_free, cma_total, mem_free);
+        else
+                fprintf(stderr, "%s: MemFree %ld kB (no CMA)\n", tag, mem_free);
+}
+
+static size_t g_tex_bytes = 0;    // uploaded texture bytes, for the failure log
+
 GLuint GPU::make_texture(int w, int h, const void* data){
         const double t0 = shader_time_ms();
         GLuint t = 0; glGenTextures(1, &t); g_scene_tex.push_back(t);
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, t); gl_state_forget_bindings();
+        while (glGetError() != GL_NO_ERROR) {}
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+        if (GLenum e = glGetError()) {
+                cerr << "texture upload failed: RGBA8 " << w << "x" << h
+                     << " (0x" << hex << e << dec << "), "
+                     << g_scene_tex.size() << " textures / " << g_tex_bytes << " B so far\n";
+                report_mem("texture upload");
+                exit(1);
+        }
+        g_tex_bytes += (size_t)w * h * 4;
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -194,7 +228,16 @@ GLuint GPU::make_q4_texture(int w, int h, const void* data){
         // A 4-bit texel is two bytes, so a row of w texels is 2w bytes; the
         // default alignment of 4 only holds when that is a multiple of four.
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        while (glGetError() != GL_NO_ERROR) {}
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4, data);
+        if (GLenum e = glGetError()) {
+                cerr << "texture upload failed: RGBA4 " << w << "x" << h
+                     << " (0x" << hex << e << dec << "), "
+                     << g_scene_tex.size() << " textures / " << g_tex_bytes << " B so far\n";
+                report_mem("texture upload");
+                exit(1);
+        }
+        g_tex_bytes += (size_t)w * h * 2;
         glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
@@ -248,8 +291,22 @@ Target GPU::make_target(int w, int h){
         glGenFramebuffers(1, &t.fbo); g_scene_fbo.push_back(t.fbo);
         bind_fbo(t.fbo);
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t.tex, 0);
-        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-            cerr << "FBO incomplete\n"; exit(1);
+        const GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        if (status != GL_FRAMEBUFFER_COMPLETE) {
+            const GLenum err = glGetError();
+            GLint max_tex = 0, max_rb = 0, max_vp[2] = { 0, 0 };
+            glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_tex);
+            glGetIntegerv(GL_MAX_RENDERBUFFER_SIZE, &max_rb);
+            glGetIntegerv(GL_MAX_VIEWPORT_DIMS, max_vp);
+            cerr << "FBO incomplete: " << w << "x" << h
+                 << " status 0x" << hex << status << dec
+                 << " glerr 0x" << hex << err << dec
+                 << " max_tex " << max_tex << " max_rb " << max_rb
+                 << " max_viewport " << max_vp[0] << "x" << max_vp[1]
+                 << " tex " << t.tex << ", textures " << g_scene_tex.size()
+                 << " / " << g_tex_bytes << " B\n";
+            report_mem("FBO incomplete");
+            exit(1);
         }
         return t;
     }

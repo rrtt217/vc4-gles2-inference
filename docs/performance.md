@@ -5899,3 +5899,30 @@ yet known) and the unchunked FFN path (`ffn_split` reads packed nibbles).  Both
 keep the packed view and say so if the switch was asked for.  qkv, wo and w2
 keep the packed view -- extending the format there is where the next 5% is, and
 it is a separate kernel each.
+
+## 2026-11-15 — the hybrid's "FBO incomplete" is an out-of-memory, and it was always one
+
+The 4-bit gate refused to run on LFM2.5 q4 with a bare `FBO incomplete`.  With
+the diagnostic added to `GPU::make_target` / `make_texture` (`Q4_FMT=force`
+reproduces it) the first failure is upstream of any FBO:
+
+    texture upload failed: RGBA8 256x1536 (0x505), 336 textures / 150732800 B
+    texture upload: CmaFree 13400 kB of 262144 kB, MemFree 37496 kB
+
+0x505 is `GL_OUT_OF_MEMORY`.  The hybrid's weights are **143.7 MiB of
+textures** before the first token, on a 256 MiB CMA with 13 MiB left; the next
+256x1536 RGBA8 texture needs 1.5 MiB and does not fit.  The old message was a
+second-order symptom: `make_texture` never checked `glGetError`, so the failed
+upload left a black texture, and the FBO built on it was incomplete.
+
+Two consequences:
+
+* **The 4-bit view does not cause this.**  A packed q4 matrix is `cols/2` bytes
+  a row and the 4-bit view is `(cols/4) * 2` -- the same bytes.  The hybrid sits
+  at the edge either way; the switch only decides which allocation dies first.
+  The guard therefore keeps the hybrid on the packed view (which fits), and
+  making the 4-bit view fit is a memory-diet problem, not a format problem.
+* **Any `make_texture` failure used to be silent.**  Every upload now checks
+  `glGetError` and reports its size, the texture count and the byte total, with
+  `CmaFree`/`MemFree`; a failed FBO prints its size, the GL error, the driver's
+  texture/renderbuffer/viewport limits and the same budget.

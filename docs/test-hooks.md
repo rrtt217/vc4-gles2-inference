@@ -162,7 +162,9 @@ binary.  They are measurement hooks, not production settings.
   `gpu_q4_shift()` reports the choice at startup.
 - `Q4_FMT=0` — disable the 4-bit FFN gate view described next, restoring the
   packed nibbles for an A/B in one binary.  (`Q4_FMT=rgba4` names the default
-  explicitly; the value is otherwise ignored.)
+  explicitly; the value is otherwise ignored.)  `Q4_FMT=force` bypasses the two
+  refusals below — diagnostics only, for reproducing the hybrid failure under
+  the `make_target`/`make_texture` diagnostics.
 - `Q4_FMT=rgba4` — bind the FFN gate's INT4 matrices as `GL_RGBA4` at twice the
   width (four weights per texel, sampled as n/15, with 15 folded into the group
   scale) instead of packed nibbles.  Zero decode in the kernel; the bytes are
