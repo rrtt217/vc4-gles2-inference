@@ -72,6 +72,16 @@ TinyBrainBot 还需要 `--no-gpu-layer`：它在 VC4 上的整层 GPU 路径目�
 尚未实现、并且会明确拒绝而不是静默忽略：`top_logprobs`（备选 token 需要把候选 id 解回
 文本）和 `stream: true` 时的 `logprobs`。
 
+## 一个服务器多个模型
+
+`--model` 可以重复；每个容器都会出现在 `GET /v1/models` 里，`/health` 还会说明当前驻留的是哪个。
+`--model-id` 按顺序对应 `--model`，没给就用容器文件名。请求里的 `model` 字段选择容器，
+**同一时刻只驻留一个**：Pi Zero 的 CMA 只放得下一个，而引擎换模型时保留 EGL 上下文和已编译程序，
+所以切换的代价是一次容器读取加上载（板上 6.12 s + 2.99 s），而不是重启进程（那还要再付 4.23 s 上下文
+和 1.89 s 程序链接，见 `docs/performance.md`）。切换发生在第一个指定了另一个模型的请求上，并打印
+`[model] <id> resident, load <ms> ms`；已驻留的模型不会每请求重载。容器自带的聊天模板随之切换，
+所以 `/health` 的 `template` 与"无模板即 400"的判定都跟着当前模型走。未知模型名返回 400 并列出可用的 id。
+
 ## 接口
 
 ```text

@@ -629,9 +629,16 @@ int main(int argc, char** argv) {
                 // syllables ("德德德德...").  Same reason the REPL clears
                 // kv_tokens.
                 cache_tokens.clear();
+                // The template and the chat support belong to the *container*,
+                // so a client that caches them (the server decides from these
+                // whether a chat completion can be served) has to be told.
                 emit(common_json::object({{"event", string("loaded")},
                                           {"model", want},
-                                          {"load_ms", (double) elapsed_ms(t_load, Clock::now())}}));
+                                          {"load_ms", (double) elapsed_ms(t_load, Clock::now())},
+                                          {"template", model.template_name.empty() ? model.template_kind >= 2 ? string("minimind3") : string("chatml") : model.template_name},
+                                          {"chat_template", chat_tmpl != nullptr},
+                                          {"chat_support", model.have_capabilities ? (bool) (model.capabilities & 1) : true},
+                                          {"seq", model.seq}}));
                 continue;
             }
             vector<string> f;

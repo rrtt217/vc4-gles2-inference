@@ -473,6 +473,42 @@ check("refusal names the packer flag", "--chat-template" in msg, msg[:200])
 check("refusal does not reach the engine", worker.calls == before, f"calls={worker.calls}")
 worker.chat_template = True
 
+print("== several models: broadcast, load on demand ==")
+# The wire format is stubbed, so this checks the routing policy: every
+# configured model appears in /v1/models, a request for a non-resident one loads
+# it (once, not per request), and an unknown name is refused instead of being
+# handed to the engine.
+httpd.models = [{"id": "first", "path": "/tmp/first.mmcf"},
+                {"id": "second", "path": "/tmp/second.mmcf"}]
+httpd.active_path = "/tmp/first.mmcf"
+httpd.active_id = "first"
+httpd.model_lock = threading.Lock()
+code, resp = http("GET", "/v1/models")
+ids = [m.get("id") for m in resp.get("data", [])] if isinstance(resp, dict) else []
+check("every configured model is advertised", code == 200 and ids == ["first", "second"], str(ids))
+
+loads = []
+def _stub_load(path):
+    loads.append(path)
+    httpd.active_path = path
+    return 12.5
+worker.load = _stub_load
+code, resp = http("POST", "/v1/chat/completions",
+                  {"model": "second", "messages": [{"role": "user", "content": "hi"}]})
+check("request for a non-resident model is served", code == 200, str(code)[:120])
+check("that request loaded it exactly once", loads == ["/tmp/second.mmcf"], str(loads))
+code, resp = http("POST", "/v1/chat/completions",
+                  {"model": "second", "messages": [{"role": "user", "content": "hi"}]})
+check("the resident model is not reloaded per request", loads == ["/tmp/second.mmcf"], str(loads))
+code, resp = http("POST", "/v1/chat/completions",
+                  {"model": "third", "messages": [{"role": "user", "content": "hi"}]})
+msg = str((resp.get("error") or {}).get("message", "")) if isinstance(resp, dict) else ""
+check("an unknown model is refused", code == 400 and "first, second" in msg, str(code) + " " + msg[:110])
+check("an unknown model never reaches the engine", loads == ["/tmp/second.mmcf"], str(loads))
+del httpd.models
+del worker.load
+httpd.active_path = httpd.active_id = None
+
 worker.template = "chatml"
 httpd.shutdown()
 httpd.server_close()

@@ -155,6 +155,43 @@ class EngineWorker:
         if not self.restart():
             raise WorkerError("engine worker exited (auto-restart disabled or exhausted)")
 
+    def load(self, model: str, timeout: float = 900.0) -> float:
+        """Make `model` resident and return how long it took, in milliseconds.
+
+        The engine keeps its EGL context and its compiled programs, so this is a
+        container read plus an upload instead of a process start: 4.23 s of
+        context and 1.89 s of program links are the part that survives (docs/
+        performance.md, "Replacing a model without rebuilding the GL context").
+        The template and the chat-template flag belong to the container, so they
+        are replaced with it -- a server that kept the old ones would render the
+        new model's prompt with the old model's markers.
+        """
+        with self.lock:
+            self.ensure_alive()
+            self.proc.stdin.write(json.dumps({"op": "load", "model": model}) + "\n")
+            self.proc.stdin.flush()
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                r, _, _ = select.select([self.proc.stdout], [], [], 1.0)
+                if not r:
+                    if self.proc.poll() is not None:
+                        raise WorkerError("engine worker exited during load")
+                    continue
+                line = self.proc.stdout.readline()
+                if not line:
+                    raise WorkerError("engine worker closed its stream during load")
+                ev = json.loads(line)
+                kind = ev.get("event")
+                if kind == "loaded":
+                    self.model = model
+                    self.template = ev.get("template", self.template)
+                    self.chat_template = bool(ev.get("chat_template", self.chat_template))
+                    self.prefix_cache_tokens = 0   # it belonged to the old model
+                    return float(ev.get("load_ms", 0.0))
+                if kind == "error":
+                    raise WorkerError(str(ev.get("message", "load failed")))
+            raise WorkerError("timed out waiting for the engine to load " + model)
+
     def generate(self, prompt, max_tokens: int, temperature: float,
                  top_p: float, seed: int, on_token=None, penalties: dict | None = None,
                  messages: dict | None = None, top_k: int = 0, request_id: str = "",
@@ -757,6 +794,37 @@ class Handler(BaseHTTPRequestHandler):
         except OSError:
             pass
 
+    def _select_model(self, name: str) -> None:
+        """Map a request's `model` onto a configured container, loading it if the
+        engine is holding a different one.
+
+        One model is resident at a time: a Pi Zero's CMA fits one, and the whole
+        point of the engine's load op is that the swap is cheaper than a restart.
+        The cost is real (a container read plus an upload), so it happens on
+        demand and is logged, not silently per request.
+        """
+        srv = self.server
+        models = getattr(srv, "models", None)
+        if not models:
+            return                                  # single-model server
+        chosen = None
+        for m in models:
+            if name in (m["id"], m["path"], Path(m["path"]).name.replace(".mmcf", "")):
+                chosen = m
+                break
+        if chosen is None:
+            raise ValueError("unknown model %r; this server serves %s"
+                             % (name, ", ".join(m["id"] for m in models)))
+        if chosen["path"] == getattr(srv, "active_path", None):
+            return
+        with getattr(srv, "model_lock", threading.Lock()):
+            if chosen["path"] == getattr(srv, "active_path", None):
+                return
+            ms = srv.worker.load(chosen["path"])
+            srv.active_path = chosen["path"]
+            srv.active_id = chosen["id"]
+            print(f"[model] {chosen['id']} resident, load {ms:.0f} ms", flush=True)
+
     def _send_json(self, obj, status=200):
         data = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
@@ -845,17 +913,21 @@ class Handler(BaseHTTPRequestHandler):
                 "restarts": int(getattr(worker, "restarts", 0)),
                 "prefix_cache_tokens": worker.prefix_cache_tokens,
                 "template": getattr(worker, "template", "chatml"),
+                "models": [m["id"] for m in (getattr(self.server, "models", None) or [])],
+                "resident": getattr(self.server, "active_id", None),
             }, 200 if alive else 503)
         elif path == "/v1/models":
             now = int(time.time())
+            models = getattr(self.server, "models", None) or [
+                {"id": self.server.model_id}]
             self._send_json({
                 "object": "list",
                 "data": [{
-                    "id": self.server.model_id,
+                    "id": m["id"],
                     "object": "model",
                     "created": now,
                     "owned_by": "local",
-                }],
+                } for m in models],
             })
         elif path in {"/status", "/time", "/tools"}:
             # Deterministic routes: no model, no KV cache, sub-millisecond.
@@ -902,6 +974,10 @@ class Handler(BaseHTTPRequestHandler):
                         if isinstance(t, dict)
                         and (t.get("function") or {}).get("name") == only_tool]
                 body["tools"] = kept or body["tools"]
+            # Which container serves this request: a multi-model server loads it
+            # here, before anything reads the resident template.
+            model = str(body.get("model") or getattr(self.server, "model_id", ""))
+            self._select_model(model)
             # The engine is the only renderer.  A container packed without
             # --chat-template has nothing to render with, and guessing a format
             # here (this process used to fall back to ChatML) put markers in
@@ -924,7 +1000,6 @@ class Handler(BaseHTTPRequestHandler):
                 top_k = 0
             seed = int(body.get("seed", 1234) or 1234)
             stream = bool(body.get("stream", False))
-            model = str(body.get("model") or self.server.model_id)
             if int(body.get("n", 1) or 1) != 1:
                 raise ValueError("only n=1 is supported")
             stops = stop_strings(body)
@@ -1131,10 +1206,16 @@ def main():
     ap.add_argument("--port", type=int, default=8000)
     repo = Path(__file__).resolve().parent.parent
     ap.add_argument("--engine", default=str(repo / "engine/engine_mm3"))
-    ap.add_argument("--model", default=str(repo / "models/minimind3/minimind3.q8.mmcf"))
+    ap.add_argument("--model", action="append", default=None, metavar="MMCF",
+                    help="Container to serve; repeat for more than one.  Each extra "
+                         "model is advertised in /v1/models and loaded on demand, "
+                         "because one container is resident at a time (the engine "
+                         "keeps its GL context across the switch).")
     ap.add_argument("--tokenizer", default="",
                     help="Legacy .tok (empty = the container blob)")
-    ap.add_argument("--model-id", default="minimind3-64m")
+    ap.add_argument("--model-id", action="append", default=None, metavar="ID",
+                    help="Id for the matching --model, in order; defaults to the "
+                         "container file name for every model after the first.")
     ap.add_argument("--seq", type=int, default=1024)
     ap.add_argument("--no-gpu-layer", action="store_true")
     ap.add_argument("--worker-log", default=str(Path(__file__).resolve().parent / "worker.log"))
@@ -1158,12 +1239,24 @@ def main():
     a = ap.parse_args()
 
     os.makedirs(os.path.dirname(os.path.abspath(a.worker_log)), exist_ok=True)
-    worker = EngineWorker(a.engine, a.model, a.tokenizer, a.seq,
+    default_model = str(repo / "models/minimind3/minimind3.q8.mmcf")
+    paths = list(a.model) if a.model else [default_model]
+    ids = list(a.model_id) if a.model_id else []
+    if not ids and paths == [default_model]:
+        ids = ["minimind3-64m"]          # keeps the historical default id
+    while len(ids) < len(paths):
+        ids.append(Path(paths[len(ids)]).name.replace(".mmcf", ""))
+    models = [{"id": i, "path": p} for i, p in zip(ids, paths)]
+    worker = EngineWorker(a.engine, models[0]["path"], a.tokenizer, a.seq,
                           gpu_layer=not a.no_gpu_layer, log_path=a.worker_log,
                           prefix_cache=a.prefix_cache, kv_pack=a.kv_pack,
                           auto_restart=not a.no_auto_restart, max_restarts=a.max_restarts)
     httpd = ThreadingHTTPServer((a.host, a.port), Handler)
-    httpd.model_id = a.model_id
+    httpd.model_id = models[0]["id"]
+    httpd.models = models
+    httpd.active_path = models[0]["path"]
+    httpd.active_id = models[0]["id"]
+    httpd.model_lock = threading.Lock()
     httpd.worker = worker
     httpd.only_tool = a.only_tool
     httpd.seq = int(a.seq)
@@ -1193,7 +1286,10 @@ def main():
                   f"({len(text)} chars, prefix_cache_tokens={worker.prefix_cache_tokens})", flush=True)
         except WorkerError as e:
             print(f"warmup failed: {e}", flush=True)
-    print(f"listening on http://{a.host}:{a.port}  model={a.model_id}", flush=True)
+    served = ", ".join(f"{m['id']} ({m['path']})" for m in models)
+    print(f"listening on http://{a.host}:{a.port}  models=[{served}]"
+          + ("" if len(models) == 1 else "  (one resident at a time, loaded on demand)"),
+          flush=True)
 
     def stop(signum, frame):
         threading.Thread(target=httpd.shutdown, daemon=True).start()

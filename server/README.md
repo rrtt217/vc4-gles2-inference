@@ -81,6 +81,30 @@ POST /v1/tool           {"name": "...", "arguments": {...}}
 POST /v1/chat/completions
 ```
 
+### Several models on one server
+
+`--model` may be repeated; each container is advertised by `GET /v1/models` and
+`/health` lists them with the one that is resident:
+
+```bash
+python3 server.py --model ../models/minimind3/minimind3.q8.mmcf --model-id mm3 \
+                  --model ../models/llama2c/minimind2-small.q8.mmcf --model-id mm2small
+# listening ... models=[mm3 (...), mm2small (...)]  (one resident at a time, loaded on demand)
+```
+
+`--model-id` is positional against the `--model` list; a model without one takes
+its container file name.  A request's `model` field selects the container, and
+**exactly one is resident at a time**: the Pi Zero's CMA fits one, and the engine
+keeps its EGL context and compiled programs across the switch, so a switch costs
+a container read plus an upload (6.12 s + 2.99 s on the board) instead of a
+process start (which would also pay 4.23 s of context and 1.89 s of program
+links -- `docs/performance.md`).  The switch happens on the first request that
+names a different model and is logged as `[model] <id> resident, load <ms> ms`;
+the resident model is not reloaded per request.  The container's chat template
+travels with it, so `/health`'s `template` and the chat-template refusal follow
+the model that is currently loaded.  An unknown name is a 400 that names what
+the server serves.
+
 The `/status`, `/time`, `/math` and `/tool` routes never touch the GL worker:
 they answer in 10–30 ms on a Pi Zero, versus ~25 s for the same question asked
 through the model.
