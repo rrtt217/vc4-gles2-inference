@@ -125,6 +125,11 @@ public:
     // (these defaults reproduce the historical 1 = BOS, 2 = EOS behaviour)
     bool load(const string& path);
     // MMCF v2 container (docs/checkpoint-container.md).
+    // The MMCF reader in three steps (2026-11-14, P2-1 of the 2026-11-13 audit):
+    // `parse_header` validates the 64-byte header and keeps the derived offsets in
+    // the members below, `load_mmcf` then walks the metadata and the tensor table.
+    // Pure host code: none of this needs a GL context.
+    bool parse_header();
     bool load_mmcf();
     ~Model();
     // Drop the mapping once every weight is on the GPU.  The pages stay in the
@@ -155,6 +160,12 @@ private:
     // The checkpoint stays mapped for the process lifetime: borrowed weights
     // point into it.  Those pages are page cache - reclaimable, never swapped -
     // so the next run reads them back from RAM instead of the SD card.
+    // set by parse_header(), used by the metadata and tensor phases
+    uint16_t version_ = 0;
+    int rec_size_ = 0;
+    uint32_t n_tensors_ = 0, caps_ = 0, meta_off_ = 0, meta_size_ = 0;
+    uint64_t data_off_ = 0, table_off_ = 0;
+
     const uint8_t* fbase_ = nullptr;
     size_t fsize_ = 0, fpos_ = 0;
     void* map_ = nullptr;

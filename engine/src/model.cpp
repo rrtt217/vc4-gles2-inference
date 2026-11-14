@@ -380,20 +380,20 @@ static uint64_t rd64(const uint8_t* p){ uint64_t v; memcpy(&v, p, 8); return v; 
 static float rdf(const uint8_t* p){ float v; memcpy(&v, p, 4); return v; }
 }  // namespace
 
-bool Model::load_mmcf(){
+bool Model::parse_header() {
         if (fsize_ < 64) { cerr << "mmcf: truncated header\n"; return false; }
         const uint8_t* h = fbase_;
-        const uint16_t mmcf_version = rd16(h + 4);
-        if (mmcf_version != 2 && mmcf_version != 3) {
-                cerr << "mmcf: unsupported version " << mmcf_version << "\n";
+        version_ = rd16(h + 4);
+        if (version_ != 2 && version_ != 3) {
+                cerr << "mmcf: unsupported version " << version_ << "\n";
                 return false;
         }
-        const int rec_size = mmcf_version >= 3 ? MMCF_REC_V3 : MMCF_REC_V2;
+        rec_size_ = version_ >= 3 ? MMCF_REC_V3 : MMCF_REC_V2;
         if (rd16(h + 6) != 64) { cerr << "mmcf: bad header size\n"; return false; }
-        const uint32_t n_tensors = rd32(h + 8);
-        const uint32_t caps = rd32(h + 12);
-        const uint32_t meta_off = rd32(h + 16), meta_size = rd32(h + 20);
-        const uint64_t data_off = rd64(h + 24), file_size = rd64(h + 32);
+        n_tensors_ = rd32(h + 8);
+        caps_ = rd32(h + 12);
+        meta_off_ = rd32(h + 16); meta_size_ = rd32(h + 20);
+        data_off_ = rd64(h + 24); const uint64_t file_size = rd64(h + 32);
         if (file_size != (uint64_t)fsize_) { cerr << "mmcf: size field " << file_size << " != file " << fsize_ << "\n"; return false; }
         {
                 // crc32 over the first 40 bytes, stored at 40..43
@@ -413,21 +413,26 @@ bool Model::load_mmcf(){
                 const uint32_t stored = rd32(h + 40);
                 if (stored && stored != crc) { cerr << "mmcf: header crc mismatch\n"; return false; }
         }
-        if ((uint64_t)meta_off + meta_size > fsize_ || data_off > fsize_ ||
-            data_off < (uint64_t)n_tensors * rec_size) { cerr << "mmcf: bad section offsets\n"; return false; }
+        if ((uint64_t)meta_off_ + meta_size_ > fsize_ || data_off_ > fsize_ ||
+            data_off_ < (uint64_t)n_tensors_ * rec_size_) { cerr << "mmcf: bad section offsets\n"; return false; }
 
-        bool have_model = false, have_rope = false, have_quant = false;
-        int group = 0, split = 0;
-        const uint64_t table_off = data_off - (uint64_t)n_tensors * rec_size;
-        if (table_off < (uint64_t)meta_off + meta_size || (table_off % 16) != 0) {
+        table_off_ = data_off_ - (uint64_t)n_tensors_ * rec_size_;
+        if (table_off_ < (uint64_t)meta_off_ + meta_size_ || (table_off_ % 16) != 0) {
                 cerr << "mmcf: tensor table does not follow the metadata block\n";
                 return false;
         }
-        for (uint64_t p = meta_off; p + 8 <= (uint64_t)meta_off + meta_size; ) {
+    return true;
+}
+
+bool Model::load_mmcf(){
+    if (!parse_header()) return false;
+        bool have_model = false, have_rope = false, have_quant = false;
+    int group = 0, split = 0;
+    for (uint64_t p = meta_off_; p + 8 <= (uint64_t)meta_off_ + meta_size_; ) {
                 const uint16_t key = rd16(fbase_ + p), type = rd16(fbase_ + p + 2);
                 const uint32_t len = rd32(fbase_ + p + 4);
                 const uint8_t* payload = fbase_ + p + 8;
-                if (p + 8 + len > (uint64_t)meta_off + meta_size) { cerr << "mmcf: TLV overruns the block\n"; return false; }
+                if (p + 8 + len > (uint64_t)meta_off_ + meta_size_) { cerr << "mmcf: TLV overruns the block\n"; return false; }
                 if (key == 1 && type == 1 && len >= 28) {
                         dim = (int)rd32(payload); hidden = (int)rd32(payload + 4);
                         layers = (int)rd32(payload + 8); heads = (int)rd32(payload + 12);
@@ -537,33 +542,33 @@ bool Model::load_mmcf(){
                 if (t > 1) { cerr << "mmcf: unknown layer type " << (int)t << "\n"; return false; }
                 hybrid = hybrid || t != 0;
         }
-        (void)caps;
+        (void)caps_;
 
         // One pass over the table, creating whatever the model needs.  Unknown
         // ids are ignored: that is what lets a future writer add tensors.
         vector<MmcfRec> recs;
-        recs.reserve(n_tensors);
-        for (uint32_t i = 0; i < n_tensors; ++i) {
-                const uint8_t* r = fbase_ + table_off + (uint64_t)i * rec_size;
+        recs.reserve(n_tensors_);
+        for (uint32_t i = 0; i < n_tensors_; ++i) {
+                const uint8_t* r = fbase_ + table_off_ + (uint64_t)i * rec_size_;
                 MmcfRec m;
                 m.id = rd16(r); m.dtype = r[2]; m.flags = r[3]; m.group = r[4];
                 m.rows = rd32(r + 6); m.cols = rd32(r + 10);
                 m.off = rd64(r + 14); m.bytes = rd64(r + 22);
                 m.crc = rd32(r + 30); m.scale = rdf(r + 34);
-                m.aux = mmcf_version >= 3 ? rd16(r + 38) : 0;
-                if (data_off + m.off + m.bytes > fsize_) { cerr << "mmcf: tensor " << i << " overruns the file\n"; return false; }
+                m.aux = version_ >= 3 ? rd16(r + 38) : 0;
+                if (data_off_ + m.off + m.bytes > fsize_) { cerr << "mmcf: tensor " << i << " overruns the file\n"; return false; }
                 recs.push_back(m);
         }
 
         auto as_f32 = [&](const MmcfRec& r, vector<float>& v) {
                 v.resize((size_t)r.rows * r.cols);
-                memcpy(v.data(), fbase_ + data_off + r.off, v.size() * 4);
+                memcpy(v.data(), fbase_ + data_off_ + r.off, v.size() * 4);
         };
         auto as_i16 = [&](const MmcfRec& r, Mat& m) {
                 m.rows = (int)r.rows; m.cols = (int)r.cols;
                 m.type = WeightType::INT16;
                 m.scale = r.scale;
-                const int16_t* p = (const int16_t*)(fbase_ + data_off + r.off);
+                const int16_t* p = (const int16_t*)(fbase_ + data_off_ + r.off);
                 if (borrow_) m.ext16 = p;
                 else m.q16.assign(p, p + (size_t)r.rows * r.cols);
         };
@@ -572,7 +577,7 @@ bool Model::load_mmcf(){
                 m.type = WeightType::INT8;
                 m.scale = r.scale;
                 m.prebiased = (r.dtype == 2);
-                const int8_t* p = (const int8_t*)(fbase_ + data_off + r.off);
+                const int8_t* p = (const int8_t*)(fbase_ + data_off_ + r.off);
                 if (borrow_) m.ext8 = p;
                 else { m.q8.assign(p, p + (size_t)r.rows * r.cols); }
         };
@@ -671,8 +676,8 @@ bool Model::load_mmcf(){
                                              << " bytes " << r.bytes << " nlo " << nlo << "\n";
                                 emb_q6_lo.resize(nlo);
                                 emb_q6_hi.resize(nhi);
-                                memcpy(emb_q6_lo.data(), fbase_ + data_off + r.off, nlo);
-                                memcpy(emb_q6_hi.data(), fbase_ + data_off + r.off + nlo, nhi);
+                                memcpy(emb_q6_lo.data(), fbase_ + data_off_ + r.off, nlo);
+                                memcpy(emb_q6_hi.data(), fbase_ + data_off_ + r.off + nlo, nhi);
                                 has_q6_emb = true;
                                 break;
                         }
@@ -681,7 +686,7 @@ bool Model::load_mmcf(){
                                 return false;
                         }
                         emb_q8.resize((size_t)r.rows * r.cols);
-                        memcpy(emb_q8.data(), fbase_ + data_off + r.off, emb_q8.size());
+                        memcpy(emb_q8.data(), fbase_ + data_off_ + r.off, emb_q8.size());
                         has_q8_emb = true;
                         break;
                 }
@@ -693,7 +698,7 @@ bool Model::load_mmcf(){
                 case 7: as_f32(r, k_norm); break;
                 case 8:    // int16 embedding (the i16 containers)
                         emb_i16.resize((size_t)r.rows * r.cols);
-                        memcpy(emb_i16.data(), fbase_ + data_off + r.off, emb_i16.size() * 2);
+                        memcpy(emb_i16.data(), fbase_ + data_off_ + r.off, emb_i16.size() * 2);
                         has_i16_emb = true;
                         break;
                 case 0x10: if (layer < layers) as_mat(r, layers_qkv[layer]); break;
@@ -710,7 +715,7 @@ bool Model::load_mmcf(){
                                              << " is not f32\n";
                                         return false;
                                 }
-                                const float* p = (const float*)(fbase_ + data_off + r.off);
+                                const float* p = (const float*)(fbase_ + data_off_ + r.off);
                                 layers_conv_w[layer].assign(p, p + (size_t)r.rows * r.cols);
                                 if (conv_k && conv_k != (int)r.cols) {
                                         cerr << "mmcf: conv kernel width changes at layer "
@@ -723,7 +728,7 @@ bool Model::load_mmcf(){
                 case 0x19: if (layer < layers) as_mat(r, layers_conv_out[layer]); break;
                 case 0x20: { Mat m; as_mat(r, m); logits_tiles.push_back(m); break; }
                 case 0x30:   // tokenizer blob, borrowed from the mapping
-                        tok_blob = fbase_ + data_off + r.off;
+                        tok_blob = fbase_ + data_off_ + r.off;
                         tok_blob_bytes = (size_t)r.bytes;
                         break;
                 default: break;  // tokenizer blob, template, unknown ids
@@ -766,7 +771,7 @@ bool Model::load_mmcf(){
                 // rows per fragment sit rows apart, so its plane is paired the
                 // way the kernel reads it.
                 m->row_scale_hi = (kind == 0x14 && !split);
-                const float* p = (const float*)(fbase_ + data_off + r.off);
+                const float* p = (const float*)(fbase_ + data_off_ + r.off);
                 m->row_scale.assign(p, p + r.rows);
         }
         row_scale = !rowmap.empty();
@@ -800,18 +805,18 @@ bool Model::load_mmcf(){
                         return false;
                 }
                 if (!borrow_) {
-                        m.q4.assign((const uint8_t*)(fbase_ + data_off + q.body->off),
-                                    (const uint8_t*)(fbase_ + data_off + q.body->off) + q.body->bytes);
-                        m.q4_scale.assign((const int16_t*)(fbase_ + data_off + q.scl->off),
-                                          (const int16_t*)(fbase_ + data_off + q.scl->off) +
+                        m.q4.assign((const uint8_t*)(fbase_ + data_off_ + q.body->off),
+                                    (const uint8_t*)(fbase_ + data_off_ + q.body->off) + q.body->bytes);
+                        m.q4_scale.assign((const int16_t*)(fbase_ + data_off_ + q.scl->off),
+                                          (const int16_t*)(fbase_ + data_off_ + q.scl->off) +
                                           (size_t)m.rows * m.groups);
-                        m.q4_min.assign((const int16_t*)(fbase_ + data_off + q.mn->off),
-                                        (const int16_t*)(fbase_ + data_off + q.mn->off) +
+                        m.q4_min.assign((const int16_t*)(fbase_ + data_off_ + q.mn->off),
+                                        (const int16_t*)(fbase_ + data_off_ + q.mn->off) +
                                         (size_t)m.rows * m.groups);
                 } else {
-                        m.ext4 = (const uint8_t*)(fbase_ + data_off + q.body->off);
-                        m.ext_scale4 = (const int16_t*)(fbase_ + data_off + q.scl->off);
-                        m.ext_min4 = (const int16_t*)(fbase_ + data_off + q.mn->off);
+                        m.ext4 = (const uint8_t*)(fbase_ + data_off_ + q.body->off);
+                        m.ext_scale4 = (const int16_t*)(fbase_ + data_off_ + q.scl->off);
+                        m.ext_min4 = (const int16_t*)(fbase_ + data_off_ + q.mn->off);
                 }
                 const int kind = id & 0xFF, layer = (id >> 8) & 0x3F;
                 if (experts > 0 && (kind == 0x12 || kind == 0x13 || kind == 0x15)) {
