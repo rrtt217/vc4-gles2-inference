@@ -1214,6 +1214,12 @@ string matvec_i4_pair_swiglu_4x4(int rows, int cols, XFormat xf, bool inl, int h
     const int texw = cols / 4;              // one 4-bit texel = four weights
     const int groups = (cols + 31) / 32;
     const string ROWS = to_string(rows), GROUPS = to_string(groups), TEXW = to_string(texw);
+    // Q4_NOMIN=1 drops the asymmetric min term and the group sum that feeds it:
+    // 28 adds per 32-weight group, 672 per fragment against 768 MACs, which is
+    // the last unexplained cost against the q8 gate (q8 has one uniform scale).
+    const bool nom = q4_nomin();
+    const string MA1 = nom ? "" : "+ma1*xsum", MA2 = nom ? "" : "+ma2*xsum";
+    const string MB1 = nom ? "" : "+mb1*xsum", MB2 = nom ? "" : "+mb2*xsum";
     return q4_head(xf, inl) + HD +
         "uniform sampler2D W1,W2,P1,P2,X;uniform float ps1,ps2;" + kQzSl +
         "void main(){int t=int(gl_FragCoord.x);int r0=2*t;"
@@ -1260,8 +1266,8 @@ string matvec_i4_pair_swiglu_4x4(int rows, int cols, XFormat xf, bool inl, int h
         "d2+=dot(wt2,xa)+dot(wt3,xb);"
         "e1+=dot(wt4,xa)+dot(wt5,xb);"
         "e2+=dot(wt6,xa)+dot(wt7,xb);}" +
-        "s10+=sa1*d1+ma1*xsum;s20+=sa2*d2+ma2*xsum;"
-        "s11+=sb1*e1+mb1*xsum;s21+=sb2*e2+mb2*xsum;}"
+        "s10+=sa1*d1" + MA1 + ";s20+=sa2*d2" + MA2 + ";"
+        "s11+=sb1*e1" + MB1 + ";s21+=sb2*e2" + MB2 + ";}"
         "float v0=sl(qz(s10),qz(s20))" + HM + ";"
         "float v1=(r0+1<" + ROWS + ")?sl(qz(s11),qz(s21))" + HM + ":0.0;"
         "gl_FragColor=x_st2(v0,v1);}";
