@@ -77,7 +77,7 @@ the file format in [`docs/model-formats.md`](docs/model-formats.md) and
 | `bench.sh`, `bench_ab.sh`, `bench_plain_ab.sh`, `longctx.sh` | timings; the `ab` ones interleave two binaries to cancel drift |
 | `swap_matrix.py` | acceptance for `/model`: swaps containers inside one process over the q8, q4, i16, hybrid and mixed-precision families (three template kinds, a round trip, a quantisation change, a repeat run) and requires every turn to be byte-identical to a fresh process.  Needs the GPU and `models/`; about three minutes on Xe |
 | `check_target_reset.sh` | every scratch `Target` in `gpu.h` is cleared by `GPU::reset_targets()`, so a released scene cannot be reused with a deleted texture name.  Runs without a GPU or a model |
-| `docs_check.sh` | documentation drift: every switch the source reads is in `docs/test-hooks.md`, every in-tree path a document names exists, and nothing calls a live switch dead.  Runs without a model or a GPU |
+| `docs_check.sh` | documentation drift: every switch the source reads is in `docs/test-hooks.md`, every in-tree path a document names exists (including `probes/`, `src/` and `engine/*.cpp`), nothing calls a live switch dead, and (via `check_docs_links.py`) every relative link and `#anchor` resolves, every `docs/README.md` entry exists and is tracked, and every switch `test-hooks.md` documents is read by `engine/src`.  Runs without a model or a GPU |
 | `bench_mc.py` | "can this model answer a multiple-choice question": letter-logit accuracy, calibrated accuracy and format compliance from `LOGITS_OUT`, one engine run per item, no sampler.  Data in `scripts/eval/mc_zh.jsonl` and `mc_en.jsonl` |
 | `eval_ifeval.py` | "does the reply obey the instruction": sampled replies scored against regexes and counts; `--selftest` validates the case file (`scripts/eval/ifeval.jsonl`) without a GPU |
 | `eval_translate.py` | "does it translate or just talk about translating": 15 sentence pairs both directions, greedy, chrF against the reference plus source-script leakage (`scripts/eval/translate.jsonl`) |
@@ -450,10 +450,16 @@ A command in a document that no longer runs is a bug in the document, not a
 detail.  `engine/scripts/docs_check.sh` is the mechanical half of that rule; it
 is step 0 of `scripts/regression.sh`, and it runs in under a second: it compares
 the `getenv()` inventory with
-`docs/test-hooks.md`, checks that every `engine/tools`, `engine/scripts`,
-`minimind3`, `server` and `templates` path a document tells you to run still
-exists, and refuses to let a document call a switch dead while the source still
-reads it.  Run it before committing a documentation change.
+`docs/test-hooks.md`, checks that every in-tree path a document tells you to run
+still exists (`engine/tools`, `engine/scripts`, `engine/probes`, `engine/src`,
+`engine/*.cpp`, `minimind3`, `server`, `templates`), and refuses to let a document
+call a switch dead while the source still reads it.  The three directions that
+need slug matching, relative resolution or git live in
+`scripts/check_docs_links.py`, called from the same step: every relative link and
+`#anchor` resolves, every `docs/README.md` entry exists and is tracked, and every
+switch `test-hooks.md` documents is read by `engine/src` -- that last one is the
+direction that would have caught `CONV_GPU`.  Run it before committing a
+documentation change.
 
 When a flag is removed, grep the whole tree for it: `--template` survived in
 five scripts and two READMEs after the engine dropped it, and `docs_check.sh`

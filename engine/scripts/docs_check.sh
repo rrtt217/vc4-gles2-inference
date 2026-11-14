@@ -12,7 +12,11 @@
 #   3. a switch a document calls "gone" while the source still reads it
 #      (found: TOKENIZER=, which is worse than gone - it *overrides* the
 #      container's tokenizer and the answer comes out empty);
-#   4. a removed engine switch still used as a command.
+#   4. a removed engine switch still used as a command;
+#   5. the three directions that need more than grep (links and their heading
+#      anchors, the docs/README.md index against git, and doc->source: every
+#      switch test-hooks.md documents must be read by engine/src).  Those live in
+#      scripts/check_docs_links.py, which is where CONV_GPU would have been caught.
 #
 # Usage:  scripts/docs_check.sh            (from engine/, or anywhere)
 #         scripts/docs_check.sh -v         also list what was checked
@@ -42,7 +46,7 @@ done < /tmp/docs_check_env.$$
 rm -f /tmp/docs_check_env.$$
 
 # 2. files a document tells you to run must exist
-refs=$(grep -rhoE "(engine/(tools|scripts)|minimind3|server|templates)/[A-Za-z0-9_.-]+\.(py|sh|jinja)" \
+refs=$(grep -rhoE "(engine/(tools|scripts|probes|src)|engine|minimind3|server|templates)/[A-Za-z0-9_.-]+\.(py|sh|jinja|cpp|h)" \
         $DOCS 2>/dev/null | sort -u)
 [ "$VERBOSE" = "-v" ] && say "  $(printf '%s\n' "$refs" | wc -l) in-tree paths referenced"
 for f in $refs; do
@@ -68,6 +72,9 @@ for flag in --template; do
         fail=1
     fi
 done
+
+# 5. links, the index and the doc->source direction
+if ! python3 scripts/check_docs_links.py; then fail=1; fi
 
 if [ "$fail" = 0 ]; then
     say "docs: ok ($n switches, $(printf '%s\n' "$refs" | wc -l) paths)"

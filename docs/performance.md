@@ -421,7 +421,7 @@ redundant `floor(x*255+0.5)` from every decoder (the rest, 1.6x on the matvec
 alone).  Together prefill went 37.95 s -> 24.25 s and decode 507.5 -> 325.4
 ms/token with byte-identical output.
 
-**The mixed-precision idea is dead on this driver.**  `engine/texsize_probe.cpp`
+**The mixed-precision idea is dead on this driver.**  `engine/probes/texsize_probe.cpp`
 shows Mesa exposes neither `OES_texture_half_float` nor `OES_texture_float`, so
 weights can only be RGBA8 and every one of them must be decoded in the fragment
 shader.  The INT16 checkpoint format does not help either: it stores two int16
@@ -527,7 +527,7 @@ into its byte.  For all 256 byte values, `float32(b/255) * 255 == b` exactly, so
 both the `+0.5` and the `floor` are dead weight — two vector ops per texel, i.e.
 about two scalar ops per weight, on top of the ~13 the q8 matvec already spends.
 
-The isolated probe (`engine/matvec_probe.cpp`) measures it on identical weights
+The isolated probe (`engine/probes/matvec_probe.cpp`) measures it on identical weights
 and an identical activation layout:
 
 | shape | q8, act 1/texel | q8, act 2/texel | q8, no rounding |
@@ -570,10 +570,10 @@ Two standalone binaries answer layout questions without touching the model:
 
 ```sh
 g++ -O2 -march=armv6 -mfpu=vfp -mfloat-abi=hard -std=c++17 \
-    -o /tmp/matvec_probe engine/matvec_probe.cpp -lEGL -lGLESv2 -lm
+    -o /tmp/matvec_probe engine/probes/matvec_probe.cpp -lEGL -lGLESv2 -lm
 /tmp/matvec_probe 1536 768 10        # rows, cols, iterations
 
-g++ ... -o /tmp/texsize_probe engine/texsize_probe.cpp -lEGL -lGLESv2 -lm
+g++ ... -o /tmp/texsize_probe engine/probes/texsize_probe.cpp -lEGL -lGLESv2 -lm
 /tmp/texsize_probe                  # which texture sizes this driver accepts
 ```
 
@@ -741,7 +741,7 @@ times per layer for the FFN gate.  One fragment now computes row r of `w1` *and*
 row r of `w3`, sharing the decode, and writes both results into one texel as two
 int16.  That is one draw instead of two and roughly half the activation traffic.
 
-`engine/matvec_probe.cpp` measures it in isolation (2048x768, two rows per
+`engine/probes/matvec_probe.cpp` measures it in isolation (2048x768, two rows per
 fragment): 7.30 ms for both matrices against 2 x 5.46 ms separately.
 
 Pi, greedy, interleaved A/B (`FFN_PAIR=0` keeps the old path):
