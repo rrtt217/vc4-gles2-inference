@@ -1171,10 +1171,7 @@ string matvec_i4_pair_swiglu(int rows, int cols, XFormat xf, bool inl, int hs) {
 // q8 gate, and the numbers are wrong on purpose.
 //   Q4_4X4_NOP=1    drop the four P fetches and the scale/min decode per group
 //                   (uses a constant), leaving the weight taps untouched
-//   Q4_4X4_NOSWZ=1  dot the texel against the unreversed activations, which
-//                   removes the .wzyx operand per dot
 static bool q4x4_nop(){ return getenv("Q4_4X4_NOP") != nullptr; }
-static bool q4x4_noswz(){ return getenv("Q4_4X4_NOSWZ") != nullptr; }
 
 string matvec_i4_pair_swiglu_4x4(int rows, int cols, XFormat xf, bool inl, int hs) {
     need_shape("matvec_i4_pair_swiglu_4x4", rows, cols, 32);
@@ -1213,14 +1210,13 @@ string matvec_i4_pair_swiglu_4x4(int rows, int cols, XFormat xf, bool inl, int h
         "vec4 wt2=texture2D(W2,vec2(c0,v0r)),wt3=texture2D(W2,vec2(c1,v0r));"
         "vec4 wt4=texture2D(W1,vec2(c0,v1r)),wt5=texture2D(W1,vec2(c1,v1r));"
         "vec4 wt6=texture2D(W2,vec2(c0,v1r)),wt7=texture2D(W2,vec2(c1,v1r));"
-        + string(q4x4_noswz() ? "d1+=dot(wt0,xa)+dot(wt1,xb);"
-                                 "d2+=dot(wt2,xa)+dot(wt3,xb);"
-                                 "e1+=dot(wt4,xa)+dot(wt5,xb);"
-                                 "e2+=dot(wt6,xa)+dot(wt7,xb);}"
-                              : "d1+=dot(wt0,xa.wzyx)+dot(wt1,xb.wzyx);"
-                                 "d2+=dot(wt2,xa.wzyx)+dot(wt3,xb.wzyx);"
-                                 "e1+=dot(wt4,xa.wzyx)+dot(wt5,xb.wzyx);"
-                                 "e2+=dot(wt6,xa.wzyx)+dot(wt7,xb.wzyx);}") +
+        // make_q4_texture reversed the nibbles at upload, so the texel is in
+        // natural column order and no .wzyx is needed (that operand measured
+        // 52 ms of the gate; Q4_4X4_NOSWZ was the arm that found it).
+        "d1+=dot(wt0,xa)+dot(wt1,xb);"
+        "d2+=dot(wt2,xa)+dot(wt3,xb);"
+        "e1+=dot(wt4,xa)+dot(wt5,xb);"
+        "e2+=dot(wt6,xa)+dot(wt7,xb);}" +
         "s10+=sa1*d1+ma1*xsum;s20+=sa2*d2+ma2*xsum;"
         "s11+=sb1*e1+mb1*xsum;s21+=sb2*e2+mb2*xsum;}"
         "float v0=sl(qz(s10),qz(s20))" + HM + ";"

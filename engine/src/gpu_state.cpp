@@ -223,13 +223,27 @@ GLuint GPU::make_texture(int w, int h, const void* data){
 
 GLuint GPU::make_q4_texture(int w, int h, const void* data){
         const double t0 = shader_time_ms();
+        // Reverse the four nibbles of every 16-bit texel on the way in.  The
+        // sampler hands back the texel's four weights in reverse column order
+        // (GL packs R into the most significant nibble), which cost 52 ms of
+        // the gate at 1216 rows as a .wzyx operand per dot.  Reversing here is
+        // the same permutation with no quality effect, and lets the kernel dot
+        // the texel against the activations in natural order.
+        const size_t n = (size_t)w * h;
+        const uint16_t* src = (const uint16_t*)data;
+        std::vector<uint16_t> rev(n);
+        for (size_t i = 0; i < n; ++i) {
+                const uint16_t v = src[i];
+                rev[i] = (uint16_t)(((v & 0x000F) << 12) | ((v & 0x00F0) << 4) |
+                                    ((v & 0x0F00) >> 4) | ((v & 0xF000) >> 12));
+        }
         GLuint t = 0; glGenTextures(1, &t); g_scene_tex.push_back(t);
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, t); gl_state_forget_bindings();
         // A 4-bit texel is two bytes, so a row of w texels is 2w bytes; the
         // default alignment of 4 only holds when that is a multiple of four.
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
         while (glGetError() != GL_NO_ERROR) {}
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4, data);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4, rev.data());
         if (GLenum e = glGetError()) {
                 cerr << "texture upload failed: RGBA4 " << w << "x" << h
                      << " (0x" << hex << e << dec << "), "
