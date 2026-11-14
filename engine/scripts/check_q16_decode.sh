@@ -19,8 +19,15 @@
 set -u
 cd "$(dirname "$0")/.." || exit 1
 
-if [ $# -ge 1 ] && [ -f "$1" ]; then
-    dump=$(cat "$1")
+# $1 is the engine binary the gate is testing (or a saved dump file, which is how
+# the negative tests are run).  On the board the binary is the runtime one, so a
+# bare `./engine_mm3` is not good enough -- that was a board-only failure.
+arg=${1:-}
+if [ -n "$arg" ] && [ -x "$arg" ]; then
+    dump=$("$arg" --dump-shaders=raw 2>/dev/null) || {
+        echo "q16 decode: $arg --dump-shaders=raw failed" >&2; exit 1; }
+elif [ -n "$arg" ] && [ -f "$arg" ]; then
+    dump=$(cat "$arg")
 else
     dump=$(./engine_mm3 --dump-shaders=raw 2>/dev/null) || {
         echo "q16 decode: cannot dump shaders" >&2; exit 1; }

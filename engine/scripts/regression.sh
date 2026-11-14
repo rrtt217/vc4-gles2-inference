@@ -185,8 +185,8 @@ esac
 
 # A Target that outlives a scene release is reused with a deleted name: the
 # create sites in gpu.cpp are guarded on "tex == 0", and nothing else notices.
-sh scripts/check_q16_decode.sh || {
-    echo "q16 decode FAIL: see scripts/check_q16_decode.sh" >&2
+sh scripts/check_q16_decode.sh "$BIN" || {
+    echo "q16 decode FAIL: see scripts/check_q16_decode.sh $BIN" >&2
     exit 1
 }
 
