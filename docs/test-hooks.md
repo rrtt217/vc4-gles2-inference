@@ -160,6 +160,11 @@ binary.  They are measurement hooks, not production settings.
 - `Q4_SHIFT=0` — force the float nibble decode instead of the ESSL 3.00 shift
   decode (`Q4_SHIFT_NO_MESA`, `Q4_SHIFT_VERBOSE` are VC4-specific overrides).
   `gpu_q4_shift()` reports the choice at startup.
+- `Q4_4X4_NOP=1`, `Q4_4X4_NOSWZ=1` — pricing arms for the 4-bit gate above, the
+  `Q4_NOUNPACK` methodology: the first drops the four P fetches and the
+  scale/min decode per group (constant scale), the second dots the texel
+  against unreversed activations.  Both give wrong weights on purpose and price
+  one candidate for the 2x the gate still pays against q8.
 - `Q4_FMT=0` — disable the 4-bit FFN gate view described next, restoring the
   packed nibbles for an A/B in one binary.  (`Q4_FMT=rgba4` names the default
   explicitly; the value is otherwise ignored.)  `Q4_FMT=force` bypasses the two

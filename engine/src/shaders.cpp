@@ -1166,6 +1166,16 @@ string matvec_i4_pair_swiglu(int rows, int cols, XFormat xf, bool inl, int hs) {
 // and only ~32 ms of that is the floor chain (Q4_NOUNPACK): the rest is eight
 // scalar taps and an eight-term scalar dot per texel, which is the shape a
 // four-lane texel does not need.
+// Two default-off pricing arms for the 4-bit gate, the same methodology as
+// Q4_NOUNPACK: each removes one candidate for the 2x it still pays against the
+// q8 gate, and the numbers are wrong on purpose.
+//   Q4_4X4_NOP=1    drop the four P fetches and the scale/min decode per group
+//                   (uses a constant), leaving the weight taps untouched
+//   Q4_4X4_NOSWZ=1  dot the texel against the unreversed activations, which
+//                   removes the .wzyx operand per dot
+static bool q4x4_nop(){ return getenv("Q4_4X4_NOP") != nullptr; }
+static bool q4x4_noswz(){ return getenv("Q4_4X4_NOSWZ") != nullptr; }
+
 string matvec_i4_pair_swiglu_4x4(int rows, int cols, XFormat xf, bool inl, int hs) {
     need_shape("matvec_i4_pair_swiglu_4x4", rows, cols, 32);
     const string HD = hid_scale_def(hs), HM = hid_scale_mul(hs);
@@ -1184,14 +1194,17 @@ string matvec_i4_pair_swiglu_4x4(int rows, int cols, XFormat xf, bool inl, int h
         "float itw=1.0/float(" + TEXW + ");"
         "float s10=0.0,s20=0.0,s11=0.0,s21=0.0;"
         "for(int g=0;g<" + GROUPS + ";g++){"
-        "vec4 q1=texture2D(P1,vec2((float(g)+0.5)/float(" + GROUPS + "),(u0+0.5)/float(" + ROWS + ")));"
-        "vec4 q2=texture2D(P2,vec2((float(g)+0.5)/float(" + GROUPS + "),(u0+0.5)/float(" + ROWS + ")));"
-        "vec4 p1=texture2D(P1,vec2((float(g)+0.5)/float(" + GROUPS + "),(u1+0.5)/float(" + ROWS + ")));"
-        "vec4 p2=texture2D(P2,vec2((float(g)+0.5)/float(" + GROUPS + "),(u1+0.5)/float(" + ROWS + ")));"
-        "float sa1=15.0*x_i16raw(q1.rg)*ps1,ma1=x_i16raw(q1.ba)*ps1;"
-        "float sa2=15.0*x_i16raw(q2.rg)*ps2,ma2=x_i16raw(q2.ba)*ps2;"
-        "float sb1=15.0*x_i16raw(p1.rg)*ps1,mb1=x_i16raw(p1.ba)*ps1;"
-        "float sb2=15.0*x_i16raw(p2.rg)*ps2,mb2=x_i16raw(p2.ba)*ps2;"
+        + (q4x4_nop()
+               ? string("float sa1=15.0*ps1,ma1=ps1,sa2=15.0*ps2,ma2=ps2,"
+                        "sb1=15.0*ps1,mb1=ps1,sb2=15.0*ps2,mb2=ps2;")
+               : "vec4 q1=texture2D(P1,vec2((float(g)+0.5)/float(" + GROUPS + "),(u0+0.5)/float(" + ROWS + ")));"
+                 "vec4 q2=texture2D(P2,vec2((float(g)+0.5)/float(" + GROUPS + "),(u0+0.5)/float(" + ROWS + ")));"
+                 "vec4 p1=texture2D(P1,vec2((float(g)+0.5)/float(" + GROUPS + "),(u1+0.5)/float(" + ROWS + ")));"
+                 "vec4 p2=texture2D(P2,vec2((float(g)+0.5)/float(" + GROUPS + "),(u1+0.5)/float(" + ROWS + ")));"
+                 "float sa1=15.0*x_i16raw(q1.rg)*ps1,ma1=x_i16raw(q1.ba)*ps1;"
+                 "float sa2=15.0*x_i16raw(q2.rg)*ps2,ma2=x_i16raw(q2.ba)*ps2;"
+                 "float sb1=15.0*x_i16raw(p1.rg)*ps1,mb1=x_i16raw(p1.ba)*ps1;"
+                 "float sb2=15.0*x_i16raw(p2.rg)*ps2,mb2=x_i16raw(p2.ba)*ps2;") +
         "float xsum=0.0,d1=0.0,d2=0.0,e1=0.0,e2=0.0;"
         "for(int q=0;q<4;q++){int c=g*32+q*8;" +
         q4_act(xf, cols, inl) + q4_xsum() +
@@ -1200,10 +1213,14 @@ string matvec_i4_pair_swiglu_4x4(int rows, int cols, XFormat xf, bool inl, int h
         "vec4 wt2=texture2D(W2,vec2(c0,v0r)),wt3=texture2D(W2,vec2(c1,v0r));"
         "vec4 wt4=texture2D(W1,vec2(c0,v1r)),wt5=texture2D(W1,vec2(c1,v1r));"
         "vec4 wt6=texture2D(W2,vec2(c0,v1r)),wt7=texture2D(W2,vec2(c1,v1r));"
-        "d1+=dot(wt0,xa.wzyx)+dot(wt1,xb.wzyx);"
-        "d2+=dot(wt2,xa.wzyx)+dot(wt3,xb.wzyx);"
-        "e1+=dot(wt4,xa.wzyx)+dot(wt5,xb.wzyx);"
-        "e2+=dot(wt6,xa.wzyx)+dot(wt7,xb.wzyx);}"
+        + string(q4x4_noswz() ? "d1+=dot(wt0,xa)+dot(wt1,xb);"
+                                 "d2+=dot(wt2,xa)+dot(wt3,xb);"
+                                 "e1+=dot(wt4,xa)+dot(wt5,xb);"
+                                 "e2+=dot(wt6,xa)+dot(wt7,xb);}"
+                              : "d1+=dot(wt0,xa.wzyx)+dot(wt1,xb.wzyx);"
+                                 "d2+=dot(wt2,xa.wzyx)+dot(wt3,xb.wzyx);"
+                                 "e1+=dot(wt4,xa.wzyx)+dot(wt5,xb.wzyx);"
+                                 "e2+=dot(wt6,xa.wzyx)+dot(wt7,xb.wzyx);}") +
         "s10+=sa1*d1+ma1*xsum;s20+=sa2*d2+ma2*xsum;"
         "s11+=sb1*e1+mb1*xsum;s21+=sb2*e2+mb2*xsum;}"
         "float v0=sl(qz(s10),qz(s20))" + HM + ";"

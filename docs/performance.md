@@ -5948,3 +5948,32 @@ also holds the session's FBOs and the KV cache.  The 4-bit view needs a few
 MiB of slack to be safe there, and the cheapest place to find it is the group
 planes: they carry a 16-bit scale and a 16-bit min per 32 weights, and halving
 that frees ~9 MiB across the 14 layers.
+
+### The logits pass on the hybrid: 155 ms of a 1000 ms token
+
+`PASS_DUP=logits` / `logits_draw` on LFM2.5 q4 (Pi, 4 greedy tokens):
+
+| | ms/token |
+|---|---:|
+| baseline | 999.6 |
+| `PASS_DUP=logits_draw` (the draw only) | +97.1 |
+| `PASS_DUP=logits` (draw + finish + read-back) | +154.5 |
+
+So 155 ms, 15% of the token, split 97 draw / 57 read-back.  The draw is the
+*fastest* part of this model per MAC (67M MACs in 97 ms = 690 MMAC/s, against
+the q4 gate's 250), so the kernel is not the problem -- the matrix is simply
+63 MiB (44% of the texture budget) and it is read in full once per token.
+
+Two things follow, and only one of them is free:
+
+* **The read-back is avoidable.**  `Session::step` pulls all 64k logits to the
+  CPU every token (`logits_from` -> one `glReadPixels` of the whole grid plus a
+  `glFinish`) and samples there, while `logits_candidates_from` already computes
+  the top-2 on the GPU with `x_top2_fast_*`.  A greedy / temp-0 path that asks
+  the GPU for the winning index would return a few bytes instead of 258 KiB and
+  save most of those 57 ms.  It has to reproduce the greedy text exactly, so it
+  is a byte-identity change, not a numeric one.
+* **The footprint is not, without changing the model.**  Halving it means q4
+  logits (a packer decision with a quality cost, and the docs' "logits stay q8"
+  is deliberate); the other routes -- low-rank logits, a coarse-then-refine
+  top-k -- are model transforms, not engine ones.
