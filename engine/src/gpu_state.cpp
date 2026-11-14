@@ -33,6 +33,15 @@ GLuint g_bound_tex[8] = {0, 0, 0, 0, 0, 0, 0, 0};
 GLuint g_cur_fbo = 0xFFFFFFFFu;
 GLuint g_cur_prog = 0xFFFFFFFFu;
 
+static bool ffn_flush_on() { static const bool on = env_set("FFN_FLUSH"); return on; }
+static bool ffn_sync_on() { static const bool on = env_set("FFN_SYNC"); return on; }
+
+bool ffn_flush_wanted(bool fast_finish) { return fast_finish || ffn_flush_on(); }
+
+void ffn_sync() {
+    if (ffn_sync_on()) { glFlush(); glFinish(); }
+}
+
 void gl_state_forget_bindings() {
     for (int i = 0; i < 8; i++) g_bound_tex[i] = 0xFFFFFFFFu;
     g_cur_fbo = 0xFFFFFFFFu;

@@ -206,7 +206,7 @@ void GPU::matvec_to_row(const Mat& m, GLuint x, Target& out, int row){
         if (out.tex == 0 || out.w != m.rows || out.h <= row) out = make_target(m.rows, row + 1);
         draw(m, x, out, row);
         layer_finish("NF_MAT");
-        if (getenv("FFN_SYNC")) { glFlush(); glFinish(); }
+        ffn_sync();
     }
 
 vector<float> GPU::matvec_from(const Mat& m, GLuint x){
@@ -262,9 +262,9 @@ GLuint GPU::ffn_fused(const Mat& w13, GLuint x, int hidden, int hs){
             set_sampler(ps, "A", 0);
             setup_attrib(ps);
             glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
-            if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
+            if (ffn_flush_wanted(layer_fast_finish_)) glFlush();
             else layer_finish("NF_FFN");
-            if (getenv("FFN_SYNC")) { glFlush(); glFinish(); }
+            ffn_sync();
             return ffn_h_a_.tex;
         }
         matvec_to(w13, x, ffn_a_);
@@ -305,7 +305,7 @@ GLuint GPU::ffn_fused(const Mat& w13, GLuint x, int hidden, int hs){
         }
         setup_attrib(pp);
         glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
-        if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
+        if (ffn_flush_wanted(layer_fast_finish_)) glFlush();
 
         GLuint ps = x_swiglu_pair(hidden, hs);
         bind_fbo(out.fbo);
@@ -315,9 +315,9 @@ GLuint GPU::ffn_fused(const Mat& w13, GLuint x, int hidden, int hs){
         set_sampler(ps, "A", 0);
         setup_attrib(ps);
         glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
-        if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
+        if (ffn_flush_wanted(layer_fast_finish_)) glFlush();
         else layer_finish("NF_FFN");
-        if (getenv("FFN_SYNC")) { glFlush(); glFinish(); }
+        ffn_sync();
         return out.tex;
     }
 
@@ -383,9 +383,9 @@ GLuint GPU::swiglu_2row(Target& src, int hidden, Target& out, int hs){
         bind_tex(0, src.tex); set_sampler(p, "A", 0);
         setup_attrib(p);
         glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
-        if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
+        if (ffn_flush_wanted(layer_fast_finish_)) glFlush();
         else layer_finish("NF_FFN");
-        if (getenv("FFN_SYNC")) { glFlush(); glFinish(); }
+        ffn_sync();
         return out.tex;
     }
 
@@ -400,9 +400,9 @@ GLuint GPU::swiglu_split(Target& a, Target& b){
         bind_tex(1, b.tex); set_sampler(p, "B", 1);
         setup_attrib(p);
         glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
-        if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
+        if (ffn_flush_wanted(layer_fast_finish_)) glFlush();
         else layer_finish("NF_FFN");
-        if (getenv("FFN_SYNC")) { glFlush(); glFinish(); }
+        ffn_sync();
         return ffn_h_.tex;
     }
 
@@ -416,9 +416,9 @@ GLuint GPU::swiglu_fused(Target& src, int hidden, int hs){
         bind_tex(0, src.tex); set_sampler(p, "A", 0);
         setup_attrib(p);
         glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
-        if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
+        if (ffn_flush_wanted(layer_fast_finish_)) glFlush();
         else layer_finish("NF_FFN");
-        if (getenv("FFN_SYNC")) { glFlush(); glFinish(); }
+        ffn_sync();
         return ffn_h_.tex;
     }
 
@@ -1242,9 +1242,9 @@ GLuint GPU::ffn_pair_swiglu_chunk(const Mat& w1, const Mat& w3, GLuint x, int ro
         }
         setup_attrib(p);
         glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
-        if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
+        if (ffn_flush_wanted(layer_fast_finish_)) glFlush();
         else layer_finish("NF_FFN");
-        if (getenv("FFN_SYNC")) { glFlush(); glFinish(); }
+        ffn_sync();
         return out.tex;
     }
 
@@ -1300,9 +1300,9 @@ GLuint GPU::ffn_pair_swiglu_chunk2(const Mat& w1, const Mat& w3, GLuint x2, int 
             glViewport(x0, 0, w, 1);
             glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         }
-        if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
+        if (ffn_flush_wanted(layer_fast_finish_)) glFlush();
         else layer_finish("NF_FFN");
-        if (getenv("FFN_SYNC")) { glFlush(); glFinish(); }
+        ffn_sync();
         return out.tex;
     }
 
@@ -1323,9 +1323,9 @@ void GPU::matvec_p2(const Mat& m, GLuint xp2, Target& out){
             glViewport(x0, 0, w, 1);
             glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         }
-        if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
+        if (ffn_flush_wanted(layer_fast_finish_)) glFlush();
         else layer_finish("NF_FFN");
-        if (getenv("FFN_SYNC")) { glFlush(); glFinish(); }
+        ffn_sync();
     }
 
 GLuint GPU::x_rms_stats2(){
@@ -1410,9 +1410,9 @@ GLuint GPU::ffn_pair_swiglu_chunk2_p2(const Mat& w1, const Mat& w3, GLuint xp2, 
             glViewport(x0, 0, w, 1);
             glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         }
-        if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
+        if (ffn_flush_wanted(layer_fast_finish_)) glFlush();
         else layer_finish("NF_FFN");
-        if (getenv("FFN_SYNC")) { glFlush(); glFinish(); }
+        ffn_sync();
         return out.tex;
     }
 
@@ -1437,9 +1437,9 @@ void GPU::matvec_p2_add_p2(const Mat& m, GLuint xp2, GLuint rp2, Target& out){
             glViewport(x0, 0, w, 1);
             glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         }
-        if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
+        if (ffn_flush_wanted(layer_fast_finish_)) glFlush();
         else layer_finish("NF_FFN");
-        if (getenv("FFN_SYNC")) { glFlush(); glFinish(); }
+        ffn_sync();
     }
 
 // Two-position w2 including the residual add: one draw per FFN chunk for both
@@ -1462,9 +1462,9 @@ void GPU::matvec_p2_add(const Mat& m, GLuint xp2, GLuint ra, GLuint rb, Target& 
             glViewport(x0, 0, w, 1);
             glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         }
-        if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
+        if (ffn_flush_wanted(layer_fast_finish_)) glFlush();
         else layer_finish("NF_FFN");
-        if (getenv("FFN_SYNC")) { glFlush(); glFinish(); }
+        ffn_sync();
     }
 
 // One position of a P2 row into its residual stream (which = 0 A, 1 B).
@@ -1479,9 +1479,9 @@ void GPU::p2_split(GLuint xp2, Target& out, int which){
         glUniform1f(uloc(p, "which"), (float)which);
         setup_attrib(p);
         glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
-        if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
+        if (ffn_flush_wanted(layer_fast_finish_)) glFlush();
         else layer_finish("NF_FFN");
-        if (getenv("FFN_SYNC")) { glFlush(); glFinish(); }
+        ffn_sync();
     }
 
 // q4 gate chunk: row pair per fragment, w1/w3 dots and both swiglu results in
@@ -1502,9 +1502,9 @@ GLuint GPU::ffn_pair_i4_swiglu_chunk(const Mat& w1, const Mat& w3, GLuint x, int
         glUniform1f(uloc(p, "ps2"), w3.q4_param_scale);
         setup_attrib(p);
         glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
-        if (layer_fast_finish_ || getenv("FFN_FLUSH")) glFlush();
+        if (ffn_flush_wanted(layer_fast_finish_)) glFlush();
         else layer_finish("NF_FFN");
-        if (getenv("FFN_SYNC")) { glFlush(); glFinish(); }
+        ffn_sync();
         return out.tex;
 }
 

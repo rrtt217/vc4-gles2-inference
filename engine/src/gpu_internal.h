@@ -21,6 +21,13 @@ extern GLuint g_cur_prog;
 
 void gl_state_forget_bindings();
 
+// FFN_FLUSH / FFN_SYNC are measurement hooks: flushing the command stream after
+// each FFN pass makes a per-pass timing meaningful, and FFN_SYNC adds the wait.
+// They used to be written out 14 times in gpu.cpp, each pair doing two getenv()
+// per pass, per layer, per token (docs/test-hooks.md).  These read them once.
+bool ffn_flush_wanted(bool fast_finish);  // fast_finish || FFN_FLUSH is set
+void ffn_sync();                          // glFlush+glFinish if FFN_SYNC is set
+
 // The largest number of fragments one draw may cover.  VC4 processes a fragment
 // per cycle and the driver's scratch target is 2048 wide, so a wider strip either
 // exceeds the target or stalls the block; 1024 is what keeps `draw()` and
