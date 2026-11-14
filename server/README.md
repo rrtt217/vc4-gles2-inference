@@ -357,8 +357,11 @@ The worker token/KV prefix reuse, disk `MMKV1` format, and packed KV modes
 are documented in [../docs/prefix-cache.md](../docs/prefix-cache.md).  The path
 may be a **directory**: the engine then loads the entry whose header matches the
 model it is holding, so several models share one cache directory and a model
-switch reloads the right one.  Building a cache also writes an engine-authored
-`<cache>.json` sidecar; compare that instead of re-deriving the fields.
+switch reloads the right one.  The **engine builds the cache** too
+(`--build-prefix-cache - OUT` renders the header with the container's own template)
+and writes the `<cache>.json` sidecar; `build_prefix_cache.py` is only the trigger
+and the checker around it, because rendering the header in Python was a second
+renderer hard-coded to ChatML.
 
 ## Python overhead
 

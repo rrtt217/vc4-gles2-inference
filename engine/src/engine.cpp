@@ -159,6 +159,14 @@ static long long proc_meminfo_kb(const char* key) {
     return -1;
 }
 
+// 64-bit FNV-1a: the sidecar's provenance, not a cryptographic hash.  It only has
+// to notice that the system prompt or the tool list changed.
+static uint64_t fnv64(const std::string& s) {
+    uint64_t h = 1469598103934665603ull;
+    for (unsigned char c : s) { h ^= c; h *= 1099511628211ull; }
+    return h;
+}
+
 static std::string g_inbuf;
 
 static bool stdin_fill(int timeout_ms) {
@@ -527,22 +535,26 @@ int main(int argc, char** argv) {
     // authority; the file name is not.
     auto load_prefix_cache_any = [&](const string& path, vector<int>& toks) -> bool {
         namespace fs = std::filesystem;
+        // One place that loads and says so: a tool that checks "did the engine
+        // really load this cache" greps for that line, so it must not depend on
+        // whether the path was a file or a directory.
+        auto load_one = [&](const string& p) -> bool {
+            toks.clear();
+            if (!session.load_prefix_cache(p, toks)) return false;
+            if (!g_quiet) cerr << "PREFIX_CACHE " << p << " " << toks.size() << " tokens\n";
+            return true;
+        };
         std::error_code ec;
         if (fs::is_directory(path, ec)) {
             vector<string> files;
             for (const auto& e : fs::directory_iterator(path, ec))
                 if (e.path().extension() == ".kv") files.push_back(e.path().string());
             std::sort(files.begin(), files.end());
-            for (const string& f : files) {
-                toks.clear();
-                if (session.load_prefix_cache(f, toks)) {
-                    if (!g_quiet) cerr << "PREFIX_CACHE " << f << " " << toks.size() << " tokens\n";
-                    return true;
-                }
-            }
+            for (const string& f : files)
+                if (load_one(f)) return true;
             return false;
         }
-        return session.load_prefix_cache(path, toks);
+        return load_one(path);
     };
     if (getenv("SHADER_TIME")) fprintf(stderr, "STARTUP %7.1f ms  session ready\n", run_time_ms());
 
@@ -625,9 +637,44 @@ int main(int argc, char** argv) {
     }
 
     if (!build_cache_prompt.empty()) {
-        string text;
-        if (!read_text_file(build_cache_prompt, text)) { cerr << "cannot read cache prompt\n"; return 1; }
-        auto tokens = tokenizer.encode(text, false, false);
+        vector<int> tokens;
+        const bool auto_header = build_cache_prompt == "-" || build_cache_prompt == "auto";
+        uint64_t system_fnv = 0, tools_fnv = 0;
+        if (auto_header) {
+            // Render the header the way a request would: the container's own
+            // template, the system prompt and the tool list.  This is the whole
+            // point of the mode -- the Python builder used to hard-code ChatML,
+            // which is wrong for every other template.
+            if (!chat_tmpl) {
+                cerr << "no chat template in this container; pass a prompt file instead of '-'\n";
+                return 1;
+            }
+            vector<ChatMsg> msgs;
+            ChatMsg sys;
+            sys.role = "system";
+            sys.content = system_prompt;
+            msgs.push_back(sys);
+            vector<PromptPart> parts;
+            try {
+                parts = chat_tmpl->render(msgs, tools_array, /*add_generation_prompt=*/false,
+                                          open_thinking, bos_str, eos_str);
+            } catch (const std::exception& e) {
+                cerr << "chat template failed: " << e.what() << "\n";
+                return 1;
+            }
+            tokens = tokenizer.encode_parts(parts, enc_bos, enc_bos);
+            system_fnv = fnv64(system_prompt);
+            // The *raw* tools text, so a verifier can hash what it passed
+            // without reproducing the array normalisation.
+            tools_fnv = fnv64(tools_json);
+            if (!g_quiet)
+                cerr << "CACHE_HEADER template=" << (model.template_name.empty() ? "(kind)" : model.template_name)
+                     << " system=" << system_prompt.size() << " B tools=" << tools_array.size() << " B\n";
+        } else {
+            string text;
+            if (!read_text_file(build_cache_prompt, text)) { cerr << "cannot read cache prompt\n"; return 1; }
+            tokens = tokenizer.encode(text, false, false);
+        }
         if (tokens.empty() || (int)tokens.size() > model.seq) {
             cerr << "cache prompt empty or too long (" << tokens.size() << ")\n"; return 1;
         }
@@ -635,7 +682,7 @@ int main(int argc, char** argv) {
             if (g_stop) return 1;
             session.step(tokens[i], (int)i, false);
         }
-        if (!session.save_prefix_cache(build_cache_out, tokens)) {
+        if (!session.save_prefix_cache(build_cache_out, tokens, system_fnv, tools_fnv)) {
             cerr << "cannot save prefix cache (GPU attention required)\n"; return 1;
         }
         cout << "CACHE_SAVED " << build_cache_out << " tokens=" << tokens.size() << "\n";

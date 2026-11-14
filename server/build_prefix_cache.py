@@ -1,177 +1,187 @@
 #!/usr/bin/env python3
-"""Build and verify a prefix cache without touching the model weights (P1-4).
+"""Trigger and check a prefix cache.  The engine builds it.
 
-The cache covers only the chat *header* (system prompt + tool definitions), so
-every conversation on this server hits it.  Nothing here needs a GPU on the
-machine you run it from -- the engine does, so run it on the Pi.
+The cache is a chat *header* -- the system prompt plus the tool definitions --
+turned into KV, so every conversation begins from it instead of prefilling those
+tokens again (417 tokens to 30 on the measurements in docs/prefix-cache.md).
 
-    # build (header only, one tool)
-    python3 server/build_prefix_cache.py build --out server/pfx_system_tools.kv \
-        --tools system_status
+Who does what, and why it moved here
+------------------------------------
+The engine owns the file.  `--build-prefix-cache - OUT` renders the header with
+the container's own template, prefills it, writes the KV and writes
+`<cache>.json` describing itself: container size and mtime, the full shape, the
+packing, the scale, the token count, a fingerprint of the tokens, and 64-bit
+hashes of the system prompt and the tool list it was built from.
 
-    # verify that the server would really load it
-    python3 server/build_prefix_cache.py verify --cache server/pfx_system_tools.kv
+This script only decides *when* to build, names the file, and compares the
+sidecar with the current settings before a server loads it.  It used to render
+the header itself -- in Python, hard-coded to ChatML -- which is wrong for every
+container whose template is not ChatML, and which went dead the day
+`render_tools()` was deleted with "the engine is the only renderer".  Rendering
+belongs where the template is.
 
-The sidecar `<cache>.json` records everything a stale cache could silently get
-wrong: model identity, seq, KV packing, the exact prompt text and its token
-count.  `verify` refuses a mismatch instead of loading garbage.
+    # build on the machine that will serve it (the KV bytes are machine specific)
+    python3 server/build_prefix_cache.py build \
+        --model models/minimind3/minimind3.q8.mmcf --seq 768 --kv-pack 16 \
+        --system "You are a helpful assistant." \
+        --tools system_status get_current_time \
+        --out server/pfx_system_tools_pi768.kv
+
+    # before a server run: does this file still describe these settings?
+    python3 server/build_prefix_cache.py verify \
+        --cache server/pfx_system_tools_pi768.kv --seq 768 --kv-pack 16
+
+`verify` refuses a cache whose sidecar disagrees with the model on disk (size or
+mtime), the SEQ, the packing, or the system/tool inputs, and then proves the
+engine really loads it (`PREFIX_CACHE loaded N tokens`).
 """
-from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
-import re
-import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 sys.path.insert(0, str(HERE))
 
-import server as srv  # noqa: E402
-import localtools  # noqa: E402
+import localtools  # noqa: E402  (the tool specs are the input to the header)
 
 
-def sha256_file(path: Path, limit: int = 8 << 20) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        remaining = limit
-        while remaining > 0:
-            chunk = f.read(min(1 << 20, remaining))
-            if not chunk:
-                break
-            h.update(chunk)
-            remaining -= len(chunk)
-    return h.hexdigest()[:16]
+def fnv64(text: str) -> str:
+    """The engine's sidecar hash: 64-bit FNV-1a, hex.  Not cryptographic."""
+    h = 1469598103934665603
+    for byte in text.encode("utf-8"):
+        h ^= byte
+        h = (h * 1099511628211) & 0xFFFFFFFFFFFFFFFF
+    return "%016x" % h
 
 
-def header_text(system: str, tool_names: list[str]) -> str:
-    """Exactly the prefix the server puts in front of every conversation."""
-    tools = []
-    for name in tool_names:
+def tools_text(names):
+    """The tools array exactly as the server would send it (same bytes hashed)."""
+    if not names:
+        return ""
+    specs = []
+    for name in names:
         spec = localtools.TOOL_SPECS.get(name)
         if spec is None:
-            raise SystemExit(f"unknown tool {name!r}; have: {', '.join(localtools.TOOL_SPECS)}")
-        tools.append({"type": "function", "function": spec})
-    return "<|im_start|>system\n" + system + srv.render_tools(tools) + "<|im_end|>\n"
+            raise SystemExit("unknown tool %r; have: %s"
+                             % (name, ", ".join(sorted(localtools.TOOL_SPECS))))
+        specs.append({"type": "function", "function": spec})
+    return json.dumps(specs, ensure_ascii=False, separators=(",", ":"))
+
+
+def sidecar(cache: Path) -> dict:
+    path = Path(str(cache) + ".json")
+    if not path.exists():
+        raise SystemExit("no sidecar next to %s: rebuild it with this script "
+                         "(the engine writes one)" % cache)
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        raise SystemExit("sidecar %s is not readable: %s" % (path, e))
+
+
+def run_engine(a, extra_args, env_extra, stdin=""):
+    env = dict(os.environ)
+    env.update(env_extra)
+    cmd = [str(a.engine)] + extra_args
+    return subprocess.run(cmd, env=env, cwd=str(REPO), input=stdin,
+                          capture_output=True, text=True, timeout=a.timeout)
 
 
 def cmd_build(a) -> int:
-    engine = Path(a.engine)
-    model = Path(a.model)
-    tok = Path(a.tokenizer) if a.tokenizer else None
-    paths = [engine, model] + ([tok] if tok else [])
-    for p in paths:
+    engine, model = Path(a.engine), Path(a.model)
+    for p in (engine, model):
         if not p.exists():
-            raise SystemExit(f"missing: {p}")
-    text = header_text(a.system or srv.DEFAULT_SYSTEM, a.tools)
+            raise SystemExit("missing: %s" % p)
     out = Path(a.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     if out.exists() and not a.force:
-        raise SystemExit(f"{out} exists; pass --force to rebuild")
+        raise SystemExit("%s exists; pass --force to rebuild" % out)
 
-    env = dict(os.environ)
-    env.update({
-        "MODEL": str(model),
-        "SEQ": str(a.seq),
-        "GPU_LAYER": "1",
-    })
-    if tok:
-        env["TOKENIZER"] = str(tok)
-    if a.kv_pack:
-        env["KV_PACK"] = str(a.kv_pack)
-    # The engine takes a *file* for the cache prompt, not inline text.
-    prompt_file = Path(str(out) + ".prompt.txt")
-    prompt_file.write_text(text, encoding="utf-8")
-    cmd = [str(engine), "--build-prefix-cache", str(prompt_file), str(out)]
-    print("building:", " ".join(cmd[:1]), f"<{len(text)} chars>", out)
-    r = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=a.timeout)
-    if r.returncode != 0 or not out.exists():
-        sys.stderr.write(r.stderr[-1500:])
+    # `-` means "render the header yourself, with the container's template".
+    header_env = {"MODEL": str(model), "SEQ": str(a.seq), "KV_PACK": str(a.kv_pack),
+                  "GPU_LAYER": "1"}
+    args = ["--build-prefix-cache", "-", str(out), "--system", a.system]
+    text = tools_text(a.tools)
+    tmp = None
+    try:
+        if text:
+            fd, tmp = tempfile.mkstemp(prefix="pfx_tools_", suffix=".json")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(text)
+            args += ["--tools-file", tmp]
+        r = run_engine(a, args, header_env)
+    finally:
+        if tmp:
+            os.unlink(tmp)
+    saved = [l for l in r.stdout.splitlines() if l.startswith("CACHE_SAVED")]
+    header = [l for l in r.stderr.splitlines() if l.startswith("CACHE_HEADER")]
+    if not saved:
+        sys.stderr.write(r.stdout + r.stderr)
         return 1
-    # The engine prints "CACHE_SAVED <path> tokens=N" on the build path and
-    # "PREFIX_CACHE loaded N tokens" on load; this used to match only the
-    # second one, so every sidecar recorded n_tokens=None.
-    loaded = re.search(r"CACHE_SAVED .* tokens=(\d+)", r.stdout + r.stderr) or \
-             re.search(r"PREFIX_CACHE (?:loaded|saved) (\d+)", r.stdout + r.stderr)
-    n_tokens = int(loaded.group(1)) if loaded else None
-
-    meta = {
-        "cache": out.name,
-        "created_at": srv.time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        "engine_sha": sha256_file(engine),
-        "model": model.name,
-        "model_sha": sha256_file(model),
-        "model_bytes": model.stat().st_size,
-        # empty when the container carries its own tokenizer blob
-        "tokenizer_sha": sha256_file(tok) if tok else "",
-        "seq": a.seq,
-        "kv_pack": a.kv_pack,
-        "tools": a.tools,
-        "system_sha": hashlib.sha256((a.system or srv.DEFAULT_SYSTEM).encode()).hexdigest()[:16],
-        "prompt_sha": hashlib.sha256(text.encode()).hexdigest()[:16],
-        "prompt_chars": len(text),
-        "n_tokens": n_tokens,
-    }
-    Path(str(out) + ".json").write_text(json.dumps(meta, ensure_ascii=False, indent=1))
-    print(f"ok  {out}  {out.stat().st_size} bytes  tokens={n_tokens}")
-    print("meta:", str(out) + ".json")
+    for line in header + saved:
+        print(line)
+    meta = sidecar(out)
+    print("sidecar  %s: template=%s tokens=%s seq=%s kv=%s"
+          % (out.name + ".json", meta.get("template"), meta.get("n_tokens"),
+             meta.get("seq"), meta.get("kv_bits")))
+    print("system_fnv64=%s tools_fnv64=%s tokens_fnv64=%s"
+          % (meta.get("system_fnv64"), meta.get("tools_fnv64"),
+             meta.get("tokens_fnv64")))
     return 0
 
 
 def cmd_verify(a) -> int:
     cache = Path(a.cache)
-    meta_path = Path(str(cache) + ".json")
     if not cache.exists():
-        print("missing cache", cache)
-        return 1
-    if meta_path.exists():
-        meta = json.loads(meta_path.read_text())
-        problems = []
-        engine = Path(a.engine)
-        model = Path(a.model)
-        if meta.get("engine_sha") and engine.exists() and sha256_file(engine) != meta["engine_sha"]:
-            problems.append("engine binary changed since the cache was built")
-        if meta.get("model_sha") and model.exists() and sha256_file(model) != meta["model_sha"]:
-            problems.append("model weights changed since the cache was built")
-        if a.seq != meta.get("seq"):
-            problems.append(f"seq {a.seq} != cached {meta.get('seq')}")
-        if a.kv_pack != meta.get("kv_pack"):
-            problems.append(f"kv_pack {a.kv_pack} != cached {meta.get('kv_pack')}")
-        text = header_text(a.system or srv.DEFAULT_SYSTEM, a.tools or meta.get("tools", []))
-        if hashlib.sha256(text.encode()).hexdigest()[:16] != meta.get("prompt_sha"):
-            problems.append("prompt header differs from the cached one (system prompt or tools changed)")
-        if problems:
-            print("REFUSE:", "; ".join(problems))
-            return 2
-        print("meta ok:", {k: meta[k] for k in ("n_tokens", "seq", "kv_pack", "tools") if k in meta})
+        raise SystemExit("missing: %s" % cache)
+    meta = sidecar(cache)
+    model = Path(a.model)
+    problems = []
 
-    env = dict(os.environ)
-    env.update({"MODEL": a.model, "SEQ": str(a.seq), "GPU_LAYER": "1"})
-    # The container embeds its tokenizer.  Only set TOKENIZER when the caller
-    # names one: an empty value is not "unset", and the engine would try to load
-    # the empty path instead of the embedded blob.
-    if a.tokenizer:
-        env["TOKENIZER"] = a.tokenizer
-    if a.kv_pack:
-        env["KV_PACK"] = str(a.kv_pack)
-    # The template, tokenizer and rope come from the container; --template no
-    # longer exists as an engine flag.
-    cmd = [a.engine, "--chat", "--prompt", "hi", "--gen", "1",
-           "--greedy", "--prefix-cache", str(cache)]
-    r = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=a.timeout)
-    m = re.search(r"PREFIX_CACHE loaded (\d+) tokens", r.stderr)
-    if not m:
-        sys.stderr.write(r.stderr[-1200:])
-        print("FAIL: engine did not load the cache")
+    def want(name, got, expect):
+        if got != expect:
+            problems.append("%s: cache %r, settings %r" % (name, got, expect))
+
+    # Only what the engine cannot check at load time is compared here: the inputs
+    # the header was built from.  Everything else -- the container's size and
+    # mtime, the shape, SEQ, the packing, the scale -- is in the KV header and the
+    # engine refuses a file whose header disagrees, so repeating that policy in
+    # Python would be a second copy of it (and the effective SEQ is not even the
+    # requested one: a tool list raises it to at least 768).
+    want("system_fnv64", meta.get("system_fnv64"), fnv64(a.system))
+    want("tools_fnv64", meta.get("tools_fnv64"), fnv64(tools_text(a.tools)))
+    if model.exists():
+        st = model.stat()
+        want("source_size", meta.get("source_size"), st.st_size)
+        want("source_mtime", meta.get("source_mtime"), int(st.st_mtime))
+
+    for p in problems:
+        print("MISMATCH %s" % p)
+    if problems:
+        print("REFUSE  %s does not describe these settings; rebuild it" % cache)
         return 1
-    n = int(m.group(1))
-    print(f"engine loaded {n} tokens from {cache.name}")
-    return 0 if n > 0 else 1
+
+    # The header checked out; now prove the engine loads it.  A one-token request
+    # is enough: the cache is read before `ready`.
+    line = "\t1\t0\t1\t1\t\t\t\t\t\t\n"
+    env = {"MODEL": str(a.model), "SEQ": str(a.seq), "KV_PACK": str(a.kv_pack),
+           "GPU_LAYER": "1"}
+    r = run_engine(a, ["--worker", "--prefix-cache", str(cache)], env, stdin=line)
+    loaded = [l for l in r.stderr.splitlines() if l.startswith("PREFIX_CACHE")]
+    if not any("tokens" in l for l in loaded):
+        print("REFUSE  the engine did not load it: %s" % (loaded or "(no line)"))
+        return 1
+    print("OK      %s (%s tokens, template %s)"
+          % (cache, meta.get("n_tokens"), meta.get("template")))
+    for l in loaded:
+        print("        " + l)
+    return 0
 
 
 def main() -> int:
@@ -179,12 +189,11 @@ def main() -> int:
     ap.add_argument("action", choices=["build", "verify"])
     ap.add_argument("--engine", default=str(REPO / "engine/engine_mm3"))
     ap.add_argument("--model", default=str(REPO / "models/minimind3/minimind3.q8.mmcf"))
-    ap.add_argument("--tokenizer", default="",
-                    help="legacy .tok path; empty = use the blob inside the container")
+    ap.add_argument("--tokenizer", default="", help="unused; the container carries it")
     ap.add_argument("--seq", type=int, default=768)
     ap.add_argument("--kv-pack", type=int, default=16, choices=[0, 8, 16])
-    ap.add_argument("--system", default="")
-    ap.add_argument("--tools", nargs="*", default=[], help="tool names to embed in the header")
+    ap.add_argument("--system", default="You are a helpful assistant.")
+    ap.add_argument("--tools", nargs="*", default=[], help="tool names in the header")
     ap.add_argument("--out", default=str(HERE / "pfx_system_tools.kv"))
     ap.add_argument("--cache", default=str(HERE / "pfx_system_tools.kv"))
     ap.add_argument("--force", action="store_true")

@@ -224,7 +224,8 @@ void Session::zero_conv_state(){
                 for (float& f : v) f = 0.0f;
 }
 
-bool Session::save_prefix_cache(const string& path, const vector<int>& toks){
+bool Session::save_prefix_cache(const string& path, const vector<int>& toks,
+                               uint64_t system_fnv, uint64_t tools_fnv){
         // A hybrid model's cache carries the conv history too (version 4, flag
         // bit 32); without it a reload would resume from a state that never
         // existed.  That needs the GPU conv path, which owns the state textures.
@@ -321,6 +322,11 @@ bool Session::save_prefix_cache(const string& path, const vector<int>& toks){
             meta["vstep"] = vsw;
             meta["n_tokens"] = (long long) toks.size();
             meta["tokens_fnv64"] = string(hex);
+            char h2[32];
+            snprintf(h2, sizeof(h2), "%016llx", (unsigned long long) system_fnv);
+            meta["system_fnv64"] = string(h2);
+            snprintf(h2, sizeof(h2), "%016llx", (unsigned long long) tools_fnv);
+            meta["tools_fnv64"] = string(h2);
             meta["template"] = m_.template_name;
             ofstream sm(path + ".json");
             if (sm) sm << meta.dump_safe() << "\n";

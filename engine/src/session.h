@@ -1,6 +1,7 @@
 #pragma once
 
 #include "common.h"
+#include <cstdint>
 #include "model.h"
 #include "gpu.h"
 #include <string>
@@ -21,7 +22,11 @@ public:
     // from token 0 with a history from another token stream is wrong.
     void zero_conv_state();
 
-    bool save_prefix_cache(const string& path, const vector<int>& toks);
+    // system_fnv / tools_fnv are hashes of the inputs this cache was built from
+    // (0 when the cache came from a prompt file).  They go into the sidecar so a
+    // rebuild trigger compares hashes instead of re-rendering the header.
+    bool save_prefix_cache(const string& path, const vector<int>& toks,
+                           uint64_t system_fnv = 0, uint64_t tools_fnv = 0);
 
     bool load_prefix_cache(const string& path, vector<int>& toks);
 
