@@ -101,6 +101,9 @@ class EngineWorker:
             env=env,
         )
         self.lock = threading.Lock()
+        # `generate` holds `lock` for the whole request, so a cancel from another
+        # thread must not take it: this one guards the write only.
+        self._write_lock = threading.Lock()
         self.model = model
         if not self._wait_ready(180.0):
             self.close()
@@ -128,12 +131,26 @@ class EngineWorker:
                 # prompt, so this is the only place that choice is made.
                 self.template = str(ev.get("template") or "chatml")
                 self.chat_template = bool(ev.get("chat_template"))
+                self._note_engine(ev)
                 return True
             if ev.get("event") == "error":
                 raise WorkerError(ev.get("message", "worker startup error"))
         return False
 
-    @property
+    def _note_engine(self, ev: dict) -> None:
+        """Keep the last numbers the engine reported about itself.
+
+        Only the engine can read the board's CMA, and asking it mid-request would
+        queue behind a generation, so the values it sends with `ready`/`loaded`
+        are cached here and `/health` reports those.
+        """
+        stats = dict(getattr(self, "engine_stats", {}) or {})
+        for key in ("cma_free_kb", "mem_available_kb", "programs", "seq"):
+            value = ev.get(key)
+            if value is not None:          # a `done` event carries no seq
+                stats[key] = value
+        self.engine_stats = stats
+
     def stderr_tail(self, lines: int = 8) -> str:
         """The engine's last log lines: what a 500 needs to be actionable.
 
@@ -152,6 +169,7 @@ class EngineWorker:
         except Exception:
             return ""
 
+    @property
     def alive(self) -> bool:
         return self.proc.poll() is None
 
@@ -188,8 +206,9 @@ class EngineWorker:
         """
         with self.lock:
             self.ensure_alive()
-            self.proc.stdin.write(json.dumps({"op": "load", "model": model}) + "\n")
-            self.proc.stdin.flush()
+            with self._write_lock:
+                self.proc.stdin.write(json.dumps({"op": "load", "model": model}) + "\n")
+                self.proc.stdin.flush()
             deadline = time.time() + timeout
             while time.time() < deadline:
                 r, _, _ = select.select([self.proc.stdout], [], [], 1.0)
@@ -207,10 +226,28 @@ class EngineWorker:
                     self.template = ev.get("template", self.template)
                     self.chat_template = bool(ev.get("chat_template", self.chat_template))
                     self.prefix_cache_tokens = 0   # it belonged to the old model
+                    self._note_engine(ev)
                     return float(ev.get("load_ms", 0.0))
                 if kind == "error":
                     raise WorkerError(str(ev.get("message", "load failed")))
             raise WorkerError("timed out waiting for the engine to load " + model)
+
+    def cancel(self, request_id: str = "") -> bool:
+        """Ask the engine to stop the request in flight (best effort).
+
+        The engine peeks at its stdin between tokens, so this takes effect within
+        a few tokens rather than at the end of the generation.  False when there
+        is no process to talk to.
+        """
+        try:
+            with self._write_lock:
+                if self.proc.poll() is not None or self.proc.stdin is None:
+                    return False
+                self.proc.stdin.write(json.dumps({"op": "cancel", "id": request_id}) + "\n")
+                self.proc.stdin.flush()
+            return True
+        except Exception:
+            return False
 
     def generate(self, prompt, max_tokens: int, temperature: float,
                  top_p: float, seed: int, on_token=None, penalties: dict | None = None,
@@ -256,8 +293,9 @@ class EngineWorker:
             # later request until someone restarted the server; rebuild it instead.
             self.ensure_alive()
             assert self.proc.stdin is not None and self.proc.stdout is not None
-            self.proc.stdin.write(req)
-            self.proc.stdin.flush()
+            with self._write_lock:
+                self.proc.stdin.write(req)
+                self.proc.stdin.flush()
             text = ""
             finish = "length"
             prompt_tokens = 0
@@ -304,6 +342,9 @@ class EngineWorker:
                     prompt_tokens = int(ev.get("prompt_tokens", prompt_tokens))
                     completion_tokens = int(ev.get("completion_tokens", completion_tokens))
                     cached_tokens = int(ev.get("cached_tokens", cached_tokens))
+                    # the engine reports what only it can see (the board's CMA, how
+                    # many programs are compiled); /health shows the latest
+                    self._note_engine(ev)
                     prefill_tokens = int(ev.get("prefill_tokens", prefill_tokens))
                     if callback_error is not None:
                         raise callback_error
@@ -1019,6 +1060,9 @@ class Handler(BaseHTTPRequestHandler):
                 "inflight": int(getattr(self.server, "inflight", 0)),
                 "est_wait_ms": self._est_wait_ms(),
                 "last_request_ms": self._last_request_ms(),
+                # What the engine last said about itself; the CMA number is what
+                # decides whether another model fits on a Pi Zero.
+                "engine": dict(getattr(worker, "engine_stats", {}) or {}),
             }, 200 if alive else 503)
         elif path == "/v1/models":
             now = int(time.time())
@@ -1291,7 +1335,14 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.flush()
             self._access_log(cid, model, finish, usage, stream=True, status=200, tools=len(body.get("tools") or []))
         except (BrokenPipeError, ConnectionResetError):
-            pass
+            # The client hung up mid-stream: tell the engine to stop rather than
+            # generate tokens nobody will read.  Best effort -- the request may
+            # have finished already, in which case the cancel is an idle ack.
+            try:
+                ok = self.server.worker.cancel(cid)
+                print(f"[cancel] {cid} sent={int(bool(ok))} (client disconnected)", flush=True)
+            except Exception as e:
+                print(f"[cancel] {cid} failed: {e}", flush=True)
         except WorkerError:
             # Headers are already out; close the stream.
             try:

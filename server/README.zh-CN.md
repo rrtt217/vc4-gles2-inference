@@ -82,6 +82,24 @@ TinyBrainBot 还需要 `--no-gpu-layer`：它在 VC4 上的整层 GPU 路径目�
 `[model] <id> resident, load <ms> ms`；已驻留的模型不会每请求重载。容器自带的聊天模板随之切换，
 所以 `/health` 的 `template` 与"无模板即 400"的判定都跟着当前模型走。未知模型名返回 400 并列出可用的 id。
 
+## 控制行、健康检查与取消
+
+以 `{` 开头的一行是控制行（请求第一列是 base64，不含 `{`），现有三个操作：
+
+| op | 回复 | 用途 |
+|---|---|---|
+| `{"op":"load","model":PATH}` | `loaded` | 换容器，保留 EGL 上下文与已编译程序 |
+| `{"op":"cancel","id":ID}` | `cancelled` | 停止正在跑的请求（引擎在 token 之间窥视 stdin，几个 token 内生效）；空闲时的 cancel 是确认，不是错误 |
+| `{"op":"stats"}` | `stats` | 只有引擎知道的数：`cma_free_kb`（板上最关键，它决定还能不能放下另一个模型）、`mem_available_kb`、已编译 `programs`、`seq`、`kv_pack`、`template`、`uptime_ms` |
+
+`GET /health` 还会给 `busy`/`inflight`（引擎单飞，所以就是队列）、`est_wait_ms`（近八次请求中位数 × 前面排队数；有排队但还没有已完成请求时返回 `-1`）、`last_request_ms`，以及 `engine`（引擎最近一次自报的数值）。
+
+每个完成的请求会打一行带 id 的日志，客户端拿到 `chatcmpl-…` 就能在服务器输出里找到它：
+`[req] chatcmpl-… model=mm3-q8 stream=0 finish=length prompt=31 completion=4 wall=0.72s`。
+
+客户端在流式过程中断开时，服务器向引擎发 `{"op":"cancel"}` 并打印
+`[cancel] <id> sent=1 (client disconnected)`；这是**尽力而为**——只有在下一块写入失败时才会察觉，所以剩余很少时可能已经跑完。worker 死掉时的 500 会附上引擎最后几行日志（`--- engine stderr tail ---`），真正的原因（CMA/GL）在那里。
+
 ## 接口
 
 ```text

@@ -197,6 +197,9 @@ public:
     bool needs_finish() const;
     bool rms_fused() const;
     int max_target_dim() const { return max_target_dim_; }
+    // How many programs this context has compiled.  A model swap keeps them, so
+    // this is the quantity that makes the second start cheaper than the first.
+    size_t program_count() const { return programs_.size(); }
     // RMSNorm epsilon: the container's `rms_norm_eps` when it states one, else
     // the historical 1e-5 the shaders used to hardcode.
     void set_rms_eps(float e, bool stated) { rms_eps_ = e > 0.0f ? e : 1e-5f; rms_eps_stated_ = stated; }

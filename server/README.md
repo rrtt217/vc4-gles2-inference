@@ -81,6 +81,34 @@ POST /v1/tool           {"name": "...", "arguments": {...}}
 POST /v1/chat/completions
 ```
 
+### Health, queue and cancellation
+
+`GET /health` answers what a client needs before it sends work:
+
+| field | meaning |
+|---|---|
+| `status`, `worker_alive`, `restarts` | process-level liveness (503 when the engine is gone) |
+| `busy`, `inflight` | requests being processed now; the engine is single-flight, so this is a queue |
+| `est_wait_ms` | median of the last eight request durations times the requests ahead; `-1` when something is queued but nothing has finished yet to extrapolate from |
+| `last_request_ms` | the previous request's wall time |
+| `engine` | the last numbers the engine reported about itself: `cma_free_kb` (**the** board number: it decides whether another model fits), `mem_available_kb`, `programs` compiled, `seq` |
+| `models`, `resident` | every configured model and the one loaded now |
+
+Every finished request logs one line with its id, so a client's `chatcmpl-...`
+can be found in the server output:
+
+```text
+[req] chatcmpl-78b0... model=mm3-q8 stream=0 finish=length prompt=31 completion=4 wall=0.72s
+```
+
+If the client hangs up mid-stream the server sends `{"op":"cancel"}` to the
+engine and logs `[cancel] <id> sent=1 (client disconnected)`; the engine stops
+within a few tokens instead of generating the rest for nobody.  It is best
+effort: the disconnect is only noticed when the next chunk write fails, so a
+short remaining generation may finish first.  A dead worker's 500 carries the
+engine's last log lines as `--- engine stderr tail ---`, which is where the CMA
+or GL failure that killed it is.
+
 ### Several models on one server
 
 `--model` may be repeated; each container is advertised by `GET /v1/models` and
@@ -482,7 +510,15 @@ base64(prompt) \t max_tokens \t temperature \t top_p \t seed
 
 A line that starts with `{` is a **control line**, not a request: a request's
 first column is base64 of the prompt and base64 has no `{`, so the two cannot be
-confused.  The one operation today replaces the model while keeping the EGL
+confused.  Three operations exist:
+
+| op | reply | what it is for |
+|---|---|---|
+| `{"op":"load","model":PATH}` | `loaded` | replace the container, keeping the EGL context and its compiled programs |
+| `{"op":"cancel","id":ID}` | `cancelled` | stop the request in flight (the engine peeks at stdin between tokens, so this lands within a few tokens); an idle cancel is acknowledged, not an error |
+| `{"op":"stats"}` | `stats` | what only the engine can see: `cma_free_kb`, `mem_available_kb`, `programs` (compiled), `seq`, `kv_pack`, `template`, `uptime_ms` |
+
+The first one replaces the model while keeping the EGL
 context and its compiled programs (on a Pi Zero that is 4.23 s of context and
 1.89 s of program links, against 6.12 s to read a container and 2.99 s to
 upload it -- `docs/performance.md`, "Where the first token goes"):
@@ -491,7 +527,7 @@ upload it -- `docs/performance.md`, "Where the first token goes"):
 {"op": "load", "model": "../models/minimind3/minimind3.q4.mmcf"}
 ```
 
-The reply is one event, `{"event":"loaded","model":...,"load_ms":...}`, or an
+The `load` reply is one event, `{"event":"loaded","model":...,"load_ms":...}`, or an
 `error` event; a container that cannot be read ends the process, because leaving
 a worker with no model would turn one clear failure into a stream of confusing
 ones.  The rolling prefix cache is dropped with the model, for the same reason

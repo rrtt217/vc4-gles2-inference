@@ -43,6 +43,8 @@
 #include "jinja/json.h"
 #include <algorithm>
 #include <filesystem>
+#include <poll.h>
+#include <unistd.h>
 #include "session.h"
 #include "tokenizer.h"
 #include "sampling.h"
@@ -143,6 +145,64 @@ static const char* kUsage =
     "Sampling penalties also come from the environment (MIN_P, ...); see\n"
     "docs/test-hooks.md.  The container carries the tokenizer, the template,\n"
     "rope and the special-token ids, so there are no flags for those.\n";
+
+// Requests and control lines arrive on stdin, and a *cancel* has to be seen
+// while a request is generating -- which getline() cannot do without swallowing
+// the next request.  One buffer, filled from the raw fd, serves both: blocking
+// lines for the request loop, and a non-consuming peek for the token loop.
+static long long proc_meminfo_kb(const char* key) {
+    std::ifstream f("/proc/meminfo");
+    std::string line;
+    const size_t n = strlen(key);
+    while (std::getline(f, line))
+        if (line.compare(0, n, key) == 0) return atoll(line.c_str() + n + 1);
+    return -1;
+}
+
+static std::string g_inbuf;
+
+static bool stdin_fill(int timeout_ms) {
+    struct pollfd fd = {0, POLLIN, 0};
+    if (poll(&fd, 1, timeout_ms) <= 0) return false;
+    char tmp[4096];
+    const ssize_t n = read(0, tmp, sizeof(tmp));
+    if (n <= 0) return false;
+    g_inbuf.append(tmp, (size_t) n);
+    return true;
+}
+
+// timeout_ms < 0 blocks until a line arrives or the stream closes; 0 only takes
+// what is already there.
+static bool stdin_line(std::string& line, int timeout_ms) {
+    for (;;) {
+        const size_t nl = g_inbuf.find('\n');
+        if (nl != std::string::npos) {
+            line = g_inbuf.substr(0, nl);
+            g_inbuf.erase(0, nl + 1);
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            return true;
+        }
+        if (!stdin_fill(timeout_ms)) {
+            if (timeout_ms >= 0) return false;
+            if (g_inbuf.empty()) return false;      // EOF
+            line.swap(g_inbuf);
+            g_inbuf.clear();
+            return true;
+        }
+    }
+}
+
+// Is the buffer's first line a cancel?  Consumes it only then, so a request that
+// arrived early stays queued for the request loop.
+static bool take_pending_cancel() {
+    const size_t nl = g_inbuf.find('\n');
+    if (nl == std::string::npos) return false;
+    const std::string head = g_inbuf.substr(0, nl);
+    if (head.find("\"op\"") == std::string::npos || head.find("cancel") == std::string::npos)
+        return false;
+    g_inbuf.erase(0, nl + 1);
+    return true;
+}
 
 int main(int argc, char** argv) {
     install_stop_handlers();
@@ -614,9 +674,10 @@ int main(int argc, char** argv) {
             {"prefix_cache_tokens", (long long) cache_tokens.size()},
             {"template", string(effective_template)},
             {"chat_template", chat_tmpl != nullptr},
-        }));
+            {"cma_free_kb", (long long) proc_meminfo_kb("CmaFree:")},
+            {"programs", (long long) gpu.program_count()}}));
         string line;
-        while (getline(cin, line)) {
+        while (stdin_line(line, -1)) {
             if (g_stop) break;
             if (line.empty()) continue;
             // A control line: one JSON object, e.g. {"op":"load","model":"..."}.
@@ -627,6 +688,29 @@ int main(int argc, char** argv) {
                 const common_json op = common_json::parse_no_throw(line);
                 const string kind = (op.is_discarded() || !op.is_object() || !op.contains("op") ||
                                      !op.at("op").is_string()) ? string() : (string) op.at("op");
+                if (kind == "cancel") {
+                    const string want_id = (op.contains("id") && op.at("id").is_string())
+                                               ? (string) op.at("id") : string();
+                    emit(common_json::object({{"event", string("cancelled")},
+                                              {"id", want_id},
+                                              {"idle", true}}));
+                    continue;
+                }
+                if (kind == "stats") {
+                    // What only the engine can answer: the CMA left on the board
+                    // (the number that decides whether another model fits), the
+                    // compiled-program count (what a swap keeps) and the plan
+                    // this process is running.
+                    emit(common_json::object({{"event", string("stats")},
+                                              {"cma_free_kb", (long long) proc_meminfo_kb("CmaFree:")},
+                                              {"mem_available_kb", (long long) proc_meminfo_kb("MemAvailable:")},
+                                              {"programs", (long long) gpu.program_count()},
+                                              {"seq", model.seq},
+                                              {"kv_pack", (long long) (getenv("KV_PACK") ? atoi(getenv("KV_PACK")) : 0)},
+                                              {"template", model.template_name.empty() ? string("(kind ") + std::to_string(model.template_kind) + ")" : model.template_name},
+                                              {"uptime_ms", (long long) run_time_ms()}}));
+                    continue;
+                }
                 if (kind != "load") { emit_error("unknown op \"" + kind + "\""); continue; }
                 const string want = (op.contains("model") && op.at("model").is_string())
                                         ? (string) op.at("model") : string();
@@ -668,7 +752,9 @@ int main(int argc, char** argv) {
                                           {"template", model.template_name.empty() ? model.template_kind >= 2 ? string("minimind3") : string("chatml") : model.template_name},
                                           {"chat_template", chat_tmpl != nullptr},
                                           {"chat_support", model.have_capabilities ? (bool) (model.capabilities & 1) : true},
-                                          {"seq", model.seq}}));
+                                          {"seq", model.seq},
+                                          {"cma_free_kb", (long long) proc_meminfo_kb("CmaFree:")},
+                                          {"programs", (long long) gpu.program_count()}}));
                 continue;
             }
             vector<string> f;
@@ -817,8 +903,17 @@ int main(int argc, char** argv) {
             int prev = tokens.back();
             vector<int> all_tokens = tokens;
             vector<int> recent;
+            bool cancelled = false;
             for (int i = 0; i < max_new; ++i) {
                 if (g_stop) { finish = "stop"; break; }
+                // A cancel is a control line on the same stream.  A draw cannot
+                // be interrupted, so a token is the granularity; it keeps the
+                // request protocol intact instead of needing a thread.
+                if (i % 4 == 0 && stdin_fill(0) && take_pending_cancel()) {
+                    cancelled = true;
+                    finish = "cancelled";
+                    break;
+                }
                 apply_sampling_penalties(logits, recent);
                 int next;
                 float next_lp = 0.0f;
@@ -871,6 +966,8 @@ int main(int argc, char** argv) {
             if (g_stop) finish = "stop";
             if (g_stop) cache_tokens.clear();
             else cache_tokens = all_tokens;
+            if (cancelled)
+                emit_req(common_json::object({{"event", string("cancelled")}, {"id", req_id}}));
             common_json done_ev = common_json::object({
                 {"event", string("done")},
                 {"text", full},
@@ -879,6 +976,9 @@ int main(int argc, char** argv) {
                 {"completion_tokens", generated},
                 {"cached_tokens", common},
                 {"prefill_tokens", prefill_tokens},
+                {"cma_free_kb", (long long) proc_meminfo_kb("CmaFree:")},
+                {"mem_available_kb", (long long) proc_meminfo_kb("MemAvailable:")},
+                {"programs", (long long) gpu.program_count()},
             });
             if (want_logprobs) {
                 common_json rows = common_json::array();
