@@ -244,7 +244,10 @@ and two more logits draws per token, and the unpacked logits target is
 limit (2048 on VC4).
 
 dtypes: `0` f32, `1` i16, `2` q8u8 (biased, so the upload is a copy), `3` q8i8,
-`4` q4, `5` blob.  `dtype` replaces the magic: q8 pre-biased and q8 signed are
+`4` q4, `5` blob, `6` q6 (the 6-bit embedding body `mmcf_hf.py --head-q6` writes:
+two planes per row, `dim/2` bytes of 4 bits then `dim/4` bytes of 2, with a
+per-row scale in the `embedding_scale` tensor that follows it; `model.cpp` reads
+it as `INT6`, and `mmcf_dump.py` prints it as `q6`).  `dtype` replaces the magic: q8 pre-biased and q8 signed are
 two values of one enum, so the upload path picks "copy straight from the map" or
 "flip the sign bit" per tensor without a format branch.
 

@@ -24,7 +24,9 @@ KINDS = {
     0x10: "qkv", 0x11: "wo", 0x12: "w1", 0x13: "w3", 0x14: "w13", 0x15: "w2",
     0x16: "router", 0x20: "logits_tile", 0x30: "tokenizer_blob",
 }
-DTYPES = {0: "f32", 1: "i16", 2: "q8u8", 3: "q8i8", 4: "q4", 5: "blob"}
+# 6 is the 6-bit embedding body mmcf_hf.py writes for `--head-q6`: two
+# planes per row (4 bits then 2 bits, `dim/2` and `dim/4` bytes).
+DTYPES = {0: "f32", 1: "i16", 2: "q8u8", 3: "q8i8", 4: "q4", 5: "blob", 6: "q6"}
 SCHEMES = {0: "i16", 1: "q8", 2: "q4"}
 TEMPLATE_KINDS = {0: "plain", 1: "chatml/qwen", 2: "minimind3", 3: "tinybrainbot"}
 # bit 3 is reserved: the packer never sets it and Model::load_mmcf() reads the
