@@ -29,3 +29,25 @@ bool read_text_file(const string& path, string& out) {
     out = ss.str();
     return true;
 }
+
+bool env_set(const char* name) { return getenv(name) != nullptr; }
+
+bool env_flag(const char* name) {
+    const char* v = getenv(name);
+    return v && strcmp(v, "0") != 0;
+}
+
+bool env_zero(const char* name) {
+    const char* v = getenv(name);
+    return v && strcmp(v, "0") == 0;
+}
+
+int env_int(const char* name, int def) {
+    const char* v = getenv(name);
+    return v ? atoi(v) : def;
+}
+
+double env_double(const char* name, double def) {
+    const char* v = getenv(name);
+    return v ? atof(v) : def;
+}

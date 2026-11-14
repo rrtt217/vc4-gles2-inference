@@ -225,7 +225,7 @@ GLuint GPU::ffn_split(const Mat& w1, const Mat& w3, GLuint x, int hidden, int hs
         // The old non-paired q8 path (q24 matvec_to_row + swiglu_2row) has been
         // observed to miscompute w1/w3 for hidden=1408; the paired q16 path is
         // correct and also faster.  FFN_PAIR=0 keeps the old path for A/B.
-        static const bool pair_env = !(getenv("FFN_PAIR") && strcmp(getenv("FFN_PAIR"), "0") == 0);
+        static const bool pair_env = !(env_zero("FFN_PAIR"));
         if (pair_env && w1.type == WeightType::INT8 && w3.type == WeightType::INT8)
             return ffn_pair_chunk(w1, w3, x, hidden, ffn_pair_a_, ffn_h_a_, hs);
         if (ffn_ab_.tex == 0 || ffn_ab_.w != hidden || ffn_ab_.h != 2) ffn_ab_ = make_target(hidden, 2);
@@ -323,7 +323,7 @@ GLuint GPU::ffn_fused(const Mat& w13, GLuint x, int hidden, int hs){
 
 void GPU::ffn_split_chunked(const Mat& w1a, const Mat& w3a, const Mat& w1b, const Mat& w3b,
                            GLuint x, int n1, int n2, GLuint& ha, GLuint& hb, int hs){
-        static const bool pair_env = !(getenv("FFN_PAIR") && strcmp(getenv("FFN_PAIR"), "0") == 0);
+        static const bool pair_env = !(env_zero("FFN_PAIR"));
         // The paired shader assumes int8 weights; q4/i16 keep the old path.
         const bool pair = pair_env &&
                           ((w1a.type == WeightType::INT8 && w3a.type == WeightType::INT8) ||
@@ -336,7 +336,7 @@ void GPU::ffn_split_chunked(const Mat& w1a, const Mat& w3a, const Mat& w1b, cons
             // 311.1636, 0.3% - far inside the 254-token corpus noise, see WORKLOG), but
             // the greedy gates are byte-identical.  FFN_FUSE=0 restores the two-pass
             // path for A/B and for any future bit-exactness work.
-            static const bool fuse_env = !(getenv("FFN_FUSE") && strcmp(getenv("FFN_FUSE"), "0") == 0);
+            static const bool fuse_env = !(env_zero("FFN_FUSE"));
             if (fuse_env && w1a.type == WeightType::INT8 && ffn_fmt_ == XFormat::I16_2 &&
                 (n1 & 1) == 0 && (n2 & 1) == 0) {
                 ha = ffn_pair_swiglu_chunk(w1a, w3a, x, n1, ffn_h_a_, hs);
@@ -641,11 +641,11 @@ CandidateResult GPU::logits_candidates_from(const vector<Mat>& tiles, GLuint xt,
     }
 
 bool GPU::gpu_attn_enabled() const{
-        return getenv("GPU_ATTN") && atoi(getenv("GPU_ATTN")) != 0;
+        return env_flag("GPU_ATTN");
     }
 
 bool GPU::gpu_layer_enabled() const{
-        return getenv("GPU_LAYER") && atoi(getenv("GPU_LAYER")) != 0;
+        return env_flag("GPU_LAYER");
     }
 
 void GPU::init_attention(int dim, int kv_dim, int heads, int kv_heads, int head_dim,
@@ -661,12 +661,12 @@ void GPU::init_attention(int dim, int kv_dim, int heads, int kv_heads, int head_
         // produces garbage on LFM2.5's shape (kv_dim 512, head_dim 64) while
         // the packed one is correct, and the packed layout is the canonical
         // Pi/Xe setting anyway.  KV_PACK overrides either way.
-        att_kv_bits_ = getenv("KV_PACK") ? atoi(getenv("KV_PACK")) : (hybrid ? 16 : 0);
+        att_kv_bits_ = env_int("KV_PACK", hybrid ? 16 : 0);
         if (att_kv_bits_ == 1) att_kv_bits_ = 16;
         if (att_kv_bits_ != 0 && att_kv_bits_ != 8 && att_kv_bits_ != 16) att_kv_bits_ = 0;
         att_kv_packed_ = att_kv_bits_ != 0;
-        att_kv_scale_ = getenv("KV_SCALE") ? atof(getenv("KV_SCALE")) :
-                        (att_kv_bits_ == 16 ? 2048.0f : att_kv_bits_ == 8 ? 16.0f : 16384.0f);
+        att_kv_scale_ = (float) env_double("KV_SCALE",
+                        att_kv_bits_ == 16 ? 2048.0 : att_kv_bits_ == 8 ? 16.0 : 16384.0);
         if (att_kv_scale_ < 1.0f) att_kv_scale_ = 1.0f;
         att_kv_width_ = att_kv_bits_ == 16 ? kv_dim : att_kv_bits_ == 8 ? kv_dim / 2 : 2 * kv_dim;
         if (att_kv_bits_ != 0 &&
@@ -680,8 +680,7 @@ void GPU::init_attention(int dim, int kv_dim, int heads, int kv_heads, int head_
         // qk-normed.  Off by default: it buys q4 6% of PPL but costs q8 6%
         // and one extra pass per layer (docs/performance.md).  K always keeps
         // the global KVSCALE grid.
-        att_kv_vstep_ = att_kv_bits_ == 8 && getenv("KV_VSTEP") &&
-                        atoi(getenv("KV_VSTEP")) != 0;
+        att_kv_vstep_ = att_kv_bits_ == 8 && env_flag("KV_VSTEP");
         q_norm_tex_.clear(); k_norm_tex_.clear();
         if (qk_norm) {
             for (int l = 0; l < layers; ++l) {
@@ -735,7 +734,7 @@ GLuint GPU::attention_block(const Mat& qkv, GLuint x, int layer, int pos){
         if (qkv_target_.tex == 0 || kv_cache_.empty()) return 0;
         // Per-pass attribution: the block is five dependent draws and the whole
         // thing used to be one number in the profile.
-        const bool prof = getenv("LAYER_PROFILE") != nullptr;
+        const bool prof = env_set("LAYER_PROFILE");
         auto tp = Clock::now();
         auto lap = [&](const char* name) {
             if (!prof) return;
@@ -1102,7 +1101,7 @@ AttnConfig GPU::att_cfg() const{
 // a compile-count question first: x_prog also merges keys that build
 // byte-identical program text, so a repeat compile cannot hide here.
 bool GPU::shader_time_on(){
-        static const bool on = getenv("SHADER_TIME") != nullptr;
+        static const bool on = env_set("SHADER_TIME");
         return on;
     }
 
@@ -1930,7 +1929,7 @@ void GPU::kv_vscale(int layer, int pos){
 void GPU::att_scores(int layer, int pos){
         // The q16 score-pair layout requires the hoisted q path; ATTN_HOIST=0
         // was removed with the kernel it selected (see att_score).
-        const bool sprof = getenv("LAYER_PROFILE") != nullptr;
+        const bool sprof = env_set("LAYER_PROFILE");
         auto stp = Clock::now();
         auto slap = [&](const char* n) {
             if (!sprof) return;
@@ -2072,7 +2071,7 @@ void GPU::draw(const Mat& m, GLuint x, Target& t, int row ){
         // "the draw did not execute" and "the draw read stale input" are
         // distinguishable in a readback.  0x33/0x66/0x99/0xff is not a valid q16
         // pair for any small value.  Cached: this sits on the per-draw path.
-        static const bool draw_clear = getenv("DRAW_CLEAR") != nullptr;
+        static const bool draw_clear = env_set("DRAW_CLEAR");
         if (draw_clear) { glClearColor(0.2f, 0.4f, 0.6f, 1.0f); glClear(GL_COLOR_BUFFER_BIT); }
         use_program(p);
         bind_tex(0, m.tex);

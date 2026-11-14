@@ -134,10 +134,10 @@ vector<int> Tokenizer::encode(const string& text, bool bos , bool dummy_prefix )
         // text and not emitted as its own token.  TOK_SPACE_FOLD=1 selects that;
         // the default keeps the historical behaviour the MiniMind2/3 gates were
         // baselined on.
-        static const bool fold = getenv("TOK_SPACE_FOLD") && atoi(getenv("TOK_SPACE_FOLD")) != 0;
+        static const bool fold = env_flag("TOK_SPACE_FOLD");
         // HF's tokenizers.encode() does not prepend a space to a raw string, so
         // the engine must be able to skip the prefix entirely (TOK_NO_PREFIX=1).
-        static const bool no_prefix = getenv("TOK_NO_PREFIX") && atoi(getenv("TOK_NO_PREFIX")) != 0;
+        static const bool no_prefix = env_flag("TOK_NO_PREFIX");
         if (no_prefix) dummy_prefix = false;
         string body = text;
         if (dummy_prefix && !text.empty()) {

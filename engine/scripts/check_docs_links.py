@@ -139,7 +139,8 @@ def check_doc_to_source():
         return 0
     src = " ".join(p.read_text(encoding="utf-8", errors="replace")
                    for p in (ROOT / "engine/src").glob("*.cpp"))
-    read = set(re.findall(r'getenv\("([A-Z_0-9]+)"\)', src))
+    # A switch is read through `getenv("X")` or through one of the common.h helpers.
+    read = set(re.findall(r'(?:getenv|env_set|env_flag|env_int|env_double)\(\s*"([A-Z_0-9]+)"', src))
     bad = 0
     for name in sorted(set(TEST_HOOK.findall(hooks.read_text(encoding="utf-8")))):
         if name in NOT_ENGINE_SWITCHES or name in read or EXTERNAL_SWITCH.match(name):

@@ -378,7 +378,9 @@ Pick the tool that answers the question before writing a new probe:
 ground truth, and the inventory is one command:
 
 ```bash
-grep -rho 'getenv("[A-Z_0-9]*")' engine/src | sort -u
+# both spellings: a direct getenv() and one of the env_* helpers in common.h
+grep -rhoE '(getenv|env_set|env_flag|env_int|env_double)\(\s*"[A-Z_0-9]+"' engine/src \
+    | sed -E 's/.*"([A-Z_0-9]+)"/\1/' | sort -u
 ```
 
 ## Measurement rules
@@ -495,7 +497,11 @@ entries; correct them with a new section that says what was wrong.
 
 The engine is split into `engine/src/` modules; see `docs/engine-layout.md`.
 Shader text belongs in `shaders.cpp` / `shaders_attn.cpp`, and activation
-layout knowledge belongs in `xformat.h/.cpp`. Do not reintroduce per-shader
+layout knowledge belongs in `xformat.h/.cpp`.  Environment switches are read
+through `env_set` / `env_flag` / `env_int` / `env_double` (`common.h`), not by
+calling `getenv` twice in one expression (`getenv(X) ? atoi(getenv(X)) : d` was
+21 of the 206 sites on 2026-11-14); `env_flag` means "set and not 0", which is
+the convention `docs/test-hooks.md` documents. Do not reintroduce per-shader
 activation-layout strings.  JSON (the worker event stream, tool arguments and
 results, the chat-template context) is built with `common_json` from
 `third_party/jinja/json.h` and never by concatenation: it keeps key insertion

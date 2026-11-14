@@ -15,7 +15,9 @@ Three rules before using this list:
   debug flags that are not listed here, is:
 
   ```bash
-  grep -rho 'getenv("[A-Z_0-9]*")' engine/src | sort -u    # 74 today
+  # both spellings: a direct getenv() and one of the env_* helpers in common.h
+  grep -rhoE '(getenv|env_set|env_flag|env_int|env_double)\(\s*"[A-Z_0-9]+"' engine/src \
+    | sed -E 's/.*"([A-Z_0-9]+)"/\1/' | sort -u    # 93 today
   ```
 
 ## Diagnostics: dumps

@@ -37,7 +37,12 @@ $ROOT/server/README.md $ROOT/server/README.zh-CN.md \
 $ROOT/models/README.md $ROOT/engine/probes/README.md $(ls "$ROOT"/docs/*.md 2>/dev/null)"
 
 # 1. every switch the engine reads is described in test-hooks.md
-grep -rho 'getenv("[A-Z_0-9]*")' src | sed 's/getenv("//;s/")//' | sort -u > /tmp/docs_check_env.$$
+# Both spellings read an environment switch: `getenv("X")` directly, and the
+# `env_*` helpers in common.h (2026-11-14 moved 21 double reads onto them).  Keying
+# the inventory on `getenv` alone would have made every converted switch invisible
+# here -- the check has to follow the *fact*, not the syntax it was written with.
+grep -rhoE '(getenv|env_set|env_flag|env_int|env_double)\(\s*"[A-Z_0-9]+"' src \
+    | sed -E 's/.*"([A-Z_0-9]+)"/\1/' | sort -u > /tmp/docs_check_env.$$
 n=$(wc -l < /tmp/docs_check_env.$$)
 [ "$VERBOSE" = "-v" ] && say "  $n environment switches in src/"
 while read -r v; do

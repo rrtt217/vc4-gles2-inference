@@ -39,7 +39,7 @@ static bool pass_dup(const char* name){
 // both, 3 global K only, 4 global V only, 5 per-head V only, 6 per-head K only.
 // KV8_SIM_SCALE sets the global grid (default 16, the KV_PACK=8 default).
 static int kv8_sim_mode(){
-    static const int m = getenv("KV8_SIM") ? atoi(getenv("KV8_SIM")) : 0;
+    static const int m = env_int("KV8_SIM", 0);
     return m;
 }
 static float kv8_sim_scale(){
@@ -207,7 +207,7 @@ Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
         bool qkv_pair = true;
         for (const Mat& m : m_.qkv)
             if (m.type != WeightType::INT8 || (m.rows & 1)) qkv_pair = false;
-        if (getenv("QKV_PAIR") && strcmp(getenv("QKV_PAIR"), "0") == 0) qkv_pair = false;
+        if (env_zero("QKV_PAIR")) qkv_pair = false;
         if (gpu_attn_)
             gpu_.init_attention(m_.dim, m_.kv_dim, m_.heads, m_.kv_heads, m_.head_dim,
                                 m_.seq, m_.rope_half, m_.qk_norm, m_.layers,
@@ -232,7 +232,7 @@ void Session::zero_conv_state(){
 // model drifted (probe: xb 8.8% off after the first norm).  The GPU path is
 // unaffected -- its textures are q16 by construction.
 static bool act_f32() {
-    static const bool on = getenv("ACT_F32") != nullptr;
+    static const bool on = env_set("ACT_F32");
     return on;
 }
 
@@ -456,7 +456,7 @@ vector<float> Session::forward(int token, int pos){
 static vector<float> decode_act_row(const vector<uint8_t>& b, int texels, XFormat f);
 
 GLuint Session::forward_gpu_hidden(int token, int pos, bool want_logits){
-        bool prof = getenv("LAYER_PROFILE") != nullptr;
+        bool prof = env_set("LAYER_PROFILE");
         auto pt = Clock::now();
         auto mark = [&](const char* name, int l) {
             if (!prof) return;

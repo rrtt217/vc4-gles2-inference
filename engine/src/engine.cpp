@@ -458,7 +458,7 @@ int main(int argc, char** argv) {
                                             : (!qwen_template && !tbb_template);
     // CHAT_DUMP=1 prints the rendered prompt with its input marking, which is
     // what the byte-for-byte template comparisons are run against.
-    const bool chat_dump = getenv("CHAT_DUMP") != nullptr;
+    const bool chat_dump = env_set("CHAT_DUMP");
     // Stop-token test.  The container states EOS and the extra stop id (key 8).
     // The CLI used to test the literal ids 1 and 2, which is MiniMind3's
     // coincidence; a model whose EOS is 7 never stopped.
@@ -752,7 +752,7 @@ int main(int argc, char** argv) {
                                               {"mem_available_kb", (long long) proc_meminfo_kb("MemAvailable:")},
                                               {"programs", (long long) gpu.program_count()},
                                               {"seq", model.seq},
-                                              {"kv_pack", (long long) (getenv("KV_PACK") ? atoi(getenv("KV_PACK")) : 0)},
+                                              {"kv_pack", (long long) (env_int("KV_PACK", 0))},
                                               {"template", model.template_name.empty() ? string("(kind ") + std::to_string(model.template_kind) + ")" : model.template_name},
                                               {"uptime_ms", (long long) run_time_ms()}}));
                     continue;
@@ -1050,7 +1050,7 @@ int main(int argc, char** argv) {
     // partial: the echo it was written for started with a plain '<' and spelled
     // the rest out, which no token mask can stop.
     vector<char> marker_mask;
-    if (getenv("BLOCK_MARKERS") && atoi(getenv("BLOCK_MARKERS")) != 0) {
+    if (env_flag("BLOCK_MARKERS")) {
         marker_mask.assign((size_t)model.vocab, 0);
         for (const auto& sp : tokenizer.specials()) {
             const int id = sp.second;

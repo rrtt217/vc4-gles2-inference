@@ -91,3 +91,22 @@ inline float dequantize_act(float q) { return q / ACT_SCALE; }
 inline float quantize_act_f(float x) { return (float)quantize_act(x) / ACT_SCALE; }
 
 bool read_text_file(const string& path, string& out);
+
+// Environment switches, read one way.  The engine has 93 of them and 206 call
+// sites, and 21 of those read the same variable twice
+// (`getenv(X) ? atoi(getenv(X)) : d`), which is both slow in a per-layer loop and
+// the shape where the two reads could in principle disagree.  New code uses these;
+// the remaining one-shot reads are converted as they are touched.
+//
+// `env_flag` is "set and not 0", which is the convention every switch follows
+// (docs/test-hooks.md); `env_set` is only set-ness, for switches that take a value
+// (`STAGE_DUMP=1`) or ignore it (`CHAT_DUMP=1`).
+bool env_set(const char* name);
+// Set and equal to "0": the switch was explicitly turned off.  This is *not*
+// `!env_flag` -- that is also true when the variable is unset, and inverting an
+// off-by-default switch that way moved q4 PPL on 2026-11-14 (330.5302 -> 326.5032,
+// caught by the gate).  `FFN_PAIR=0` disables pairing; unset keeps the default.
+bool env_zero(const char* name);
+bool env_flag(const char* name);
+int env_int(const char* name, int def);
+double env_double(const char* name, double def);
