@@ -6053,3 +6053,28 @@ ms a draw is still unattributed.
 The general lesson, which the repo had already paid for once on the q8 side and
 I did not apply: **do not write `dot` in a VC4 kernel.**  The scalar form with
 the accumulator as the destination is the fast one.
+
+### 2026-11-15 — the hybrid's OOM is a CMA race on this board, not the format
+
+The earlier "143.7 MiB of textures against 13 MiB of CmaFree" reading was taken
+while the board's other software held most of the CMA.  Measured across the
+session with nothing of ours running:
+
+    CmaTotal   262144 kB
+    CmaFree   128156 kB   (after a reboot, before any engine run)
+    CmaFree    67596 kB   (minutes later, server stack busy)
+    CmaFree    35464 kB   (busy again)
+
+`pumpkin` + `gate` + `frps` hold 130-230 MB of a 256 MB CMA depending on load,
+so the engine's own 143.7 MiB for lfm2.5-230M q4 fits or does not fit depending
+on what else is resident *at that moment*.  In the same session, with CmaFree at
+67 MB, **both** the packed and the `Q4_FMT=force` 4-bit hybrid completed; with
+CmaFree at 35 MB the 4-bit run came back empty again.  The 4-bit view is
+size-neutral by construction (`cols/2` bytes a row either way), so it is neither
+the cause nor the cure.
+
+What that means for the guard: it stays.  The hybrid is refused the 4-bit view
+not because the format is wrong there but because the board cannot reliably hold
+the model plus everything else, and a run that half-loads is the worst outcome.
+Verifying the hybrid on the 4-bit view needs a board with the server stack
+stopped; until then the honest statement is "not verified", not "does not work".
