@@ -67,7 +67,7 @@ the file format in [`docs/model-formats.md`](docs/model-formats.md) and
 
 | Script | Answers |
 |---|---|
-| `regression.sh` | the acceptance gate: docs drift, shader hashes, determinism, behaviour, pinned strings, PPL |
+| `regression.sh` | the acceptance gate: docs drift, shader hashes, target-reset ledger, determinism, behaviour, pinned strings, PPL |
 | `shader_hashes.sh` | did a builder change move the emitted GLSL: digests of every builder's text (`--dump-shaders`), no GPU or model needed |
 | `diff_paths.sh` + `dump_diff.awk` | per-stage CPU-vs-GPU comparison, from `STAGE_DUMP=1 HIDDEN_DUMP=1 PREFILL_PAIR=0` |
 | `dump_stats.py` | per-row `max/mean/clamp-count` of a `DUMP` file (is a row saturating?) |
@@ -75,6 +75,7 @@ the file format in [`docs/model-formats.md`](docs/model-formats.md) and
 | `cmp_logits.py` | compares two `LOGITS_OUT` dumps tile by tile |
 | `verify_packing.sh` | byte-for-byte check of the packed-activation layout against a known-good binary |
 | `bench.sh`, `bench_ab.sh`, `bench_plain_ab.sh`, `longctx.sh` | timings; the `ab` ones interleave two binaries to cancel drift |
+| `check_target_reset.sh` | every scratch `Target` in `gpu.h` is cleared by `GPU::reset_targets()`, so a released scene cannot be reused with a deleted texture name.  Runs without a GPU or a model |
 | `docs_check.sh` | documentation drift: every switch the source reads is in `docs/test-hooks.md`, every in-tree path a document names exists, and nothing calls a live switch dead.  Runs without a model or a GPU |
 | `bench_mc.py` | "can this model answer a multiple-choice question": letter-logit accuracy, calibrated accuracy and format compliance from `LOGITS_OUT`, one engine run per item, no sampler.  Data in `scripts/eval/mc_zh.jsonl` and `mc_en.jsonl` |
 | `eval_ifeval.py` | "does the reply obey the instruction": sampled replies scored against regexes and counts; `--selftest` validates the case file (`scripts/eval/ifeval.jsonl`) without a GPU |

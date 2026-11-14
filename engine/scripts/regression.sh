@@ -21,6 +21,10 @@
 #                      that moves it must move scripts/shader_hashes.txt in the
 #                      same commit.  --dump-shaders returns before any EGL call,
 #                      so this needs no GPU and no model (~0.03 s).
+#   0c. target reset - every scratch Target in gpu.h is cleared by
+#                      GPU::reset_targets().  A Target that survives a scene
+#                      release is *reused* with a deleted name (silent garbage),
+#                      so the ledger has to stay complete.  No GPU, no model.
 #   1. determinism   - the same binary, run twice, prints the same text.  A
 #                      failure here is a real bug (uninitialised state, a race,
 #                      a stale cache), never "noise".
@@ -173,6 +177,13 @@ case $shader_rc in
        echo "  (binary not runnable on this host, or built without --dump-shaders)" >&2
        exit 1 ;;
 esac
+
+# A Target that outlives a scene release is reused with a deleted name: the
+# create sites in gpu.cpp are guarded on "tex == 0", and nothing else notices.
+sh scripts/check_target_reset.sh || {
+    echo "target reset FAIL: run scripts/check_target_reset.sh for the list" >&2
+    exit 1
+}
 
 q8=$(text "$Q8" "$PROMPT" 16 "$SYS")
 q8b=$(text "$Q8" "$PROMPT" 16 "$SYS")

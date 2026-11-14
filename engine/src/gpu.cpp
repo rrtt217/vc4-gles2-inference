@@ -85,6 +85,64 @@ GPU::GPU(){
         if (max_target_dim_ <= 0) max_target_dim_ = 2048;
     }
 
+void GPU::reset_targets(){
+        // Every scratch target this GPU owns, in one place: release_scene()
+        // deletes their textures, and a Target that still carried a deleted
+        // name would be *reused* by the guarded create sites in this file
+        // ("if (t.tex == 0 || ...)") - silent garbage instead of a new one.
+        // scripts/check_target_reset.sh fails if a Target member is added
+        // without being listed here.
+        conv_t_b_ = Target();
+        conv_t_c_ = Target();
+        conv_t_x_ = Target();
+        conv_cv_ = Target();
+        conv_y_ = Target();
+        logits_target_ = Target();
+        candidate_target_ = Target();
+        sum_target_ = Target();
+        ffn_a_ = Target();
+        ffn_b_ = Target();
+        ffn_h_ = Target();
+        ffn_ab_ = Target();
+        ffn_ab_a_ = Target();
+        ffn_ab_b_ = Target();
+        ffn_h_a_ = Target();
+        ffn_h_b_ = Target();
+        qkv_target_ = Target();
+        att_scores_ = Target();
+        att_stats_ = Target();
+        att_probs_ = Target();
+        att_out_ = Target();
+        qrot_target_ = Target();
+        qscale_target_ = Target();
+        hidden_a_ = Target();
+        hidden_b_ = Target();
+        xb_ = Target();
+        xbf_ = Target();
+        xf_ = Target();
+        rms_stats_ = Target();
+        rms_partial_ = Target();
+        rms_partial2_ = Target();
+        ffn_pair_a_ = Target();
+        ffn_pair_b_ = Target();
+        pp_a_ = Target();
+        pp_a2_ = Target();
+        pp_a3_ = Target();
+        pp_b_ = Target();
+        pp_b2_ = Target();
+        pp_b3_ = Target();
+        pp_in2_ = Target();
+        pp_g_ = Target();
+        pp_w2_ = Target();
+        pp_w2b_ = Target();
+        xb2_ = Target();
+        xbf2_ = Target();
+        probe_ = Target();
+        conv_state_.clear();
+        vs_targets_.clear();
+        kv_cache_.clear();
+    }
+
 void GPU::release_scene(){
         // Deleting a name that is already gone is a no-op in GL, so a texture
         // rebuilt in place (the conv kernel) can sit in the list twice.
@@ -95,6 +153,7 @@ void GPU::release_scene(){
         // The per-layer handle vectors point at names that are gone.  Keeping
         // them would make a reload reuse or re-delete stale names; the textures
         // themselves are already in the ledger above.
+        reset_targets();
         conv_k_tex_.clear();
         rms_att_tex_.clear();
         rms_ffn_tex_.clear();

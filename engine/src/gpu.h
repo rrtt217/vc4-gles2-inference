@@ -51,6 +51,10 @@ public:
     // swap cannot silently leave a texture behind (that would be a CMA leak on
     // the Pi, where one model barely fits).
     void release_scene();
+    // Zeroes every scratch Target (textures and FBOs are in the ledger).  Kept
+    // next to release_scene() because the two always run together, and
+    // scripts/check_target_reset.sh keeps the list complete.
+    void reset_targets();
 
     vector<float> matvec(const Mat& m, const vector<float>& x);
     // Same, with the activation scaled by 2^k so a small input keeps its
