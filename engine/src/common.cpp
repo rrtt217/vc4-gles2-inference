@@ -57,3 +57,15 @@ uint64_t fnv64(const std::string& s) {
     for (unsigned char ch : s) { h ^= ch; h *= 1099511628211ull; }
     return h;
 }
+
+std::string dump_escape(const std::string& t) {
+    std::string o;
+    for (unsigned char c : t) {
+        if (c == '\n') o += "\\n";
+        else if (c == '\r') o += "\\r";
+        else if (c == '\t') o += "\\t";
+        else if (c < 0x20) { char b[8]; snprintf(b, sizeof b, "\\x%02x", c); o += b; }
+        else o += (char)c;
+    }
+    return o;
+}
