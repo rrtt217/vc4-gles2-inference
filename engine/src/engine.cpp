@@ -38,6 +38,8 @@
 #include "shaders.h"
 #include "xformat.h"
 #include "gpu.h"
+#include "cli.h"
+#include "ppl.h"
 #include "model.h"
 #include "chattmpl.h"
 #include "jinja/json.h"
@@ -72,7 +74,6 @@ static std::string dump_escape(const std::string& t){
 // literal here would be dead code that reads like the default and is not --
 // `-Wunused-variable` found exactly that on 2026-11-14.
 
-static const char* kVersion = "1.0";
 
 // Informational stderr lines (template, tokenizer, specials, rope, cache) are
 // useful when something is wrong and noise when it is not; -q turns them off.
@@ -111,39 +112,6 @@ struct TurnTiming {
         }
 };
 
-static const char* kUsage =
-    "usage: engine_mm3 [options]                       (MODEL=<file.mmcf> or --model)\n"
-    "\n"
-    "  --model PATH          container to run (or set MODEL)\n"
-    "  --chat                chat mode; with no --prompt it is a REPL on stdin\n"
-    "  --prompt TEXT         one-shot prompt ('-' reads stdin to EOF)\n"
-    "  --system TEXT         system prompt (default: the container's)\n"
-    "  --gen N              tokens to generate (default 8, 128 with --chat)\n"
-    "  --greedy             argmax instead of sampling\n"
-    "  --temp F --topp F     sampling knobs (default 1.0 / 0.9)\n"
-    "  --top-k N            keep only the N most likely tokens (0 = off)\n"
-    "  --top-k-candidates   with --top-k, read back only the candidates instead\n"
-    "                       of the full logits (approximate; falls back when it\n"
-    "                       cannot decide).  Without this flag the CPU path is exact\n"
-    "  --seed N              sampling seed (default 1234)\n"
-    "  --min-p F --repeat-penalty F --frequency-penalty F --presence-penalty F\n"
-    "  --no-repeat-ngram N   sampling penalties\n"
-    "  --tools JSON | --tools-file F   tool definitions for the model\n"
-    "  --thinking            open a thinking block before the answer\n"
-    "  --prefix-cache F      load a prefix cache (needs GPU attention)\n"
-    "  --build-prefix-cache PROMPTFILE OUT   write one and exit\n"
-    "  --ppl FILE            perplexity of a text file\n"
-    "  --dump-shaders[=raw]  print every shader builder's GLSL digest (or the\n"
-    "                        text) and exit; needs no model and no GPU\n"
-    "  --worker              JSON-lines worker (the HTTP server drives this)\n"
-    "  -q, --quiet           no informational lines on stderr\n"
-    "  -V, --version         print the version\n"
-    "  -h, --help            this text\n"
-    "\n"
-    "In the REPL: /help, /clear (forget the conversation), /exit.\n"
-    "Sampling penalties also come from the environment (MIN_P, ...); see\n"
-    "docs/test-hooks.md.  The container carries the tokenizer, the template,\n"
-    "rope and the special-token ids, so there are no flags for those.\n";
 
 // Requests and control lines arrive on stdin, and a *cancel* has to be seen
 // while a request is generating -- which getline() cannot do without swallowing
@@ -221,114 +189,38 @@ int main(int argc, char** argv) {
     string tokenizer_path = getenv("TOKENIZER") ? getenv("TOKENIZER") : "../models/llama2c/tokenizer.bin";
     string prompt = "One day, Lily";
     string system_prompt;
-    int gen = 8;
-    int dump_mode = 0;   // --dump-shaders: 1 = digests, 2 = raw GLSL
-    bool prompt_set = false, gen_set = false;
-    bool chat = false, qwen_template = false, minimind3_template = false, greedy = false, worker = false;
-    bool tbb_template = false;   // <|user|>/<|assistant|>/<|end|>, no system turn, no BOS
-    bool open_thinking = false;
-    string tools_json;
-    string build_cache_prompt, build_cache_out, prefix_cache_path, ppl_path;
-    uint32_t seed = 1234;
-    float temp = 1.0f, top_p = 0.9f;
-    int top_k = 0;
-    bool top_k_candidates = false;
-    if (getenv("REPETITION_PENALTY")) g_sampling.repetition_penalty = atof(getenv("REPETITION_PENALTY"));
-    if (getenv("FREQUENCY_PENALTY")) g_sampling.frequency_penalty = atof(getenv("FREQUENCY_PENALTY"));
-    if (getenv("PRESENCE_PENALTY")) g_sampling.presence_penalty = atof(getenv("PRESENCE_PENALTY"));
-    if (getenv("NO_REPEAT_NGRAM")) g_sampling.no_repeat_ngram = atoi(getenv("NO_REPEAT_NGRAM"));
-    if (getenv("MIN_P")) g_sampling.min_p = atof(getenv("MIN_P"));
+    Options opt;
+    bool quiet = g_quiet;
+    int cli_exit = 0;
+    if (!parse_args(argc, argv, opt, quiet, cli_exit)) return cli_exit;
+    g_quiet = quiet;
 
-    for (int i = 1; i < argc; ++i) {
-        if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help") || !strcmp(argv[i], "help")) {
-            printf("%s", kUsage); return 0;
-        }
-        else if (!strcmp(argv[i], "--version") || !strcmp(argv[i], "-V")) {
-            printf("engine_mm3 %s (MMCF v2)\n", kVersion); return 0;
-        }
-        else if (!strcmp(argv[i], "-q") || !strcmp(argv[i], "--quiet")) g_quiet = true;
-        else if (!strcmp(argv[i], "--model") && i + 1 < argc) model_path = argv[++i];
-        else if (!strcmp(argv[i], "--prompt") && i + 1 < argc) {
-            prompt = argv[++i]; prompt_set = true;
-            if (prompt == "-") {                       // everything on stdin
-                stringstream ss; ss << cin.rdbuf(); prompt = ss.str();
-                while (!prompt.empty() && (prompt.back() == '\n' || prompt.back() == '\r'))
-                    prompt.pop_back();
-            }
-        }
-        else if (!strcmp(argv[i], "--gen") && i + 1 < argc) { gen = atoi(argv[++i]); gen_set = true; }
-        else if (!strcmp(argv[i], "--chat")) chat = true;
-        else if (!strcmp(argv[i], "--ppl") && i + 1 < argc) ppl_path = argv[++i];
-        else if (!strcmp(argv[i], "--worker")) worker = true;
-        else if (!strcmp(argv[i], "--build-prefix-cache") && i + 2 < argc) {
-            build_cache_prompt = argv[++i]; build_cache_out = argv[++i];
-        }
-        else if (!strcmp(argv[i], "--prefix-cache") && i + 1 < argc) prefix_cache_path = argv[++i];
-        else if (!strcmp(argv[i], "--greedy")) greedy = true;
-        else if (!strcmp(argv[i], "--thinking") || !strcmp(argv[i], "--open-thinking")) open_thinking = true;
-        else if (!strcmp(argv[i], "--tools") && i + 1 < argc) tools_json = argv[++i];
-        else if (!strcmp(argv[i], "--tools-file") && i + 1 < argc) {
-            ifstream tf(argv[++i]);
-            if (!tf) { cerr << "cannot open tools file\n"; return 1; }
-            stringstream ss; ss << tf.rdbuf(); tools_json = ss.str();
-        }
-        else if (!strcmp(argv[i], "--system") && i + 1 < argc) system_prompt = argv[++i];
-        else if (!strcmp(argv[i], "--seed") && i + 1 < argc) seed = (uint32_t)strtoul(argv[++i], nullptr, 10);
-        else if (!strcmp(argv[i], "--temp") && i + 1 < argc) temp = atof(argv[++i]);
-        else if (!strcmp(argv[i], "--topp") && i + 1 < argc) top_p = atof(argv[++i]);
-        else if (!strcmp(argv[i], "--top-k") && i + 1 < argc) top_k = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--top-k-candidates")) top_k_candidates = true;
-        else if (!strcmp(argv[i], "--repeat-penalty") && i + 1 < argc) g_sampling.repetition_penalty = atof(argv[++i]);
-        else if (!strcmp(argv[i], "--frequency-penalty") && i + 1 < argc) g_sampling.frequency_penalty = atof(argv[++i]);
-        else if (!strcmp(argv[i], "--presence-penalty") && i + 1 < argc) g_sampling.presence_penalty = atof(argv[++i]);
-        else if (!strcmp(argv[i], "--no-repeat-ngram") && i + 1 < argc) g_sampling.no_repeat_ngram = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--min-p") && i + 1 < argc) g_sampling.min_p = atof(argv[++i]);
-        else if (!strcmp(argv[i], "--dump-shaders")) dump_mode = 1;
-        else if (!strcmp(argv[i], "--dump-shaders=raw")) dump_mode = 2;
-        else {
-            // Silently ignoring an argument is how "CHAT_DUMP=1" ends up on the
-            // command line (where it is not an environment variable) and the
-            // switch appears not to work at all.
-            if (argv[i][0] == '-') {
-                fprintf(stderr, "unknown option: %s  (see --help; environment "
-                                "switches like CHAT_DUMP=1 go before the command)\n", argv[i]);
-                return 2;
-            }
-            if (strchr(argv[i], '='))
-                fprintf(stderr, "%s looks like an environment assignment; put it before "
-                                "the command, not after it\n", argv[i]);
-            else
-                fprintf(stderr, "unexpected argument: %s  (the model comes from MODEL or "
-                                "--model; see --help)\n", argv[i]);
-            return 2;
-        }
-    }
-    if (dump_mode) return dump_shaders(dump_mode == 2);
-    if (top_k < 0) top_k = 0;
-    if (top_k_candidates && top_k <= 0) {
+    if (opt.dump_mode) return dump_shaders(opt.dump_mode == 2);
+    if (opt.top_k < 0) opt.top_k = 0;
+    if (opt.top_k_candidates && opt.top_k <= 0) {
         if (!g_quiet) cerr << "--top-k-candidates needs --top-k N; using full logits\n";
-        top_k_candidates = false;
+        opt.top_k_candidates = false;
     }
-    if (top_k > 0 && !g_quiet)
-        cerr << "sampling: top-k " << top_k
-             << (top_k_candidates ? " (candidates preferred)" : " (full logits)") << "\n";
-    if (chat && !gen_set) gen = 128;
+    if (opt.top_k > 0 && !g_quiet)
+        cerr << "sampling: top-k " << opt.top_k
+             << (opt.top_k_candidates ? " (candidates preferred)" : " (full logits)") << "\n";
+    if (opt.chat && !opt.gen_set) opt.gen = 128;
 
-    if (model_path.empty()) {
+    if (opt.model_path.empty()) {
         fprintf(stderr, "no model: set MODEL=<file.mmcf> or pass --model PATH (see --help)\n");
         return 2;
     }
     {
-        ifstream probe(model_path, ios::binary);
+        ifstream probe(opt.model_path, ios::binary);
         if (!probe) {
             fprintf(stderr, "cannot open model %s\n"
                             "  set MODEL=<file.mmcf> or pass --model PATH; the store lives in "
-                            "models/<name>/<name>.<quant>.mmcf (see --help)\n", model_path.c_str());
+                            "models/<name>/<name>.<quant>.mmcf (see --help)\n", opt.model_path.c_str());
             return 2;
         }
     }
     Model model;
-    if (!model.load(model_path)) return 1;
+    if (!model.load(opt.model_path)) return 1;
     if (getenv("SHADER_TIME")) fprintf(stderr, "STARTUP %7.1f ms  model loaded\n", run_time_ms());
     GPU gpu;
     if (getenv("SHADER_TIME")) fprintf(stderr, "STARTUP %7.1f ms  egl ready\n", run_time_ms());
@@ -340,7 +232,7 @@ int main(int argc, char** argv) {
     // set and a different scaling, i.e. numbers that no longer match a fresh
     // process -- measured as logits cosine 0.9998 for the dense models and 0.96
     // for the hybrid, whose hidden scale is the larger half of the difference.
-    const bool system_from_cli = !system_prompt.empty();
+    const bool system_from_cli = !opt.system_prompt.empty();
     auto prepare_model = [&]() {
         if (getenv("Q8_PARTS"))
             model.apply_precision(getenv("Q8_LAYERS") ? getenv("Q8_LAYERS") : "", getenv("Q8_PARTS"));
@@ -349,8 +241,8 @@ int main(int argc, char** argv) {
         if (getenv("SHADER_TIME")) fprintf(stderr, "STARTUP %7.1f ms  ffn split\n", run_time_ms());
         if (getenv("Q4_WEIGHTS"))
             model.quantize_q4_weights(getenv("Q4_SCOPE") ? getenv("Q4_SCOPE") : "all");
-        if (!tools_json.empty() && model.seq < 768) model.seq = 768;
-        if ((worker || !build_cache_prompt.empty()) && model.seq < 1024 && !getenv("SEQ")) model.seq = 1024;
+        if (!opt.tools_json.empty() && model.seq < 768) model.seq = 768;
+        if ((opt.worker || !opt.build_cache_prompt.empty()) && model.seq < 1024 && !getenv("SEQ")) model.seq = 1024;
         const int target_limit = gpu.max_target_dim();
         if (model.seq > target_limit) {
             cerr << "SEQ " << model.seq << " exceeds GL target limit " << target_limit
@@ -358,7 +250,7 @@ int main(int argc, char** argv) {
             model.seq = target_limit;
         }
         if (model.seq < 16) model.seq = 16;
-        if (!system_from_cli && !model.default_system.empty()) system_prompt = model.default_system;
+        if (!system_from_cli && !model.default_system.empty()) opt.system_prompt = model.default_system;
     };
     prepare_model();
     // The checkpoint names its template (a kind byte plus a name), so --template
@@ -367,20 +259,20 @@ int main(int argc, char** argv) {
     // Chat mode with no chat template falls back to the built-in [INST] wrapper,
     // which is right for a Llama-2 chat model and nonsense for a completion
     // model.  Say which one is happening instead of letting the output explain.
-    if (chat && model.template_kind == 0 && model.chat_template.empty() && !g_quiet)
+    if (opt.chat && model.template_kind == 0 && model.chat_template.empty() && !g_quiet)
         fprintf(stderr, "chat: this checkpoint has no chat template (kind 0, plain); "
                         "using the built-in [INST] wrapper.  For a completion model drop "
                         "--chat and use --prompt.\n");
     // Capabilities: a checkpoint that says it is not a chat model must not be
     // driven through the chat template.
-    if (model.have_capabilities && chat && !(model.capabilities & 1)) {
+    if (model.have_capabilities && opt.chat && !(model.capabilities & 1)) {
         cerr << "this checkpoint does not advertise chat support (capabilities 0x"
              << std::hex << model.capabilities << std::dec << "); drop --chat\n";
         return 2;
     }
-    if (model.have_capabilities && !chat && (model.capabilities & 1) && !gen_set) {
-        chat = true;
-        gen = 128;
+    if (model.have_capabilities && !opt.chat && (model.capabilities & 1) && !opt.gen_set) {
+        opt.chat = true;
+        opt.gen = 128;
     }
     Tokenizer tokenizer;
     string bos_str, eos_str;
@@ -391,7 +283,7 @@ int main(int argc, char** argv) {
     // as an argument.  Returns false when the container is unusable.
     auto setup_from_model = [&]() -> bool {
         chat_tmpl.reset();
-        qwen_template = minimind3_template = tbb_template = false;
+        opt.qwen_template = opt.minimind3_template = opt.tbb_template = false;
         if (!model.template_name.empty() || model.template_kind >= 0) {
             const int k = model.template_kind;
             bool want_qwen = false, want_mm3 = false, want_tbb = false;
@@ -404,12 +296,12 @@ int main(int argc, char** argv) {
                 want_qwen = model.template_name == "qwen" || model.template_name == "minimind3";
                 want_mm3 = model.template_name == "minimind3";
             }
-            const bool was_qwen = qwen_template, was_mm3 = minimind3_template;
-            qwen_template = want_qwen;
-            minimind3_template = want_mm3;
-            tbb_template = want_tbb;
-            if (tbb_template) qwen_template = false;   // its own markers, not chatml
-            if (((!was_qwen && qwen_template) || (!was_mm3 && minimind3_template)) && !g_quiet)
+            const bool was_qwen = opt.qwen_template, was_mm3 = opt.minimind3_template;
+            opt.qwen_template = want_qwen;
+            opt.minimind3_template = want_mm3;
+            opt.tbb_template = want_tbb;
+            if (opt.tbb_template) opt.qwen_template = false;   // its own markers, not chatml
+            if (((!was_qwen && opt.qwen_template) || (!was_mm3 && opt.minimind3_template)) && !g_quiet)
                 cerr << "template: " << (model.template_name.empty() ? "kind " + std::to_string(k) : model.template_name)
                      << " (from the checkpoint)\n";
         }
@@ -431,7 +323,7 @@ int main(int argc, char** argv) {
         if (model.tok_blob && !getenv("TOKENIZER")) {
             if (!tokenizer.load_memory(model.tok_blob, model.tok_blob_bytes, model.vocab)) return false;
             if (!g_quiet) cerr << "tokenizer: " << model.tok_blob_bytes << " B embedded in the checkpoint\n";
-        } else if (!tokenizer.load(tokenizer_path, model.vocab)) {
+        } else if (!tokenizer.load(opt.tokenizer_path, model.vocab)) {
             return false;
         }
         tokenizer.set_bos(model.have_specials ? model.id_bos : 1);
@@ -445,17 +337,17 @@ int main(int argc, char** argv) {
         // supposed to).  llama.cpp passes the strings; so must this.
         bos_str = tokenizer.id_text(model.id_bos);
         eos_str = tokenizer.id_text(model.id_eos);
-        tokenizer.set_qwen(qwen_template || minimind3_template);
-        tokenizer.set_bytelevel(minimind3_template);
+        tokenizer.set_qwen(opt.qwen_template || opt.minimind3_template);
+        tokenizer.set_bytelevel(opt.minimind3_template);
         return true;
     };
     if (!setup_from_model()) return 2;
     // Tool definitions, normalised to one JSON array for the template context.
-    const string tools_array = chat_tools_array(tools_json);
+    const string tools_array = chat_tools_array(opt.tools_json);
     // BOS policy: the container states it when it can (key 10); otherwise the
     // historical rule is kept, which is derived from the template kind.
     const bool enc_bos = model.add_bos >= 0 ? (model.add_bos != 0)
-                                            : (!qwen_template && !tbb_template);
+                                            : (!opt.qwen_template && !opt.tbb_template);
     // CHAT_DUMP=1 prints the rendered prompt with its input marking, which is
     // what the byte-for-byte template comparisons are run against.
     const bool chat_dump = env_set("CHAT_DUMP");
@@ -557,87 +449,11 @@ int main(int argc, char** argv) {
     };
     if (getenv("SHADER_TIME")) fprintf(stderr, "STARTUP %7.1f ms  session ready\n", run_time_ms());
 
-    if (!ppl_path.empty()) {
-        string text;
-        if (!read_text_file(ppl_path, text)) { cerr << "cannot read " << ppl_path << "\n"; return 1; }
-        // BOS, because this path feeds raw text to the model and no template is
-        // involved.  It used to pass false/false, which is what chat *without*
-        // a BOS policy means -- and for LFM2.5 (whose template supplies
-        // <|startoftext|>) it measured a prompt the model never sees: PPL 85.4
-        // without the BOS against 14.7 with it, nats 4.45 against 2.69.  It is
-        // also what llama.cpp's llama-perplexity does (add_special from the
-        // GGUF's add_bos_token).
-        auto tokens = tokenizer.encode(text, /*bos=*/true, /*dummy_prefix=*/false);
-        if ((int)tokens.size() < 4) { cerr << "not enough tokens\n"; return 1; }
-        // Score every token of the file, in windows of at most SEQ tokens.
-        //
-        // A window that starts mid-text is cold: it has no left context, and on
-        // a real document that costs ~1.8 nats/token (measured 2026-11-12 on
-        // this file: 3.80 nats with the document before it, 5.61 starting at
-        // token 512 -- f32 numpy, so it is the model and not the engine).  So a
-        // sum of cold windows is not a perplexity anyone else reports, and the
-        // 2026-11-11 note that called it a window-by-window degradation was
-        // reading llama.cpp's warm chunks against our cold ones.
-        //
-        // Each window therefore warms up on the tokens before the ones it
-        // scores: it feeds `span` tokens and scores the last `stride` of them,
-        // which is the sliding-window protocol (`--ppl-stride` in llama.cpp,
-        // `--stride` in HuggingFace's evaluate).  Default stride is SEQ/2 so
-        // every scored token has at least SEQ/2 tokens of context and each
-        // window pays half its passes for context.  PPL_STRIDE=0 restores the
-        // old cold-window behaviour (stride SEQ-1, no warm-up), which is the
-        // only way to reproduce the pre-2026-11-12 long-file numbers.
-        const int span = model.seq;
-        int stride = span / 2 > 0 ? span / 2 : 1;
-        if (const char* ps = getenv("PPL_STRIDE")) stride = atoi(ps);
-        if (stride < 0) stride = 0;
-        if (stride == 0) stride = span - 1;             // cold windows
-        if (stride > span - 1) stride = span - 1;
-        const int warm = span - stride;                 // context tokens per window
-        FILE* ppl_dump = nullptr;
-        if (const char* dp = getenv("PPL_DUMP")) ppl_dump = fopen(dp, "w");
-        double nll = 0.0;
-        long cnt = 0;
-        int windows = 0;
-        const long n = (long)tokens.size();
-        long next = 1;                                  // first token still to score
-        while (next < n) {
-            if (g_stop) break;
-            const long a = windows == 0 ? 0 : next - warm;   // first token fed
-            const long len = std::min((long)span, n - a);
-            if (len < 2 || a < 0) break;
-            Session win(model, gpu);
-            for (long j = 0; j + 1 < len; ++j) {
-                if (g_stop) break;
-                const long t = a + j + 1;               // token this position predicts
-                const bool score = t >= next;
-                vector<float> lg = win.step(tokens[a + j], (int)j, score);
-                if (!score) continue;
-                if ((int)lg.size() <= tokens[t]) break;
-                double mx = -1e30;
-                for (float v : lg) mx = max((double)v, mx);
-                double se = 0.0;
-                for (float v : lg) se += exp((double)v - mx);
-                double logp = ((double)lg[tokens[t]] - mx) - log(se);
-                nll += -logp;
-                // PPL_DUMP=path writes one line per scored token.  The mean is
-                // not enough to see what a gap is made of: a handful of
-                // catastrophic positions and a uniform 2% error both raise PPL.
-                if (FILE* pf = ppl_dump) fprintf(pf, "%ld %d %.6f\n", t, tokens[t], -logp);
-                ++cnt;
-                next = t + 1;
-            }
-            ++windows;
-        }
-        if (!cnt) { cerr << "no tokens scored\n"; return 1; }
-        printf("PPL %.4f  nll=%.4f  tokens=%ld  windows=%d  span=%d  stride=%d\n",
-               exp(nll / cnt), nll / cnt, cnt, windows, span, stride);
-        return 0;
-    }
+    if (!opt.ppl_path.empty()) return run_ppl(opt.ppl_path, model, gpu, tokenizer);
 
-    if (!build_cache_prompt.empty()) {
+    if (!opt.build_cache_prompt.empty()) {
         vector<int> tokens;
-        const bool auto_header = build_cache_prompt == "-" || build_cache_prompt == "auto";
+        const bool auto_header = opt.build_cache_prompt == "-" || opt.build_cache_prompt == "auto";
         uint64_t system_fnv = 0, tools_fnv = 0;
         if (auto_header) {
             // Render the header the way a request would: the container's own
@@ -651,27 +467,27 @@ int main(int argc, char** argv) {
             vector<ChatMsg> msgs;
             ChatMsg sys;
             sys.role = "system";
-            sys.content = system_prompt;
+            sys.content = opt.system_prompt;
             msgs.push_back(sys);
             vector<PromptPart> parts;
             try {
                 parts = chat_tmpl->render(msgs, tools_array, /*add_generation_prompt=*/false,
-                                          open_thinking, bos_str, eos_str);
+                                          opt.open_thinking, bos_str, eos_str);
             } catch (const std::exception& e) {
                 cerr << "chat template failed: " << e.what() << "\n";
                 return 1;
             }
             tokens = tokenizer.encode_parts(parts, enc_bos, enc_bos);
-            system_fnv = fnv64(system_prompt);
+            system_fnv = fnv64(opt.system_prompt);
             // The *raw* tools text, so a verifier can hash what it passed
             // without reproducing the array normalisation.
-            tools_fnv = fnv64(tools_json);
+            tools_fnv = fnv64(opt.tools_json);
             if (!g_quiet)
                 cerr << "CACHE_HEADER template=" << (model.template_name.empty() ? "(kind)" : model.template_name)
-                     << " system=" << system_prompt.size() << " B tools=" << tools_array.size() << " B\n";
+                     << " system=" << opt.system_prompt.size() << " B tools=" << tools_array.size() << " B\n";
         } else {
             string text;
-            if (!read_text_file(build_cache_prompt, text)) { cerr << "cannot read cache prompt\n"; return 1; }
+            if (!read_text_file(opt.build_cache_prompt, text)) { cerr << "cannot read cache prompt\n"; return 1; }
             tokens = tokenizer.encode(text, false, false);
         }
         if (tokens.empty() || (int)tokens.size() > model.seq) {
@@ -681,14 +497,14 @@ int main(int argc, char** argv) {
             if (g_stop) return 1;
             session.step(tokens[i], (int)i, false);
         }
-        if (!session.save_prefix_cache(build_cache_out, tokens, system_fnv, tools_fnv)) {
+        if (!session.save_prefix_cache(opt.build_cache_out, tokens, system_fnv, tools_fnv)) {
             cerr << "cannot save prefix cache (GPU attention required)\n"; return 1;
         }
-        cout << "CACHE_SAVED " << build_cache_out << " tokens=" << tokens.size() << "\n";
+        cout << "CACHE_SAVED " << opt.build_cache_out << " tokens=" << tokens.size() << "\n";
         return 0;
     }
 
-    if (worker) {
+    if (opt.worker) {
         // Every worker event is a JSON object; common_json decides the spelling
         // (escaping, numbers) so no line here assembles JSON by hand.
         // dump_safe, not dump: a token's bytes can be invalid UTF-8 on their own
@@ -706,15 +522,15 @@ int main(int argc, char** argv) {
         // Process-level defaults (CLI flags / env vars), restored before each request.
         const SamplingSettings base_sampling = g_sampling;
         vector<int> cache_tokens;
-        if (!prefix_cache_path.empty() && !load_prefix_cache_any(prefix_cache_path, cache_tokens))
-            cerr << "PREFIX_CACHE ignored " << prefix_cache_path << "\n";
+        if (!opt.prefix_cache_path.empty() && !load_prefix_cache_any(opt.prefix_cache_path, cache_tokens))
+            cerr << "PREFIX_CACHE ignored " << opt.prefix_cache_path << "\n";
         // The HTTP layer renders the prompt text itself, so it has to know which
         // template this checkpoint wants.  The container states it (kind + name)
         // and the resolution above already turned it into these three flags, so
         // report the effective one: the server must not guess from a file name.
-        const char* effective_template = tbb_template ? "tinybrainbot"
-                                        : minimind3_template ? "minimind3"
-                                        : qwen_template ? "chatml" : "plain";
+        const char* effective_template = opt.tbb_template ? "tinybrainbot"
+                                        : opt.minimind3_template ? "minimind3"
+                                        : opt.qwen_template ? "chatml" : "plain";
         emit(common_json::object({
             {"event", string("ready")},
             {"prefix_cache_tokens", (long long) cache_tokens.size()},
@@ -788,7 +604,7 @@ int main(int argc, char** argv) {
                 // container's is loaded here.  With a directory this is the
                 // whole per-model story; with a single file the header check
                 // refuses it and the swap runs uncached.
-                if (!prefix_cache_path.empty()) load_prefix_cache_any(prefix_cache_path, cache_tokens);
+                if (!opt.prefix_cache_path.empty()) load_prefix_cache_any(opt.prefix_cache_path, cache_tokens);
                 // The template and the chat support belong to the *container*,
                 // so a client that caches them (the server decides from these
                 // whether a chat completion can be served) has to be told.
@@ -858,14 +674,14 @@ int main(int argc, char** argv) {
                     continue;
                 }
                 req_parts = chat_tmpl->render(req_msgs, req_tools, true,
-                                              req_thinking >= 0 ? req_thinking != 0 : open_thinking,
+                                              req_thinking >= 0 ? req_thinking != 0 : opt.open_thinking,
                                               bos_str, eos_str);
                 if (chat_dump)
                     for (auto& p : req_parts)
                         fprintf(stderr, "PROMPT[%s] %3zu B  %s\n", p.is_input ? "in" : "tmpl",
                             p.text.size(), dump_escape(p.text).c_str());
             }
-            auto tokens = req_parts.empty() ? tokenizer.encode(prompt, false, false)
+            auto tokens = req_parts.empty() ? tokenizer.encode(opt.prompt, false, false)
                                             : tokenizer.encode_parts(req_parts, enc_bos, enc_bos);
             if (chat_dump) {
                 fprintf(stderr, "PROMPT_IDS %zu:", tokens.size());
@@ -896,14 +712,14 @@ int main(int argc, char** argv) {
                 {"cached_tokens", common},
                 {"prefill_tokens", prefill_tokens},
             }));
-            int req_top_k = top_k;
+            int req_top_k = opt.top_k;
             if (f.size() > 11 && !f[11].empty()) req_top_k = atoi(f[11].c_str());
             if (req_top_k < 0) req_top_k = 0;
             bool greedy_req = wt <= 0.0f;
             // The candidate path reads back only the top-k logits, so it cannot
             // answer "what was the probability of this token" over the whole
             // vocabulary; a request that asks for it uses the full logits.
-            bool cand_mode = top_k_candidates && req_top_k > 0 && !greedy_req &&
+            bool cand_mode = opt.top_k_candidates && req_top_k > 0 && !greedy_req &&
                              !sampling_penalties_active() && !want_logprobs;
             vector<float> logits;
             CandidateResult cand;
@@ -920,7 +736,7 @@ int main(int argc, char** argv) {
             if (g_stop) break;
             int pos = (int)tokens.size();
             max_new = min(max_new, model.seq - pos);
-    mt19937 rng(seed);
+    mt19937 rng(opt.seed);
             vector<common_json> lp_rows;   // one per generated token, when asked
             string pending, full, finish = "length";
             int generated = 0;
@@ -1016,8 +832,8 @@ int main(int argc, char** argv) {
 
 
     vector<int> cli_cache_tokens;
-    if (!worker && !prefix_cache_path.empty()) {
-        if (load_prefix_cache_any(prefix_cache_path, cli_cache_tokens)) {
+    if (!opt.worker && !opt.prefix_cache_path.empty()) {
+        if (load_prefix_cache_any(opt.prefix_cache_path, cli_cache_tokens)) {
             cerr << "PREFIX_CACHE loaded " << cli_cache_tokens.size() << " tokens\n";
             // Probe: write the just-loaded rows straight back out, so a built
             // file and a loaded file can be compared byte for byte.
@@ -1028,7 +844,7 @@ int main(int argc, char** argv) {
                 else cerr << "PREFIX_CACHE resave failed\n";
             }
         } else
-            cerr << "PREFIX_CACHE ignored " << prefix_cache_path << "\n";
+            cerr << "PREFIX_CACHE ignored " << opt.prefix_cache_path << "\n";
     }
     auto cache_prefix_len = [&](const vector<int>& tokens) {
         size_t n = 0;
@@ -1065,7 +881,7 @@ int main(int argc, char** argv) {
             if (marker_mask[i]) logits[i] = -1e30f;
     };
 
-    mt19937 rng(seed);
+    mt19937 rng(opt.seed);
     // Tokens currently in the KV cache; the REPL keeps this so a turn can
     // prefill only what changed instead of the whole conversation.
     vector<int> kv_tokens;
@@ -1074,7 +890,7 @@ int main(int argc, char** argv) {
         string text;
         vector<PromptPart> parts;
         if (chat_tmpl) {
-            const string& sys = system_prompt;
+            const string& sys = opt.system_prompt;
             vector<ChatMsg> msgs;
             if (hist) {
                 // The REPL keeps the conversation; the system turn goes in once,
@@ -1088,18 +904,18 @@ int main(int argc, char** argv) {
                 msgs.push_back(ChatMsg{"user", user, "", ""});
             }
             parts = chat_tmpl->render(msgs, tools_array, /*add_generation_prompt=*/true,
-                                      open_thinking, bos_str, eos_str);
-            if (open_thinking) {
+                                      opt.open_thinking, bos_str, eos_str);
+            if (opt.open_thinking) {
                 bool has = false;
                 for (auto& p : parts) if (p.text.find("<think>") != string::npos) has = true;
                 if (!has) parts.push_back(PromptPart{"<think>", false});
             }
-        } else if (minimind3_template) {
-            string sys = system_prompt;
-            if (!tools_json.empty()) {
+        } else if (opt.minimind3_template) {
+            string sys = opt.system_prompt;
+            if (!opt.tools_json.empty()) {
                 sys += "\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\n"
                        "You are provided with function signatures within <tools></tools> XML tags:\n<tools>\n" +
-                       tools_json +
+                       opt.tools_json +
                        "\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n"
                        "<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call>";
             }
@@ -1107,8 +923,8 @@ int main(int argc, char** argv) {
                 text = "<|im_start|>system\n" + sys + "<|im_end|>\n";
             text += "<|im_start|>user\n" + user + "<|im_end|>\n"
                     "<|im_start|>assistant\n";
-            text += open_thinking ? "<think>\n" : "<think>\n\n</think>\n\n";
-        } else if (tbb_template) {
+            text += opt.open_thinking ? "<think>\n" : "<think>\n\n</think>\n\n";
+        } else if (opt.tbb_template) {
             // No system turn and no BOS: the markers carry the roles, and the
             // first user turn opens with a space (the model was trained so).
             // "<|user|> {q}<|assistant|> " with a trailing space: the model
@@ -1116,16 +932,16 @@ int main(int argc, char** argv) {
             // it the first token is <|end|> (measured on the q4 and i16 files,
             // where the other four wrappers I tried collapse to one token).
             text = string("<|user|> ") + user + "<|assistant|> ";
-        } else if (qwen_template) {
+        } else if (opt.qwen_template) {
             if (first)
-                text = "<|im_start|>system\n" + system_prompt +
+                text = "<|im_start|>system\n" + opt.system_prompt +
                        "<|im_end|>\n<|im_start|>user\n" + user + "<|im_end|>\n<|im_start|>assistant\n";
             else
                 text = "<|im_start|>user\n" + user + "<|im_end|>\n<|im_start|>assistant\n";
-            if (open_thinking) text += "<think>\n";
+            if (opt.open_thinking) text += "<think>\n";
         } else {
-            if (first && !system_prompt.empty())
-                text = "[INST] <<SYS>>\n" + system_prompt + "\n<</SYS>>\n\n" + user + " [/INST]";
+            if (first && !opt.system_prompt.empty())
+                text = "[INST] <<SYS>>\n" + opt.system_prompt + "\n<</SYS>>\n\n" + user + " [/INST]";
             else
                 text = "[INST] " + user + " [/INST]";
         }
@@ -1165,13 +981,13 @@ int main(int argc, char** argv) {
         for (int i = 0; i < skip; ++i) pos = i + 1;
         vector<float> logits;
         CandidateResult cand;
-        bool cand_mode = top_k_candidates && top_k > 0 && !greedy && !sampling_penalties_active();
+        bool cand_mode = opt.top_k_candidates && opt.top_k > 0 && !opt.greedy && !sampling_penalties_active();
         for (size_t i = skip; i < tokens.size(); ++i) {
             if (g_stop) { tt.cut = "prefill"; gpu.sync(); return; }
             if (pos >= model.seq) { tt.cut = "context"; cout << "[context full]\n"; return; }
             bool last = (i + 1 == tokens.size());
             if (last && cand_mode) {
-                cand = session.step_candidates(tokens[i], pos++, top_k, temp, top_p);
+                cand = session.step_candidates(tokens[i], pos++, opt.top_k, opt.temp, opt.top_p);
                 if (!cand.complete) { logits = std::move(cand.full); cand_mode = false; }
             } else if (!last && i + 2 < tokens.size() && pos + 1 < model.seq && session.pair_ok()) {
                 // Two prompt tokens per layer pass; the last token stays on the
@@ -1195,13 +1011,13 @@ int main(int argc, char** argv) {
         string pending;   // holds an incomplete UTF-8 sequence between tokens
         int prev = tokens.empty() ? 1 : tokens.back();
         vector<int> recent;
-        for (int i = 0; i < gen && pos < model.seq; ++i) {
+        for (int i = 0; i < opt.gen && pos < model.seq; ++i) {
             if (g_stop) { tt.cut = "decode"; gpu.sync(); return; }
             if (!marker_mask.empty()) mask_markers(logits);
             apply_sampling_penalties(logits, recent);
-            int next = greedy ? argmax_token(logits)
-                              : (cand_mode ? sample_candidate_result(cand, temp, top_p, top_k, rng)
-                                           : sample_token(logits, temp, top_p, top_k, rng));
+            int next = opt.greedy ? argmax_token(logits)
+                              : (cand_mode ? sample_candidate_result(cand, opt.temp, opt.top_p, opt.top_k, rng)
+                                           : sample_token(logits, opt.temp, opt.top_p, opt.top_k, rng));
             if (!getenv("IGNORE_EOS") && is_stop_token(next)) {
                 session.step(next, pos++, false);
                 break;
@@ -1223,7 +1039,7 @@ int main(int argc, char** argv) {
             tt.generated = generated;
             prev = next;
             if (cand_mode) {
-                cand = session.step_candidates(next, pos++, top_k, temp, top_p);
+                cand = session.step_candidates(next, pos++, opt.top_k, opt.temp, opt.top_p);
                 if (!cand.complete) { logits = std::move(cand.full); cand_mode = false; }
             } else {
                 logits = session.step(next, pos++, true);
@@ -1237,7 +1053,7 @@ int main(int argc, char** argv) {
         // The loop also stops at the KV limit, which otherwise looks like a
         // model that simply had nothing more to say.
         if (pos >= model.seq) tt.cut = "context";
-        if (!g_quiet && !g_stop && generated >= gen && !is_stop_token(prev) && generated)
+        if (!g_quiet && !g_stop && generated >= opt.gen && !is_stop_token(prev) && generated)
             fprintf(stderr, "[stopped at the --gen limit: %d tokens.  This model did "
                             "not emit its end token (eos %d, stop %d); raise --gen]\n",
                     generated, model.id_eos, model.id_stop);
@@ -1319,13 +1135,13 @@ int main(int argc, char** argv) {
     };
 
     auto run_tool_turn = [&](const string& user, bool first, vector<ChatMsg>* hist = nullptr) {
-        string sys = system_prompt.empty()
+        string sys = opt.system_prompt.empty()
             ? string("你的名字叫MiniMind，你是一个乐于助人、知识渊博的AI助手。请用完整且友好的方式回答用户问题，当被问到名字时请回答MiniMind。")
-            : system_prompt;
-        if (!tools_json.empty()) {
+            : opt.system_prompt;
+        if (!opt.tools_json.empty()) {
             sys += "\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\n"
                    "You are provided with function signatures within <tools></tools> XML tags:\n<tools>\n" +
-                   tools_json +
+                   opt.tools_json +
                    "\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n"
                    "<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call>";
         }
@@ -1340,30 +1156,30 @@ int main(int argc, char** argv) {
         vector<ChatMsg>& msgs = hist ? *hist : local_msgs;
         if (chat_tmpl) {
             if (hist) {
-                if (msgs.empty() && !system_prompt.empty())
-                    msgs.push_back(ChatMsg{"system", system_prompt, "", ""});
-            } else if (!system_prompt.empty()) {
+                if (msgs.empty() && !opt.system_prompt.empty())
+                    msgs.push_back(ChatMsg{"system", opt.system_prompt, "", ""});
+            } else if (!opt.system_prompt.empty()) {
                 // Always the system turn: dropping it after the first user line
                 // was the old bug, and it also kills the shared prefix.
-                msgs.push_back(ChatMsg{"system", system_prompt, "", ""});
+                msgs.push_back(ChatMsg{"system", opt.system_prompt, "", ""});
             }
             msgs.push_back(ChatMsg{"user", user, "", ""});
         }
         string text;
-        if (first || !tools_json.empty())
+        if (first || !opt.tools_json.empty())
             text = "<|im_start|>system\n" + sys + "<|im_end|>\n";
         text += "<|im_start|>user\n" + user + "<|im_end|>\n<|im_start|>assistant\n";
-        text += open_thinking ? "<think>\n" : "<think>\n\n</think>\n\n";
+        text += opt.open_thinking ? "<think>\n" : "<think>\n\n</think>\n\n";
 
         for (int round = 0; round < 3; ++round) {
             TurnTiming tt;   // one line per model turn, interrupted or not
             vector<PromptPart> parts;
             if (chat_tmpl)
                 parts = chat_tmpl->render(msgs, tools_array, /*add_generation_prompt=*/true,
-                                          open_thinking, bos_str, eos_str);
+                                          opt.open_thinking, bos_str, eos_str);
             // A template without an open_thinking switch (LFM2.5's) still gets
             // the block: the caller asked for it, and `<think>` is one token.
-            if (chat_tmpl && open_thinking) {
+            if (chat_tmpl && opt.open_thinking) {
                 bool has = false;
                 for (auto& p : parts) if (p.text.find("<think>") != string::npos) has = true;
                 if (!has) parts.push_back(PromptPart{"<think>", false});
@@ -1395,7 +1211,7 @@ int main(int argc, char** argv) {
             if ((int)tokens.size() >= model.seq) { tt.cut = "context"; cout << "[context full]\n"; return; }
             vector<float> logits;
             CandidateResult cand;
-            bool cand_mode = top_k_candidates && top_k > 0 && !greedy && !sampling_penalties_active();
+            bool cand_mode = opt.top_k_candidates && opt.top_k > 0 && !opt.greedy && !sampling_penalties_active();
             int skip = 0;
             if (!kv_tokens.empty()) {
                 size_t n = 0;
@@ -1414,7 +1230,7 @@ int main(int argc, char** argv) {
                 if (g_stop) { tt.cut = "prefill"; gpu.sync(); return; }
                 bool last = (i + 1 == tokens.size());
                 if (last && cand_mode) {
-                    cand = session.step_candidates(tokens[i], (int)i, top_k, temp, top_p);
+                    cand = session.step_candidates(tokens[i], (int)i, opt.top_k, opt.temp, opt.top_p);
                     if (!cand.complete) { logits = std::move(cand.full); cand_mode = false; }
                 } else if (!last && i + 2 < tokens.size() && (int)i + 1 < model.seq && session.pair_ok()) {
                     session.step_pair(tokens[i], (int)i, tokens[i + 1], (int)i + 1, false);
@@ -1431,12 +1247,12 @@ int main(int argc, char** argv) {
             int prev = tokens.empty() ? 1 : tokens.back();
             int pos = (int)tokens.size();
             vector<int> recent;
-            for (int i = 0; i < gen && pos < model.seq; ++i) {
+            for (int i = 0; i < opt.gen && pos < model.seq; ++i) {
                 if (g_stop) { tt.cut = "decode"; gpu.sync(); return; }
                 apply_sampling_penalties(logits, recent);
-                int next = greedy ? argmax_token(logits)
-                                  : (cand_mode ? sample_candidate_result(cand, temp, top_p, top_k, rng)
-                                               : sample_token(logits, temp, top_p, top_k, rng));
+                int next = opt.greedy ? argmax_token(logits)
+                                  : (cand_mode ? sample_candidate_result(cand, opt.temp, opt.top_p, opt.top_k, rng)
+                                               : sample_token(logits, opt.temp, opt.top_p, opt.top_k, rng));
                 if (is_stop_token(next)) {
                     if (!g_quiet && is_bos_token(next))
                         fprintf(stderr, "\n[stopped after %d tokens: the model emitted its "
@@ -1455,7 +1271,7 @@ int main(int argc, char** argv) {
                 ++tt.generated;
                 prev = next;
                 if (cand_mode) {
-                    cand = session.step_candidates(next, pos++, top_k, temp, top_p);
+                    cand = session.step_candidates(next, pos++, opt.top_k, opt.temp, opt.top_p);
                     if (!cand.complete) { logits = std::move(cand.full); cand_mode = false; }
                 } else {
                     logits = session.step(next, pos++, true);
@@ -1497,16 +1313,16 @@ int main(int argc, char** argv) {
             }
             if (!chat_tmpl) {
                 text += "<|im_end|>\n<|im_start|>assistant\n";
-                text += open_thinking ? "<think>\n" : "<think>\n\n</think>\n\n";
+                text += opt.open_thinking ? "<think>\n" : "<think>\n\n</think>\n\n";
             }
         }
     };
 
-    if (chat) {
-        if (!prompt_set) prompt.clear();
-        if (!prompt.empty()) {
-            if (tools_json.empty()) run_turn(prompt, true, 0);
-            else run_tool_turn(prompt, true);
+    if (opt.chat) {
+        if (!opt.prompt_set) opt.prompt.clear();
+        if (!opt.prompt.empty()) {
+            if (opt.tools_json.empty()) run_turn(opt.prompt, true, 0);
+            else run_tool_turn(opt.prompt, true);
         } else {
             bool first = true;
             int cancels = 0;
@@ -1541,7 +1357,7 @@ int main(int argc, char** argv) {
                     // must apply the same rule instead of quietly running it
                     // (stories15M's capabilities are 0, and it happily answered
                     // through the built-in [INST] wrapper before this guard).
-                    if (model.have_capabilities && chat && !(model.capabilities & 1)) {
+                    if (model.have_capabilities && opt.chat && !(model.capabilities & 1)) {
                         cerr << "/model: this checkpoint does not advertise chat support "
                                 "(capabilities 0x" << std::hex << model.capabilities << std::dec
                              << "); leaving\n";
@@ -1568,7 +1384,7 @@ int main(int argc, char** argv) {
                             "Ctrl-Left/Right (or Alt-b/f) move by word.\n";
                     continue;
                 }
-                if (tools_json.empty()) run_turn(line, first, 0, chat_tmpl ? &history : nullptr);
+                if (opt.tools_json.empty()) run_turn(line, first, 0, chat_tmpl ? &history : nullptr);
                 else run_tool_turn(line, first, chat_tmpl ? &history : nullptr);
                 first = false;
                 if (g_stop) {
@@ -1581,7 +1397,7 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    auto tokens = tokenizer.encode(prompt, true, true);
+    auto tokens = tokenizer.encode(opt.prompt, true, true);
     // The single-shot path never reuses a loaded prefix, so a hybrid model must
     // not keep the conv history that came with the cache file.
     if (!cli_cache_tokens.empty()) session.zero_conv_state();
@@ -1590,7 +1406,7 @@ int main(int argc, char** argv) {
     cout << "\n";
     vector<float> logits;
     CandidateResult cand;
-    bool cand_mode = top_k_candidates && top_k > 0 && !greedy && !sampling_penalties_active();
+    bool cand_mode = opt.top_k_candidates && opt.top_k > 0 && !opt.greedy && !sampling_penalties_active();
     // PREFILL_REPEAT=n runs the same prefill n times in one process.  The first
     // pass pays every lazy shader link and every QPU program generation, which
     // on VC4 is seconds; a comparison between two modes that compile different
@@ -1604,7 +1420,7 @@ int main(int argc, char** argv) {
             if (g_stop) break;
             bool last = (i + 1 == tokens.size());
             if (last && cand_mode) {
-                cand = session.step_candidates(tokens[i], (int)i, top_k, temp, top_p);
+                cand = session.step_candidates(tokens[i], (int)i, opt.top_k, opt.temp, opt.top_p);
                 if (!cand.complete) { lg = std::move(cand.full); cand_mode = false; }
             } else if (!last && i + 2 < tokens.size() && (int)i + 1 < model.seq && session.pair_ok()) {
                 session.step_pair(tokens[i], (int)i, tokens[i + 1], (int)i + 1, false);
@@ -1643,7 +1459,7 @@ int main(int argc, char** argv) {
     bool ended_on_eos = false;
     const char* stop_reason = nullptr;
     int stop_id = -1;
-    for (int i = 0; i < gen; ++i) {
+    for (int i = 0; i < opt.gen; ++i) {
         if (g_stop) break;
         // The chat and tool loops stop at the container's seq; this one did
         // not, so a --gen larger than seq walked past the KV cache and the rope
@@ -1660,9 +1476,9 @@ int main(int argc, char** argv) {
         }
         if (!marker_mask.empty()) mask_markers(logits);
         apply_sampling_penalties(logits, recent);
-        int next = greedy ? argmax_token(logits)
-                          : (cand_mode ? sample_candidate_result(cand, temp, top_p, top_k, rng)
-                                       : sample_token(logits, temp, top_p, top_k, rng));
+        int next = opt.greedy ? argmax_token(logits)
+                          : (cand_mode ? sample_candidate_result(cand, opt.temp, opt.top_p, opt.top_k, rng)
+                                       : sample_token(logits, opt.temp, opt.top_p, opt.top_k, rng));
         if (!getenv("IGNORE_EOS") && is_stop_token(next)) {
             ended_on_eos = true;
             stop_reason = is_bos_token(next) ? "the model emitted its BOS token mid-generation"
@@ -1675,7 +1491,7 @@ int main(int argc, char** argv) {
         recent.push_back(next);
         auto a = Clock::now();
         if (cand_mode) {
-            cand = session.step_candidates(next, (int)tokens.size() - 1, top_k, temp, top_p);
+            cand = session.step_candidates(next, (int)tokens.size() - 1, opt.top_k, opt.temp, opt.top_p);
             if (!cand.complete) { logits = std::move(cand.full); cand_mode = false; }
         } else {
             logits = session.step(next, (int)tokens.size() - 1, true);
@@ -1694,7 +1510,7 @@ int main(int argc, char** argv) {
     // stop"; say which limit ended it so that is diagnosable from the output.
     if (!g_quiet && ended_on_eos && stop_reason && is_bos_token(stop_id))
         fprintf(stderr, "\n[stopped after %d tokens: %s (%d)]\n", generated, stop_reason, stop_id);
-    if (!g_quiet && !ended_on_eos && generated >= gen)
+    if (!g_quiet && !ended_on_eos && generated >= opt.gen)
         fprintf(stderr, "\n[stopped at the --gen limit: %d tokens.  This model did not "
                         "emit its end token (eos %d, stop %d); raise --gen or press "
                         "Ctrl-C]\n", generated, model.id_eos, model.id_stop);
