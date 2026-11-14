@@ -102,6 +102,12 @@ Build for the target and do not reuse a stale binary:
   be Raspbian; Debian's armhf is ARMv7).
 - Probes: `make -C engine -B probes/<name>[_pi]` — see the targets in
   `engine/Makefile`.
+- CI: `.github/workflows/gate.yml` runs the **no-GPU half** of the gate on every
+  push: build, `docs_check.sh`, `shader_hashes.sh`, `check_target_reset.sh`,
+  `server/selftest.py`, the eval case file's `--selftest`, shell and Python
+  syntax, and the tool CLIs.  The model-dependent half (golden strings, PPL,
+  `swap_matrix.py`) needs the containers and a GL driver, so it stays local —
+  run `scripts/regression.sh` before pushing anything that touches numerics.
 
 Do not use a short build timeout.  Machine-specific host/sysroot/deploy paths
 belong in `AGENTS.local.md` (DSH) or `AGENTS.override.md` (Hermes/VLAB).

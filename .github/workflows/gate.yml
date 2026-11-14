@@ -1,0 +1,82 @@
+# The no-GPU half of the gate.
+#
+# Everything here runs without a model and without a GPU, which is why it can run
+# on a hosted runner: documentation drift, the shader text digests, the server's
+# stub-worker self-test, shell and Python syntax, and the tool CLIs.  The
+# model-dependent half (golden strings, PPL, swap_matrix.py) needs the containers
+# in models/ and a GL driver, so it stays on the machines that have them.
+#
+# The audit that asked for this (P1-5) measured all six checks locally: docs
+# 0.25 s, shaders 0.03 s, self-test ~1 s, syntaxes and CLIs instant.
+
+name: gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  no-gpu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install GL headers (the engine links them even for --dump-shaders)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            g++ make libegl1-mesa-dev libgles2-mesa-dev
+
+      - name: build
+        run: make -C engine -B engine_mm3
+
+      - name: documentation drift
+        run: sh engine/scripts/docs_check.sh
+
+      - name: shader text digests
+        run: sh engine/scripts/shader_hashes.sh
+
+      - name: target-reset ledger
+        run: sh engine/scripts/check_target_reset.sh
+
+      - name: server self-test (stub worker, no engine needed)
+        run: python3 server/selftest.py
+
+      - name: eval case file self-check
+        run: python3 engine/scripts/eval_ifeval.py --selftest
+
+      - name: shell syntax
+        run: |
+          set -eu
+          n=0
+          for f in $(git ls-files '*.sh'); do
+            case "$(head -1 "$f")" in
+              *bash*)  bash -n "$f" ;;
+              *)       sh -n "$f" ;;
+            esac
+            n=$((n + 1))
+          done
+          echo "shell syntax ok ($n files)"
+
+      - name: python syntax
+        run: |
+          set -eu
+          python3 - <<'PY'
+          import subprocess, sys
+          files = subprocess.run(["git", "ls-files", "*.py"], capture_output=True, text=True).stdout.split()
+          for f in files:
+              compile(open(f, encoding="utf-8").read(), f, "exec")
+          print("python syntax ok (%d files)" % len(files))
+          PY
+
+      - name: tool CLIs
+        run: |
+          set -eu
+          n=0
+          for f in engine/tools/*.py; do
+            python3 "$f" --help > /dev/null
+            n=$((n + 1))
+          done
+          echo "tool CLIs ok ($n tools)"
