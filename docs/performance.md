@@ -6025,3 +6025,31 @@ sums in a different order, so a sub-percent move was expected -- 1.34% is past
 the 1% the gate enforces, so `Q4_PPL_EXPECT` has to be re-baselined to 326.1134
 on Xe (and the board's row re-measured) in the same commit that adopts it.  The
 pinned strings did not move on either machine, and the suite is ACCEPT.
+
+### The `dot()` builtin was costing 14% of the 4-bit gate
+
+The q8 kernel had already recorded the answer in its own comments ("the generic
+X4Q macro takes its two texel fetches as arguments and VC4 compiles that loop
+measurably slower; dA/dB are exactly the decode and the four accumulators keep
+the same summation order"): VC4 lowers `dot(a,b)` as four multiplies plus a
+horizontal add tree per texel, while `w.x*a0+w.y*a1+w.z*a2+w.w*a3` accumulates
+straight into the destination with no reduction.  Every 4-bit kernel here was
+written with `dot`, so each eight-weight texel pair paid one reduction.
+
+Rewriting the seven `dot(wt*,x*)` sites as eight-term scalar expressions:
+
+    gate, 1216 rows   8.181 -> 7.011 ms/draw   (-14%, output hash unchanged)
+    token             252.9 -> 247.2            (-5.7 ms, load 0.22)
+
+The probe hash is the same (776b29b8), so the arithmetic is bit-identical: this
+is a lowering change, not a numeric one, and PPL confirms it (326.1134 ->
+326.1483, the 0.01% of a re-association at the last bit).
+
+q4 is now 247.2 against q8's ~190: **1.30x**, from 1.45x at the start of this
+goal.  What is left at kernel level is 7.01 against 4.42, and with the P plane
+and the min term both removed it was ~6.7 before this change -- so roughly 2.5
+ms a draw is still unattributed.
+
+The general lesson, which the repo had already paid for once on the q8 side and
+I did not apply: **do not write `dot` in a VC4 kernel.**  The scalar form with
+the accumulator as the destination is the fast one.

@@ -1076,9 +1076,9 @@ string matvec_i4_add_pair_4x4(int rows, int cols, XFormat xf, bool inl) {
         q4_act(xf, cols, inl) + q4_xsum() +
         "float c0=(float(g*8+q*2)+0.5)*itw,c1=c0+itw;"
         "vec4 wq0=texture2D(W,vec2(c0,v0r)),wq1=texture2D(W,vec2(c1,v0r));"
-        "dota+=dot(wq0,xa)+dot(wq1,xb);"
+        "dota+=wq0.x*xa.x+wq0.y*xa.y+wq0.z*xa.z+wq0.w*xa.w+wq1.x*xb.x+wq1.y*xb.y+wq1.z*xb.z+wq1.w*xb.w;"
         "vec4 wr0=texture2D(W,vec2(c0,v1r)),wr1=texture2D(W,vec2(c1,v1r));"
-        "dotb+=dot(wr0,xa)+dot(wr1,xb);}"
+        "dotb+=wr0.x*xa.x+wr0.y*xa.y+wr0.z*xa.z+wr0.w*xa.w+wr1.x*xb.x+wr1.y*xb.y+wr1.z*xb.z+wr1.w*xb.w;}"
         "s0+=sa*dota+ma*xsum;s1+=sb*dotb+mb*xsum;}"
         "float res0=R1Q(R,r0," + to_string(rw) + ".0),res1=R1Q(R,r1," + to_string(rw) + ".0);"
         "gl_FragColor=x_st2q(s0+res0,s1+res1);}";
@@ -1265,15 +1265,15 @@ string matvec_i4_pair_swiglu_4x4(int rows, int cols, XFormat xf, bool inl, int h
         // natural column order and no .wzyx is needed (that operand measured
         // 52 ms of the gate; it was the first thing this decomposition found).
         + "vec4 wt0=texture2D(W1,vec2(c0,v0r)),wt1=texture2D(W1,vec2(c1,v0r));"
-          "d1+=dot(wt0,xa)+dot(wt1,xb);"
+          "d1+=wt0.x*xa.x+wt0.y*xa.y+wt0.z*xa.z+wt0.w*xa.w+wt1.x*xb.x+wt1.y*xb.y+wt1.z*xb.z+wt1.w*xb.w;"
         + (q4x4_onew() ? string()
                         : "vec4 wt2=texture2D(W2,vec2(c0,v0r)),wt3=texture2D(W2,vec2(c1,v0r));"
-                          "d2+=dot(wt2,xa)+dot(wt3,xb);")
+                          "d2+=wt2.x*xa.x+wt2.y*xa.y+wt2.z*xa.z+wt2.w*xa.w+wt3.x*xb.x+wt3.y*xb.y+wt3.z*xb.z+wt3.w*xb.w;")
         + (q4x4_onerow() ? string()
                          : "vec4 wt4=texture2D(W1,vec2(c0,v1r)),wt5=texture2D(W1,vec2(c1,v1r));"
-                           "e1+=dot(wt4,xa)+dot(wt5,xb);"
+                           "e1+=wt4.x*xa.x+wt4.y*xa.y+wt4.z*xa.z+wt4.w*xa.w+wt5.x*xb.x+wt5.y*xb.y+wt5.z*xb.z+wt5.w*xb.w;"
                            "vec4 wt6=texture2D(W2,vec2(c0,v1r)),wt7=texture2D(W2,vec2(c1,v1r));"
-                           "e2+=dot(wt6,xa)+dot(wt7,xb);")
+                           "e2+=wt6.x*xa.x+wt6.y*xa.y+wt6.z*xa.z+wt6.w*xa.w+wt7.x*xb.x+wt7.y*xb.y+wt7.z*xb.z+wt7.w*xb.w;")
         + "}" +
         "s10+=sa1*d1" + MA1 + ";s20+=sa2*d2" + MA2 + ";"
         "s11+=sb1*e1" + MB1 + ";s21+=sb2*e2" + MB2 + ";}"
@@ -1307,7 +1307,7 @@ string matvec_i4_4x4(int rows, int cols, XFormat xf, bool inl) {
         q4_act(xf, cols, inl) + q4_xsum() +
         "float c0=(float(g*8+t*2)+0.5)*itw,c1=c0+itw;"
         "vec4 w0=texture2D(W,vec2(c0,vr)),w1=texture2D(W,vec2(c1,vr));"
-        "d+=dot(w0,xa)+dot(w1,xb);}"
+        "d+=w0.x*xa.x+w0.y*xa.y+w0.z*xa.z+w0.w*xa.w+w1.x*xb.x+w1.y*xb.y+w1.z*xb.z+w1.w*xb.w;}"
         "s+=sc*d" + MA + ";}"
         "gl_FragColor=x_i24encq(s);}";
 }
@@ -1335,7 +1335,7 @@ string matvec_i4_add_4x4(int rows, int cols, XFormat xf, XFormat rf) {
         + q4_xsum() +
         "float c0=(float(g*8+t*2)+0.5)*itw,c1=c0+itw;"
         "vec4 w0=texture2D(W,vec2(c0,vr)),w1=texture2D(W,vec2(c1,vr));"
-        "d+=dot(w0,xa)+dot(w1,xb);}"
+        "d+=w0.x*xa.x+w0.y*xa.y+w0.z*xa.z+w0.w*xa.w+w1.x*xb.x+w1.y*xb.y+w1.z*xb.z+w1.w*xb.w;}"
         "s+=sc*d" + MA + ";}"
         "float res=R1Q(R,r," + to_string(x_texels(rows, rf)) + ".0);"
         "gl_FragColor=XST1Q(s+res);}";
