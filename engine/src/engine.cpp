@@ -38,6 +38,7 @@
 #include "shaders.h"
 #include "xformat.h"
 #include "gpu.h"
+#include "app.h"
 #include "chat_format.h"
 #include "prefix_build.h"
 #include "cli.h"
@@ -209,10 +210,9 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
-    Model model;
-    if (!model.load(opt.model_path)) return 1;
+    App app(opt);
+    if (!app.model.load(opt.model_path)) return 1;
     if (getenv("SHADER_TIME")) fprintf(stderr, "STARTUP %7.1f ms  model loaded\n", run_time_ms());
-    GPU gpu;
     if (getenv("SHADER_TIME")) fprintf(stderr, "STARTUP %7.1f ms  egl ready\n", run_time_ms());
     // Everything the engine does to the model between reading it and uploading
     // it.  A model swap has to repeat *all* of it: split_ffn decides the FFN
@@ -222,121 +222,40 @@ int main(int argc, char** argv) {
     // set and a different scaling, i.e. numbers that no longer match a fresh
     // process -- measured as logits cosine 0.9998 for the dense models and 0.96
     // for the hybrid, whose hidden scale is the larger half of the difference.
-    const bool system_from_cli = !opt.system_prompt.empty();
-    auto prepare_model = [&]() {
-        if (getenv("Q8_PARTS"))
-            model.apply_precision(getenv("Q8_LAYERS") ? getenv("Q8_LAYERS") : "", getenv("Q8_PARTS"));
-        model.split_ffn(gpu.max_target_dim());
-        model.apply_hidden_scale();
-        if (getenv("SHADER_TIME")) fprintf(stderr, "STARTUP %7.1f ms  ffn split\n", run_time_ms());
-        if (getenv("Q4_WEIGHTS"))
-            model.quantize_q4_weights(getenv("Q4_SCOPE") ? getenv("Q4_SCOPE") : "all");
-        if (!opt.tools_json.empty() && model.seq < 768) model.seq = 768;
-        if ((opt.worker || !opt.build_cache_prompt.empty()) && model.seq < 1024 && !getenv("SEQ")) model.seq = 1024;
-        const int target_limit = gpu.max_target_dim();
-        if (model.seq > target_limit) {
-            cerr << "SEQ " << model.seq << " exceeds GL target limit " << target_limit
-                 << "; clamping to " << target_limit << "\n";
-            model.seq = target_limit;
-        }
-        if (model.seq < 16) model.seq = 16;
-        if (!system_from_cli && !model.default_system.empty()) opt.system_prompt = model.default_system;
-    };
-    prepare_model();
+    app.system_prompt = opt.system_prompt;          // the CLI value; setup_from_model
+    app.system_from_cli = !app.system_prompt.empty();  // may replace it with the container's
+    app.prepare_model();
     // The checkpoint names its template (a kind byte plus a name), so --template
     // is only needed to override it.  The kind is authoritative; the name is the
     // fallback for a kind this build does not know.
     // Chat mode with no chat template falls back to the built-in [INST] wrapper,
     // which is right for a Llama-2 chat model and nonsense for a completion
     // model.  Say which one is happening instead of letting the output explain.
-    if (opt.chat && model.template_kind == 0 && model.chat_template.empty() && !g_quiet)
+    if (opt.chat && app.model.template_kind == 0 && app.model.chat_template.empty() && !g_quiet)
         fprintf(stderr, "chat: this checkpoint has no chat template (kind 0, plain); "
                         "using the built-in [INST] wrapper.  For a completion model drop "
                         "--chat and use --prompt.\n");
     // Capabilities: a checkpoint that says it is not a chat model must not be
     // driven through the chat template.
-    if (model.have_capabilities && opt.chat && !(model.capabilities & 1)) {
+    if (app.model.have_capabilities && opt.chat && !(app.model.capabilities & 1)) {
         cerr << "this checkpoint does not advertise chat support (capabilities 0x"
-             << std::hex << model.capabilities << std::dec << "); drop --chat\n";
+             << std::hex << app.model.capabilities << std::dec << "); drop --chat\n";
         return 2;
     }
-    if (model.have_capabilities && !opt.chat && (model.capabilities & 1) && !opt.gen_set) {
+    if (app.model.have_capabilities && !opt.chat && (app.model.capabilities & 1) && !opt.gen_set) {
         opt.chat = true;
         opt.gen = 128;
     }
-    Tokenizer tokenizer;
-    string bos_str, eos_str;
-    std::unique_ptr<ChatTemplate> chat_tmpl;
     // Everything that comes from the container's own metadata: the template
     // kind, the tokenizer and the Jinja template.  Called at startup and again
     // by the REPL's /model, which is why it reads `model` instead of taking it
     // as an argument.  Returns false when the container is unusable.
-    auto setup_from_model = [&]() -> bool {
-        chat_tmpl.reset();
-        opt.qwen_template = opt.minimind3_template = opt.tbb_template = false;
-        if (!model.template_name.empty() || model.template_kind >= 0) {
-            const int k = model.template_kind;
-            bool want_qwen = false, want_mm3 = false, want_tbb = false;
-            if (k == 3) { want_tbb = true; }
-            else if (k == 2) { want_qwen = want_mm3 = true; }
-            else if (k == 1) { want_qwen = true; }
-            else if (k == 0) { want_qwen = want_mm3 = false; }
-            else {   // unknown kind: fall back to the name
-                want_tbb = model.template_name == "tinybrainbot";
-                want_qwen = model.template_name == "qwen" || model.template_name == "minimind3";
-                want_mm3 = model.template_name == "minimind3";
-            }
-            const bool was_qwen = opt.qwen_template, was_mm3 = opt.minimind3_template;
-            opt.qwen_template = want_qwen;
-            opt.minimind3_template = want_mm3;
-            opt.tbb_template = want_tbb;
-            if (opt.tbb_template) opt.qwen_template = false;   // its own markers, not chatml
-            if (((!was_qwen && opt.qwen_template) || (!was_mm3 && opt.minimind3_template)) && !g_quiet)
-                cerr << "template: " << (model.template_name.empty() ? "kind " + std::to_string(k) : model.template_name)
-                     << " (from the checkpoint)\n";
-        }
-        // Metadata key 9: the model's own Jinja template.  When it is present it
-        // is the prompt builder; template_kind stays as the fallback for
-        // containers written before the key existed.  A template the vendored
-        // engine cannot parse is refused here, not silently swapped for a
-        // built-in one.
-        if (!model.chat_template.empty()) {
-            chat_tmpl.reset(new ChatTemplate(model.chat_template));
-            if (!chat_tmpl->ok()) {
-                cerr << "chat template rejected: " << chat_tmpl->error() << "\n";
-                return false;
-            }
-            if (!g_quiet) cerr << "chat template: " << model.chat_template.size()
-                 << " B from the checkpoint (" << model.chat_templates.size() << " variant(s))\n";
-        }
-        tokenizer.reset();
-        if (model.tok_blob && !getenv("TOKENIZER")) {
-            if (!tokenizer.load_memory(model.tok_blob, model.tok_blob_bytes, model.vocab)) return false;
-            if (!g_quiet) cerr << "tokenizer: " << model.tok_blob_bytes << " B embedded in the checkpoint\n";
-        } else if (!tokenizer.load(opt.tokenizer_path, model.vocab)) {
-            return false;
-        }
-        tokenizer.set_bos(model.have_specials ? model.id_bos : 1);
-        if (model.have_specials && !g_quiet)
-            cerr << "specials: bos " << model.id_bos << " eos " << model.id_eos
-                 << " stop " << model.id_stop << " (from the checkpoint)\n";
-        // The template's `{{ bos_token }}` / `{{ eos_token }}` need the *text* of
-        // those ids, not just the id: LFM2.5's template starts with
-        // `{{- bos_token -}}`, and handing it "" dropped the BOS from every chat
-        // prompt (the tokenizer does not add one, because the template is
-        // supposed to).  llama.cpp passes the strings; so must this.
-        bos_str = tokenizer.id_text(model.id_bos);
-        eos_str = tokenizer.id_text(model.id_eos);
-        tokenizer.set_qwen(opt.qwen_template || opt.minimind3_template);
-        tokenizer.set_bytelevel(opt.minimind3_template);
-        return true;
-    };
-    if (!setup_from_model()) return 2;
+    if (!app.setup_from_model()) return 2;
     // Tool definitions, normalised to one JSON array for the template context.
     const string tools_array = chat_tools_array(opt.tools_json);
     // BOS policy: the container states it when it can (key 10); otherwise the
     // historical rule is kept, which is derived from the template kind.
-    const bool enc_bos = model.add_bos >= 0 ? (model.add_bos != 0)
+    const bool enc_bos = app.model.add_bos >= 0 ? (app.model.add_bos != 0)
                                             : (!opt.qwen_template && !opt.tbb_template);
     // CHAT_DUMP=1 prints the rendered prompt with its input marking, which is
     // what the byte-for-byte template comparisons are run against.
@@ -347,66 +266,30 @@ int main(int argc, char** argv) {
     // BOS counts as a stop while generating: no model means to re-open its own
     // stream, and a story model that emits <s> mid-text has run out of
     // distribution - it will repeat one token until --gen otherwise.
-    auto is_bos_token = [&](int id) { return model.id_bos >= 0 && id == model.id_bos; };
+    auto is_bos_token = [&](int id) { return app.model.id_bos >= 0 && id == app.model.id_bos; };
     auto is_stop_token = [&](int id) {
         if (is_bos_token(id)) return true;
-        if (model.have_specials)
-            return id == model.id_eos || (model.id_stop >= 0 && id == model.id_stop);
+        if (app.model.have_specials)
+            return id == app.model.id_eos || (app.model.id_stop >= 0 && id == app.model.id_stop);
         return id == 1 || id == 2;
     };
 
     if (getenv("SHADER_TIME"))
-        cerr << "rmsnorm eps: " << model.rms_eps << " (container"
-             << (model.rms_eps == 1e-5f ? "" : "-stated") << ")\n";
+        cerr << "rmsnorm eps: " << app.model.rms_eps << " (container"
+             << (app.model.rms_eps == 1e-5f ? "" : "-stated") << ")\n";
     // Uploading the weights is a separate phase from reading the container, and
     // a model swap has to repeat both.  Kept as one lambda so the two callers
     // cannot drift: forgetting an upload leaves every Mat with tex == 0, and the
     // forward pass then answers with EOS on the first token (measured: the first
     // swap produced empty replies until this was shared).
     const auto up_t0 = Clock::now();
-    auto upload_weights = [&]() {
-        // The rmsnorm epsilon is model state that lives in the GPU (and, per
-        // AGENTS.md, changing it changes the emitted shader text).  It used to
-        // sit one line above this block, so a model swap kept the previous
-        // model's value: invisible when reloading the same file, wrong for any
-        // other container.
-        gpu.set_rms_eps(model.rms_eps, model.rms_eps_stated);
-    for (auto& m : model.qkv) gpu.upload(m);
-    for (auto& m : model.wo) gpu.upload(m);
-    for (auto& m : model.conv_in_b) if (m.rows) gpu.upload(m);
-    for (auto& m : model.conv_in_c) if (m.rows) gpu.upload(m);
-    for (auto& m : model.conv_in_x) if (m.rows) gpu.upload(m);
-    for (auto& m : model.conv_out) if (m.rows) gpu.upload(m);
-    for (auto& m : model.w13) gpu.upload(m);
-    for (auto& m : model.w1) gpu.upload(m);
-    for (auto& m : model.w3) gpu.upload(m);
-    for (auto& m : model.w2) gpu.upload(m);
-    for (auto& m : model.w1a) gpu.upload(m);
-    for (auto& m : model.w1b) gpu.upload(m);
-    for (auto& m : model.w3a) gpu.upload(m);
-    for (auto& m : model.w3b) gpu.upload(m);
-    for (auto& m : model.w2a) gpu.upload(m);
-    for (auto& m : model.w2b) gpu.upload(m);
-    for (auto& m : model.router) gpu.upload(m);
-    for (auto& layer : model.moe) {
-        for (auto& e : layer) {
-            // A MoeExpert holds the whole FFN or its two chunks, never both:
-            // the unused Mats are empty and must not reach make_texture.
-            Mat* mats[] = {&e.w1, &e.w3, &e.w2, &e.w1a, &e.w1b,
-                           &e.w3a, &e.w3b, &e.w2a, &e.w2b};
-            for (Mat* m : mats) if (m->rows > 0) gpu.upload(*m);
-        }
-    }
-    for (auto& m : model.logits_tiles) gpu.upload(m);
-    model.release_map();
-    };
-    upload_weights();
+    app.upload_weights();
     if (getenv("SHADER_TIME") || getenv("UPLOAD_TIME"))
         fprintf(stderr, "UPLOAD %.2f s wall, %d textures, texture time %.0f ms\n",
                 elapsed_ms(up_t0, Clock::now()) / 1000.0, gpu_upload_textures(), gpu_upload_texture_ms());
     if (getenv("SHADER_TIME")) fprintf(stderr, "STARTUP %7.1f ms  weights uploaded\n", run_time_ms());
 
-    Session session(model, gpu);
+    Session session(app.model, app.gpu);
 
     // A cache path may be a single file or a directory.  With a directory the
     // engine picks the entry whose *header* matches this model (container size
@@ -414,36 +297,13 @@ int main(int argc, char** argv) {
     // several models: after a model swap the cache that belongs to the new
     // container is loaded and the others are ignored.  The header is the
     // authority; the file name is not.
-    auto load_prefix_cache_any = [&](const string& path, vector<int>& toks) -> bool {
-        namespace fs = std::filesystem;
-        // One place that loads and says so: a tool that checks "did the engine
-        // really load this cache" greps for that line, so it must not depend on
-        // whether the path was a file or a directory.
-        auto load_one = [&](const string& p) -> bool {
-            toks.clear();
-            if (!session.load_prefix_cache(p, toks)) return false;
-            if (!g_quiet) cerr << "PREFIX_CACHE " << p << " " << toks.size() << " tokens\n";
-            return true;
-        };
-        std::error_code ec;
-        if (fs::is_directory(path, ec)) {
-            vector<string> files;
-            for (const auto& e : fs::directory_iterator(path, ec))
-                if (e.path().extension() == ".kv") files.push_back(e.path().string());
-            std::sort(files.begin(), files.end());
-            for (const string& f : files)
-                if (load_one(f)) return true;
-            return false;
-        }
-        return load_one(path);
-    };
     if (getenv("SHADER_TIME")) fprintf(stderr, "STARTUP %7.1f ms  session ready\n", run_time_ms());
 
-    if (!opt.ppl_path.empty()) return run_ppl(opt.ppl_path, model, gpu, tokenizer);
+    if (!opt.ppl_path.empty()) return run_ppl(opt.ppl_path, app.model, app.gpu, app.tokenizer);
 
     if (!opt.build_cache_prompt.empty())
-        return build_prefix_cache(model, tokenizer, chat_tmpl.get(), opt, tools_array, enc_bos,
-                                  bos_str, eos_str, g_quiet, session);
+        return build_prefix_cache(app.model, app.tokenizer, app.chat_tmpl.get(), opt, tools_array, enc_bos,
+                                  app.bos_str, app.eos_str, g_quiet, session);
 
     if (opt.worker) {
         // Every worker event is a JSON object; common_json decides the spelling
@@ -463,7 +323,7 @@ int main(int argc, char** argv) {
         // Process-level defaults (CLI flags / env vars), restored before each request.
         const SamplingSettings base_sampling = g_sampling;
         vector<int> cache_tokens;
-        if (!opt.prefix_cache_path.empty() && !load_prefix_cache_any(opt.prefix_cache_path, cache_tokens))
+        if (!opt.prefix_cache_path.empty() && !app.load_prefix_cache_any(opt.prefix_cache_path, cache_tokens, session))
             cerr << "PREFIX_CACHE ignored " << opt.prefix_cache_path << "\n";
         // The HTTP layer renders the prompt text itself, so it has to know which
         // template this checkpoint wants.  The container states it (kind + name)
@@ -476,9 +336,9 @@ int main(int argc, char** argv) {
             {"event", string("ready")},
             {"prefix_cache_tokens", (long long) cache_tokens.size()},
             {"template", string(effective_template)},
-            {"chat_template", chat_tmpl != nullptr},
+            {"chat_template", app.chat_tmpl != nullptr},
             {"cma_free_kb", (long long) proc_meminfo_kb("CmaFree:")},
-            {"programs", (long long) gpu.program_count()}}));
+            {"programs", (long long) app.gpu.program_count()}}));
         string line;
         while (stdin_line(line, -1)) {
             if (g_stop) break;
@@ -507,10 +367,10 @@ int main(int argc, char** argv) {
                     emit(common_json::object({{"event", string("stats")},
                                               {"cma_free_kb", (long long) proc_meminfo_kb("CmaFree:")},
                                               {"mem_available_kb", (long long) proc_meminfo_kb("MemAvailable:")},
-                                              {"programs", (long long) gpu.program_count()},
-                                              {"seq", model.seq},
+                                              {"programs", (long long) app.gpu.program_count()},
+                                              {"seq", app.model.seq},
                                               {"kv_pack", (long long) (env_int("KV_PACK", 0))},
-                                              {"template", model.template_name.empty() ? string("(kind ") + std::to_string(model.template_kind) + ")" : model.template_name},
+                                              {"template", app.model.template_name.empty() ? string("(kind ") + std::to_string(app.model.template_kind) + ")" : app.model.template_name},
                                               {"uptime_ms", (long long) run_time_ms()}}));
                     continue;
                 }
@@ -522,17 +382,17 @@ int main(int argc, char** argv) {
                 // order: release the scene (CMA), read, prepare (FFN split and
                 // hidden scale -- the Mats), template/tokenizer, upload, session.
                 const auto t_load = Clock::now();
-                gpu.release_scene();
-                model.reset();
-                if (!model.load(want)) {
+                app.gpu.release_scene();
+                app.model.reset();
+                if (!app.model.load(want)) {
                     emit_error("load: cannot read " + want);
                     // No model is loaded any more, so every later request would
                     // fail differently.  A driver deserves one clear failure.
                     return 1;
                 }
-                prepare_model();
-                if (!setup_from_model()) return 2;
-                upload_weights();
+                app.prepare_model();
+                if (!app.setup_from_model()) return 2;
+                app.upload_weights();
                 session.reset();
                 // The rolling prefix cache belongs to the model that produced
                 // it: keeping it made the next request skip prefill against a
@@ -545,19 +405,19 @@ int main(int argc, char** argv) {
                 // container's is loaded here.  With a directory this is the
                 // whole per-model story; with a single file the header check
                 // refuses it and the swap runs uncached.
-                if (!opt.prefix_cache_path.empty()) load_prefix_cache_any(opt.prefix_cache_path, cache_tokens);
+                if (!opt.prefix_cache_path.empty()) app.load_prefix_cache_any(opt.prefix_cache_path, cache_tokens, session);
                 // The template and the chat support belong to the *container*,
                 // so a client that caches them (the server decides from these
                 // whether a chat completion can be served) has to be told.
                 emit(common_json::object({{"event", string("loaded")},
                                           {"model", want},
                                           {"load_ms", (double) elapsed_ms(t_load, Clock::now())},
-                                          {"template", model.template_name.empty() ? model.template_kind >= 2 ? string("minimind3") : string("chatml") : model.template_name},
-                                          {"chat_template", chat_tmpl != nullptr},
-                                          {"chat_support", model.have_capabilities ? (bool) (model.capabilities & 1) : true},
-                                          {"seq", model.seq},
+                                          {"template", app.model.template_name.empty() ? app.model.template_kind >= 2 ? string("minimind3") : string("chatml") : app.model.template_name},
+                                          {"chat_template", app.chat_tmpl != nullptr},
+                                          {"chat_support", app.model.have_capabilities ? (bool) (app.model.capabilities & 1) : true},
+                                          {"seq", app.model.seq},
                                           {"cma_free_kb", (long long) proc_meminfo_kb("CmaFree:")},
-                                          {"programs", (long long) gpu.program_count()}}));
+                                          {"programs", (long long) app.gpu.program_count()}}));
                 continue;
             }
             vector<string> f;
@@ -610,20 +470,20 @@ int main(int argc, char** argv) {
                     emit_error("bad request: " + perr);
                     continue;
                 }
-                if (!chat_tmpl) {
+                if (!app.chat_tmpl) {
                     emit_error("this checkpoint carries no chat template; send a prompt string");
                     continue;
                 }
-                req_parts = chat_tmpl->render(req_msgs, req_tools, true,
+                req_parts = app.chat_tmpl->render(req_msgs, req_tools, true,
                                               req_thinking >= 0 ? req_thinking != 0 : opt.open_thinking,
-                                              bos_str, eos_str);
+                                              app.bos_str, app.eos_str);
                 if (chat_dump)
                     for (auto& p : req_parts)
                         fprintf(stderr, "PROMPT[%s] %3zu B  %s\n", p.is_input ? "in" : "tmpl",
                             p.text.size(), dump_escape(p.text).c_str());
             }
-            auto tokens = req_parts.empty() ? tokenizer.encode(opt.prompt, false, false)
-                                            : tokenizer.encode_parts(req_parts, enc_bos, enc_bos);
+            auto tokens = req_parts.empty() ? app.tokenizer.encode(opt.prompt, false, false)
+                                            : app.tokenizer.encode_parts(req_parts, enc_bos, enc_bos);
             if (chat_dump) {
                 fprintf(stderr, "PROMPT_IDS %zu:", tokens.size());
                 for (int t : tokens) fprintf(stderr, " %d", t);
@@ -633,7 +493,7 @@ int main(int argc, char** argv) {
                 emit_error("empty prompt");
                 continue;
             }
-            if ((int)tokens.size() >= model.seq) {
+            if ((int)tokens.size() >= app.model.seq) {
                 emit_error("context full");
                 continue;
             }
@@ -642,7 +502,7 @@ int main(int argc, char** argv) {
                    cache_tokens[common] == tokens[common]) ++common;
             // Same rule as the CLI: a partial prefix reuse invalidates the
             // loaded conv history.
-            if (common < (int)cache_tokens.size() && model.hybrid)
+            if (common < (int)cache_tokens.size() && app.model.hybrid)
                 session.zero_conv_state();
             int prefill_from = common;
             if (prefill_from >= (int)tokens.size()) prefill_from = (int)tokens.size() - 1;
@@ -676,7 +536,7 @@ int main(int argc, char** argv) {
             }
             if (g_stop) break;
             int pos = (int)tokens.size();
-            max_new = min(max_new, model.seq - pos);
+            max_new = min(max_new, app.model.seq - pos);
     // The request's own seed (column 5 of the request line).  It was parsed
     // and then never used -- `rng` was built from the CLI seed, so the seed the
     // server sends on every request did nothing; -Wall found it on 2026-11-14.
@@ -712,8 +572,8 @@ int main(int argc, char** argv) {
                                       : (cand_mode ? sample_candidate_result(cand, wt, wp, req_top_k, rng)
                                                    : sample_token(logits, wt, wp, req_top_k, rng));
                 }
-                const bool is_eos = model.have_specials
-                        ? (next == model.id_eos || (model.id_stop >= 0 && next == model.id_stop))
+                const bool is_eos = app.model.have_specials
+                        ? (next == app.model.id_eos || (app.model.id_stop >= 0 && next == app.model.id_stop))
                         : (next == 1 || next == 2);
                 if (is_eos) {
                     session.step(next, pos++, false);
@@ -721,7 +581,7 @@ int main(int argc, char** argv) {
                     finish = "stop";
                     break;
                 }
-                string piece = tokenizer.decode({next}, prev);
+                string piece = app.tokenizer.decode({next}, prev);
                 if (want_logprobs)
                     lp_rows.push_back(common_json::object(
                         {{"id", next}, {"text", piece}, {"lp", next_lp}}));
@@ -762,7 +622,7 @@ int main(int argc, char** argv) {
                 {"prefill_tokens", prefill_tokens},
                 {"cma_free_kb", (long long) proc_meminfo_kb("CmaFree:")},
                 {"mem_available_kb", (long long) proc_meminfo_kb("MemAvailable:")},
-                {"programs", (long long) gpu.program_count()},
+                {"programs", (long long) app.gpu.program_count()},
             });
             if (want_logprobs) {
                 common_json rows = common_json::array();
@@ -777,7 +637,7 @@ int main(int argc, char** argv) {
 
     vector<int> cli_cache_tokens;
     if (!opt.worker && !opt.prefix_cache_path.empty()) {
-        if (load_prefix_cache_any(opt.prefix_cache_path, cli_cache_tokens)) {
+        if (app.load_prefix_cache_any(opt.prefix_cache_path, cli_cache_tokens, session)) {
             cerr << "PREFIX_CACHE loaded " << cli_cache_tokens.size() << " tokens\n";
             // Probe: write the just-loaded rows straight back out, so a built
             // file and a loaded file can be compared byte for byte.
@@ -811,11 +671,11 @@ int main(int argc, char** argv) {
     // the rest out, which no token mask can stop.
     vector<char> marker_mask;
     if (env_flag("BLOCK_MARKERS")) {
-        marker_mask.assign((size_t)model.vocab, 0);
-        for (const auto& sp : tokenizer.specials()) {
+        marker_mask.assign((size_t)app.model.vocab, 0);
+        for (const auto& sp : app.tokenizer.specials()) {
             const int id = sp.second;
-            if (id < 0 || id >= model.vocab) continue;
-            if (id == model.id_eos || id == model.id_stop || id == model.id_bos) continue;
+            if (id < 0 || id >= app.model.vocab) continue;
+            if (id == app.model.id_eos || id == app.model.id_stop || id == app.model.id_bos) continue;
             if (sp.first.size() < 3 || sp.first.find('|') == string::npos) continue;
             marker_mask[(size_t)id] = 1;
         }
@@ -833,8 +693,8 @@ int main(int argc, char** argv) {
         TurnTiming tt;
         string text;
         vector<PromptPart> parts;
-        if (chat_tmpl) {
-            const string& sys = opt.system_prompt;
+        if (app.chat_tmpl) {
+            const string& sys = app.system_prompt;
             vector<ChatMsg> msgs;
             if (hist) {
                 // The REPL keeps the conversation; the system turn goes in once,
@@ -847,15 +707,15 @@ int main(int argc, char** argv) {
                 if (first && !sys.empty()) msgs.push_back(ChatMsg{"system", sys, "", ""});
                 msgs.push_back(ChatMsg{"user", user, "", ""});
             }
-            parts = chat_tmpl->render(msgs, tools_array, /*add_generation_prompt=*/true,
-                                      opt.open_thinking, bos_str, eos_str);
+            parts = app.chat_tmpl->render(msgs, tools_array, /*add_generation_prompt=*/true,
+                                      opt.open_thinking, app.bos_str, app.eos_str);
             if (opt.open_thinking) {
                 bool has = false;
                 for (auto& p : parts) if (p.text.find("<think>") != string::npos) has = true;
                 if (!has) parts.push_back(PromptPart{"<think>", false});
             }
         } else if (opt.minimind3_template) {
-            string sys = opt.system_prompt;
+            string sys = app.system_prompt;
             if (!opt.tools_json.empty()) {
                 sys += "\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\n"
                        "You are provided with function signatures within <tools></tools> XML tags:\n<tools>\n" +
@@ -878,14 +738,14 @@ int main(int argc, char** argv) {
             text = string("<|user|> ") + user + "<|assistant|> ";
         } else if (opt.qwen_template) {
             if (first)
-                text = "<|im_start|>system\n" + opt.system_prompt +
+                text = "<|im_start|>system\n" + app.system_prompt +
                        "<|im_end|>\n<|im_start|>user\n" + user + "<|im_end|>\n<|im_start|>assistant\n";
             else
                 text = "<|im_start|>user\n" + user + "<|im_end|>\n<|im_start|>assistant\n";
             if (opt.open_thinking) text += "<think>\n";
         } else {
-            if (first && !opt.system_prompt.empty())
-                text = "[INST] <<SYS>>\n" + opt.system_prompt + "\n<</SYS>>\n\n" + user + " [/INST]";
+            if (first && !app.system_prompt.empty())
+                text = "[INST] <<SYS>>\n" + app.system_prompt + "\n<</SYS>>\n\n" + user + " [/INST]";
             else
                 text = "[INST] " + user + " [/INST]";
         }
@@ -903,8 +763,8 @@ int main(int argc, char** argv) {
                             p.text.size(), dump_escape(p.text).c_str());
             }
         }
-        auto tokens = parts.empty() ? tokenizer.encode(text, enc_bos, enc_bos)
-                                    : tokenizer.encode_parts(parts, enc_bos, enc_bos);
+        auto tokens = parts.empty() ? app.tokenizer.encode(text, enc_bos, enc_bos)
+                                    : app.tokenizer.encode_parts(parts, enc_bos, enc_bos);
         int skip = (first && !cli_cache_tokens.empty()) ? cache_prefix_len(tokens) : 0;
         // A hybrid model that only reuses part of the cache must not keep the
         // loaded conv history: the history is a running state, and the tokens
@@ -927,13 +787,13 @@ int main(int argc, char** argv) {
         CandidateResult cand;
         bool cand_mode = opt.top_k_candidates && opt.top_k > 0 && !opt.greedy && !sampling_penalties_active();
         for (size_t i = skip; i < tokens.size(); ++i) {
-            if (g_stop) { tt.cut = "prefill"; gpu.sync(); return; }
-            if (pos >= model.seq) { tt.cut = "context"; cout << "[context full]\n"; return; }
+            if (g_stop) { tt.cut = "prefill"; app.gpu.sync(); return; }
+            if (pos >= app.model.seq) { tt.cut = "context"; cout << "[context full]\n"; return; }
             bool last = (i + 1 == tokens.size());
             if (last && cand_mode) {
                 cand = session.step_candidates(tokens[i], pos++, opt.top_k, opt.temp, opt.top_p);
                 if (!cand.complete) { logits = std::move(cand.full); cand_mode = false; }
-            } else if (!last && i + 2 < tokens.size() && pos + 1 < model.seq && session.pair_ok()) {
+            } else if (!last && i + 2 < tokens.size() && pos + 1 < app.model.seq && session.pair_ok()) {
                 // Two prompt tokens per layer pass; the last token stays on the
                 // single-position path because its logits are the ones we need.
                 session.step_pair(tokens[i], pos, tokens[i + 1], pos + 1, false);
@@ -943,7 +803,7 @@ int main(int argc, char** argv) {
                 logits = session.step(tokens[i], pos++, last);
             }
         }
-        if (g_stop) { tt.cut = "prefill"; gpu.sync(); return; }
+        if (g_stop) { tt.cut = "prefill"; app.gpu.sync(); return; }
         tt.begin_decode();
         int generated = 0;
         if (!cand_mode && getenv("LOGITS_OUT")) {
@@ -955,8 +815,8 @@ int main(int argc, char** argv) {
         string pending;   // holds an incomplete UTF-8 sequence between tokens
         int prev = tokens.empty() ? 1 : tokens.back();
         vector<int> recent;
-        for (int i = 0; i < opt.gen && pos < model.seq; ++i) {
-            if (g_stop) { tt.cut = "decode"; gpu.sync(); return; }
+        for (int i = 0; i < opt.gen && pos < app.model.seq; ++i) {
+            if (g_stop) { tt.cut = "decode"; app.gpu.sync(); return; }
             if (!marker_mask.empty()) mask_markers(logits);
             apply_sampling_penalties(logits, recent);
             int next = opt.greedy ? argmax_token(logits)
@@ -971,7 +831,7 @@ int main(int argc, char** argv) {
             // and the reply goes back into the template on the next turn, where
             // the JSON marshal rejects it (SIGABRT).  Hold the tail until it is
             // complete, exactly as the worker does.
-            pending += tokenizer.decode({next}, prev);
+            pending += app.tokenizer.decode({next}, prev);
             string chunk = utf8_take(pending);
             if (!chunk.empty()) {
                 cout << chunk; cout.flush();
@@ -996,11 +856,11 @@ int main(int argc, char** argv) {
         cout << "\n";
         // The loop also stops at the KV limit, which otherwise looks like a
         // model that simply had nothing more to say.
-        if (pos >= model.seq) tt.cut = "context";
+        if (pos >= app.model.seq) tt.cut = "context";
         if (!g_quiet && !g_stop && generated >= opt.gen && !is_stop_token(prev) && generated)
             fprintf(stderr, "[stopped at the --gen limit: %d tokens.  This model did "
                             "not emit its end token (eos %d, stop %d); raise --gen]\n",
-                    generated, model.id_eos, model.id_stop);
+                    generated, app.model.id_eos, app.model.id_stop);
         if (hist) {
             hist->push_back(ChatMsg{"assistant", reply, "", ""});
             kv_tokens = tokens;
@@ -1009,7 +869,7 @@ int main(int argc, char** argv) {
             ofstream f(getenv("TOKENS_OUT"), ios::binary);
             for (int t : tokens) f.write((char*)&t, 4);
         }
-        if (g_stop) gpu.sync();
+        if (g_stop) app.gpu.sync();
     };
 
     // The assistant turn is re-rendered from the template, so the raw
@@ -1017,9 +877,9 @@ int main(int argc, char** argv) {
     // would emit them twice.
 
     auto run_tool_turn = [&](const string& user, bool first, vector<ChatMsg>* hist = nullptr) {
-        string sys = opt.system_prompt.empty()
+        string sys = app.system_prompt.empty()
             ? string("你的名字叫MiniMind，你是一个乐于助人、知识渊博的AI助手。请用完整且友好的方式回答用户问题，当被问到名字时请回答MiniMind。")
-            : opt.system_prompt;
+            : app.system_prompt;
         if (!opt.tools_json.empty()) {
             sys += "\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\n"
                    "You are provided with function signatures within <tools></tools> XML tags:\n<tools>\n" +
@@ -1036,14 +896,14 @@ int main(int argc, char** argv) {
         // local and holds this turn only.
         vector<ChatMsg> local_msgs;
         vector<ChatMsg>& msgs = hist ? *hist : local_msgs;
-        if (chat_tmpl) {
+        if (app.chat_tmpl) {
             if (hist) {
-                if (msgs.empty() && !opt.system_prompt.empty())
-                    msgs.push_back(ChatMsg{"system", opt.system_prompt, "", ""});
-            } else if (!opt.system_prompt.empty()) {
+                if (msgs.empty() && !app.system_prompt.empty())
+                    msgs.push_back(ChatMsg{"system", app.system_prompt, "", ""});
+            } else if (!app.system_prompt.empty()) {
                 // Always the system turn: dropping it after the first user line
                 // was the old bug, and it also kills the shared prefix.
-                msgs.push_back(ChatMsg{"system", opt.system_prompt, "", ""});
+                msgs.push_back(ChatMsg{"system", app.system_prompt, "", ""});
             }
             msgs.push_back(ChatMsg{"user", user, "", ""});
         }
@@ -1056,12 +916,12 @@ int main(int argc, char** argv) {
         for (int round = 0; round < 3; ++round) {
             TurnTiming tt;   // one line per model turn, interrupted or not
             vector<PromptPart> parts;
-            if (chat_tmpl)
-                parts = chat_tmpl->render(msgs, tools_array, /*add_generation_prompt=*/true,
-                                          opt.open_thinking, bos_str, eos_str);
+            if (app.chat_tmpl)
+                parts = app.chat_tmpl->render(msgs, tools_array, /*add_generation_prompt=*/true,
+                                          opt.open_thinking, app.bos_str, app.eos_str);
             // A template without an open_thinking switch (LFM2.5's) still gets
             // the block: the caller asked for it, and `<think>` is one token.
-            if (chat_tmpl && opt.open_thinking) {
+            if (app.chat_tmpl && opt.open_thinking) {
                 bool has = false;
                 for (auto& p : parts) if (p.text.find("<think>") != string::npos) has = true;
                 if (!has) parts.push_back(PromptPart{"<think>", false});
@@ -1080,8 +940,8 @@ int main(int argc, char** argv) {
                                 p.text.size(), dump_escape(p.text).c_str());
                 }
             }
-            auto tokens = chat_tmpl ? tokenizer.encode_parts(parts, enc_bos, enc_bos)
-                                    : tokenizer.encode(text, false, false);
+            auto tokens = app.chat_tmpl ? app.tokenizer.encode_parts(parts, enc_bos, enc_bos)
+                                    : app.tokenizer.encode(text, false, false);
             // CHAT_DUMP also prints the ids the model will see: a template that
             // renders to the same bytes can still tokenise differently, and the
             // ids are what the model actually reads.
@@ -1090,7 +950,7 @@ int main(int argc, char** argv) {
                 for (int t : tokens) fprintf(stderr, " %d", t);
                 fprintf(stderr, "\n");
             }
-            if ((int)tokens.size() >= model.seq) { tt.cut = "context"; cout << "[context full]\n"; return; }
+            if ((int)tokens.size() >= app.model.seq) { tt.cut = "context"; cout << "[context full]\n"; return; }
             vector<float> logits;
             CandidateResult cand;
             bool cand_mode = opt.top_k_candidates && opt.top_k > 0 && !opt.greedy && !sampling_penalties_active();
@@ -1109,19 +969,19 @@ int main(int argc, char** argv) {
                 fprintf(stderr, "CHAT_CACHE round=%d cached=%d prefill=%zu prompt=%zu\n",
                         round, skip, tokens.size() - (size_t)skip, tokens.size());
             for (size_t i = skip; i < tokens.size(); ++i) {
-                if (g_stop) { tt.cut = "prefill"; gpu.sync(); return; }
+                if (g_stop) { tt.cut = "prefill"; app.gpu.sync(); return; }
                 bool last = (i + 1 == tokens.size());
                 if (last && cand_mode) {
                     cand = session.step_candidates(tokens[i], (int)i, opt.top_k, opt.temp, opt.top_p);
                     if (!cand.complete) { logits = std::move(cand.full); cand_mode = false; }
-                } else if (!last && i + 2 < tokens.size() && (int)i + 1 < model.seq && session.pair_ok()) {
+                } else if (!last && i + 2 < tokens.size() && (int)i + 1 < app.model.seq && session.pair_ok()) {
                     session.step_pair(tokens[i], (int)i, tokens[i + 1], (int)i + 1, false);
                     ++i;
                 } else {
                     logits = session.step(tokens[i], (int)i, last);
                 }
             }
-            if (g_stop) { tt.cut = "prefill"; gpu.sync(); return; }
+            if (g_stop) { tt.cut = "prefill"; app.gpu.sync(); return; }
             tt.begin_decode();
             cout << "Assistant: "; cout.flush();
             string out;
@@ -1129,8 +989,8 @@ int main(int argc, char** argv) {
             int prev = tokens.empty() ? 1 : tokens.back();
             int pos = (int)tokens.size();
             vector<int> recent;
-            for (int i = 0; i < opt.gen && pos < model.seq; ++i) {
-                if (g_stop) { tt.cut = "decode"; gpu.sync(); return; }
+            for (int i = 0; i < opt.gen && pos < app.model.seq; ++i) {
+                if (g_stop) { tt.cut = "decode"; app.gpu.sync(); return; }
                 apply_sampling_penalties(logits, recent);
                 int next = opt.greedy ? argmax_token(logits)
                                   : (cand_mode ? sample_candidate_result(cand, opt.temp, opt.top_p, opt.top_k, rng)
@@ -1142,7 +1002,7 @@ int main(int argc, char** argv) {
                     session.step(next, pos++, false);
                     break;
                 }
-                pending += tokenizer.decode({next}, prev);
+                pending += app.tokenizer.decode({next}, prev);
                 string chunk = utf8_take(pending);
                 if (!chunk.empty()) {
                     cout << chunk; cout.flush();
@@ -1164,11 +1024,11 @@ int main(int argc, char** argv) {
                 out += "\xEF\xBF\xBD";
             }
             cout << "\n";
-            if (pos >= model.seq) tt.cut = "context";
+            if (pos >= app.model.seq) tt.cut = "context";
             string reasoning;
             string body = take_thinking(out, reasoning);
             vector<ToolCall> calls = parse_tool_calls(body);
-            if (chat_tmpl) {
+            if (app.chat_tmpl) {
                 // The final answer goes into the history too.  Before this the
                 // tool path returned without recording it, so the next REPL turn
                 // lost the answer and had no shared prefix to reuse.
@@ -1182,7 +1042,7 @@ int main(int argc, char** argv) {
                 for (int t : tokens) f.write((char*)&t, 4);
             }
             if (calls.empty()) return;
-            if (!chat_tmpl) {
+            if (!app.chat_tmpl) {
                 text += out;
                 text += "<|im_end|>\n<|im_start|>user\n";
             }
@@ -1190,10 +1050,10 @@ int main(int argc, char** argv) {
                 string result = run_tool(c.name, c.args);
                 cout << "[tool] " << c.name << " " << c.args << "\n";
                 cout << "[tool result] " << result << "\n";
-                if (chat_tmpl) msgs.push_back(ChatMsg{"tool", result, "", ""});
+                if (app.chat_tmpl) msgs.push_back(ChatMsg{"tool", result, "", ""});
                 else text += "<tool_response>\n" + result + "\n</tool_response>\n";
             }
-            if (!chat_tmpl) {
+            if (!app.chat_tmpl) {
                 text += "<|im_end|>\n<|im_start|>assistant\n";
                 text += opt.open_thinking ? "<think>\n" : "<think>\n\n</think>\n\n";
             }
@@ -1231,29 +1091,29 @@ int main(int argc, char** argv) {
                 if (line.rfind("/model ", 0) == 0) {
                     const string path = line.substr(7);
                     const auto t_swap = Clock::now();
-                    gpu.release_scene();
-                    model.reset();
-                    if (!model.load(path)) { cerr << "no model loaded; leaving\n"; return 1; }
+                    app.gpu.release_scene();
+                    app.model.reset();
+                    if (!app.model.load(path)) { cerr << "no model loaded; leaving\n"; return 1; }
                     // The startup path refuses a container that does not
                     // advertise chat support while --chat is in effect; a swap
                     // must apply the same rule instead of quietly running it
                     // (stories15M's capabilities are 0, and it happily answered
                     // through the built-in [INST] wrapper before this guard).
-                    if (model.have_capabilities && opt.chat && !(model.capabilities & 1)) {
+                    if (app.model.have_capabilities && opt.chat && !(app.model.capabilities & 1)) {
                         cerr << "/model: this checkpoint does not advertise chat support "
-                                "(capabilities 0x" << std::hex << model.capabilities << std::dec
+                                "(capabilities 0x" << std::hex << app.model.capabilities << std::dec
                              << "); leaving\n";
                         return 2;
                     }
-                    prepare_model();          // FFN split, hidden scale, seq clamp
-                    if (!setup_from_model()) return 2;
-                    upload_weights();
+                    app.prepare_model();          // FFN split, hidden scale, seq clamp
+                    if (!app.setup_from_model()) return 2;
+                    app.upload_weights();
                     session.reset();
                     history.clear();
                     kv_tokens.clear();
                     first = true;
-                    cout << "[model] " << (model.template_name.empty() ? string("(kind 0)") : model.template_name)
-                         << "  chat_template " << (chat_tmpl ? "yes" : "no")
+                    cout << "[model] " << (app.model.template_name.empty() ? string("(kind 0)") : app.model.template_name)
+                         << "  chat_template " << (app.chat_tmpl ? "yes" : "no")
                          << "  " << (long) elapsed_ms(t_swap, Clock::now()) << " ms\n" << flush;
                     continue;
                 }
@@ -1266,8 +1126,8 @@ int main(int argc, char** argv) {
                             "Ctrl-Left/Right (or Alt-b/f) move by word.\n";
                     continue;
                 }
-                if (opt.tools_json.empty()) run_turn(line, first, 0, chat_tmpl ? &history : nullptr);
-                else run_tool_turn(line, first, chat_tmpl ? &history : nullptr);
+                if (opt.tools_json.empty()) run_turn(line, first, 0, app.chat_tmpl ? &history : nullptr);
+                else run_tool_turn(line, first, app.chat_tmpl ? &history : nullptr);
                 first = false;
                 if (g_stop) {
                     cout << "\n[interrupted]\n";
@@ -1279,7 +1139,7 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    auto tokens = tokenizer.encode(opt.prompt, true, true);
+    auto tokens = app.tokenizer.encode(opt.prompt, true, true);
     // The single-shot path never reuses a loaded prefix, so a hybrid model must
     // not keep the conv history that came with the cache file.
     if (!cli_cache_tokens.empty()) session.zero_conv_state();
@@ -1304,7 +1164,7 @@ int main(int argc, char** argv) {
             if (last && cand_mode) {
                 cand = session.step_candidates(tokens[i], (int)i, opt.top_k, opt.temp, opt.top_p);
                 if (!cand.complete) { lg = std::move(cand.full); cand_mode = false; }
-            } else if (!last && i + 2 < tokens.size() && (int)i + 1 < model.seq && session.pair_ok()) {
+            } else if (!last && i + 2 < tokens.size() && (int)i + 1 < app.model.seq && session.pair_ok()) {
                 session.step_pair(tokens[i], (int)i, tokens[i + 1], (int)i + 1, false);
                 ++i;
             } else {
@@ -1317,7 +1177,7 @@ int main(int argc, char** argv) {
     auto start = Clock::now();
     if (getenv("SHADER_TIME")) fprintf(stderr, "STARTUP %7.1f ms  first step\n", run_time_ms());
     logits = prefill_once();
-    if (g_stop) { tt.cut = "prefill"; gpu.sync(); cout << "\n[interrupted]\n"; return 0; }
+    if (g_stop) { tt.cut = "prefill"; app.gpu.sync(); cout << "\n[interrupted]\n"; return 0; }
     double prefill = chrono::duration<double>(Clock::now() - start).count();
     cout << "prefill " << prefill << " s\n";
     if (getenv("PREFILL_REPEAT")) {
@@ -1349,11 +1209,11 @@ int main(int argc, char** argv) {
         // --gen 4096): the text turns to "walk inkinkinkinkin" at position
         // 1023 and stays garbage -- and the same file packed at seq 2048 turns
         // to " t t t t" at 2047 instead, which is how the boundary was found.
-        if ((int)tokens.size() >= model.seq) {
+        if ((int)tokens.size() >= app.model.seq) {
             tt.cut = "context";
             if (!g_quiet)
                 fprintf(stderr, "\n[context full] %d tokens, seq %d; raise --seq when "
-                                "packing or lower --gen\n", generated, model.seq);
+                                "packing or lower --gen\n", generated, app.model.seq);
             break;
         }
         if (!marker_mask.empty()) mask_markers(logits);
@@ -1368,7 +1228,7 @@ int main(int argc, char** argv) {
             stop_id = next;
             break;
         }
-        cout << tokenizer.decode({next}, tokens.empty() ? 1 : tokens.back()); cout.flush();
+        cout << app.tokenizer.decode({next}, tokens.empty() ? 1 : tokens.back()); cout.flush();
         tokens.push_back(next);
         recent.push_back(next);
         auto a = Clock::now();
@@ -1387,7 +1247,7 @@ int main(int argc, char** argv) {
         ofstream f(getenv("TOKENS_OUT"), ios::binary);
         for (int t : tokens) f.write((char*)&t, 4);
     }
-    if (g_stop) { tt.cut = "decode"; gpu.sync(); cout << "[interrupted]\n"; return 0; }
+    if (g_stop) { tt.cut = "decode"; app.gpu.sync(); cout << "[interrupted]\n"; return 0; }
     // A completion model that never emits its end token looks like "it will not
     // stop"; say which limit ended it so that is diagnosable from the output.
     if (!g_quiet && ended_on_eos && stop_reason && is_bos_token(stop_id))
@@ -1395,10 +1255,10 @@ int main(int argc, char** argv) {
     if (!g_quiet && !ended_on_eos && generated >= opt.gen)
         fprintf(stderr, "\n[stopped at the --gen limit: %d tokens.  This model did not "
                         "emit its end token (eos %d, stop %d); raise --gen or press "
-                        "Ctrl-C]\n", generated, model.id_eos, model.id_stop);
+                        "Ctrl-C]\n", generated, app.model.id_eos, app.model.id_stop);
     if (generated) cout << "decode avg " << decode_ms / generated << " ms/token\n";
     if (getenv("DRAWCOUNT") && generated)
-        cout << "draws " << gpu.draws() << " total, "
-             << (double)gpu.draws() / generated << " per token\n";
+        cout << "draws " << app.gpu.draws() << " total, "
+             << (double)app.gpu.draws() / generated << " per token\n";
     return 0;
 }

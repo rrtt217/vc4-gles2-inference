@@ -18,7 +18,12 @@ responsibility, not by line count:
 | `src/sampling.h/.cpp` | sampling, penalties, top-p/min-p |
 | `src/chattmpl.h/.cpp` | renders the container's Jinja chat template; returns the prompt split into template text and caller text.  Also parses the worker's message request (column 11) |
 | `src/tools.h/.cpp` | tool JSON, restricted arithmetic, built-in handlers |
-| `src/engine.cpp` | CLI, worker protocol, chat loop, capability/template handling |
+| `src/app.h/.cpp` | the live engine state (container, GL context, tokenizer, chat template, system prompt) and the four steps that make a loaded container runnable: `prepare_model`, `setup_from_model`, `upload_weights`, `load_prefix_cache_any`.  Startup and `/model` share them, which is why they are one object.  `Options` is held **by reference**: `setup_from_model` decides the template flags and `main` reads them back |
+| `src/cli.h/.cpp` | `Options` and the one argument parser (the usage text lives here too) |
+| `src/ppl.cpp` | `--ppl`: one sliding window at a time, BOS included, the gate's number |
+| `src/prefix_build.cpp` | `--build-prefix-cache`: render the header, prefill, save the KV plus the sidecar |
+| `src/chat_format.h/.cpp` | strip a tool-call block, split a `<think>` block, render tool calls for the template |
+| `src/engine.cpp` | the entry point: worker protocol, chat loop, capability/template handling, and the wiring around the modules above |
 
 The sibling directories are **not** linked into `engine_mm3`:
 

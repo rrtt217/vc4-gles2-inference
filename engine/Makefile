@@ -22,7 +22,7 @@ CORE := $(SRC)/engine.cpp $(SRC)/common.cpp $(SRC)/xformat.cpp \
         $(SRC)/shaders.cpp $(SRC)/shaders_attn.cpp $(SRC)/dump_shaders.cpp \
         $(SRC)/gpu.cpp $(SRC)/gpu_state.cpp $(SRC)/gpu_conv.cpp \
         $(SRC)/tokenizer.cpp $(SRC)/model.cpp $(SRC)/session.cpp $(SRC)/prefix_cache.cpp $(SRC)/lineedit.cpp \
-        $(SRC)/sampling.cpp $(SRC)/tools.cpp $(SRC)/ppl.cpp $(SRC)/cli.cpp $(SRC)/chat_format.cpp $(SRC)/prefix_build.cpp $(SRC)/chattmpl.cpp $(JINJA)
+        $(SRC)/sampling.cpp $(SRC)/tools.cpp $(SRC)/ppl.cpp $(SRC)/cli.cpp $(SRC)/chat_format.cpp $(SRC)/prefix_build.cpp $(SRC)/app.cpp $(SRC)/chattmpl.cpp $(JINJA)
 HEADERS := $(wildcard $(SRC)/*.h)
 # third_party is -isystem: it is vendored code (llama.cpp's Jinja engine) and its
 # own warnings are not this repository's to fix, but they must not drown ours --
