@@ -27,7 +27,7 @@ replace working paths with demos or cosmetic rewrites.
 | `templates/` | the chat templates this repository ships, for `mmcf_pack.py --chat-template` |
 | `engine/scripts/` | the regression gate **and** the diagnostic tools, and the model-quality batteries (`bench_mc.py`, `eval_ifeval.py`, `eval_translate.py`) |
 | `engine/probes/` | standalone VC4 feature/throughput probes (not linked into the engine); `README.md` is the map: one row per probe = the question it answers, its `_pi` target and where the answer is written down |
-| `server/` | OpenAI-compatible HTTP server, deterministic tools, self-test, eval suite |
+| `server/` | OpenAI-compatible HTTP server, deterministic tools, self-test, eval suite.  `server.py` is the entry point; `http_api.py` (routes/SSE), `engine_bridge.py` (the worker protocol), `chat_render.py`, `tool_calls.py` and `sampling.py` are the parts it was split into on 2026-11-14, all stdlib only |
 | `models/` | central model store (gitignored), one `.mmcf` per precision |
 | `minimind3/` | MiniMind3 source config/tokenizer/reference; artifacts live in `models/` |
 | `refs/` | untracked upstream reference material for MiniMind3 (gitignored) |

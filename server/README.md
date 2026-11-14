@@ -9,10 +9,24 @@ owns HTTP, JSON, SSE, and tool-call schema.
 ```text
 OpenAI client / curl
         |  HTTP + SSE
-server.py (stdlib only)
+http_api.py  <- server.py builds the server and calls main()
         |  base64 + tab-separated request, JSONL events
 engine_mm3 --worker (one GL context, one model)
 ```
+
+Modules (2026-11-14; `server.py` was one 1504-line file before):
+
+| File | Holds |
+|---|---|
+| `server.py` | the entry point: CLI, model list, the server object, `main()` |
+| `http_api.py` | the routes and the SSE writers (`Handler`) |
+| `engine_bridge.py` | the worker: request line, JSONL events, control lines, cancel, restart |
+| `chat_render.py` | messages/tools/thinking/system-prompt rendering and context pruning |
+| `tool_calls.py` | deterministic tool choice, arguments and the OpenAI tool_calls reply |
+| `sampling.py` | `StopFilter` and the per-request penalties |
+| `localtools.py` | the deterministic tools themselves |
+
+Everything is still stdlib only.
 
 ## Start
 
