@@ -5926,3 +5926,25 @@ Two consequences:
   `glGetError` and reports its size, the texture count and the byte total, with
   `CmaFree`/`MemFree`; a failed FBO prints its size, the GL error, the driver's
   texture/renderbuffer/viewport limits and the same budget.
+
+### Where the hybrid's 143.7 MiB goes
+
+`lfm2.5-230m` q4, `dim 1024 hidden 2560 layers 14 vocab 64402`:
+
+| | MiB |
+|---|---:|
+| q4 weights, 14 layers (qkv, wo, w1, w3, w2 or the conv triples) | ~88 |
+| the q4 group planes (scale+min, 4 B per 32 weights) | ~19 |
+| logits, q8, 64402 x 1024 | **63** |
+| activations, KV, scratch targets | ~10 |
+
+The logits matrix alone is 44% of the texture budget and 67M MACs per token --
+it is the largest single object in the model and it is *sampled once per
+token*.  The embedding table is not on the GPU at all (`Session::embedding`
+looks the row up on the CPU), so there is nothing to reclaim there.
+
+Headroom is the whole problem: 143.7 MiB of weights against a 256 MiB CMA that
+also holds the session's FBOs and the KV cache.  The 4-bit view needs a few
+MiB of slack to be safe there, and the cheapest place to find it is the group
+planes: they carry a 16-bit scale and a 16-bit min per 32 weights, and halving
+that frees ~9 MiB across the 14 layers.
