@@ -13,6 +13,7 @@
 
 #include "chat_format.h"
 #include "common.h"
+#include "lineedit.h"
 #include "sampling.h"
 #include "tools.h"
 
@@ -443,4 +444,209 @@ void Chat::run_tool_turn(const std::string& user, bool first, std::vector<ChatMs
             text += app.opt.open_thinking ? "<think>\n" : "<think>\n\n</think>\n\n";
         }
     }
+}
+
+int Chat::repl() {
+
+    if (!app.opt.prompt_set) app.opt.prompt.clear();
+    if (!app.opt.prompt.empty()) {
+        if (app.opt.tools_json.empty()) run_turn(app.opt.prompt, true, 0);
+        else run_tool_turn(app.opt.prompt, true);
+    } else {
+        bool first = true;
+        int cancels = 0;
+        vector<ChatMsg> history;
+        while (!g_stop) {
+            string line;
+            if (!line_edit_read("User: ", line)) break;
+            if (line.empty()) {
+                // Ctrl-C cancels the line; a second one in a row leaves,
+                // which is what people expect from a prompt.
+                if (++cancels >= 2) break;
+                fprintf(stderr, "(Ctrl-C again or /exit to leave)\n");
+                continue;
+            }
+            cancels = 0;
+            if (line == "/exit" || line == "/quit") break;
+            if (line == "/clear") {
+                first = true;
+                history.clear();
+                kv_tokens.clear();
+                cout << "[conversation cleared]\n";
+                continue;
+            }
+            if (line.rfind("/model ", 0) == 0) {
+                const string path = line.substr(7);
+                const auto t_swap = Clock::now();
+                app.gpu.release_scene();
+                app.model.reset();
+                if (!app.model.load(path)) { cerr << "no model loaded; leaving\n"; return 1; }
+                // The startup path refuses a container that does not
+                // advertise chat support while --chat is in effect; a swap
+                // must apply the same rule instead of quietly running it
+                // (stories15M's capabilities are 0, and it happily answered
+                // through the built-in [INST] wrapper before this guard).
+                if (app.model.have_capabilities && app.opt.chat && !(app.model.capabilities & 1)) {
+                    cerr << "/model: this checkpoint does not advertise chat support "
+                            "(capabilities 0x" << std::hex << app.model.capabilities << std::dec
+                         << "); leaving\n";
+                    return 2;
+                }
+                app.prepare_model();          // FFN split, hidden scale, seq clamp
+                if (!app.setup_from_model()) return 2;
+                app.upload_weights();
+                session.reset();
+                history.clear();
+                kv_tokens.clear();
+                first = true;
+                cout << "[model] " << (app.model.template_name.empty() ? string("(kind 0)") : app.model.template_name)
+                     << "  chat_template " << (app.chat_tmpl ? "yes" : "no")
+                     << "  " << (long) elapsed_ms(t_swap, Clock::now()) << " ms\n" << flush;
+                continue;
+            }
+            if (line == "/help") {
+                cout << "/clear  forget the conversation so far\n"
+                        "/model PATH  load another container, keeping the GPU context\n"
+                        "/exit   leave\n"
+                        "/help   this list\n"
+                        "anything else is sent to the model; arrows edit, Up/Down recall,\n"
+                        "Ctrl-Left/Right (or Alt-b/f) move by word.\n";
+                continue;
+            }
+            if (app.opt.tools_json.empty()) run_turn(line, first, 0, app.chat_tmpl ? &history : nullptr);
+            else run_tool_turn(line, first, app.chat_tmpl ? &history : nullptr);
+            first = false;
+            if (g_stop) {
+                cout << "\n[interrupted]\n";
+                g_stop = 0;
+            }
+        }
+        if (g_stop) cout << "\n";
+    }
+    return 0;}
+
+int Chat::complete() {
+auto tokens = app.tokenizer.encode(app.opt.prompt, true, true);
+// The single-shot path never reuses a loaded prefix, so a hybrid model must
+// not keep the conv history that came with the cache file.
+if (!cli_cache_tokens.empty()) session.zero_conv_state();
+cout << "tokens:";
+for (int t : tokens) cout << " " << t;
+cout << "\n";
+vector<float> logits;
+CandidateResult cand;
+bool cand_mode = app.opt.top_k_candidates && app.opt.top_k > 0 && !app.opt.greedy && !sampling_penalties_active();
+// PREFILL_REPEAT=n runs the same prefill n times in one process.  The first
+// pass pays every lazy shader link and every QPU program generation, which
+// on VC4 is seconds; a comparison between two modes that compile different
+// program sets otherwise measures the compiler, not the kernels (that is
+// how step 7c came out "6% slower" while its kernels were faster).  The
+// repeats are exact re-runs - every KV entry is rewritten with the same
+// bytes before it is read - so prefill_warm is the number the server sees.
+auto prefill_once = [&]() {
+    vector<float> lg;
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        if (g_stop) break;
+        bool last = (i + 1 == tokens.size());
+        if (last && cand_mode) {
+            cand = session.step_candidates(tokens[i], (int)i, app.opt.top_k, app.opt.temp, app.opt.top_p);
+            if (!cand.complete) { lg = std::move(cand.full); cand_mode = false; }
+        } else if (!last && i + 2 < tokens.size() && (int)i + 1 < app.model.seq && session.pair_ok()) {
+            session.step_pair(tokens[i], (int)i, tokens[i + 1], (int)i + 1, false);
+            ++i;
+        } else {
+            lg = session.step(tokens[i], (int)i, last);
+        }
+    }
+    return lg;
+};
+TurnTiming tt;
+auto start = Clock::now();
+if (getenv("SHADER_TIME")) fprintf(stderr, "STARTUP %7.1f ms  first step\n", run_time_ms());
+logits = prefill_once();
+if (g_stop) { tt.cut = "prefill"; app.gpu.sync(); cout << "\n[interrupted]\n"; return 0; }
+double prefill = chrono::duration<double>(Clock::now() - start).count();
+cout << "prefill " << prefill << " s\n";
+if (getenv("PREFILL_REPEAT")) {
+    int n = max(1, atoi(getenv("PREFILL_REPEAT")));
+    for (int r = 1; r < n; ++r) {
+        auto t = Clock::now();
+        logits = prefill_once();
+        double w = chrono::duration<double>(Clock::now() - t).count();
+        cout << "prefill_warm " << w << " s\n";
+    }
+}
+
+if (!cand_mode && getenv("LOGITS_OUT")) {
+    ofstream f(getenv("LOGITS_OUT"), ios::binary);
+    f.write((char*)logits.data(), logits.size() * 4);
+}
+tt.begin_decode();
+int generated = 0;
+double decode_ms = 0;
+vector<int> recent;
+bool ended_on_eos = false;
+const char* stop_reason = nullptr;
+int stop_id = -1;
+for (int i = 0; i < app.opt.gen; ++i) {
+    if (g_stop) break;
+    // The chat and tool loops stop at the container's seq; this one did
+    // not, so a --gen larger than seq walked past the KV cache and the rope
+    // table and printed whatever came back.  Measured on void.1 (seq 1024,
+    // --gen 4096): the text turns to "walk inkinkinkinkin" at position
+    // 1023 and stays garbage -- and the same file packed at seq 2048 turns
+    // to " t t t t" at 2047 instead, which is how the boundary was found.
+    if ((int)tokens.size() >= app.model.seq) {
+        tt.cut = "context";
+        if (!quiet)
+            fprintf(stderr, "\n[context full] %d tokens, seq %d; raise --seq when "
+                            "packing or lower --gen\n", generated, app.model.seq);
+        break;
+    }
+    if (!marker_mask.empty()) mask_markers(logits);
+    apply_sampling_penalties(logits, recent);
+    int next = app.opt.greedy ? argmax_token(logits)
+                      : (cand_mode ? sample_candidate_result(cand, app.opt.temp, app.opt.top_p, app.opt.top_k, rng)
+                                   : sample_token(logits, app.opt.temp, app.opt.top_p, app.opt.top_k, rng));
+    if (!getenv("IGNORE_EOS") && is_stop_token(next)) {
+        ended_on_eos = true;
+        stop_reason = is_bos_token(next) ? "the model emitted its BOS token mid-generation"
+                                         : "the model emitted its end token";
+        stop_id = next;
+        break;
+    }
+    cout << app.tokenizer.decode({next}, tokens.empty() ? 1 : tokens.back()); cout.flush();
+    tokens.push_back(next);
+    recent.push_back(next);
+    auto a = Clock::now();
+    if (cand_mode) {
+        cand = session.step_candidates(next, (int)tokens.size() - 1, app.opt.top_k, app.opt.temp, app.opt.top_p);
+        if (!cand.complete) { logits = std::move(cand.full); cand_mode = false; }
+    } else {
+        logits = session.step(next, (int)tokens.size() - 1, true);
+    }
+    decode_ms += elapsed_ms(a, Clock::now());
+    ++generated;
+    tt.generated = generated;
+}
+cout << "\n";
+if (getenv("TOKENS_OUT")) {
+    ofstream f(getenv("TOKENS_OUT"), ios::binary);
+    for (int t : tokens) f.write((char*)&t, 4);
+}
+if (g_stop) { tt.cut = "decode"; app.gpu.sync(); cout << "[interrupted]\n"; return 0; }
+// A completion model that never emits its end token looks like "it will not
+// stop"; say which limit ended it so that is diagnosable from the output.
+if (!quiet && ended_on_eos && stop_reason && is_bos_token(stop_id))
+    fprintf(stderr, "\n[stopped after %d tokens: %s (%d)]\n", generated, stop_reason, stop_id);
+if (!quiet && !ended_on_eos && generated >= app.opt.gen)
+    fprintf(stderr, "\n[stopped at the --gen limit: %d tokens.  This model did not "
+                    "emit its end token (eos %d, stop %d); raise --gen or press "
+                    "Ctrl-C]\n", generated, app.model.id_eos, app.model.id_stop);
+if (generated) cout << "decode avg " << decode_ms / generated << " ms/token\n";
+if (getenv("DRAWCOUNT") && generated) {
+    cout << "draws " << app.gpu.draws() << " total, "
+         << (double)app.gpu.draws() / generated << " per token\n";
+}
+return 0;
 }

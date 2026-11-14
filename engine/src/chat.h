@@ -34,6 +34,8 @@ struct Chat {
     void mask_markers(std::vector<float>& logits);
     void run_turn(const std::string& user, bool first, int pos,
                          std::vector<ChatMsg>* hist = nullptr);
+    int repl();      // --chat without --prompt: the REPL, /model included
+    int complete();  // --prompt without --chat: one prefill, one decode loop
     void run_tool_turn(const std::string& user, bool first,
                               std::vector<ChatMsg>* hist = nullptr);
 };
