@@ -427,6 +427,20 @@ sidecar no longer matches.
   Symptom: `/health` still answers, `/v1/chat/completions` returns
   `{"error": {"message": "engine worker exited"}}`.
 
+## Logprobs
+
+`logprobs: true` returns the OpenAI `logprobs.content` array: one entry per
+generated token, `{token, logprob}`, where `logprob` is measured in the
+distribution the sampler used (temperature, top-k and top-p applied, then
+renormalised over the kept set).  The engine computes it from the same logits it
+sampled from -- asking for it does not change the text, only the work — and the
+candidate read-back path (`--top-k-candidates`) is bypassed for such a request,
+because it does not carry the full vocabulary.
+
+Not implemented yet, and refused rather than silently ignored: `top_logprobs`
+(the alternatives — the engine would have to decode each candidate id back to
+text) and `logprobs` with `stream: true`.
+
 ## Worker protocol
 
 Request line:
@@ -435,7 +449,7 @@ Request line:
 base64(prompt) \t max_tokens \t temperature \t top_p \t seed
                \t [repetition_penalty \t frequency_penalty \t presence_penalty
                   \t no_repeat_ngram \t min_p]
-               \t [base64(request JSON) \t [top_k]]
+               \t [base64(request JSON) \t [top_k \t [request id \t [logprobs]]]]
 ```
 
 The first five columns are required; columns 6-10 and 12 are optional and may be

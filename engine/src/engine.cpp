@@ -517,9 +517,17 @@ int main(int argc, char** argv) {
     if (worker) {
         // Every worker event is a JSON object; common_json decides the spelling
         // (escaping, numbers) so no line here assembles JSON by hand.
-        auto emit = [&](const common_json& j) { cout << j.dump() << "\n" << flush; };
+        // dump_safe, not dump: a token's bytes can be invalid UTF-8 on their own
+        // (the event stream is line-framed, so a throw here would kill the turn),
+        // and bad bytes become U+FFFD instead.
+        auto emit = [&](const common_json& j) { cout << j.dump_safe() << "\n" << flush; };
+        string req_id;            // column 13, echoed in this request's events
+        auto emit_req = [&](common_json j) {
+            if (!req_id.empty()) j["id"] = req_id;
+            emit(j);
+        };
         auto emit_error = [&](const string& message) {
-            emit(common_json::object({{"event", string("error")}, {"message", message}}));
+            emit_req(common_json::object({{"event", string("error")}, {"message", message}}));
         };
         // Process-level defaults (CLI flags / env vars), restored before each request.
         const SamplingSettings base_sampling = g_sampling;
@@ -570,6 +578,11 @@ int main(int argc, char** argv) {
             if (f.size() > 7 && !f[7].empty()) g_sampling.presence_penalty = atof(f[7].c_str());
             if (f.size() > 8 && !f[8].empty()) g_sampling.no_repeat_ngram = atoi(f[8].c_str());
             if (f.size() > 9 && !f[9].empty()) g_sampling.min_p = atof(f[9].c_str());
+            // Column 13: opaque request id, echoed so a log line and an HTTP
+            // request can be matched.  Column 14: 1 = report a logprob per
+            // token in `done`.
+            req_id = f.size() > 12 ? f[12] : string();
+            const bool want_logprobs = f.size() > 13 && !f[13].empty() && atoi(f[13].c_str()) != 0;
             if (g_sampling.repetition_penalty < 0.5f) g_sampling.repetition_penalty = 0.5f;
             if (g_sampling.repetition_penalty > 2.0f) g_sampling.repetition_penalty = 2.0f;
             if (g_sampling.frequency_penalty < -2.0f) g_sampling.frequency_penalty = -2.0f;
@@ -629,7 +642,7 @@ int main(int argc, char** argv) {
             int prefill_from = common;
             if (prefill_from >= (int)tokens.size()) prefill_from = (int)tokens.size() - 1;
             int prefill_tokens = (int)tokens.size() - prefill_from;
-            emit(common_json::object({
+            emit_req(common_json::object({
                 {"event", string("start")},
                 {"prompt_tokens", (long long) tokens.size()},
                 {"cached_tokens", common},
@@ -639,8 +652,11 @@ int main(int argc, char** argv) {
             if (f.size() > 11 && !f[11].empty()) req_top_k = atoi(f[11].c_str());
             if (req_top_k < 0) req_top_k = 0;
             bool greedy_req = wt <= 0.0f;
+            // The candidate path reads back only the top-k logits, so it cannot
+            // answer "what was the probability of this token" over the whole
+            // vocabulary; a request that asks for it uses the full logits.
             bool cand_mode = top_k_candidates && req_top_k > 0 && !greedy_req &&
-                             !sampling_penalties_active();
+                             !sampling_penalties_active() && !want_logprobs;
             vector<float> logits;
             CandidateResult cand;
             for (int i = prefill_from; i < (int)tokens.size(); ++i) {
@@ -679,6 +695,7 @@ int main(int argc, char** argv) {
     };
 
     mt19937 rng(seed);
+            vector<common_json> lp_rows;   // one per generated token, when asked
             string pending, full, finish = "length";
             int generated = 0;
             int prev = tokens.back();
@@ -687,9 +704,19 @@ int main(int argc, char** argv) {
             for (int i = 0; i < max_new; ++i) {
                 if (g_stop) { finish = "stop"; break; }
                 apply_sampling_penalties(logits, recent);
-                int next = greedy_req ? argmax_token(logits)
+                int next;
+                float next_lp = 0.0f;
+                if (want_logprobs) {
+                    const SampledToken s = greedy_req
+                        ? argmax_token_report(logits)
+                        : sample_token_report(logits, wt, wp, req_top_k, rng);
+                    next = s.id;
+                    next_lp = s.logprob;
+                } else {
+                    next = greedy_req ? argmax_token(logits)
                                       : (cand_mode ? sample_candidate_result(cand, wt, wp, req_top_k, rng)
                                                    : sample_token(logits, wt, wp, req_top_k, rng));
+                }
                 const bool is_eos = model.have_specials
                         ? (next == model.id_eos || (model.id_stop >= 0 && next == model.id_stop))
                         : (next == 1 || next == 2);
@@ -700,11 +727,14 @@ int main(int argc, char** argv) {
                     break;
                 }
                 string piece = tokenizer.decode({next}, prev);
+                if (want_logprobs)
+                    lp_rows.push_back(common_json::object(
+                        {{"id", next}, {"text", piece}, {"lp", next_lp}}));
                 pending += piece;
                 string text = utf8_take(pending);
                 if (!text.empty()) {
                     full += text;
-                    emit(common_json::object({{"event", string("token")}, {"text", text}}));
+                    emit_req(common_json::object({{"event", string("token")}, {"text", text}}));
                 }
                 prev = next;
                 ++generated;
@@ -720,12 +750,12 @@ int main(int argc, char** argv) {
             if (!pending.empty()) {
                 string text = "\xEF\xBF\xBD";
                 full += text;
-                emit(common_json::object({{"event", string("token")}, {"text", text}}));
+                emit_req(common_json::object({{"event", string("token")}, {"text", text}}));
             }
             if (g_stop) finish = "stop";
             if (g_stop) cache_tokens.clear();
             else cache_tokens = all_tokens;
-            emit(common_json::object({
+            common_json done_ev = common_json::object({
                 {"event", string("done")},
                 {"text", full},
                 {"finish_reason", finish},
@@ -733,7 +763,13 @@ int main(int argc, char** argv) {
                 {"completion_tokens", generated},
                 {"cached_tokens", common},
                 {"prefill_tokens", prefill_tokens},
-            }));
+            });
+            if (want_logprobs) {
+                common_json rows = common_json::array();
+                for (auto& r : lp_rows) rows.push_back(r);
+                done_ev["logprobs"] = rows;
+            }
+            emit_req(done_ev);
         }
         return 0;
     }

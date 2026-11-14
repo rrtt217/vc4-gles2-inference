@@ -33,6 +33,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import localtools as local_tools  # noqa: E402  (deterministic tools, same directory)
 
 DEFAULT_SYSTEM = "You are a helpful assistant."
+# Carries the engine's per-token logprobs from generate() to the handler; removed
+# from `usage` before it is sent, because a client must not see it.
+LOGPROBS_KEY = "_logprobs"
 
 
 class WorkerError(RuntimeError):
@@ -154,7 +157,8 @@ class EngineWorker:
 
     def generate(self, prompt, max_tokens: int, temperature: float,
                  top_p: float, seed: int, on_token=None, penalties: dict | None = None,
-                 messages: dict | None = None, top_k: int = 0):
+                 messages: dict | None = None, top_k: int = 0, request_id: str = "",
+                 logprobs: bool = False):
         """Return (text, finish_reason, usage).  on_token(text) is optional.
 
         ``prompt`` is either the rendered prompt string, or ``""`` when
@@ -187,6 +191,8 @@ class EngineWorker:
             field("min_p"),
             col11,
             str(int(top_k)) if top_k and top_k > 0 else "",
+            request_id,
+            "1" if logprobs else "",
         ]) + "\n"
         with self.lock:
             # A crashed worker used to surface as "engine worker exited" on every
@@ -202,6 +208,7 @@ class EngineWorker:
             cached_tokens = 0
             prefill_tokens = 0
             callback_error = None
+            logprob_rows = None
             while True:
                 line = self.proc.stdout.readline()
                 if not line:
@@ -233,6 +240,8 @@ class EngineWorker:
                         raise ContextFull(message)
                     raise WorkerError(message)
                 elif kind == "done":
+                    if isinstance(ev.get("logprobs"), list):
+                        logprob_rows = ev["logprobs"]
                     text = ev.get("text", text)
                     finish = ev.get("finish_reason", "length")
                     prompt_tokens = int(ev.get("prompt_tokens", prompt_tokens))
@@ -241,13 +250,18 @@ class EngineWorker:
                     prefill_tokens = int(ev.get("prefill_tokens", prefill_tokens))
                     if callback_error is not None:
                         raise callback_error
-                    return text, finish, {
+                    usage = {
                         "prompt_tokens": prompt_tokens,
                         "completion_tokens": completion_tokens,
                         "total_tokens": prompt_tokens + completion_tokens,
                         "prompt_tokens_details": {"cached_tokens": cached_tokens},
                         "prefill_tokens": prefill_tokens,
                     }
+                    if logprob_rows is not None:
+                        # Internal: the handler turns these into the OpenAI
+                        # `logprobs` object and removes the key before sending.
+                        usage[LOGPROBS_KEY] = logprob_rows
+                    return text, finish, usage
 
     def close(self):
         if self.proc.poll() is None:
@@ -915,6 +929,12 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("only n=1 is supported")
             stops = stop_strings(body)
             penalties = sampling_penalties(body)
+            want_logprobs = bool(body.get("logprobs", False))
+            if int(body.get("top_logprobs", 0) or 0) > 0:
+                raise ValueError("top_logprobs is not implemented: logprobs=true returns "
+                                 "the chosen token's logprob only")
+            if want_logprobs and stream:
+                raise ValueError("logprobs with stream=true is not implemented yet")
         except Exception as e:
             self._error(str(e), 400)
             return
@@ -972,7 +992,8 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     text, finish, usage = self.server.worker.generate(
                         prompt, max_tokens, temperature, top_p, seed, penalties=penalties,
-                        messages=req, top_k=top_k)
+                        messages=req, top_k=top_k, request_id=cid,
+                        logprobs=want_logprobs)
                     break
                 except ContextFull as e:
                     trimmed = prune_messages(body.get("messages") or [])
@@ -993,6 +1014,7 @@ class Handler(BaseHTTPRequestHandler):
                 text, stopped = apply_stop_text(text, stops)
                 if stopped:
                     finish = "stop"
+            rows = usage.pop(LOGPROBS_KEY, None)
             calls, content = parse_tool_calls(text)
             message = {"role": "assistant", "content": content or (None if calls else "")}
             if calls:
@@ -1006,11 +1028,14 @@ class Handler(BaseHTTPRequestHandler):
                 "object": "chat.completion",
                 "created": created,
                 "model": model,
-                "choices": [{
+                "choices": [dict({
                     "index": 0,
                     "message": message,
                     "finish_reason": finish,
-                }],
+                }, **({"logprobs": {"content": [
+                    {"token": r.get("text", ""), "logprob": float(r.get("lp", 0.0))}
+                    for r in rows if isinstance(r, dict)
+                ]}} if (want_logprobs and rows is not None) else {}))],
                 "usage": usage,
             })
             return
@@ -1052,7 +1077,7 @@ class Handler(BaseHTTPRequestHandler):
                 # <tool_call> block is complete; do not stream partial JSON.
                 text, finish, usage = self.server.worker.generate(
                     prompt, max_tokens, temperature, top_p, seed, penalties=penalties,
-                    messages=req, top_k=top_k)
+                    messages=req, top_k=top_k, request_id=cid)
                 if stops:
                     text, stopped = apply_stop_text(text, stops)
                     if stopped:
@@ -1071,7 +1096,7 @@ class Handler(BaseHTTPRequestHandler):
                 text, finish, usage = self.server.worker.generate(
                     prompt, max_tokens, temperature, top_p, seed,
                     on_token=stop_filter.feed, penalties=penalties,
-                    messages=req, top_k=top_k)
+                    messages=req, top_k=top_k, request_id=cid)
                 stop_filter.finish()
                 if stop_filter.hit:
                     finish = "stop"

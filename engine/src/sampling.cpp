@@ -55,7 +55,19 @@ void apply_sampling_penalties(vector<float>& logits, const vector<int>& recent) 
     }
 }
 
-int sample_token(const vector<float>& logits, float temp, float top_p, int top_k, mt19937& rng) {
+namespace {
+
+// The distribution sample_token draws from: temperature, then a hard top-k cut
+// with renormalisation, then the top-p cut.  Split out so a caller that has to
+// *report* probabilities (the worker protocol's logprobs) reads the numbers the
+// draw actually used instead of deriving a second, subtly different copy.
+struct KeptDistribution {
+    vector<pair<float, int>> p;   // (probability, id), descending
+    float c = 0.0f;               // mass kept; the draw is uniform on [0, c)
+};
+
+KeptDistribution keep_distribution(const vector<float>& logits, float temp, float top_p,
+                                   int top_k) {
     vector<pair<float, int>> p(logits.size());
     float mx = -1e30f;
     for (size_t i = 0; i < logits.size(); ++i) mx = max(mx, logits[i] / temp);
@@ -84,10 +96,51 @@ int sample_token(const vector<float>& logits, float temp, float top_p, int top_k
     }
     float c = 0; int cut = 0;
     for (; cut < (int)p.size(); ++cut) { c += p[cut].first; if (c >= top_p) { ++cut; break; } }
-    float r = uniform_real_distribution<float>(0, 1)(rng) * c;
+    p.resize(cut);
+    return KeptDistribution{std::move(p), c};
+}
+
+}  // namespace
+
+int sample_token(const vector<float>& logits, float temp, float top_p, int top_k, mt19937& rng) {
+    const KeptDistribution d = keep_distribution(logits, temp, top_p, top_k);
+    const float r = uniform_real_distribution<float>(0, 1)(rng) * d.c;
     float acc = 0;
-    for (int i = 0; i < cut; ++i) { acc += p[i].first; if (r <= acc) return p[i].second; }
-    return p[cut - 1].second;
+    for (const auto& x : d.p) { acc += x.first; if (r <= acc) return x.second; }
+    return d.p.back().second;
+}
+
+SampledToken sample_token_report(const vector<float>& logits, float temp, float top_p,
+                                 int top_k, mt19937& rng) {
+    const KeptDistribution d = keep_distribution(logits, temp, top_p, top_k);
+    const float r = uniform_real_distribution<float>(0, 1)(rng) * d.c;
+    float acc = 0;
+    int id = d.p.back().second;
+    float prob = d.p.back().first;
+    for (const auto& x : d.p) {
+        acc += x.first;
+        if (r <= acc) { id = x.second; prob = x.first; break; }
+    }
+    // Probability *within the kept set*: that is the distribution the token was
+    // drawn from, and renormalising by c keeps the numbers a client sees
+    // comparable across top-p settings.
+    SampledToken out;
+    out.id = id;
+    out.logprob = logf(d.c > 0.0f ? prob / d.c : prob);
+    return out;
+}
+
+SampledToken argmax_token_report(const vector<float>& logits) {
+    // Greedy ignores temperature and the truncation, so the honest answer is the
+    // model's own distribution.
+    float mx = logits[0];
+    for (float v : logits) mx = max(mx, v);
+    double sum = 0;
+    for (float v : logits) sum += exp((double)v - mx);
+    SampledToken out;
+    out.id = argmax_token(logits);
+    out.logprob = (float)(((double)logits[out.id] - mx) - log(sum));
+    return out;
 }
 
 int argmax_token(const vector<float>& logits) {

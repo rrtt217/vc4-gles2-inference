@@ -124,7 +124,7 @@ class TinyContextWorker:
         pass
 
     def generate(self, prompt, max_tokens, temperature, top_p, seed, on_token=None, penalties=None,
-                 messages=None, top_k=0):
+                 messages=None, top_k=0, request_id="", logprobs=False):
         # The server sends messages and no prompt text, so the marker has to be
         # looked for in whatever actually travelled.
         sent = prompt if messages is None else json.dumps(messages, sort_keys=True)
@@ -155,19 +155,25 @@ class StubWorker:
             raise srv.WorkerError("engine worker exited (auto-restart disabled or exhausted)")
 
     def generate(self, prompt, max_tokens, temperature, top_p, seed, on_token=None, penalties=None,
-                 messages=None, top_k=0):
+                 messages=None, top_k=0, request_id="", logprobs=False):
         self.ensure_alive()
         self.last_messages = messages
         self.calls += 1
         self.last_penalties = penalties
         self.last_top_k = top_k
         self.last_prompt = prompt
+        self.last_request_id = request_id
+        self.last_logprobs_flag = logprobs
         self.total_tokens += 1
         if on_token:
             on_token("STUB")
-        return "STUB", "stop", {"prompt_tokens": 1, "completion_tokens": 1,
-                                "total_tokens": 2, "prompt_tokens_details": {"cached_tokens": 0},
-                                "prefill_tokens": 1}
+        usage = {"prompt_tokens": 1, "completion_tokens": 1,
+                 "total_tokens": 2, "prompt_tokens_details": {"cached_tokens": 0},
+                 "prefill_tokens": 1}
+        if logprobs:
+            usage[srv.LOGPROBS_KEY] = [{"id": 5, "text": "ST", "lp": -0.25},
+                                       {"id": 6, "text": "UB", "lp": -1.5}]
+        return "STUB", "stop", usage
 
     def close(self) -> None:
         pass
@@ -373,6 +379,30 @@ custom = [{"type": "function", "function": {"name": "my_tool", "description": "x
            "parameters": {"type": "object", "properties": {}}}}]
 p_custom = srv.build_messages({"messages": [{"role": "user", "content": "hi"}], "tools": custom})
 check("unknown tools pass through", "my_tool" in str(p_custom))
+
+print("== logprobs ==")
+code, resp = http("POST", "/v1/chat/completions", {
+    "messages": [{"role": "user", "content": "hi"}], "logprobs": True, "max_tokens": 4})
+lp = (resp.get("choices") or [{}])[0]
+check("logprobs: true asks the engine", worker.last_logprobs_flag is True)
+check("logprobs reach the response", isinstance(lp.get("logprobs"), dict)
+      and [c["logprob"] for c in lp["logprobs"]["content"]] == [-0.25, -1.5], str(lp)[:200])
+check("the internal key does not leak", srv.LOGPROBS_KEY not in (resp.get("usage") or {}),
+      str(resp.get("usage"))[:200])
+check("the request id travels to the engine", bool(worker.last_request_id), str(worker.last_request_id))
+
+code, resp = http("POST", "/v1/chat/completions", {
+    "messages": [{"role": "user", "content": "hi"}], "logprobs": True, "top_logprobs": 3})
+check("top_logprobs is refused for now", code == 400, str(code))
+check("top_logprobs refusal says so", "top_logprobs" in str(resp), str(resp)[:150])
+
+code, resp = http("POST", "/v1/chat/completions", {
+    "messages": [{"role": "user", "content": "hi"}], "logprobs": True, "stream": True})
+check("streamed logprobs is refused for now", code == 400, str(code))
+
+code, resp = http("POST", "/v1/chat/completions", {
+    "messages": [{"role": "user", "content": "hi"}], "max_tokens": 4})
+check("no logprobs unless asked", "logprobs" not in (resp.get("choices") or [{}])[0], str(resp)[:150])
 
 print("== request stats ==")
 stats_path = str(Path(tempfile.mkdtemp()) / "stats.jsonl")

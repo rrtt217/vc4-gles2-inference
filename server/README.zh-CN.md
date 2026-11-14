@@ -55,6 +55,17 @@ system 轮仍是服务器的策略：Chatbox 的运行时元数据会被剥掉�
 TinyBrainBot 还需要 `--no-gpu-layer`：它在 VC4 上的整层 GPU 路径目前不正确
 （见 docs/performance.md 的 item 12），可部署的是 CPU 路径。
 
+## logprobs
+
+`logprobs: true` 返回 OpenAI 形状的 `logprobs.content`：每个生成 token 一条
+`{token, logprob}`，`logprob` 是在**采样器实际使用的分布**里测的（温度、top-k、top-p
+过滤后按保留集重归一化）。引擎用的是它采样时的同一份 logits，所以**要 logprob 不会改变
+文本**，只增加一点计算；这类请求会绕过候选读回路径（`--top-k-candidates`），因为那条路径
+不带全词表。
+
+尚未实现、并且会明确拒绝而不是静默忽略：`top_logprobs`（备选 token 需要把候选 id 解回
+文本）和 `stream: true` 时的 `logprobs`。
+
 ## 接口
 
 ```text
