@@ -6078,3 +6078,23 @@ not because the format is wrong there but because the board cannot reliably hold
 the model plus everything else, and a run that half-loads is the worst outcome.
 Verifying the hybrid on the 4-bit view needs a board with the server stack
 stopped; until then the honest statement is "not verified", not "does not work".
+
+### The ratio, measured in one session
+
+Same binary (`engine_mm3_pi.mad`), same session, interleaved, 16 greedy tokens:
+
+| pair | q8 | q4 (all four matvecs 4-bit) |
+|---|---:|---:|
+| 1 | 190.4 | 258.4 |
+| 2 | 186.8 | 248.5 |
+| 3 | 206.4 | 264.6 |
+
+**1.30-1.36x** (best pair 186.8 / 248.5; the clean-board runs give 190 / 247.2
+= 1.30x).  The spread is the board's load average, which was 5.97 during this
+run against 0.2 for the clean ones -- every row here is inflated and the q4 row
+more than the q8 row, so quote the clean numbers and treat this as the
+confirmation that the ratio is ~1.3x, not as the number itself.
+
+For the record, the goal this session set out from was 1.45x (276 against 190),
+and the path was: nibble reversal at upload (268.5), w2 on the 4-bit view
+(266), qkv/wo (252.9), scalar accumulate instead of `dot()` (247.2).
