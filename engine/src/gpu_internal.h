@@ -12,6 +12,8 @@
 
 #include "gpu.h"
 
+#include <string>
+
 extern int g_up_tex;             // count, for UPLOAD_TIME
 extern double g_up_tex_ms;
 
@@ -20,6 +22,13 @@ extern GLuint g_cur_fbo;
 extern GLuint g_cur_prog;
 
 void gl_state_forget_bindings();
+
+// The program layer (gpu_prog.cpp) shares three things with the kernel builders:
+// the key of the program being built (diagnostics name it), whether the q4 nibble
+// unpack should be emitted inline, and whether the driver accepted ESSL 3.00.
+extern std::string g_prog_key;
+extern bool g_q4_shift_ok;
+bool q4_inline(const char* name);
 
 // FFN_FLUSH / FFN_SYNC are measurement hooks: flushing the command stream after
 // each FFN pass makes a per-pass timing meaningful, and FFN_SYNC adds the wait.
