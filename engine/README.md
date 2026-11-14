@@ -148,6 +148,16 @@ stdin is a pipe (`echo "hi" | engine_mm3 --chat`) the editor is bypassed and the
 old `getline` behaviour is used, so scripts and the worker protocol are
 unaffected.
 
+`/model PATH` loads another container without rebuilding the GL context, which
+is the expensive part: on the Pi Zero the context costs 4.23 s and the 13
+program links 1.89 s per process, against 6.12 s to read a container and 2.99 s
+to upload it (`docs/performance.md`, "Where the first token goes").  Weights,
+tokenizer, chat template and the session's targets are replaced; the compiled
+programs stay.  The conversation is dropped, because the previous model's
+history and template mean nothing to the new one.  Changing precision (q8 <-> q4)
+is refused: it needs a restart, and that restriction is the honest state of the
+code, not a policy choice.
+
 The REPL **keeps the conversation**: every turn re-renders the whole exchange
 through the container's template, so the model sees the same prompt shape it was
 trained on, system turn included, and `/clear` is the way to start over.  Only

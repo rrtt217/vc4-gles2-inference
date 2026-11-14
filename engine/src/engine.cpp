@@ -390,7 +390,6 @@ int main(int argc, char** argv) {
         return id == 1 || id == 2;
     };
 
-    gpu.set_rms_eps(model.rms_eps, model.rms_eps_stated);
     if (getenv("SHADER_TIME"))
         cerr << "rmsnorm eps: " << model.rms_eps << " (container"
              << (model.rms_eps == 1e-5f ? "" : "-stated") << ")\n";
@@ -401,6 +400,12 @@ int main(int argc, char** argv) {
     // swap produced empty replies until this was shared).
     const auto up_t0 = Clock::now();
     auto upload_weights = [&]() {
+        // The rmsnorm epsilon is model state that lives in the GPU (and, per
+        // AGENTS.md, changing it changes the emitted shader text).  It used to
+        // sit one line above this block, so a model swap kept the previous
+        // model's value: invisible when reloading the same file, wrong for any
+        // other container.
+        gpu.set_rms_eps(model.rms_eps, model.rms_eps_stated);
     for (auto& m : model.qkv) gpu.upload(m);
     for (auto& m : model.wo) gpu.upload(m);
     for (auto& m : model.conv_in_b) if (m.rows) gpu.upload(m);
@@ -1311,8 +1316,46 @@ int main(int argc, char** argv) {
                     cout << "[conversation cleared]\n";
                     continue;
                 }
+                if (line.rfind("/model ", 0) == 0) {
+                    const string path = line.substr(7);
+                    const auto q4_of = [](const Model& m) {
+                        for (const Mat& w : m.qkv) if (w.rows && w.type == WeightType::INT4) return true;
+                        return false;
+                    };
+                    const bool was_q4 = q4_of(model);
+                    const auto t_swap = Clock::now();
+                    gpu.release_scene();
+                    model.reset();
+                    if (!model.load(path)) { cerr << "no model loaded; leaving\n"; return 1; }
+                    if (q4_of(model) != was_q4) {
+                        cerr << "/model: changing quantisation needs a restart\n";
+                        return 1;
+                    }
+                    // The startup path refuses a container that does not
+                    // advertise chat support while --chat is in effect; a swap
+                    // must apply the same rule instead of quietly running it
+                    // (stories15M's capabilities are 0, and it happily answered
+                    // through the built-in [INST] wrapper before this guard).
+                    if (model.have_capabilities && chat && !(model.capabilities & 1)) {
+                        cerr << "/model: this checkpoint does not advertise chat support "
+                                "(capabilities 0x" << std::hex << model.capabilities << std::dec
+                             << "); leaving\n";
+                        return 2;
+                    }
+                    if (!setup_from_model()) return 2;
+                    upload_weights();
+                    session.reset();
+                    history.clear();
+                    kv_tokens.clear();
+                    first = true;
+                    cout << "[model] " << (model.template_name.empty() ? string("(kind 0)") : model.template_name)
+                         << "  chat_template " << (chat_tmpl ? "yes" : "no")
+                         << "  " << (long) elapsed_ms(t_swap, Clock::now()) << " ms\n" << flush;
+                    continue;
+                }
                 if (line == "/help") {
                     cout << "/clear  forget the conversation so far\n"
+                            "/model PATH  load another container, keeping the GPU context\n"
                             "/exit   leave\n"
                             "/help   this list\n"
                             "anything else is sent to the model; arrows edit, Up/Down recall,\n"

@@ -148,6 +148,32 @@ TinyBrainBot cosine evidence.
 A native ARMv6 build on a Pi Zero takes about 8–10 minutes; never run two
 builds concurrently.  Prefer the VLAB cross-build (see the VLAB override).
 
+### Switching models without restarting the engine
+
+`--chat` without `--prompt` is a REPL, and `/model PATH` replaces the container
+while keeping the GL context and its compiled programs (the Pi Zero pays 4.23 s
+of context and 1.89 s of program links per process, against 6.12 s of container
+read and 2.99 s of upload, so this is the one expensive part that survives).
+What it replaces: weights, tokenizer, chat template, session targets, the
+conversation.  What it refuses: a container that does not advertise chat support
+when `--chat` is in effect (same policy as startup), and a precision change
+(q8 <-> q4), which still needs a restart -- that limit is real, not a policy.
+
+Two invariants it depends on, both paid for:
+
+- **A program key is not a program text.**  `GPU::x_prog(key, src)` caches by
+  key, and the builders name programs by kernel, not by shape: the same key
+  yields different GLSL for another model (head width, qk-norm presence,
+  activation format).  The cache therefore validates the shader *hash* on every
+  hit (`prog_key_hash_`); without that, the second model silently ran the
+  first model's attention kernels.
+- **Everything the GPU owns must be released and reset**, not left to the
+  context teardown: `GPU::release_scene()` deletes the textures/FBOs,
+  `reset_targets()` zeroes the scratch targets (including the lazily filled
+  `target_for()` map), the per-layer handle vectors and the activation caches
+  are cleared, and `scripts/check_target_reset.sh` fails the gate if a `Target`
+  member is ever added without being cleared.
+
 ## The container is the only format
 
 Since `fcc4095` the engine reads **only** MMCF v2.  `Model::load()` refuses
