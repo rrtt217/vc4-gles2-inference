@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 import base64
+import functools
 import json
 import os
 import select
@@ -73,6 +74,7 @@ class EngineWorker:
         env["GPU_LAYER"] = "1" if gpu_layer else "0"
         if kv_pack:
             env["KV_PACK"] = str(kv_pack)
+        self._log_path = log_path
         self.log = open(log_path, "ab", buffering=0)
         # The container names its chat template (kind 3 TinyBrainBot, 2
         # MiniMind3, 1 chatml, 0 plain) and the worker reports the effective one
@@ -132,6 +134,24 @@ class EngineWorker:
         return False
 
     @property
+    def stderr_tail(self, lines: int = 8) -> str:
+        """The engine's last log lines: what a 500 needs to be actionable.
+
+        The worker writes its diagnostics to a file, and "engine worker exited"
+        on its own has cost real time more than once -- the line that says *why*
+        (a CMA allocation failure, a GL error, an OOM) is in there.
+        """
+        try:
+            with open(self._log_path, "rb") as f:
+                f.seek(0, os.SEEK_END)
+                size = f.tell()
+                f.seek(max(0, size - 8192))
+                text = f.read().decode("utf-8", "replace")
+            tail = [l for l in text.strip().splitlines() if l.strip()]
+            return "\n".join(tail[-lines:])
+        except Exception:
+            return ""
+
     def alive(self) -> bool:
         return self.proc.poll() is None
 
@@ -771,12 +791,58 @@ def apply_stop_text(text: str, stops: list[str]) -> tuple[str, bool]:
     return text[:cut], True
 
 
+def _gauged(method):
+    """Count POSTs in flight and remember how long recent ones took.
+
+    `est_wait_ms` for a queued request is what people actually want when the
+    engine is busy: the worker is single-flight, so N requests ahead of you cost
+    N recent requests.  A real queue depth would need the engine's own lock, and
+    this number is honest about being an estimate based on the recent past.
+    """
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        srv = self.server
+        lock = getattr(srv, "stats_lock", None)
+        if lock is None:
+            lock = srv.stats_lock = threading.Lock()
+        if not hasattr(srv, "durations"):
+            srv.durations = []
+        with lock:
+            srv.inflight = int(getattr(srv, "inflight", 0)) + 1
+        t0 = time.time()
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            with lock:
+                srv.inflight = max(0, int(getattr(srv, "inflight", 0)) - 1)
+                srv.durations.append((time.time() - t0) * 1000.0)
+                if len(srv.durations) > 64:
+                    del srv.durations[:-64]
+    return wrapper
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "MiniMindOpenAI/0.1"
 
     def log_message(self, fmt, *args):
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
+
+    def _access_log(self, cid: str, model: str, finish: str, usage: dict, stream: bool, **extra):
+        """One line per finished request with its id.
+
+        The base handler's line has only the path and the status, so a support
+        question ("my request abc123 returned what?") had no way to find the
+        request.  The id, the model, the finish reason and the token counts go
+        here, and into the stats file when --stats-file is set.
+        """
+        rec = getattr(self, "_rec", None) or {}
+        wall = time.time() - rec.get("ts", time.time())
+        print(f"[req] {cid} model={model} stream={int(bool(stream))} finish={finish} "
+              f"prompt={usage.get('prompt_tokens')} completion={usage.get('completion_tokens')} "
+              f"wall={wall:.2f}s", flush=True)
+        self._stats(cid=cid, model=model, stream=bool(stream), finish=finish,
+                    wall_s=round(wall, 3), usage=usage, **extra)
 
     def _stats(self, **fields):
         """Append one JSON line per request when --stats-file is set."""
@@ -824,6 +890,38 @@ class Handler(BaseHTTPRequestHandler):
             srv.active_path = chosen["path"]
             srv.active_id = chosen["id"]
             print(f"[model] {chosen['id']} resident, load {ms:.0f} ms", flush=True)
+
+    def _est_wait_ms(self) -> int:
+        """Rough wait for a request queued behind the ones already running.
+
+        The worker handles one request at a time, so N requests in flight ahead of
+        you cost N recent requests.  An estimate from the recent past, and it is
+        named as one rather than dressed up as a measurement.
+        """
+        import statistics
+        srv = self.server
+        ahead = max(0, int(getattr(srv, "inflight", 0)) - 1)
+        recent = list(getattr(srv, "durations", []))[-8:]
+        if not ahead:
+            return 0            # nothing queued in front of this request
+        if not recent:
+            return -1           # queued, but no completed request to extrapolate
+        return int(statistics.median(recent) * ahead)
+
+    def _last_request_ms(self) -> int:
+        recent = list(getattr(self.server, "durations", []))[-1:]
+        return int(recent[0]) if recent else 0
+
+    def _worker_error(self, e, status: int = 500):
+        """A 500 that carries the engine's stderr tail: the line that says why."""
+        msg = str(e)
+        try:
+            tail = self.server.worker.stderr_tail()
+        except Exception:
+            tail = ""
+        if tail:
+            msg += "\n--- engine stderr tail ---\n" + tail
+        self._error(msg, status, "server_error")
 
     def _send_json(self, obj, status=200):
         data = json.dumps(obj, ensure_ascii=False).encode("utf-8")
@@ -915,6 +1013,12 @@ class Handler(BaseHTTPRequestHandler):
                 "template": getattr(worker, "template", "chatml"),
                 "models": [m["id"] for m in (getattr(self.server, "models", None) or [])],
                 "resident": getattr(self.server, "active_id", None),
+                # Busy means the worker is single-flight; what a client wants to
+                # know is the queue in front of it, not a percentage.
+                "busy": int(getattr(self.server, "inflight", 0)) > 0,
+                "inflight": int(getattr(self.server, "inflight", 0)),
+                "est_wait_ms": self._est_wait_ms(),
+                "last_request_ms": self._last_request_ms(),
             }, 200 if alive else 503)
         elif path == "/v1/models":
             now = int(time.time())
@@ -950,6 +1054,7 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._error("not found", 404, "not_found")
 
+    @_gauged
     def do_POST(self):
         path = self.path.split("?", 1)[0].rstrip("/")
         if path in {"/v1/math", "/math", "/v1/tool", "/tool"}:
@@ -1079,7 +1184,7 @@ class Handler(BaseHTTPRequestHandler):
                     body["messages"] = trimmed
                     req = build_messages(body)
                 except WorkerError as e:
-                    self._error(str(e), 500, "server_error")
+                    self._worker_error(e)
                     return
             else:
                 self._error("prompt still exceeds the context window after trimming history",
@@ -1095,9 +1200,7 @@ class Handler(BaseHTTPRequestHandler):
             if calls:
                 message["tool_calls"] = calls
                 finish = "tool_calls"
-            self._stats(wall_s=round(time.time() - getattr(self, "_rec", {"ts": time.time()})["ts"], 3),
-                        usage=usage, finish=finish, stream=False, status=200,
-                        tools=len(body.get("tools") or []))
+            self._access_log(cid, model, finish, usage, stream=False, status=200, tools=len(body.get("tools") or []))
             self._send_json({
                 "id": cid,
                 "object": "chat.completion",
@@ -1186,9 +1289,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(("%X\r\n" % len(done)).encode("ascii") + done + b"\r\n")
             self.wfile.write(b"0\r\n\r\n")
             self.wfile.flush()
-            self._stats(wall_s=round(time.time() - getattr(self, "_rec", {"ts": time.time()})["ts"], 3),
-                        usage=usage, finish=finish, stream=True, status=200,
-                        tools=len(body.get("tools") or []))
+            self._access_log(cid, model, finish, usage, stream=True, status=200, tools=len(body.get("tools") or []))
         except (BrokenPipeError, ConnectionResetError):
             pass
         except WorkerError:
@@ -1284,6 +1385,8 @@ def main():
     httpd.seq = int(a.seq)
     httpd.stats_file = a.stats_file
     httpd.stats_lock = threading.Lock()
+    httpd.inflight = 0
+    httpd.durations = []
 
     if a.warmup:
         # The first generation after a process start pays shader compilation and

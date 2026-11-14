@@ -154,6 +154,10 @@ class StubWorker:
         if not self.alive:
             raise srv.WorkerError("engine worker exited (auto-restart disabled or exhausted)")
 
+    def stderr_tail(self, lines: int = 8) -> str:
+        # What a real 500 carries: the engine's last lines, not just "exited".
+        return "boom: CmaFree 0 kB, allocation failed"
+
     def generate(self, prompt, max_tokens, temperature, top_p, seed, on_token=None, penalties=None,
                  messages=None, top_k=0, request_id="", logprobs=False):
         self.ensure_alive()
@@ -508,6 +512,22 @@ check("an unknown model never reaches the engine", loads == ["/tmp/second.mmcf"]
 del httpd.models
 del worker.load
 httpd.active_path = httpd.active_id = None
+
+print("== busy metrics and a 500 that says why ==")
+code, h = http("GET", "/health")
+fields = ("busy", "inflight", "est_wait_ms", "last_request_ms")
+check("/health reports the queue", code == 200 and all(k in h for k in fields),
+      str({k: h.get(k) for k in fields}))
+check("/health last_request_ms is a number", isinstance(h.get("last_request_ms"), int),
+      repr(h.get("last_request_ms")))
+httpd.worker.alive = False
+code, resp = http("POST", "/v1/chat/completions",
+                  {"model": "x", "messages": [{"role": "user", "content": "hi"}]})
+msg = str((resp.get("error") or {}).get("message", "")) if isinstance(resp, dict) else ""
+check("a dead worker is a 500", code == 500, str(code))
+check("the 500 carries the engine's stderr tail",
+      "engine stderr tail" in msg and "allocation failed" in msg, msg[:160])
+httpd.worker.alive = True
 
 worker.template = "chatml"
 httpd.shutdown()
