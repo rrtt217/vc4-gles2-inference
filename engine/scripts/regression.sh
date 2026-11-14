@@ -25,6 +25,11 @@
 #                      GPU::reset_targets().  A Target that survives a scene
 #                      release is *reused* with a deleted name (silent garbage),
 #                      so the ledger has to stay complete.  No GPU, no model.
+#   0d. q16 decode   - every q16 decode in the emitted GLSL folds the negative
+#                      rail with one of the two documented thresholds (32767.5
+#                      and 32768.0, equivalent because a decoded value is always
+#                      a multiple of 255).  Ten spellings share the rule; this
+#                      catches a new one or a dropped fold.  No GPU, no model.
 #   1. determinism   - the same binary, run twice, prints the same text.  A
 #                      failure here is a real bug (uninitialised state, a race,
 #                      a stale cache), never "noise".
@@ -180,6 +185,11 @@ esac
 
 # A Target that outlives a scene release is reused with a deleted name: the
 # create sites in gpu.cpp are guarded on "tex == 0", and nothing else notices.
+sh scripts/check_q16_decode.sh || {
+    echo "q16 decode FAIL: see scripts/check_q16_decode.sh" >&2
+    exit 1
+}
+
 sh scripts/check_target_reset.sh || {
     echo "target reset FAIL: run scripts/check_target_reset.sh for the list" >&2
     exit 1

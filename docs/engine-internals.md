@@ -217,6 +217,37 @@ before the KV cache and attention targets are allocated.  On VC4 that limit is
 clamps, instead of dying later with `FBO incomplete`.  A context longer than
 the limit would need a tiled KV cache, which is not implemented.
 
+## The q16 decode rule, and its two thresholds
+
+A q16 value is two bytes (`hi`, `lo`); the decode is
+
+```glsl
+u = hi * 65280.0 + lo * 255.0;      // 0 .. 65535
+if (u >= T) u -= 65536.0;           // fold the negative rail
+```
+
+The rule lives in `engine/src/xformat.cpp`, but the *text* is repeated by every
+kernel that reads q16 by hand -- the `x_i16` family, the q4 kernels' `dA`/`dB`,
+the KV decoders in `shaders_attn.cpp`, the pair readers -- ten spellings across
+three files, with two thresholds:
+
+| spelling | where | threshold |
+|---|---|---|
+| fast float, `if` form | `xformat.cpp` (raw, pair, quad) | `32767.5` |
+| fast float, `if` form | `xformat.cpp` pair-of-positions, `shaders_attn.cpp` `dec16` | `32768.0` |
+| ternary form | `shaders.cpp` `dA`/`dB`, `dr` | `32768.0` |
+
+**Both thresholds are correct**, and that is why the text is not unified: a
+decoded `u` is always a multiple of 255 (the bytes hold 1/255 steps), so no value
+can land in `[32767.5, 32768)`.  `32767.5` is the documented rail test (it
+classifies the VC4 rail exactly); `32768.0` is the older spelling and behaves
+identically.  Changing the text would change the numerics by the letter of
+"the emitted text *is* the numerics", so the rule is enforced instead:
+`engine/scripts/check_q16_decode.sh` (gate step 0d) requires every decode in
+`--dump-shaders=raw` to carry one fold per decode and one of the two thresholds.
+A third spelling, or a fold dropped in an edit, fails there instead of on the
+board as a sign error.
+
 ## FFN policy
 
 - VC4, split W1/W3 models: **GPU FFN** (W1/W3 -> SwiGLU -> W2, only W2 read back).
