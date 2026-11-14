@@ -1172,16 +1172,16 @@ string matvec_i4_pair_swiglu_4x4(int rows, int cols, XFormat xf, bool inl, int h
     const int texw = cols / 4;              // one 4-bit texel = four weights
     const int groups = (cols + 31) / 32;
     const string ROWS = to_string(rows), GROUPS = to_string(groups), TEXW = to_string(texw);
-    auto tap = [&](const char* W, const string& col, const char* row) {
-        return string("texture2D(") + W + ",vec2((float(" + col + ")+0.5)/float(" + TEXW +
-               "),(" + row + "+0.5)/float(" + ROWS + ")))";
-    };
-    const string I0 = "2*(g*4+q)", I1 = "2*(g*4+q)+1";
     return q4_head(xf, inl) + HD +
         "uniform sampler2D W1,W2,P1,P2,X;uniform float ps1,ps2;" + kQzSl +
         "void main(){int t=int(gl_FragCoord.x);int r0=2*t;"
         "int r1=min(r0+1," + to_string(rows - 1) + ");"
         "float u0=float(r0),u1=float(r1);"
+        // Precomputed once: the two row coordinates and the reciprocal of the
+        // texel width.  Emitting them per tap cost an integer->float conversion
+        // and two multiplies per tap, eight taps per 32-weight group.
+        "float v0r=(u0+0.5)/float(" + ROWS + "),v1r=(u1+0.5)/float(" + ROWS + ");"
+        "float itw=1.0/float(" + TEXW + ");"
         "float s10=0.0,s20=0.0,s11=0.0,s21=0.0;"
         "for(int g=0;g<" + GROUPS + ";g++){"
         "vec4 q1=texture2D(P1,vec2((float(g)+0.5)/float(" + GROUPS + "),(u0+0.5)/float(" + ROWS + ")));"
@@ -1195,10 +1195,11 @@ string matvec_i4_pair_swiglu_4x4(int rows, int cols, XFormat xf, bool inl, int h
         "float xsum=0.0,d1=0.0,d2=0.0,e1=0.0,e2=0.0;"
         "for(int q=0;q<4;q++){int c=g*32+q*8;" +
         q4_act(xf, cols, inl) + q4_xsum() +
-        "vec4 wt0=" + tap("W1", I0, "u0") + ",wt1=" + tap("W1", I1, "u0") + ";"
-        "vec4 wt2=" + tap("W2", I0, "u0") + ",wt3=" + tap("W2", I1, "u0") + ";"
-        "vec4 wt4=" + tap("W1", I0, "u1") + ",wt5=" + tap("W1", I1, "u1") + ";"
-        "vec4 wt6=" + tap("W2", I0, "u1") + ",wt7=" + tap("W2", I1, "u1") + ";"
+        "float c0=(float(g*8+q*2)+0.5)*itw,c1=c0+itw;"
+        "vec4 wt0=texture2D(W1,vec2(c0,v0r)),wt1=texture2D(W1,vec2(c1,v0r));"
+        "vec4 wt2=texture2D(W2,vec2(c0,v0r)),wt3=texture2D(W2,vec2(c1,v0r));"
+        "vec4 wt4=texture2D(W1,vec2(c0,v1r)),wt5=texture2D(W1,vec2(c1,v1r));"
+        "vec4 wt6=texture2D(W2,vec2(c0,v1r)),wt7=texture2D(W2,vec2(c1,v1r));"
         "d1+=dot(wt0,xa.wzyx)+dot(wt1,xb.wzyx);"
         "d2+=dot(wt2,xa.wzyx)+dot(wt3,xb.wzyx);"
         "e1+=dot(wt4,xa.wzyx)+dot(wt5,xb.wzyx);"
