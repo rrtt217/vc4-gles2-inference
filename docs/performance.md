@@ -5758,3 +5758,55 @@ answered with repeated syllables ("德德德德..."); the REPL already cleared i
 
 With all of that, a quantisation change inside one process is bit-identical too
 (q8 -> q4 -> i16), which is why the `/model` command no longer refuses one.
+
+## 2026-11-14 — RGBA4 on VC4, measured: it works, and the 2026-11-04 fact was real
+
+The format question was open because the evidence was indirect: a driver table
+entry (`vc4_formats.c`), a probe that never checked `glGetError`, and an
+`internalformat` spelling (`GL_RGBA4`) that is ES3-only while vc4 reports
+**GLES 2.0**.  `engine/probes/rgba4444_probe.cpp` settles it on the board.  It is
+standalone — EGL + GLES2 and nothing else, no `engine/src` object — so it builds
+and runs while `gpu.cpp` is being split.
+
+Pi Zero, `VC4 V3D 2.1`, `OpenGL ES 2.0 Mesa 26.2.2-1~bpo13+0~rpt1`, GLSL ES
+1.0.16, `EXT_texture_integer` absent, `EXT_draw_buffers` **present**:
+
+| test | result |
+|---|---|
+| B upload, ES2 spelling (`GL_RGBA` + `UNSIGNED_SHORT_4_4_4_4`) | accepted, no GL error, sampled `17n` at 16/16 texels |
+| B upload, ES3 spelling (`internalformat GL_RGBA4`, what `q4fmt_probe` used) | also accepted — Mesa is lenient here, so the old probe was not silently black |
+| C component order | `R` = bits 12-15, `G` = 8-11, `B` = 4-7, `A` = 0-3 — **identical on VC4 and Xe** |
+| D exactness | `round(c*15) == n` at 16/16; the residual is **-1** (2^-20) for n = 9..14 and 0 elsewhere, exactly the 2026-11-04 claim |
+| E the real shape: 1216 rows x 192 texels (466 944 B, one q4 matrix) | accepted; **144/144 sampled nibbles match the packed bytes** at rows 0, 1, 5, 608, 1214, 1215 |
+| F `glRenderbufferStorage(GL_RGBA4)` | **accepted, FBO complete** |
+
+Three conclusions, the first two of which correct what this file said hours
+earlier:
+
+1. **The 2026-11-13 "Not renderable" bullet is wrong.**  It was inferred from
+   `vc4_formats.c`'s render-target column (`RT_NO` for `B4G4R4A4_UNORM`), and
+   the board contradicts it: an `GL_RGBA4` renderbuffer is accepted and its FBO
+   is complete.  Whatever Mesa does underneath, `progbinary_probe.cpp:135` is
+   not the failure the inference predicted.  This is the case for measuring a
+   capability instead of reading the driver table for it.
+2. **The 2026-11-13 "Tiled only" warning is untested, not confirmed.**  It comes
+   from `get_resource_texture_format()` returning `~0` for a non-RGBA8888
+   *linear* resource.  `glTexImage2D` textures are tiled and the 1216-row
+   matrix works, so the warning only binds a path that would pass
+   `PIPE_BIND_LINEAR` — nothing in the engine does today.
+3. **The design note survives.**  The same bytes bound as `GL_RGBA4` at twice
+   the width are four weights per texel, in reverse column order (C above, on
+   both machines), so a kernel needs one `.wzyx` and no repack.  What remains
+   open is cost, not capability: two fetches per eight weights against the
+   current eight floors per eight weights.
+
+One cross-machine detail worth keeping: the residual in D is **0 on Xe and -1 on
+VC4**.  A decode that multiplies by 15 and does not round is therefore exact on
+the laptop and one ULP low on the board — the exact shape of a pin that moves
+only when someone runs it on the target.
+
+```
+# On the board (it has gcc and the Mesa headers, so no cross build is needed):
+g++ -O2 -std=c++17 -o rgba4444_probe rgba4444_probe.cpp -lEGL -lGLESv2
+./rgba4444_probe
+```

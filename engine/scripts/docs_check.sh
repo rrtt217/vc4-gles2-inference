@@ -34,7 +34,7 @@ bad() { printf 'FAIL  %s\n' "$*"; fail=1; }
 DOCS="$ROOT/AGENTS.md $ROOT/README.md $ROOT/README.zh-CN.md \
 $ROOT/engine/README.md $ROOT/engine/README.zh-CN.md \
 $ROOT/server/README.md $ROOT/server/README.zh-CN.md \
-$ROOT/models/README.md $(ls "$ROOT"/docs/*.md 2>/dev/null)"
+$ROOT/models/README.md $ROOT/engine/probes/README.md $(ls "$ROOT"/docs/*.md 2>/dev/null)"
 
 # 1. every switch the engine reads is described in test-hooks.md
 grep -rho 'getenv("[A-Z_0-9]*")' src | sed 's/getenv("//;s/")//' | sort -u > /tmp/docs_check_env.$$

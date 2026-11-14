@@ -71,7 +71,7 @@ static GLuint compile(GLenum t, const char* s) {
     return q;
 }
 
-static GLuint program(const char* fs) {
+static GLuint program(const char* name, const char* fs) {
     const char* vs = "attribute vec2 p; void main(){gl_Position=vec4(p,0.,1.);}";
     GLuint p = glCreateProgram();
     glAttachShader(p, compile(GL_VERTEX_SHADER, vs));
@@ -82,8 +82,10 @@ static GLuint program(const char* fs) {
     if (!ok) {
         char log[4096];
         glGetProgramInfoLog(p, sizeof(log), nullptr, log);
-        printf("LINK FAIL: %s\n", log);
+        printf("LINK FAIL %s: %s\n", name, log);
+        return 0;
     }
+    printf("PROGRAM %s: linked\n", name);
     return p;
 }
 
@@ -102,8 +104,9 @@ static const char* FS_SAMPLE =
     "precision highp float;uniform sampler2D W;uniform float w;"
     "void main(){float i=floor(gl_FragCoord.x);"
     "vec4 c=texture2D(W,vec2((i+0.5)/w,0.5));"
-    "gl_FragColor=vec4(floor(c*15.0+0.5)/15.0,"
-    "clamp(128.0+((c.r*15.0)-floor(c.r*15.0+0.5))*1048576.0,0.0,255.0)/255.0,"
+    "float n15=c.r*15.0;float v=floor(n15+0.5);"
+    "float res=clamp(128.0+(n15-v)*1048576.0,0.0,255.0);"
+    "gl_FragColor=vec4(v/15.0,res/255.0,"
     "floor(c.g*15.0+0.5)/15.0,floor(c.a*15.0+0.5)/15.0);}";
 
 // Four channels of one texel, as nibbles 0..15.
@@ -111,14 +114,18 @@ static const char* FS_TEXEL =
     "precision highp float;uniform sampler2D W;uniform float w;"
     "void main(){float i=floor(gl_FragCoord.x);"
     "vec4 c=texture2D(W,vec2((i+0.5)/w,0.5));"
-    "gl_FragColor=vec4(floor(c*15.0+0.5)/15.0);}";
+    "float r=floor(c.r*15.0+0.5),g=floor(c.g*15.0+0.5),"
+    "b=floor(c.b*15.0+0.5),a=floor(c.a*15.0+0.5);"
+    "gl_FragColor=vec4(r,g,b,a)/15.0;}";
 
 // Row r of a tall texture, column i: the q4 use case, one fragment per texel.
 static const char* FS_ROW =
     "precision highp float;uniform sampler2D W;uniform float w,row,n;"
     "void main(){float i=floor(gl_FragCoord.x);"
     "vec4 c=texture2D(W,vec2((i+0.5)/w,(row+0.5)/n));"
-    "gl_FragColor=vec4(floor(c*15.0+0.5)/15.0);}";
+    "float r=floor(c.r*15.0+0.5),g=floor(c.g*15.0+0.5),"
+    "b=floor(c.b*15.0+0.5),a=floor(c.a*15.0+0.5);"
+    "gl_FragColor=vec4(r,g,b,a)/15.0;}";
 
 struct Target { GLuint tex = 0, fbo = 0; };
 static Target make_target(int w, int h) {
@@ -137,6 +144,7 @@ static Target make_target(int w, int h) {
 
 static GLuint vbo = 0;
 static void draw(GLuint prog, GLuint tex, Target& out, int w, int h) {
+    if (!prog) { printf("   draw skipped: program is 0\n"); return; }
     glBindFramebuffer(GL_FRAMEBUFFER, out.fbo);
     glViewport(0, 0, w, h);
     glUseProgram(prog);
@@ -199,9 +207,10 @@ int main() {
     while (glGetError() != GL_NO_ERROR) {}
 
     Target t16 = make_target(16, 1);
-    GLuint prog_sample = program(FS_SAMPLE);
-    GLuint prog_texel = program(FS_TEXEL);
-    GLuint prog_row = program(FS_ROW);
+    GLuint prog_sample = program("sample", FS_SAMPLE);
+    GLuint prog_texel = program("texel", FS_TEXEL);
+    GLuint prog_row = program("row", FS_ROW);
+    if (!prog_sample || !prog_texel || !prog_row) { printf("A program did not link\n"); return 1; }
     if (gl_errors("setup")) return 1;
 
     // ---- B: does the upload work, in both spellings? -----------------------

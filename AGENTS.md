@@ -26,7 +26,7 @@ replace working paths with demos or cosmetic rewrites.
 | `engine/third_party/jinja/` | vendored llama.cpp Jinja engine (MIT) — renders the container's chat template |
 | `templates/` | the chat templates this repository ships, for `mmcf_pack.py --chat-template` |
 | `engine/scripts/` | the regression gate **and** the diagnostic tools, and the model-quality batteries (`bench_mc.py`, `eval_ifeval.py`, `eval_translate.py`) |
-| `engine/probes/` | standalone VC4 feature/throughput probes (not linked into the engine) |
+| `engine/probes/` | standalone VC4 feature/throughput probes (not linked into the engine); `README.md` is the map: one row per probe = the question it answers, its `_pi` target and where the answer is written down |
 | `server/` | OpenAI-compatible HTTP server, deterministic tools, self-test, eval suite |
 | `models/` | central model store (gitignored), one `.mmcf` per precision |
 | `minimind3/` | MiniMind3 source config/tokenizer/reference; artifacts live in `models/` |

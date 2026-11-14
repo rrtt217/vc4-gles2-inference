@@ -29,7 +29,8 @@ ROOT = Path(__file__).resolve().parents[2]
 DOCS = [ROOT / "AGENTS.md", ROOT / "README.md", ROOT / "README.zh-CN.md",
         ROOT / "engine/README.md", ROOT / "engine/README.zh-CN.md",
         ROOT / "server/README.md", ROOT / "server/README.zh-CN.md",
-        ROOT / "models/README.md"] + sorted((ROOT / "docs").glob("*.md"))
+        ROOT / "models/README.md", ROOT / "engine/probes/README.md"] + \
+       sorted((ROOT / "docs").glob("*.md"))
 
 SKIP_SCHEMES = ("http://", "https://", "mailto:", "ftp://")
 
