@@ -306,6 +306,12 @@ def specials_from(tok_blob, vocab, args):
     return bos, eos, stop, pad, unk, im_start
 
 
+# name -> kind byte in metadata key 6.  One table: the packer validates against
+# it, and the engine's fallback path reads the *name* when the kind is unknown,
+# so the two have to agree.
+TEMPLATE_KINDS = {"plain": 0, "qwen": 1, "chatml": 1, "minimind3": 2, "tinybrainbot": 3}
+
+
 def tlv(key, typ, payload):
     return struct.pack("<HHI", key, typ, len(payload)) + payload
 
@@ -323,7 +329,14 @@ def build(meta, tensors, tok_blob, args):
     # kind: 0 plain (llama2c), 1 chatml/qwen, 2 minimind3, 3 tinybrainbot.  The
     # name is kept for humans and as a fallback for a kind an old engine does
     # not know.
-    kind = {"plain": 0, "qwen": 1, "chatml": 1, "minimind3": 2, "tinybrainbot": 3}.get(args.template, 1)
+    # An unknown name used to fall through to kind 1 (chatml) without a word to
+    # anyone, so `--template llama2_chat` produced a container that renders ChatML
+    # to a model trained on [INST]: a silent wrong answer, and the engine cannot
+    # tell because the kind byte is all it sees.
+    kind = TEMPLATE_KINDS.get(args.template)
+    if kind is None:
+        raise SystemExit("unknown --template %r; known: %s"
+                         % (args.template, ", ".join(sorted(TEMPLATE_KINDS))))
     template = (bytes([kind]) + args.system.encode() + b"\0" + args.template.encode() + b"\0")
     # A plain container is a completion model: advertising chat lets the engine
     # wrap a story prompt in the built-in [INST] template and answer with noise.
@@ -545,6 +558,12 @@ def main():
                     help="KV length to record for a HuggingFace source (default 512)")
     ap.add_argument("--verify", action="store_true")
     args = ap.parse_args()
+
+    # Fail on a name this build does not know before touching any weights: an
+    # unknown template used to become ChatML silently.
+    if args.template not in TEMPLATE_KINDS:
+        raise SystemExit("unknown --template %r; known: %s"
+                         % (args.template, ", ".join(sorted(TEMPLATE_KINDS))))
 
     if os.path.isdir(args.src):
         # Straight from HuggingFace: no intermediate checkpoint, and the rope
