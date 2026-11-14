@@ -40,6 +40,8 @@ import json
 import os
 import re
 import subprocess
+
+from worker_engine import WorkerEngine
 import sys
 import time
 
@@ -271,6 +273,12 @@ def main(argv=None):
     ap.add_argument("--gen", type=int, default=0, help="override every case's gen")
     ap.add_argument("--system", default="You are a helpful assistant.")
     ap.add_argument("--engine", default=os.path.join(ROOT, "engine", "engine_mm3"))
+    ap.add_argument("--reuse-worker", action="store_true",
+                    help="EXPERIMENTAL: one engine process for the whole battery (the "
+                         "container is read and the programs link once instead of per "
+                         "prompt).  Faster, but its texts do not yet match the "
+                         "per-process path on every prompt -- measure time with it, "
+                         "do not score with it")
     ap.add_argument("--env", action="append", default=[], metavar="K=V")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--selftest", action="store_true")
@@ -304,7 +312,10 @@ def main(argv=None):
         if not os.path.exists(path):
             raise SystemExit("no such model: %s" % path)
         print("%s== %s (%s)" % (NL, name, path), flush=True)
-        eng = Engine(args.engine, path, env, args.system, sampling)
+        if args.reuse_worker:
+            eng = WorkerEngine(args.engine, path, env, args.system, sampling)
+        else:
+            eng = Engine(args.engine, path, env, args.system, sampling)
         out_path = os.path.join(args.out, name + ".attempts.jsonl")
         done = set()
         rows = []
