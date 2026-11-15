@@ -186,22 +186,30 @@ void Model::apply_q4_fmt(){
                 if (v) cerr << "Q4_FMT: the unchunked FFN path is not supported; using the packed view\n";
                 return;
         }
-        auto mark = [](Mat& m) {
-                if (m.rows > 0 && m.type == WeightType::INT4) m.fmt4 = true;
-        };
+        // With the *sized* GL_RGBA4 internal format the surface is two bytes a
+        // texel (PIPE_FORMAT_B4G4R4A4_UNORM), so the view holds the same bytes
+        // as the packed one: twice the texels, half the bytes each.  The unsized
+        // GL_RGBA spelling fell back to RGBA8 and doubled the memory -- that is
+        // what made the hybrid fail, and it is fixed in make_q4_texture.
+        // probes/rgba4444_probe section H keeps both spellings measurable.
+        vector<Mat*> mark4;
+        auto want = [&](Mat& m) { if (m.rows > 0 && m.type == WeightType::INT4) mark4.push_back(&m); };
         if (is_moe()) {
-                for (auto& layer : moe)
-                        for (auto& e : layer) {
-                                mark(e.w1a); mark(e.w1b); mark(e.w3a); mark(e.w3b);
+                for (auto& layer : moe) for (auto& e : layer) {
+                        want(e.w1a); want(e.w1b); want(e.w3a); want(e.w3b);
+                }
+        } else {
+                if ((int)w1a.size() >= layers)
+                        for (int l = 0; l < layers; ++l) {
+                                want(w1a[l]); want(w1b[l]); want(w3a[l]); want(w3b[l]);
+                                want(w2a[l]); want(w2b[l]);
                         }
-                return;
+                if ((int)w1.size() >= layers)
+                        for (int l = 0; l < layers; ++l) { want(w1[l]); want(w3[l]); want(w2[l]); }
+                if ((int)qkv.size() >= layers)
+                        for (int l = 0; l < layers; ++l) { want(qkv[l]); want(wo[l]); }
         }
-        for (int l = 0; l < layers; ++l) {
-                mark(w1a[l]); mark(w1b[l]); mark(w3a[l]); mark(w3b[l]);
-                mark(w2a[l]); mark(w2b[l]);
-                mark(qkv[l]); mark(wo[l]);
-                mark(w1[l]); mark(w3[l]);          // unchunked models keep them whole
-        }
+        for (Mat* m : mark4) m->fmt4 = true;
 }
 
 // Metadata key 15: the SwiGLU hidden is written *2^-k by the FFN kernels, so

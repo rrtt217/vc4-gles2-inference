@@ -243,7 +243,14 @@ GLuint GPU::make_q4_texture(int w, int h, const void* data){
         // default alignment of 4 only holds when that is a multiple of four.
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
         while (glGetError() != GL_NO_ERROR) {}
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4, rev.data());
+        // GL_RGBA4, not GL_RGBA: with an *unsized* internal format st_choose_format
+        // falls back to RGBA8 and the nibbles are expanded at upload (v*17, which
+        // samples exactly like 4444 and costs four bytes a texel -- the memory
+        // doubling in docs/performance.md 2026-11-15).  The sized format maps to
+        // PIPE_FORMAT_B4G4R4A4_UNORM (st_format.c), which vc4_formats.c accepts,
+        // so the surface is two bytes a texel and the view is size-neutral again.
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA4, w, h, 0, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4,
+                     rev.data());
         if (GLenum e = glGetError()) {
                 cerr << "texture upload failed: RGBA4 " << w << "x" << h
                      << " (0x" << hex << e << dec << "), "

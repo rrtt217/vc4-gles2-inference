@@ -36,6 +36,7 @@
 #include <cstdint>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -405,6 +406,59 @@ int main() {
             printf("G texel cost %d x 96 fetches: 8-bit %.3f ms/draw, 4-bit %.3f ms/draw  (%+.0f%%)\n",
                    tw, m8, m4, (m4 / m8 - 1.0) * 100.0);
         }
+    }
+
+    // ---- H: what does a 4444 texture COST? --------------------------------
+    // vc4_tiling.h: a utile is 64 B, so a 2048x2048 cpp=2 surface is 8 MB and
+    // the cpp=4 one 16 MB.  Measuring both in one process does not work -- the
+    // first exhausts the pool and the second fails every upload (the earlier
+    // run read as "0.5 MB each" for exactly that reason).  One format a run,
+    // selected by RGBA4444_COST=4|8, with every upload error-checked.
+    if (const char* which = getenv("RGBA4444_COST")) {
+        auto cma_free = []() -> long {
+            FILE* f = fopen("/proc/meminfo", "r");
+            if (!f) return -1;
+            char line[256];
+            long v = -1;
+            while (fgets(line, sizeof line, f))
+                if (!strncmp(line, "CmaFree:", 8)) { sscanf(line + 8, "%ld", &v); break; }
+            fclose(f);
+            return v;
+        };
+        const bool four = which[0] == '4';
+        const int n = 64;
+        const long before = cma_free();
+        std::vector<uint8_t> z8((size_t)512 * 512 * 4, 0x5a);
+        std::vector<uint16_t> z4((size_t)512 * 512, 0x5555);
+        int bad = 0;
+        for (int i = 0; i < n; ++i) {
+            GLuint t = 0; glGenTextures(1, &t); glBindTexture(GL_TEXTURE_2D, t); params();
+            while (glGetError() != GL_NO_ERROR) {}
+            if (four) {
+                // "4" is the unsized GL_RGBA internal format with a 4444 client
+                // type -- st_ChooseTextureFormat resolves that to RGBA8 and the
+                // nibbles are expanded at upload (v*17), which samples exactly
+                // like 4444 and costs FOUR bytes a texel.  "4s" asks for the
+                // sized GL_RGBA4, which vc4_formats.c maps to B4G4R4A4 (cpp=2).
+                glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+                glTexImage2D(GL_TEXTURE_2D, 0, which[1] == 's' ? GL_RGBA4 : GL_RGBA,
+                             512, 512, 0, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4, z4.data());
+                glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+            } else {
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 512, 512, 0, GL_RGBA,
+                             GL_UNSIGNED_BYTE, z8.data());
+            }
+            if (glGetError() != GL_NO_ERROR) ++bad;
+        }
+        glFinish();
+        const long after = cma_free();
+        const double paper = four ? 0.5 : 1.0;
+        if (before > 0)
+            printf("H %s  %d x 2048x2048, %d refused: %.1f MB/texture against %.0f MB of paper (%.2fx)\n",
+                   four ? (which[1] == 's' ? "4-bit sized" : "4-bit unsized") : "8-bit", n, bad,
+                   (before - after) / 1024.0 / n, paper, (before - after) / 1024.0 / n / paper);
+        else
+            printf("H %s  no CmaFree here (desktop driver)\n", four ? "4-bit" : "8-bit");
     }
 
     // ---- F: is 4444 renderable? -------------------------------------------
