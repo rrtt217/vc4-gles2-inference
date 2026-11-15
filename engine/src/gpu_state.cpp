@@ -83,6 +83,8 @@ void GPU::reset_targets(){
         conv_y_ = Target();
         logits_target_ = Target();
         candidate_target_ = Target();
+        argmax_chunk_ = Target();
+        argmax_tile_ = Target();
         sum_target_ = Target();
         ffn_a_ = Target();
         ffn_b_ = Target();

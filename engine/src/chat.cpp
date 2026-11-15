@@ -177,11 +177,21 @@ void Chat::run_turn(const std::string& user, bool first, int pos, std::vector<Ch
     vector<float> logits;
     CandidateResult cand;
     bool cand_mode = app.opt.top_k_candidates && app.opt.top_k > 0 && !app.opt.greedy && !sampling_penalties_active();
+    // Greedy fast path: the argmax runs on the GPU and only the winning id
+    // crosses the bus.  Everything that touches the logits vector on the CPU
+    // (penalties, the marker mask, the LOGITS_OUT dump) disqualifies it; the
+    // reduction itself is byte-identical to argmax_token (GPU_ARGMAX=0 A/Bs).
+    const bool fast_greedy = app.opt.greedy && !sampling_penalties_active()
+                          && marker_mask.empty() && !getenv("LOGITS_OUT")
+                          && session.greedy_fast_ok();
+    int next_fast = -1;
     for (size_t i = skip; i < tokens.size(); ++i) {
         if (g_stop) { tt.cut = "prefill"; app.gpu.sync(); return; }
         if (pos >= app.model.seq) { tt.cut = "context"; cout << "[context full]\n"; return; }
         bool last = (i + 1 == tokens.size());
-        if (last && cand_mode) {
+        if (last && fast_greedy) {
+            next_fast = session.step_greedy(tokens[i], pos++);
+        } else if (last && cand_mode) {
             cand = session.step_candidates(tokens[i], pos++, app.opt.top_k, app.opt.temp, app.opt.top_p);
             if (!cand.complete) { logits = std::move(cand.full); cand_mode = false; }
         } else if (!last && i + 2 < tokens.size() && pos + 1 < app.model.seq && session.pair_ok()) {
@@ -208,11 +218,16 @@ void Chat::run_turn(const std::string& user, bool first, int pos, std::vector<Ch
     vector<int> recent;
     for (int i = 0; i < app.opt.gen && pos < app.model.seq; ++i) {
         if (g_stop) { tt.cut = "decode"; app.gpu.sync(); return; }
-        if (!marker_mask.empty()) mask_markers(logits);
-        apply_sampling_penalties(logits, recent);
-        int next = app.opt.greedy ? argmax_token(logits)
+        int next;
+        if (fast_greedy) {
+            next = next_fast;   // produced by the previous step_greedy
+        } else {
+            if (!marker_mask.empty()) mask_markers(logits);
+            apply_sampling_penalties(logits, recent);
+            next = app.opt.greedy ? argmax_token(logits)
                           : (cand_mode ? sample_candidate_result(cand, app.opt.temp, app.opt.top_p, app.opt.top_k, rng)
                                        : sample_token(logits, app.opt.temp, app.opt.top_p, app.opt.top_k, rng));
+        }
         if (!getenv("IGNORE_EOS") && is_stop_token(next)) {
             session.step(next, pos++, false);
             break;
@@ -233,7 +248,9 @@ void Chat::run_turn(const std::string& user, bool first, int pos, std::vector<Ch
         ++generated;
         tt.generated = generated;
         prev = next;
-        if (cand_mode) {
+        if (fast_greedy) {
+            next_fast = session.step_greedy(next, pos++);
+        } else if (cand_mode) {
             cand = session.step_candidates(next, pos++, app.opt.top_k, app.opt.temp, app.opt.top_p);
             if (!cand.complete) { logits = std::move(cand.full); cand_mode = false; }
         } else {
@@ -341,6 +358,11 @@ void Chat::run_tool_turn(const std::string& user, bool first, std::vector<ChatMs
         vector<float> logits;
         CandidateResult cand;
         bool cand_mode = app.opt.top_k_candidates && app.opt.top_k > 0 && !app.opt.greedy && !sampling_penalties_active();
+        // Same greedy fast path as run_turn; this loop has no marker mask
+        // and no LOGITS_OUT dump, so only the penalties can disqualify it.
+        const bool fast_greedy = app.opt.greedy && !sampling_penalties_active()
+                              && session.greedy_fast_ok();
+        int next_fast = -1;
         int skip = 0;
         if (!kv_tokens.empty()) {
             size_t n = 0;
@@ -358,7 +380,9 @@ void Chat::run_tool_turn(const std::string& user, bool first, std::vector<ChatMs
         for (size_t i = skip; i < tokens.size(); ++i) {
             if (g_stop) { tt.cut = "prefill"; app.gpu.sync(); return; }
             bool last = (i + 1 == tokens.size());
-            if (last && cand_mode) {
+            if (last && fast_greedy) {
+                next_fast = session.step_greedy(tokens[i], (int)i);
+            } else if (last && cand_mode) {
                 cand = session.step_candidates(tokens[i], (int)i, app.opt.top_k, app.opt.temp, app.opt.top_p);
                 if (!cand.complete) { logits = std::move(cand.full); cand_mode = false; }
             } else if (!last && i + 2 < tokens.size() && (int)i + 1 < app.model.seq && session.pair_ok()) {
@@ -378,10 +402,15 @@ void Chat::run_tool_turn(const std::string& user, bool first, std::vector<ChatMs
         vector<int> recent;
         for (int i = 0; i < app.opt.gen && pos < app.model.seq; ++i) {
             if (g_stop) { tt.cut = "decode"; app.gpu.sync(); return; }
-            apply_sampling_penalties(logits, recent);
-            int next = app.opt.greedy ? argmax_token(logits)
+            int next;
+            if (fast_greedy) {
+                next = next_fast;
+            } else {
+                apply_sampling_penalties(logits, recent);
+                next = app.opt.greedy ? argmax_token(logits)
                               : (cand_mode ? sample_candidate_result(cand, app.opt.temp, app.opt.top_p, app.opt.top_k, rng)
                                            : sample_token(logits, app.opt.temp, app.opt.top_p, app.opt.top_k, rng));
+            }
             if (is_stop_token(next)) {
                 if (!quiet && is_bos_token(next))
                     fprintf(stderr, "\n[stopped after %d tokens: the model emitted its "
@@ -399,7 +428,9 @@ void Chat::run_tool_turn(const std::string& user, bool first, std::vector<ChatMs
             recent.push_back(next);
             ++tt.generated;
             prev = next;
-            if (cand_mode) {
+            if (fast_greedy) {
+                next_fast = session.step_greedy(next, pos++);
+            } else if (cand_mode) {
                 cand = session.step_candidates(next, pos++, app.opt.top_k, app.opt.temp, app.opt.top_p);
                 if (!cand.complete) { logits = std::move(cand.full); cand_mode = false; }
             } else {
@@ -562,6 +593,13 @@ cout << "\n";
 vector<float> logits;
 CandidateResult cand;
 bool cand_mode = app.opt.top_k_candidates && app.opt.top_k > 0 && !app.opt.greedy && !sampling_penalties_active();
+// Greedy fast path, same rules as run_turn.  The per-token decode timer
+// below wraps step_greedy, so the argmax reduction is inside the measured
+// per-token cost, exactly as the read-back it replaces was.
+const bool fast_greedy = app.opt.greedy && !sampling_penalties_active()
+                      && marker_mask.empty() && !getenv("LOGITS_OUT")
+                      && session.greedy_fast_ok();
+int next_fast = -1;
 // PREFILL_REPEAT=n runs the same prefill n times in one process.  The first
 // pass pays every lazy shader link and every QPU program generation, which
 // on VC4 is seconds; a comparison between two modes that compile different
@@ -574,7 +612,9 @@ auto prefill_once = [&]() {
     for (size_t i = 0; i < tokens.size(); ++i) {
         if (g_stop) break;
         bool last = (i + 1 == tokens.size());
-        if (last && cand_mode) {
+        if (last && fast_greedy) {
+            next_fast = session.step_greedy(tokens[i], (int)i);
+        } else if (last && cand_mode) {
             cand = session.step_candidates(tokens[i], (int)i, app.opt.top_k, app.opt.temp, app.opt.top_p);
             if (!cand.complete) { lg = std::move(cand.full); cand_mode = false; }
         } else if (!last && i + 2 < tokens.size() && (int)i + 1 < app.model.seq && session.pair_ok()) {
@@ -629,11 +669,16 @@ for (int i = 0; i < app.opt.gen; ++i) {
                             "packing or lower --gen\n", generated, app.model.seq);
         break;
     }
-    if (!marker_mask.empty()) mask_markers(logits);
-    apply_sampling_penalties(logits, recent);
-    int next = app.opt.greedy ? argmax_token(logits)
+    int next;
+    if (fast_greedy) {
+        next = next_fast;
+    } else {
+        if (!marker_mask.empty()) mask_markers(logits);
+        apply_sampling_penalties(logits, recent);
+        next = app.opt.greedy ? argmax_token(logits)
                       : (cand_mode ? sample_candidate_result(cand, app.opt.temp, app.opt.top_p, app.opt.top_k, rng)
                                    : sample_token(logits, app.opt.temp, app.opt.top_p, app.opt.top_k, rng));
+    }
     if (!getenv("IGNORE_EOS") && is_stop_token(next)) {
         ended_on_eos = true;
         stop_reason = is_bos_token(next) ? "the model emitted its BOS token mid-generation"
@@ -645,7 +690,9 @@ for (int i = 0; i < app.opt.gen; ++i) {
     tokens.push_back(next);
     recent.push_back(next);
     auto a = Clock::now();
-    if (cand_mode) {
+    if (fast_greedy) {
+        next_fast = session.step_greedy(next, (int)tokens.size() - 1);
+    } else if (cand_mode) {
         cand = session.step_candidates(next, (int)tokens.size() - 1, app.opt.top_k, app.opt.temp, app.opt.top_p);
         if (!cand.complete) { logits = std::move(cand.full); cand_mode = false; }
     } else {

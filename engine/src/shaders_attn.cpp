@@ -403,6 +403,60 @@ string top2_fast_packed(int rows, int chunk) {
         "gl_FragColor=vec4(vh/255.0,vl/255.0,ih/255.0,il/255.0);}";
 }
 
+// Greedy argmax, stage 1: one fragment per chunk of the packed q16 logits
+// target, keeping only the best (value, index).  The comparison is strict >,
+// so a tie keeps the smaller index -- the same rule std::max_element applies
+// on the CPU side, which is what makes this path byte-identical to the full
+// read-back + argmax_token.  Values travel as the exact q16 integer (the
+// stored bytes decoded with floor(c*255+0.5)), never re-rounded, so the
+// ordering here is the ordering the CPU would see.  Chunks beyond the tile's
+// row count write the sentinel (-32768, index 65535): the target is reused
+// across tokens, and a stale texel must not be able to win.  -32768 is the
+// smallest q16 value, so a sentinel can at most tie a real rail value, and
+// the tie keeps the earlier (real) chunk.
+string top1_packed(int rows, int chunk) {
+    return "precision highp float;"
+        "uniform sampler2D L;uniform float tr,nr;"
+        "float dv(float v){if(v>=32768.0)v-=65536.0;return v/256.0;}"
+        "float dl(vec4 c){return dv(floor(c.r*255.0+0.5)*256.0+floor(c.g*255.0+0.5));}"
+        "float dh(vec4 c){return dv(floor(c.b*255.0+0.5)*256.0+floor(c.a*255.0+0.5));}"
+        "void main(){int x=int(gl_FragCoord.x);int start=x*" + to_string(chunk) + ";"
+        "if(start>=" + to_string(rows) + "){gl_FragColor=vec4(128.0/255.0,0.0,1.0,1.0);return;}"
+        "float best=-1e30;int bi=0;"
+        "for(int k=0;k<" + to_string(chunk) + ";k++){int idx=start+k;if(idx>=" + to_string(rows) + ")break;"
+        "int h=idx/2;vec4 c=texture2D(L,vec2((float(h)+0.5)/" + to_string(kLogitsGridPacked) + ".0,(tr+0.5)/nr));"
+        "float v=((h*2)==idx)?dl(c):dh(c);"
+        "if(v>best){best=v;bi=idx;}}"
+        "float bv=best*256.0;if(bv<0.0)bv+=65536.0;"
+        "float vh=floor(bv/256.0),vl=bv-vh*256.0;"
+        "float ih=floor(float(bi)/256.0),il=float(bi)-ih*256.0;"
+        "gl_FragColor=vec4(vh/255.0,vl/255.0,ih/255.0,il/255.0);}";
+}
+
+// Greedy argmax, stage 2: one fragment per tile row reduces the stage-1 chunk
+// winners to a single (value, index) per tile.  The input texels are the
+// stage-1 encoding (q16 value in .rg, index in .ba), so the decode is the
+// same byte-exact floor form; the value stays the raw signed integer here
+// (dividing by 256 would not change the ordering).  Strict > again keeps the
+// first chunk on a tie, and the host keeps the first tile, so the global
+// winner is the smallest token id among the maxima -- max_element's rule.
+string top1_reduce(int n) {
+    return "precision highp float;"
+        "uniform sampler2D L;uniform float nr;"
+        "void main(){int r=int(gl_FragCoord.y);"
+        "float best=-1e30;int bi=0;"
+        "for(int c=0;c<" + to_string(n) + ";c++){"
+        "vec4 t=texture2D(L,vec2((float(c)+0.5)/" + to_string(n) + ".0,(float(r)+0.5)/nr));"
+        "float v=floor(t.r*255.0+0.5)*256.0+floor(t.g*255.0+0.5);"
+        "if(v>=32768.0)v-=65536.0;"
+        "int idx=int(floor(t.b*255.0+0.5)*256.0+floor(t.a*255.0+0.5));"
+        "if(v>best){best=v;bi=idx;}}"
+        "if(best<0.0)best+=65536.0;"
+        "float vh=floor(best/256.0),vl=best-vh*256.0;"
+        "float ih=floor(float(bi)/256.0),il=float(bi)-ih*256.0;"
+        "gl_FragColor=vec4(vh/255.0,vl/255.0,ih/255.0,il/255.0);}";
+}
+
 string top2_packed(int rows, int chunk) {
     return "precision highp float;"
         "uniform sampler2D L;uniform float tr,nr,invt;"

@@ -1,4 +1,5 @@
 #include "session.h"
+#include "sampling.h"   // argmax_token: the greedy fallback path
 #include "jinja/json.h"   // the cache sidecar: JSON is built, never concatenated
 #include <algorithm>
 #include <cmath>
@@ -729,6 +730,27 @@ vector<float> Session::step(int token, int pos, bool want_logits){
                 ? rms_final_gpu(x)
                 : rms_norm(x, m_.rms_final.data());
         return gpu_.logits(m_.logits_tiles, xb);
+    }
+
+bool Session::greedy_fast_ok() const {
+        return gpu_layer_ && gpu_.logits_argmax_ok(m_.logits_tiles);
+    }
+
+int Session::step_greedy(int token, int pos){
+        if (greedy_fast_ok()) {
+            GLuint xf = forward_gpu_hidden(token, pos, true);
+            if (g_stop) return -1;
+            int t = gpu_.logits_argmax_from(m_.logits_tiles, xf);
+            if (t >= 0) return t;
+            // The reduction found no valid winner (cannot happen for a real
+            // vocabulary): the logits are already drawn, so read them back
+            // rather than drawing them twice.
+            vector<float> lg = gpu_.read_logits_full(m_.logits_tiles);
+            return argmax_token(lg);
+        }
+        vector<float> lg = step(token, pos, true);
+        if (g_stop || lg.empty()) return -1;
+        return argmax_token(lg);
     }
 
 CandidateResult Session::step_candidates(int token, int pos, int topk, float temp, float top_p){

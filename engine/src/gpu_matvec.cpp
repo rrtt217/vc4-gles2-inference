@@ -283,6 +283,83 @@ vector<float> GPU::logits_from(const vector<Mat>& tiles, GLuint x){
         return read_logits_full(tiles);
     }
 
+bool GPU::logits_argmax_ok(const vector<Mat>& tiles) const{
+        // GPU_ARGMAX=0 restores the full read-back inside the same binary,
+        // which is the A/B the measurement rules ask for.  Only the packed
+        // q16 layout is reduced on the GPU: there the stored bytes are the
+        // exact integers the CPU compares, so the winner is byte-identical.
+        // The unpacked (i16-weight / ACT8) layout keeps the old path.
+        const char* v = getenv("GPU_ARGMAX");
+        if (v && strcmp(v, "0") == 0) return false;
+        return logits_pair_ok(tiles);
+    }
+
+int GPU::logits_argmax_from(const vector<Mat>& tiles, GLuint x){
+        const int rows = (int)tiles.size();
+        logits_pass(tiles, x);
+        // Same VC4 rule as logits_candidates_from: the reduction samples the
+        // logits target as a texture, and the tile pipeline does not order
+        // that sample after the FBO renders on its own.
+        if (needs_finish()) { glFlush(); glFinish(); }
+
+        const int chunk = 16;
+        int max_chunks = 0;
+        for (auto& t : tiles) max_chunks = max(max_chunks, (t.rows + chunk - 1) / chunk);
+        if (argmax_chunk_.tex == 0 || argmax_chunk_.w != max_chunks || argmax_chunk_.h != rows)
+            argmax_chunk_ = make_target(max_chunks, rows);
+        // Stage 1: one fragment per chunk.  Every tile draws the full
+        // max_chunks width; the shader writes the sentinel for chunks past
+        // its row count, so no texel of the reused target stays stale.
+        for (int i = 0; i < rows; ++i) {
+            GLuint p = x_top1_packed(tiles[i].rows, chunk);
+            bind_fbo(argmax_chunk_.fbo);
+            glViewport(0, i, max_chunks, 1);
+            use_program(p);
+            bind_tex(0, logits_target_.tex);
+            set_sampler(p, "L", 0);
+            glUniform1f(uloc(p, "tr"), (float)i);
+            glUniform1f(uloc(p, "nr"), (float)rows);
+            setup_attrib(p);
+            glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+        }
+        if (needs_finish()) { glFlush(); glFinish(); }
+
+        // Stage 2: one fragment per tile row, reducing that row's chunk
+        // winners.  One draw for the whole grid (rows fragments, under the
+        // draw cap for every vocabulary the packer produces).
+        if (argmax_tile_.tex == 0 || argmax_tile_.w != 1 || argmax_tile_.h != rows)
+            argmax_tile_ = make_target(1, rows);
+        {
+            GLuint p = x_top1_reduce(max_chunks);
+            bind_fbo(argmax_tile_.fbo);
+            glViewport(0, 0, 1, rows);
+            use_program(p);
+            bind_tex(0, argmax_chunk_.tex);
+            set_sampler(p, "L", 0);
+            glUniform1f(uloc(p, "nr"), (float)rows);
+            setup_attrib(p);
+            glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+        }
+        if (needs_finish()) { glFlush(); glFinish(); }
+
+        // Read back one texel per tile (rows * 4 bytes) and keep the first
+        // maximum across tiles -- the same tie rule as max_element, applied
+        // at every level of the reduction.
+        vector<uint8_t> raw = read_bytes(argmax_tile_, 1, rows);
+        float best = -1e30f;
+        int token = -1;
+        for (int r = 0; r < rows; ++r) {
+            const size_t o = (size_t)r * 4;
+            int value = (int)raw[o] * 256 + raw[o + 1];
+            if (value >= 32768) value -= 65536;
+            int idx = (int)raw[o + 2] * 256 + raw[o + 3];
+            if (idx >= tiles[r].rows) continue;
+            float v = (float)value / ACT_SCALE;
+            if (v > best) { best = v; token = r * kLogitsGrid + idx; }
+        }
+        return token;
+    }
+
 void GPU::logits_pass_only(const vector<Mat>& tiles, GLuint x){
         logits_pass(tiles, x);
     }
@@ -577,4 +654,12 @@ GLuint GPU::x_top2_fast_packed(int rows, int chunk){
 
 GLuint GPU::x_top2_packed(int rows, int chunk){
         return x_prog("xt2p_" + to_string(rows) + "_" + to_string(chunk), top2_packed(rows, chunk));
+    }
+
+GLuint GPU::x_top1_packed(int rows, int chunk){
+        return x_prog("xt1p_" + to_string(rows) + "_" + to_string(chunk), top1_packed(rows, chunk));
+    }
+
+GLuint GPU::x_top1_reduce(int n){
+        return x_prog("xt1r_" + to_string(n), top1_reduce(n));
     }

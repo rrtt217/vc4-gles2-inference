@@ -169,6 +169,14 @@ public:
 
     vector<float> logits_from(const vector<Mat>& tiles, GLuint x);
 
+    // Greedy fast path: draw the logits, reduce to the winning token on the
+    // GPU and read back one texel per tile instead of the whole vocabulary.
+    // Only the packed q16 logits layout is supported (logits_argmax_ok);
+    // the reduction is byte-identical to read_logits_full + max_element.
+    // GPU_ARGMAX=0 refuses it so the two paths can be A/B-ed in one binary.
+    bool logits_argmax_ok(const vector<Mat>& tiles) const;
+    int logits_argmax_from(const vector<Mat>& tiles, GLuint x);
+
     // PASS_DUP=logits_draw probe: re-run the logits draw only, without the
     // finish/read-back, so the draw and the sync can be priced separately.
     void logits_pass_only(const vector<Mat>& tiles, GLuint x);
@@ -250,6 +258,8 @@ private:
     GLuint x_q8_pair_logits(int rows, int cols, bool wrow = false);
     GLuint x_top2_fast_packed(int rows, int chunk);
     GLuint x_top2_packed(int rows, int chunk);
+    GLuint x_top1_packed(int rows, int chunk);
+    GLuint x_top1_reduce(int n);
     bool logits_pair() const;
     bool logits_pair_ok(const vector<Mat>& tiles) const;
     void logits_pass(const vector<Mat>& tiles, GLuint x);
@@ -291,6 +301,8 @@ private:
     unordered_map<int, Target> targets_;
     Target logits_target_;
     Target candidate_target_;
+    // Greedy argmax reduction: chunk winners, then one winner per tile.
+    Target argmax_chunk_, argmax_tile_;
     Target sum_target_;
     Target ffn_a_, ffn_b_, ffn_h_, ffn_ab_;
     Target ffn_ab_a_, ffn_ab_b_, ffn_h_a_, ffn_h_b_;

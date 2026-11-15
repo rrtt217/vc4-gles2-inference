@@ -295,12 +295,20 @@ int run_worker(App& app, Session& session, bool enc_bos, bool chat_dump) {
         // vocabulary; a request that asks for it uses the full logits.
         bool cand_mode = app.opt.top_k_candidates && req_top_k > 0 && !greedy_req &&
                          !sampling_penalties_active() && !want_logprobs;
+        // Greedy fast path: the argmax runs on the GPU, only the winning id
+        // is read back.  Penalties and logprobs need the full vector, so they
+        // keep the old path (GPU_ARGMAX=0 A/Bs the reduction itself).
+        const bool fast_greedy = greedy_req && !want_logprobs &&
+                                 !sampling_penalties_active() && session.greedy_fast_ok();
+        int next_fast = -1;
         vector<float> logits;
         CandidateResult cand;
         for (int i = prefill_from; i < (int)tokens.size(); ++i) {
             if (g_stop) break;
             bool last = i + 1 == (int)tokens.size();
-            if (last && cand_mode) {
+            if (last && fast_greedy) {
+                next_fast = session.step_greedy(tokens[i], i);
+            } else if (last && cand_mode) {
                 cand = session.step_candidates(tokens[i], i, req_top_k, wt, wp);
                 if (!cand.complete) { logits = std::move(cand.full); cand_mode = false; }
             } else {
@@ -331,19 +339,23 @@ mt19937 rng(seed);
                 finish = "cancelled";
                 break;
             }
-            apply_sampling_penalties(logits, recent);
             int next;
             float next_lp = 0.0f;
-            if (want_logprobs) {
-                const SampledToken s = greedy_req
-                    ? argmax_token_report(logits)
-                    : sample_token_report(logits, wt, wp, req_top_k, rng);
-                next = s.id;
-                next_lp = s.logprob;
+            if (fast_greedy) {
+                next = next_fast;   // produced by the previous step_greedy
             } else {
-                next = greedy_req ? argmax_token(logits)
-                                  : (cand_mode ? sample_candidate_result(cand, wt, wp, req_top_k, rng)
-                                               : sample_token(logits, wt, wp, req_top_k, rng));
+                apply_sampling_penalties(logits, recent);
+                if (want_logprobs) {
+                    const SampledToken s = greedy_req
+                        ? argmax_token_report(logits)
+                        : sample_token_report(logits, wt, wp, req_top_k, rng);
+                    next = s.id;
+                    next_lp = s.logprob;
+                } else {
+                    next = greedy_req ? argmax_token(logits)
+                                      : (cand_mode ? sample_candidate_result(cand, wt, wp, req_top_k, rng)
+                                                   : sample_token(logits, wt, wp, req_top_k, rng));
+                }
             }
             const bool is_eos = app.model.have_specials
                     ? (next == app.model.id_eos || (app.model.id_stop >= 0 && next == app.model.id_stop))
@@ -368,7 +380,9 @@ mt19937 rng(seed);
             ++generated;
             all_tokens.push_back(next);
             recent.push_back(next);
-            if (cand_mode) {
+            if (fast_greedy) {
+                next_fast = session.step_greedy(next, pos++);
+            } else if (cand_mode) {
                 cand = session.step_candidates(next, pos++, req_top_k, wt, wp);
                 if (!cand.complete) { logits = std::move(cand.full); cand_mode = false; }
             } else {

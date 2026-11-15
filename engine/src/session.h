@@ -38,6 +38,16 @@ public:
 
     vector<float> step(int token, int pos, bool want_logits);
 
+    // Greedy fast path: run one position and return the winning token id
+    // without reading the vocabulary back.  When the GPU reduction is not
+    // available (CPU path, unpacked logits, GPU_ARGMAX=0) it falls back to
+    // step() + argmax_token, so the answer is the same either way.  Returns
+    // -1 when g_stop interrupted the forward pass.  The caller must still
+    // apply its own eligibility rules (penalties, marker masks, LOGITS_OUT,
+    // logprobs) -- this only guarantees the argmax itself is unchanged.
+    int step_greedy(int token, int pos);
+    bool greedy_fast_ok() const;
+
     // Prefill batching (WORKLOG 7c): run one layer pass for two consecutive
     // positions.  Returns B logits when want_logits; a pair never contains the
     // last prompt token, whose logits are the only ones the caller needs.

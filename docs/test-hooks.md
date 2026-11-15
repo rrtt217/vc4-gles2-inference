@@ -102,6 +102,14 @@ binary.  They are measurement hooks, not production settings.
 - `FFN_PAIR=0` — unpaired FFN rows; the paired q8/q4 path is the default (the
   paired shader covers q8 and q4, and `FFN_FUSE` only applies inside it).
 - `LOGITS_SPLIT=1` — unpaired logits rows.
+- `GPU_ARGMAX=0` — greedy sampling reads the whole vocabulary back and takes
+  the argmax on the CPU.  The default reduces the packed q16 logits to the
+  winning token on the GPU (two small passes, one texel per tile read back)
+  and is byte-identical to the read-back path: the reduction compares the
+  exact stored integers and keeps the first maximum at every level, which is
+  `std::max_element`'s tie rule.  Only greedy turns without penalties, marker
+  masks, `LOGITS_OUT` or logprobs take it; the unpacked logits layout (i16
+  weights, `ACT8`) always keeps the read-back.
 - `RMS_SPLIT=1`, `RMS_FUSED=1` — force the split or fused rmsnorm reduce.  VC4
   defaults to fused (it drops one draw per norm); other drivers default to
   split, where 32 extra fetches per fragment can cost more than the draw.
