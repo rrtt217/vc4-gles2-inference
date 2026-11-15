@@ -6128,8 +6128,9 @@ movable, so every allocation moves page cache in and out.  The "17.6 MB for an
 this section came from that noise and are withdrawn.
 
 The driver's own ledger is `/sys/kernel/debug/dri/0/bo_stats`.  Measured there,
-in the engine's own context, before any model is loaded (`Q4_TEX_ALLOC`, eight
-1024x1024 textures):
+in the engine's own context, before any model was loaded (a temporary
+`Q4_TEX_ALLOC` switch, since removed, that allocated eight 1024x1024 textures
+and held still while `bo_stats` was read):
 
 | upload | V3D BOs | per texture | vs paper |
 |---|---:|---:|---:|
@@ -6165,7 +6166,8 @@ two-byte candidates and takes `DEFAULT_RGBA_FORMATS`.  The retry that would drop
 the render-target binding runs only when nothing matches, and RGBA8 always
 matches, so no spelling and no mutability can reach it -- `glTexImage2D` with
 `GL_RGBA4` or with a 4444 client type, and `glTexStorage2D` with `GL_RGBA4`,
-all measure four bytes a texel (`Q4_TEX_ALLOC` against `bo_stats`).
+all measured four bytes a texel against `bo_stats` (with that same, since
+removed, allocation switch).
 
 `probes/egl_image_probe` goes around that function: it allocates the buffer
 itself and imports it.

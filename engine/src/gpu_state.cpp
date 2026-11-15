@@ -199,33 +199,24 @@ static void report_mem(const char* tag){
 
 static size_t g_tex_bytes = 0;    // uploaded texture bytes, for the failure log
 
-// Q4_TEX_STATS=1: what does each upload actually cost, in the engine's own
-// context?  CmaFree is the only handle on this driver -- GL has no way to ask
-// how a texture was stored -- so the delta around glTexImage2D is it.  Printed
-// against the logical size so the ratio is immediate: 1.0 means the surface is
-// what it says on the tin, 2.0 means the driver picked RGBA8.
+// Q4_TEX_STATS=1: print, per texture, which path it took and its logical size.
+// It deliberately does *not* report a CmaFree delta any more: on this driver
+// those deltas are page-cache migration, not the texture (the same shape read
+// 2020, 2436, 4576 and 4544 kB in four consecutive uploads, and an RGBA8 upload
+// once *raised* CmaFree).  The driver's BO ledger is
+// /sys/kernel/debug/dri/0/bo_stats, read around the whole process.
 static bool q4_tex_stats(){
         static const char* e = getenv("Q4_TEX_STATS");
         static const bool v = e && strcmp(e, "0") != 0;
         return v;
 }
-static long cma_free_kb(){
-        FILE* f = fopen("/proc/meminfo", "r");
-        if (!f) return -1;
-        char line[256];
-        long v = -1;
-        while (fgets(line, sizeof line, f))
-                if (!strncmp(line, "CmaFree:", 8)) { sscanf(line + 8, "%ld", &v); break; }
-        fclose(f);
-        return v;
-}
+
 
 GLuint GPU::make_texture(int w, int h, const void* data){
         const double t0 = shader_time_ms();
         GLuint t = 0; glGenTextures(1, &t); g_scene_tex.push_back(t);
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, t); gl_state_forget_bindings();
         while (glGetError() != GL_NO_ERROR) {}
-        const long cma8 = q4_tex_stats() ? cma_free_kb() : 0;
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
         if (GLenum e = glGetError()) {
                 cerr << "texture upload failed: RGBA8 " << w << "x" << h
@@ -235,11 +226,9 @@ GLuint GPU::make_texture(int w, int h, const void* data){
                 exit(1);
         }
         g_tex_bytes += (size_t)w * h * 4;
-        if (q4_tex_stats()) {
-                const long d = cma8 - cma_free_kb();
-                fprintf(stderr, "rgba8  %5dx%-5d logical %6zu kB  cma %6ld kB  (%.2fx)\n",
-                        w, h, (size_t)w * h * 4 / 1024, d, (size_t)w * h * 4 / 1024.0 / (d > 0 ? d : 1));
-        }
+        if (q4_tex_stats())
+                fprintf(stderr, "rgba8  %5dx%-5d logical %6zu kB  upload\n",
+                        w, h, (size_t)w * h * 4 / 1024);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -283,10 +272,10 @@ GLuint GPU::make_q4_texture(int w, int h, const void* data){
         // default alignment of 4 only holds when that is a multiple of four.
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
         while (glGetError() != GL_NO_ERROR) {}
-        const long cma0 = q4_tex_stats() ? cma_free_kb() : 0;
         // GL_RGBA (unsized) + a 4444 client type.  The sized GL_RGBA4 was tried
         // on 2026-11-15 and buys nothing: measured in the engine's own context
-        // against the driver's BO ledger (Q4_TEX_ALLOC, 8 x 1024x1024), both
+        // against the driver's BO ledger (with a temporary 8 x 1024x1024
+        // allocation switch that is gone now), both
         // spellings allocate four bytes a texel --
         //     RGBA8  32776 kB   (4 MB a texture, 1.0x paper)
         //     4444   36872 kB   (4 MB a texture, 2.0x paper)
@@ -304,11 +293,9 @@ GLuint GPU::make_q4_texture(int w, int h, const void* data){
                 exit(1);
         }
         g_tex_bytes += (size_t)w * h * 2;
-        if (q4_tex_stats()) {
-                const long d = cma0 - cma_free_kb();
-                fprintf(stderr, "q4tex  %5dx%-5d logical %6zu kB  cma %6ld kB  (%.2fx)\n",
-                        w, h, (size_t)w * h * 2 / 1024, d, (size_t)w * h * 2 / 1024.0 / (d > 0 ? d : 1));
-        }
+        if (q4_tex_stats())
+                fprintf(stderr, "q4tex  %5dx%-5d logical %6zu kB  upload (RGBA8, 2x)\n",
+                        w, h, (size_t)w * h * 2 / 1024);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);

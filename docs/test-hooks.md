@@ -191,16 +191,12 @@ binary.  They are measurement hooks, not production settings.
   that came back.  This is what showed the imported surface reports the word's
   nibbles reversed, i.e. that the import must be given the same `rev` buffer the
   upload path uses.
-- `Q4_TEX_STATS=1` — print, next to every texture upload, the `CmaFree` delta
-  against the logical size.  **Read the caveat in the engine before using it as a
-  measurement**: on this driver those deltas are page-cache migration, not the
-  texture (the same shape reads 2020, 2436, 4576 and 4544 kB in four consecutive
-  uploads), so they are a lead only.  The driver's own ledger is
-  `/sys/kernel/debug/dri/0/bo_stats`.
-- `Q4_TEX_ALLOC=8888|4444|4444s` — allocate eight 1024x1024 textures in the
-  engine's own context before any model is loaded and hold for 20 s, so the BO
-  ledger can be read around a known allocation.  This is how the table above was
-  produced; it is the only reliable way to price a texture format here.
+- `Q4_TEX_STATS=1` — print, per texture, which path it took (dma-buf import or
+  upload) and its logical size.  It deliberately reports no `CmaFree` delta: on
+  this driver those are page-cache migration, not the texture (the same shape
+  read 2020, 2436, 4576 and 4544 kB in four consecutive uploads, and one RGBA8
+  upload *raised* CmaFree).  The measurement it used to attempt is now done with
+  `/sys/kernel/debug/dri/0/bo_stats`, read around a whole process.
 - `KV_SCALE=N` — KV fixed-point scale (default 16384; q16 uses 2048, q8 uses 16).
 - `KV_PACK=16|8` — packed KV layout: two int16 per RGBA8 texel (width 384) or
   four int8 (width 192), instead of one 24-bit value (width 768).  A hybrid
