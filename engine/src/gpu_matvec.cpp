@@ -383,6 +383,25 @@ int GPU::logits_argmax_from(const vector<Mat>& tiles, GLuint x){
                 if (lg[i] > cb) { cb = lg[i]; cpu = (int)i; }
             fprintf(stderr, "ARGMAX gpu=%d cpu=%d %s\n", token, cpu,
                     token == cpu ? "MATCH" : "MISMATCH");
+            // Per-chunk winners of tile 0, GPU against CPU, to localise a
+            // wrong index to the stage that produced it.
+            vector<uint8_t> c = read_bytes(argmax_chunk_, max_chunks, rows);
+            const int M = tiles[0].rows;
+            for (int ch = 0; ch < max_chunks; ++ch) {
+                const size_t o = (size_t)ch * 4;
+                int gv = (int)c[o] * 256 + c[o + 1]; if (gv >= 32768) gv -= 65536;
+                int gi = (int)c[o + 2] * 256 + c[o + 3];
+                float bv = -1e30f; int bi = -1;
+                for (int k = 0; k < chunk; ++k) {
+                    int idx = ch * chunk + k; if (idx >= M) break;
+                    float v = lg[(size_t)idx];
+                    if (v > bv) { bv = v; bi = idx; }
+                }
+                int cv = (int)(bv * ACT_SCALE);
+                if (gv != cv || gi != bi)
+                    fprintf(stderr, "ARGMAX ch%02d gpu=(%d,%d) cpu=(%d,%d) DIFF\n",
+                            ch, gv, gi, cv, bi);
+            }
         }
         return token;
     }
