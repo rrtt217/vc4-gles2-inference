@@ -272,18 +272,22 @@ GLuint GPU::make_q4_texture(int w, int h, const void* data){
         // default alignment of 4 only holds when that is a multiple of four.
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
         while (glGetError() != GL_NO_ERROR) {}
-        // GL_RGBA (unsized) + a 4444 client type.  The sized GL_RGBA4 was tried
-        // on 2026-11-15 and buys nothing: measured in the engine's own context
-        // against the driver's BO ledger (with a temporary 8 x 1024x1024
-        // allocation switch that is gone now), both
-        // spellings allocate four bytes a texel --
-        //     RGBA8  32776 kB   (4 MB a texture, 1.0x paper)
-        //     4444   36872 kB   (4 MB a texture, 2.0x paper)
-        // -- so the driver expands the nibbles to RGBA8 either way and the view
-        // costs twice the packed one in memory.  The sized call is also invalid
-        // in an ES2 context (internalformat must equal format), so it is not
-        // worth the silent acceptance.
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4,
+        // Which internal format to ask for depends on what the driver does with
+        // it, and the two cases are opposite:
+        //
+        //  * vc4 cannot render to B4G4R4A4, so st_ChooseTextureFormat's render
+        //    target binding sends find_supported_format to RGBA8 and the nibbles
+        //    are expanded: four bytes a texel, measured against bo_stats.  That
+        //    is why the import above exists; this path is its fallback there.
+        //  * everywhere else RGBA4 *is* renderable, the same table entry is
+        //    chosen, and a sized GL_RGBA4 really is two bytes a texel -- asking
+        //    for the unsized form there throws half the memory away.
+        //
+        // The sized spelling is only legal from ES 3.0 (ES2 requires
+        // internalformat == format) and the engine knows which context it got:
+        // gpu_q4_shift() is true exactly when the driver reports ESSL 3.
+        const GLint internal = gpu_q4_shift() ? GL_RGBA4 : GL_RGBA;
+        glTexImage2D(GL_TEXTURE_2D, 0, internal, w, h, 0, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4,
                      rev.data());
         if (GLenum e = glGetError()) {
                 cerr << "texture upload failed: RGBA4 " << w << "x" << h

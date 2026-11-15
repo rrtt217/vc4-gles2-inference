@@ -449,15 +449,6 @@ int main() {
                              GL_UNSIGNED_BYTE, z8.data());
             }
             if (glGetError() != GL_NO_ERROR) ++bad;
-            if (i == 0) {
-                // What did the driver actually allocate?  A silent fallback to
-                // RGBA8 shows up here and nowhere else.
-                GLint got = 0;
-                glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, &got);
-                printf("H %s  internal format the driver chose: 0x%x%s\n",
-                       four ? (which[1] == 's' ? "4-bit sized" : "4-bit unsized") : "8-bit",
-                       got, got == GL_RGBA4 ? " (GL_RGBA4)" : got == GL_RGBA ? " (GL_RGBA)" : "");
-            }
         }
         glFinish();
         const long after = cma_free();

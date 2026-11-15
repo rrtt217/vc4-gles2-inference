@@ -6257,3 +6257,28 @@ greedy string with the view is one token different from the packed one
 (`我是一个AI的一个智能助手` against `我是一个一个简单而富有趣`), which is the
 same reassociation amplified by a hybrid's conv path -- quote the packed string
 for the hybrid, and the dense pins for the view.
+
+### 2026-11-15 — outside vc4 the sized format is the one to ask for
+
+The fallback upload asked for an *unsized* `GL_RGBA` with a 4444 client type,
+which was right for vc4 and wrong everywhere else.  The difference is
+renderability: `st_ChooseTextureFormat` adds `PIPE_BIND_RENDER_TARGET` because a
+texture may become a render target, and then
+
+- on vc4, `B4G4R4A4` is `RT_NO`, so `find_supported_format` skips it and lands on
+  RGBA8 -- four bytes a texel, which is why the dma-buf import exists;
+- on a driver where RGBA4 *is* renderable, the same table entry is chosen and a
+  sized `GL_RGBA4` is genuinely two bytes a texel, so the unsized spelling was
+  throwing half the memory away.
+
+`probes/rgba4444_probe` section F on the Iris Xe says it plainly:
+
+    F renderable  RGBA4 renderbuffer: accepted; FBO complete (0x8cd5); storage 0x8056 = GL_RGBA4
+    F precision   clear 0.1/0.5/0.9 reads 34/136/238 -> 4-bit surface (a multiple of 1/15)
+
+`make_q4_texture` now asks for the sized format whenever the context is ES 3.0
+(the only place it is legal; ES2 requires `internalformat == format`), which is
+exactly when the driver reports ESSL 3 -- the same test the q4 shift path uses.
+The output is unchanged on both machines (the pins hold: the sampled values are
+n/15 either way), so this is a memory change only, and it cannot be measured in
+process RSS because the texture lives on the driver's side.
