@@ -279,8 +279,14 @@ void GPU::matvec_add(const Mat& m, GLuint x, GLuint residual, Target& out, XForm
 
 vector<float> GPU::logits_from(const vector<Mat>& tiles, GLuint x){
         logits_pass(tiles, x);
+        const bool rt = getenv("READBACK_TIME");
+        auto t0 = Clock::now();
         if (needs_finish()) { glFlush(); glFinish(); }
-        return read_logits_full(tiles);
+        auto t1 = Clock::now();
+        vector<float> out = read_logits_full(tiles);
+        if (rt) fprintf(stderr, "RBT finish %.3f ms readback %.3f ms (%zu floats)\n",
+                        elapsed_ms(t0, t1), elapsed_ms(t1, Clock::now()), out.size());
+        return out;
     }
 
 bool GPU::logits_argmax_ok(const vector<Mat>& tiles) const{
@@ -303,11 +309,15 @@ bool GPU::logits_argmax_ok(const vector<Mat>& tiles) const{
 
 int GPU::logits_argmax_from(const vector<Mat>& tiles, GLuint x){
         const int rows = (int)tiles.size();
+        const bool rt = getenv("READBACK_TIME");
+        auto t0 = Clock::now();
+        auto lap = [&](const char* n) { if (rt) { fprintf(stderr, "RBT %s %.3f ms\n", n, elapsed_ms(t0, Clock::now())); t0 = Clock::now(); } };
         logits_pass(tiles, x);
         // Same VC4 rule as logits_candidates_from: the reduction samples the
         // logits target as a texture, and the tile pipeline does not order
         // that sample after the FBO renders on its own.
         if (needs_finish()) { glFlush(); glFinish(); }
+        lap("logits+finish");
 
         const int chunk = 16;
         int max_chunks = 0;
@@ -345,6 +355,7 @@ int GPU::logits_argmax_from(const vector<Mat>& tiles, GLuint x){
             glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         }
         if (needs_finish()) { glFlush(); glFinish(); }
+        lap("stage1");
 
         // ARGMAX_DUMP=1: print the reduction chain next to the CPU argmax of
         // the same logits, so a wrong winner can be located stage by stage.
@@ -382,6 +393,7 @@ int GPU::logits_argmax_from(const vector<Mat>& tiles, GLuint x){
             glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         }
         if (needs_finish()) { glFlush(); glFinish(); }
+        lap("group");
         if (argmax_tile_.tex == 0 || argmax_tile_.w != 1 || argmax_tile_.h != rows)
             argmax_tile_ = make_target(1, rows);
         {
@@ -396,6 +408,7 @@ int GPU::logits_argmax_from(const vector<Mat>& tiles, GLuint x){
             glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         }
         if (needs_finish()) { glFlush(); glFinish(); }
+        lap("final");
 
         // Read back one texel per tile (rows * 4 bytes) and keep the first
         // maximum across tiles -- the same tie rule as max_element, applied
@@ -414,6 +427,7 @@ int GPU::logits_argmax_from(const vector<Mat>& tiles, GLuint x){
             float v = (float)value / ACT_SCALE;
             if (v > best) { best = v; token = r * kLogitsGrid + idx; }
         }
+        lap("readback");
         if (dbg) {
             vector<float> lg = read_logits_full(tiles);
             int cpu = -1; float cb = -1e30f;

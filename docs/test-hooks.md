@@ -117,6 +117,9 @@ binary.  They are measurement hooks, not production settings.
   per-tile winners and the CPU argmax of the same logits, so a wrong winner
   can be located stage by stage.  Diagnostic only; it reads the vocabulary
   back, so it erases the saving it is debugging.
+- `READBACK_TIME=1` — print the per-token logits finish/read-back timing:
+  `finish` and `readback` separately on the full-read-back path, and one lap
+  per reduction stage on the greedy fast path.  Diagnostic only.
 - `RMS_SPLIT=1`, `RMS_FUSED=1` — force the split or fused rmsnorm reduce.  VC4
   defaults to fused (it drops one draw per norm); other drivers default to
   split, where 32 extra fetches per fragment can cost more than the draw.
