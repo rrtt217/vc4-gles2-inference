@@ -145,3 +145,14 @@ reachable through `packHalf2x16`; it is not.
 - Anything that needs half precision must be assembled by hand from float
   operations; there is no `packHalf2x16`, and there are no half-float textures
   either (`OES_texture_half_float` is not exposed).
+- **A loop the compiler does not unroll loses conditional index updates.**
+  Measured 2026-11-15 (`ARGMAX_DUMP`, `docs/performance.md`): in a scan that
+  keeps a running (max, index) pair, the float max stays correct but the
+  index sticks at its first-iteration value — with the index carried as int
+  or float, in the single-branch or the two-branch form.  A 96-iteration loop
+  showed it; a 16-iteration loop with a runtime-bound `break` showed it too;
+  the 16-iteration literal-bound top2 loop (which Mesa unrolls) is exact.
+  Reduction kernels therefore keep every loop at the unrollable length and
+  avoid runtime breaks: out-of-range elements are sentinel texels, not a
+  `break`.  Xe compiles all of these forms correctly, so only a board run
+  catches this.

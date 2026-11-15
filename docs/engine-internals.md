@@ -90,7 +90,9 @@ On VC4, `glReadPixels` is not enough after rendering to an FBO texture, and a
 second pass that samples that texture needs a finish before it starts.  The
 engine keeps `glFlush(); glFinish();` on VC4:
 
-- after logits are rendered, before the Top-K candidate pass;
+- after logits are rendered, before the Top-K candidate pass or the greedy
+  argmax reduction (`GPU_ARGMAX`);
+- after each stage of the argmax reduction, before the next samples it;
 - after matvecs, before readback;
 - after texture uploads that feed a draw.
 
