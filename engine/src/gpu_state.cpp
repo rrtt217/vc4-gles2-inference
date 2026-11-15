@@ -271,13 +271,17 @@ GLuint GPU::make_q4_texture(int w, int h, const void* data){
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
         while (glGetError() != GL_NO_ERROR) {}
         const long cma0 = q4_tex_stats() ? cma_free_kb() : 0;
-        // GL_RGBA4, not GL_RGBA: with an *unsized* internal format st_choose_format
-        // falls back to RGBA8 and the nibbles are expanded at upload (v*17, which
-        // samples exactly like 4444 and costs four bytes a texel -- the memory
-        // doubling in docs/performance.md 2026-11-15).  The sized format maps to
-        // PIPE_FORMAT_B4G4R4A4_UNORM (st_format.c), which vc4_formats.c accepts,
-        // so the surface is two bytes a texel and the view is size-neutral again.
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA4, w, h, 0, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4,
+        // GL_RGBA (unsized) + a 4444 client type.  The sized GL_RGBA4 was tried
+        // on 2026-11-15 and buys nothing: measured in the engine's own context
+        // against the driver's BO ledger (Q4_TEX_ALLOC, 8 x 1024x1024), both
+        // spellings allocate four bytes a texel --
+        //     RGBA8  32776 kB   (4 MB a texture, 1.0x paper)
+        //     4444   36872 kB   (4 MB a texture, 2.0x paper)
+        // -- so the driver expands the nibbles to RGBA8 either way and the view
+        // costs twice the packed one in memory.  The sized call is also invalid
+        // in an ES2 context (internalformat must equal format), so it is not
+        // worth the silent acceptance.
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4,
                      rev.data());
         if (GLenum e = glGetError()) {
                 cerr << "texture upload failed: RGBA4 " << w << "x" << h

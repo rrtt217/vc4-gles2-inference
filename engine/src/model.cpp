@@ -170,8 +170,12 @@ void Model::apply_q4_fmt(){
         // marginal cost (MATVEC_DUP=ffn: 134.5 -> 123.9).  `Q4_FMT=0` restores
         // the packed view inside the same binary, which is the A/B the
         // measurement rules ask for.
+        // Opt-in: the view costs twice the packed one in VRAM on vc4 (the
+        // driver stores the texels as RGBA8, see make_q4_texture), so it is a
+        // speed knob for models that fit either way and a regression for the
+        // ones that only just fit at packed size.  Q4_FMT=rgba4 turns it on.
         const char* v = getenv("Q4_FMT");
-        if (v && strcmp(v, "0") == 0) return;
+        if (!v || strcmp(v, "0") == 0) return;
         // The hybrid is not refused any more: the failure that looked like a
         // 4-bit-format problem was the board running out of CMA while its other
         // services held most of it, and it reproduced on the packed view as

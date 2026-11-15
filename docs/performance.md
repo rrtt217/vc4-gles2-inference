@@ -6115,3 +6115,43 @@ byte-identical to a fresh process) and `regression.sh` is ACCEPT with q4 PPL
 hybrid included; what a board with little CMA free does is now a legible
 failure (`make_texture` reports the size, the texture budget and `CmaFree`)
 instead of the old silent `FBO incomplete`.
+
+### 2026-11-15 — what a 4444 texture actually costs, and why the view is opt-in
+
+Two measurements, both wrong, and then one that holds.
+
+`CmaFree` around a `glTexImage2D` is not a measurement on this driver.  The same
+q4 texture shape read 2020, 2436, 4576, 3344 and 4544 kB in five consecutive
+uploads, and an RGBA8 upload once *raised* CmaFree by 716 kB: CMA pages are
+movable, so every allocation moves page cache in and out.  The "17.6 MB for an
+8 MB surface" and "0.5 MB for the same surface" numbers in earlier drafts of
+this section came from that noise and are withdrawn.
+
+The driver's own ledger is `/sys/kernel/debug/dri/0/bo_stats`.  Measured there,
+in the engine's own context, before any model is loaded (`Q4_TEX_ALLOC`, eight
+1024x1024 textures):
+
+| upload | V3D BOs | per texture | vs paper |
+|---|---:|---:|---:|
+| `GL_RGBA` + `UNSIGNED_BYTE` | 32776 kB | 4.0 MB | 1.0x |
+| `GL_RGBA` + `UNSIGNED_SHORT_4_4_4_4` | 36872 kB | 4.0 MB | 2.0x |
+| `GL_RGBA4` (sized) + `UNSIGNED_SHORT_4_4_4_4` | 36872 kB | 4.0 MB | 2.0x |
+
+So the driver stores four bytes a texel whichever spelling is used: the nibbles
+are expanded to RGBA8 at upload (`v*17`, which samples exactly like n/15, which
+is why the view looked correct and why the expansion went unnoticed).  vc4 does
+list `B4G4R4A4_UNORM` in its sampler table (`vc4_formats.c`), and the sized
+`GL_RGBA4` is not even legal in an ES2 context, where the internal and client
+formats must match -- neither changes the outcome.
+
+Consequences, both now in the code:
+
+- **The 4-bit view costs twice the packed view in VRAM.**  Measured on the whole
+  model: minimind3 q4 is 81948 kB of V3D BOs with the view and 50892 kB without,
+  i.e. +31 MB on a ~24 MB q4 body.  It is a speed knob (-14% on a dense q4
+  token: 247 against 276 ms), not a memory saving, and it is **opt-in**
+  (`Q4_FMT=rgba4`) as of this commit.
+- **LFM2.5 q4 never fit because of this.**  With the view on, its 61 MB of q4
+  weights become 122 MB, which is why the hybrid stopped loading in 2026-11-15
+  while the packed view still did.  That is the regression the board reported,
+  and it was this, not the CMA.

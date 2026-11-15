@@ -170,21 +170,30 @@ binary.  They are measurement hooks, not production settings.
   methodology: it drops the four P fetches and the scale/min decode per group
   (constant scale), with wrong weights on purpose.  It measured 84 ms of the
   gate's 159 on the Pi, which is why the group plane is the next target.
-- `Q4_FMT=0` — disable the 4-bit weight view below, restoring the packed
-  nibbles for an A/B in one binary.  (`Q4_FMT=rgba4` names the default
-  explicitly; any other value is ignored.)
-- `Q4_FMT=rgba4` — bind every INT4 weight matrix as `GL_RGBA4` at twice the
-  width: four weights per texel, sampled as n/15 with the 15 folded into the
-  group scale, so the kernel decodes nothing.  The bytes are the container's
-  own, so there is no re-packing and no format change.  **Default on** for qkv,
-  wo, w13 and w2, the hybrid (conv + attention) model included -- verified on Xe
-  against the packed view, and the earlier board failure turned out to be CMA
-  starvation, which reproduces on the packed view too.  Still refused on the
-  unchunked FFN path (`ffn_split` -> `matvec_to_row` reads packed nibbles).
-  One builder per kernel (`matvec_i4*_4x4`), kept separate so the packed text
-  and its shader hash cannot move.  Not bit-exact: `15*(n/15)` is not exactly
-  `n`, so logits move by ~1 ULP and q4 PPL by ~1.3%; the greedy strings have
-  not moved on either machine.
+- `Q4_FMT=rgba4` — bind every INT4 weight matrix as `GL_RGBA4` texels at twice
+  the width: four weights per texel, sampled as n/15 with the 15 folded into the
+  group scale, so the kernel decodes nothing.  **Opt-in**, and the reason is
+  memory: the driver stores those texels as RGBA8 whatever the internal format
+  says (measured in the engine's own context against the driver's BO ledger,
+  2026-11-15: 8 x 1024x1024 costs 32776 kB as RGBA8 and 36872 kB as "4444", four
+  bytes a texel either way), so the view holds twice the packed view's bytes.
+  Worth it where it fits -- -14% on a dense q4 token on the Pi (247 against
+  276 ms) -- and a regression on a model that only just fits packed.
+  `Q4_FMT=0` or an unset `Q4_FMT` is the packed view.  Still refused on the
+  unchunked FFN path (`ffn_split` -> `matvec_to_row` reads packed nibbles).  One
+  builder per kernel (`matvec_i4*_4x4`), kept separate so the packed text and
+  its shader hash cannot move.  Not bit-exact: `15*(n/15)` is not exactly `n`,
+  so q4 PPL moves ~1.3% and the greedy strings have not moved on either machine.
+- `Q4_TEX_STATS=1` — print, next to every texture upload, the `CmaFree` delta
+  against the logical size.  **Read the caveat in the engine before using it as a
+  measurement**: on this driver those deltas are page-cache migration, not the
+  texture (the same shape reads 2020, 2436, 4576 and 4544 kB in four consecutive
+  uploads), so they are a lead only.  The driver's own ledger is
+  `/sys/kernel/debug/dri/0/bo_stats`.
+- `Q4_TEX_ALLOC=8888|4444|4444s` — allocate eight 1024x1024 textures in the
+  engine's own context before any model is loaded and hold for 20 s, so the BO
+  ledger can be read around a known allocation.  This is how the table above was
+  produced; it is the only reliable way to price a texture format here.
 - `KV_SCALE=N` — KV fixed-point scale (default 16384; q16 uses 2048, q8 uses 16).
 - `KV_PACK=16|8` — packed KV layout: two int16 per RGBA8 texel (width 384) or
   four int8 (width 192), instead of one 24-bit value (width 768).  A hybrid

@@ -11,7 +11,56 @@
 
 #include "common.h"
 
+#if defined(__linux__)
+#include <unistd.h>
+#endif
+
+// Q4_TEX_ALLOC=4444|4444u|8888: allocate eight 1024x1024 textures *in this
+// context, before any model is loaded, then hold still for 20 s so the shell
+// can read /sys/kernel/debug/dri/0/bo_stats around them.  The same call from a
+// standalone probe and from the engine land on different storage sizes, and
+// CmaFree cannot tell them apart (its deltas are page-cache migration on this
+// driver); the driver's own BO ledger can.
+static void q4_alloc_probe() {
+        const char* e = getenv("Q4_TEX_ALLOC");
+        if (!e) return;
+        const bool four = strncmp(e, "4444", 4) == 0;
+        const bool sized = four && e[4] == 's';      // 4444s = sized GL_RGBA4
+        const int n = 8, S = 1024;
+        std::vector<uint32_t> z8((size_t)S * S, 0x5a5a5a5a);
+        std::vector<uint16_t> z4((size_t)S * S / 2, 0x5555);
+        int bad = 0;
+        for (int i = 0; i < n; ++i) {
+                GLuint t = 0;
+                glGenTextures(1, &t);
+                glBindTexture(GL_TEXTURE_2D, t);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                while (glGetError() != GL_NO_ERROR) {}
+                if (four) {
+                        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+                        glTexImage2D(GL_TEXTURE_2D, 0, sized ? GL_RGBA4 : GL_RGBA, S, S, 0,
+                                     GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4, z4.data());
+                        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+                } else {
+                        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, S, S, 0, GL_RGBA,
+                                     GL_UNSIGNED_BYTE, z8.data());
+                }
+                if (GLenum err = glGetError()) { ++bad; fprintf(stderr, "alloc probe: upload %d -> 0x%x\n", i, err); }
+        }
+        glFinish();
+        fprintf(stderr, "alloc probe: %d x %dx%d %s, %d refused; holding 20 s for bo_stats\n",
+                n, S, S, four ? (sized ? "GL_RGBA4 sized" : "GL_RGBA unsized +4444") : "RGBA8", bad);
+        fflush(stderr);
+#if defined(__linux__)
+        sleep(20);
+#endif
+}
+
 void App::prepare_model() {
+        q4_alloc_probe();
     if (getenv("Q8_PARTS"))
         model.apply_precision(getenv("Q8_LAYERS") ? getenv("Q8_LAYERS") : "", getenv("Q8_PARTS"));
     model.split_ffn(gpu.max_target_dim());
