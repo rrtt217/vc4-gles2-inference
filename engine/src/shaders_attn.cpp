@@ -415,12 +415,14 @@ string top2_fast_packed(int rows, int chunk) {
 // smallest q16 value, so a sentinel can at most tie a real rail value, and
 // the tie keeps the earlier (real) chunk.
 //
-// The winning index is carried as a FLOAT, not an int.  Measured on VC4
-// (2026-11-15, ARGMAX_DUMP): an int assigned under a condition inside the
-// loop keeps its first-iteration value -- every chunk reported its start
-// index while the float max was correct -- so the loop-carried index state
-// stays in the float domain, where the conditional updates work.  Indices
-// are <= 65535, exact in float32.
+// The winning index is tracked in the two-branch best1/best2/i1/i2 form the
+// top2 kernels use.  Measured on VC4 (2026-11-15, ARGMAX_DUMP): the simpler
+// single-branch form `if(v>best){best=v;bi=idx;}` loses every index update
+// after the first iteration -- the float max stays correct, the index sticks
+// at the chunk start, with the index carried as int OR float -- while the
+// top2 two-branch form is verified on this board (the candidate path
+// reproduces greedy, 2026-11-03 and re-checked 2026-11-15).  Keep the proven
+// shape; rank 1 is computed and discarded.
 string top1_packed(int rows, int chunk) {
     return "precision highp float;"
         "uniform sampler2D L;uniform float tr,nr;"
@@ -429,14 +431,15 @@ string top1_packed(int rows, int chunk) {
         "float dh(vec4 c){return dv(floor(c.b*255.0+0.5)*256.0+floor(c.a*255.0+0.5));}"
         "void main(){int x=int(gl_FragCoord.x);int start=x*" + to_string(chunk) + ";"
         "if(start>=" + to_string(rows) + "){gl_FragColor=vec4(128.0/255.0,0.0,1.0,1.0);return;}"
-        "float best=-1e30,bi=0.0;"
+        "float best1=-1e30,best2=-1e30;int i1=0,i2=0;"
         "for(int k=0;k<" + to_string(chunk) + ";k++){int idx=start+k;if(idx>=" + to_string(rows) + ")break;"
         "int h=idx/2;vec4 c=texture2D(L,vec2((float(h)+0.5)/" + to_string(kLogitsGridPacked) + ".0,(tr+0.5)/nr));"
         "float v=((h*2)==idx)?dl(c):dh(c);"
-        "if(v>best){best=v;bi=float(idx);}}"
-        "float bv=best*256.0;if(bv<0.0)bv+=65536.0;"
+        "if(v>best1){best2=best1;i2=i1;best1=v;i1=idx;}else if(v>best2){best2=v;i2=idx;}}"
+        "float bv=best1*256.0;int bi=i1;"
+        "if(bv<0.0)bv+=65536.0;"
         "float vh=floor(bv/256.0),vl=bv-vh*256.0;"
-        "float ih=floor(bi/256.0),il=bi-ih*256.0;"
+        "float ih=floor(float(bi)/256.0),il=float(bi)-ih*256.0;"
         "gl_FragColor=vec4(vh/255.0,vl/255.0,ih/255.0,il/255.0);}";
 }
 
@@ -447,21 +450,21 @@ string top1_packed(int rows, int chunk) {
 // (dividing by 256 would not change the ordering).  Strict > again keeps the
 // first chunk on a tie, and the host keeps the first tile, so the global
 // winner is the smallest token id among the maxima -- max_element's rule.
-// Both loop-carried winners are floats, for the VC4 reason in top1_packed.
+// Two-branch best1/best2/i1/i2 tracking, for the VC4 reason in top1_packed.
 string top1_reduce(int n) {
     return "precision highp float;"
         "uniform sampler2D L;uniform float nr;"
         "void main(){int r=int(gl_FragCoord.y);"
-        "float best=-1e30,bi=0.0;"
+        "float best1=-1e30,best2=-1e30;int i1=0,i2=0;"
         "for(int c=0;c<" + to_string(n) + ";c++){"
         "vec4 t=texture2D(L,vec2((float(c)+0.5)/" + to_string(n) + ".0,(float(r)+0.5)/nr));"
         "float v=floor(t.r*255.0+0.5)*256.0+floor(t.g*255.0+0.5);"
         "if(v>=32768.0)v-=65536.0;"
-        "float fi=floor(t.b*255.0+0.5)*256.0+floor(t.a*255.0+0.5);"
-        "if(v>best){best=v;bi=fi;}}"
-        "if(best<0.0)best+=65536.0;"
-        "float vh=floor(best/256.0),vl=best-vh*256.0;"
-        "float ih=floor(bi/256.0),il=bi-ih*256.0;"
+        "int idx=int(floor(t.b*255.0+0.5)*256.0+floor(t.a*255.0+0.5));"
+        "if(v>best1){best2=best1;i2=i1;best1=v;i1=idx;}else if(v>best2){best2=v;i2=idx;}}"
+        "if(best1<0.0)best1+=65536.0;"
+        "float vh=floor(best1/256.0),vl=best1-vh*256.0;"
+        "float ih=floor(float(i1)/256.0),il=float(i1)-ih*256.0;"
         "gl_FragColor=vec4(vh/255.0,vl/255.0,ih/255.0,il/255.0);}";
 }
 
