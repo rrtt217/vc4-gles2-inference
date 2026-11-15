@@ -149,7 +149,8 @@ vector<Case> cases() {
     add(v, "top2_6400_256", [] { return top2(6400, 256); });
     add(v, "top2_fast_packed_6400_256", [] { return top2_fast_packed(6400, 256); });
     add(v, "top2_packed_6400_256", [] { return top2_packed(6400, 256); });
-    add(v, "top1_reduce_96", [] { return top1_reduce(96); });
+    add(v, "top1_group_96", [] { return top1_group(96); });
+    add(v, "top1_final_6", [] { return top1_final(6); });
 
     // --- the hybrid (conv) block.  Its three elementwise passes are the only
     // shaders whose text decides the conv numerics, and they were not in this

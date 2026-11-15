@@ -98,6 +98,7 @@ std::string top2(int rows, int chunk);
 std::string top2_fast_packed(int rows, int chunk);
 std::string top2_packed(int rows, int chunk);
 // Greedy argmax over the packed logits target: stage 1 reuses top2_fast_packed;
-// this reduces the chunk winners to one winner per tile.  Byte-identical to
-// the full read-back + max_element.
-std::string top1_reduce(int n);
+// these reduce the chunk winners to one winner per tile in two 16-bound
+// loops (the VC4-proven length).  Byte-identical to read-back + max_element.
+std::string top1_group(int n);
+std::string top1_final(int groups);

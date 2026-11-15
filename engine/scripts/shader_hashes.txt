@@ -117,7 +117,8 @@ f24cbab4e4c07b6a    3778 swiglu_2432_split_i8_4
 21bc9ae53b32d173    3755 swiglu_2row_2432_i16_2
 d8e5d4878209db96    2951 swiglu_pair_2432_i16_2
 234af67bc4105e0f    2976 swiglu_pair_2432_i8_4
-fe51ae962e1a6bf7     698 top1_reduce_96
+fc0f0f08dcabc3f5     631 top1_final_6
+6d206c540bce7864     819 top1_group_96
 5aee82094245d145    1114 top2_6400_256
 692b283616f82d56     786 top2_fast_6400_256
 e1719f8d1523bd67     873 top2_fast_packed_6400_256

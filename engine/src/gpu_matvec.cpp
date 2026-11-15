@@ -344,23 +344,36 @@ int GPU::logits_argmax_from(const vector<Mat>& tiles, GLuint x){
             }
         }
 
-        // Stage 2: one fragment per tile row, reducing that row's chunk
-        // winners (the rank-0 texels, at even x).  One draw for the whole
-        // grid (rows fragments, under the draw cap for every vocabulary the
-        // packer produces).  The last tile may be short: its trailing chunks
-        // hold the top2 kernel's empty-chunk output, so the reduce stops at
-        // that tile's real chunk count (lc).
-        if (argmax_tile_.tex == 0 || argmax_tile_.w != 1 || argmax_tile_.h != rows)
-            argmax_tile_ = make_target(1, rows);
+        // Stage 2a: one fragment per (tile, group of 16 chunk winners),
+        // then stage 2b: one fragment per tile.  Both loops stay at the
+        // VC4-proven length (see top1_group); a single 96-iteration reduce
+        // lost the index updates on this board.
+        const int groups = (max_chunks + 15) / 16;
+        if (argmax_group_.tex == 0 || argmax_group_.w != groups || argmax_group_.h != rows)
+            argmax_group_ = make_target(groups, rows);
         {
-            GLuint p = x_top1_reduce(max_chunks);
-            bind_fbo(argmax_tile_.fbo);
-            glViewport(0, 0, 1, rows);
+            GLuint p = x_top1_group(max_chunks);
+            bind_fbo(argmax_group_.fbo);
+            glViewport(0, 0, groups, rows);
             use_program(p);
             bind_tex(0, argmax_chunk_.tex);
             set_sampler(p, "L", 0);
             glUniform1f(uloc(p, "nr"), (float)rows);
             glUniform1f(uloc(p, "lc"), (float)((tiles[rows - 1].rows + chunk - 1) / chunk));
+            setup_attrib(p);
+            glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+        }
+        if (needs_finish()) { glFlush(); glFinish(); }
+        if (argmax_tile_.tex == 0 || argmax_tile_.w != 1 || argmax_tile_.h != rows)
+            argmax_tile_ = make_target(1, rows);
+        {
+            GLuint p = x_top1_final(groups);
+            bind_fbo(argmax_tile_.fbo);
+            glViewport(0, 0, 1, rows);
+            use_program(p);
+            bind_tex(0, argmax_group_.tex);
+            set_sampler(p, "L", 0);
+            glUniform1f(uloc(p, "nr"), (float)rows);
             setup_attrib(p);
             glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         }
@@ -709,6 +722,10 @@ GLuint GPU::x_top2_packed(int rows, int chunk){
         return x_prog("xt2p_" + to_string(rows) + "_" + to_string(chunk), top2_packed(rows, chunk));
     }
 
-GLuint GPU::x_top1_reduce(int n){
-        return x_prog("xt1r_" + to_string(n), top1_reduce(n));
+GLuint GPU::x_top1_group(int n){
+        return x_prog("xt1g_" + to_string(n), top1_group(n));
+    }
+
+GLuint GPU::x_top1_final(int groups){
+        return x_prog("xt1f_" + to_string(groups), top1_final(groups));
     }

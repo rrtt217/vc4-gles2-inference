@@ -403,24 +403,56 @@ string top2_fast_packed(int rows, int chunk) {
         "gl_FragColor=vec4(vh/255.0,vl/255.0,ih/255.0,il/255.0);}";
 }
 
-// Greedy argmax, stage 2: one fragment per tile row reduces the stage-1
-// chunk winners to a single (value, index) per tile.  Stage 1 is the proven
-// top2_fast_packed kernel, so the input is its two-rank layout: the rank-0
-// winners sit at even x of a 2n-wide target.  The decode is the same
-// byte-exact floor form; the value stays the raw signed integer here
-// (dividing by 256 would not change the ordering).  Strict > keeps the
-// first chunk on a tie, and the host keeps the first tile, so the global
-// winner is the smallest token id among the maxima -- max_element's rule.
-// The last tile may be short: lc is its real chunk count, and the reduce
-// stops there so the empty-chunk texels of the reused target cannot win.
-string top1_reduce(int n) {
+// Greedy argmax, stage 2a: one fragment per (tile, group of 16 chunk
+// winners) reduces the rank-0 texels of the top2_fast_packed output (even x
+// of a 2n-wide target) to one winner per group.  The decode is the same
+// byte-exact floor form; the value stays the raw signed integer (dividing
+// by 256 would not change the ordering).  Strict > keeps the first chunk on
+// a tie -- max_element's rule, applied at every level.
+//
+// Why 16 and not one 96-iteration loop: measured on VC4 (2026-11-15,
+// ARGMAX_DUMP), a loop too long to unroll loses every conditional index
+// update after the first iteration -- the float max stays correct, the
+// index sticks -- while the 16-iteration top2 loop is exact on this board.
+// Every loop in the reduction therefore stays at the proven length, and
+// the last tile's short chunk count (lc) is honoured with the same
+// break-on-index form top2 uses.  Groups past lc write the sentinel
+// (-32768, 65535): the smallest q16 value cannot beat a real winner, and a
+// tie keeps the earlier (real) group.
+string top1_group(int n) {
     return "precision highp float;"
         "uniform sampler2D L;uniform float nr,lc;"
-        "void main(){int r=int(gl_FragCoord.y);"
-        "int lim=" + to_string(n) + ";if(float(r)==nr-1.0)lim=int(lc);"
+        "void main(){int g=int(gl_FragCoord.x);int r=int(gl_FragCoord.y);"
+        "int start=g*16;"
+        "int lim=int(mix(float(" + to_string(n) + "),lc,(float(r)==nr-1.0)?1.0:0.0));"
         "float best1=-1e30,best2=-1e30;int i1=0,i2=0;"
-        "for(int c=0;c<" + to_string(n) + ";c++){if(c>=lim)break;"
+        "for(int k=0;k<16;k++){int c=start+k;if(c>=lim)break;"
         "vec4 t=texture2D(L,vec2((float(c*2)+0.5)/" + to_string(n * 2) + ".0,(float(r)+0.5)/nr));"
+        "float v=floor(t.r*255.0+0.5)*256.0+floor(t.g*255.0+0.5);"
+        "if(v>=32768.0)v-=65536.0;"
+        "int idx=int(floor(t.b*255.0+0.5)*256.0+floor(t.a*255.0+0.5));"
+        "if(v>best1){best2=best1;i2=i1;best1=v;i1=idx;}else if(v>best2){best2=v;i2=idx;}}"
+        "float bv=(start>=lim)?-32768.0:best1;"
+        "float bi=(start>=lim)?65535.0:float(i1);"
+        "if(bv<0.0)bv+=65536.0;"
+        "float vh=floor(bv/256.0),vl=bv-vh*256.0;"
+        "float ih=floor(bi/256.0),il=bi-ih*256.0;"
+        "gl_FragColor=vec4(vh/255.0,vl/255.0,ih/255.0,il/255.0);}";
+}
+
+// Greedy argmax, stage 2b: one fragment per tile reduces the group winners
+// to the tile winner.  Same encoding and tie rule; the loop is the group
+// count (<= 16 for every vocabulary the packer produces), again the proven
+// length.  The host reads one texel per tile and keeps the first maximum
+// across tiles, so the global winner is the smallest token id among the
+// maxima -- byte-identical to the full read-back + max_element.
+string top1_final(int groups) {
+    return "precision highp float;"
+        "uniform sampler2D L;uniform float nr;"
+        "void main(){int r=int(gl_FragCoord.y);"
+        "float best1=-1e30,best2=-1e30;int i1=0,i2=0;"
+        "for(int c=0;c<" + to_string(groups) + ";c++){"
+        "vec4 t=texture2D(L,vec2((float(c)+0.5)/" + to_string(groups) + ".0,(float(r)+0.5)/nr));"
         "float v=floor(t.r*255.0+0.5)*256.0+floor(t.g*255.0+0.5);"
         "if(v>=32768.0)v-=65536.0;"
         "int idx=int(floor(t.b*255.0+0.5)*256.0+floor(t.a*255.0+0.5));"
