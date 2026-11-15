@@ -6453,3 +6453,10 @@ the rolled-loop rule in `docs/vc4-glsl-costs.md` §6, the ARGMAX_DUMP /
 READBACK_TIME instruments, and a corrected cost model: the hybrid's logits
 pass is 97 ms of draw plus ~6 ms of read-back, and both are near their floor
 without changing the model.
+
+Board acceptance on the final default binary: q8 PPL **271.2855** to the
+digit (the pin), q4 PPL **328.0042** (unpinned; the 4-bit view moved it from
+the packed view's 325.3751, +0.8% — the format-pin behaviour the RGBA4 entry
+predicts, measured here for the record), the q8/q4 string pins, the poem
+behaviour check, hybrid determinism (two runs byte-identical), and the
+default byte-identical to the pre-argmax binary on q8/q4/hybrid.
