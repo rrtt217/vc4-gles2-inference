@@ -110,6 +110,10 @@ binary.  They are measurement hooks, not production settings.
   `std::max_element`'s tie rule.  Only greedy turns without penalties, marker
   masks, `LOGITS_OUT` or logprobs take it; the unpacked logits layout (i16
   weights, `ACT8`) always keeps the read-back.
+- `ARGMAX_DUMP=1` — with the greedy fast path, print the chunk winners, the
+  per-tile winners and the CPU argmax of the same logits, so a wrong winner
+  can be located stage by stage.  Diagnostic only; it reads the vocabulary
+  back, so it erases the saving it is debugging.
 - `RMS_SPLIT=1`, `RMS_FUSED=1` — force the split or fused rmsnorm reduce.  VC4
   defaults to fused (it drops one draw per norm); other drivers default to
   split, where 32 extra fetches per fragment can cost more than the draw.

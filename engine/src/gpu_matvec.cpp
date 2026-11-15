@@ -324,6 +324,23 @@ int GPU::logits_argmax_from(const vector<Mat>& tiles, GLuint x){
         }
         if (needs_finish()) { glFlush(); glFinish(); }
 
+        // ARGMAX_DUMP=1: print the reduction chain next to the CPU argmax of
+        // the same logits, so a wrong winner can be located stage by stage.
+        const bool dbg = getenv("ARGMAX_DUMP");
+        if (dbg) {
+            vector<uint8_t> c = read_bytes(argmax_chunk_, max_chunks, rows);
+            for (int r = 0; r < min(rows, 2); ++r) {
+                fprintf(stderr, "ARGMAX chunk row %d:", r);
+                for (int j = 0; j < min(max_chunks, 6); ++j) {
+                    const size_t o = ((size_t)r * max_chunks + j) * 4;
+                    int v = (int)c[o] * 256 + c[o + 1]; if (v >= 32768) v -= 65536;
+                    int idx = (int)c[o + 2] * 256 + c[o + 3];
+                    fprintf(stderr, " (%d,%d)", v, idx);
+                }
+                fprintf(stderr, "\n");
+            }
+        }
+
         // Stage 2: one fragment per tile row, reducing that row's chunk
         // winners.  One draw for the whole grid (rows fragments, under the
         // draw cap for every vocabulary the packer produces).
@@ -353,9 +370,19 @@ int GPU::logits_argmax_from(const vector<Mat>& tiles, GLuint x){
             int value = (int)raw[o] * 256 + raw[o + 1];
             if (value >= 32768) value -= 65536;
             int idx = (int)raw[o + 2] * 256 + raw[o + 3];
+            if (dbg) fprintf(stderr, "ARGMAX tile %d: (%d,%d)%s\n", r, value, idx,
+                             idx >= tiles[r].rows ? " INVALID" : "");
             if (idx >= tiles[r].rows) continue;
             float v = (float)value / ACT_SCALE;
             if (v > best) { best = v; token = r * kLogitsGrid + idx; }
+        }
+        if (dbg) {
+            vector<float> lg = read_logits_full(tiles);
+            int cpu = -1; float cb = -1e30f;
+            for (size_t i = 0; i < lg.size(); ++i)
+                if (lg[i] > cb) { cb = lg[i]; cpu = (int)i; }
+            fprintf(stderr, "ARGMAX gpu=%d cpu=%d %s\n", token, cpu,
+                    token == cpu ? "MATCH" : "MISMATCH");
         }
         return token;
     }
