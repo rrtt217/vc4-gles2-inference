@@ -62,11 +62,36 @@ int main() {
     }
 
     // ---- B: a two-byte-per-texel BO we allocate ourselves -------------------
-    const int W = 64, H = 16;
-    int fd = open("/dev/dri/card0", O_RDWR);
-    if (fd < 0) { printf("B drm        open card0 failed: %s\n", strerror(errno)); return 0; }
+    // The engine's actual shape, and the engine's own swizzle: 192x1536 is what
+    // a 768-column q4 matrix becomes, so this is the case that matters.
+    const int shapes[][2] = { {64,16}, {80,16}, {96,16}, {120,16}, {128,16}, {160,16}, {192,16} };
+    for (int si = 0; si < 7; ++si) {
+    const int W = shapes[si][0], H = shapes[si][1];
+    // card0 is the KMS node (mode setting + GEM, needs DRM master to modeset and
+    // usually root:video), renderD128 is the render node (GEM and rendering
+    // only, root:render, no master needed) -- the node a headless compute
+    // process is supposed to use, and the only one that exists on a host whose
+    // sandbox does not expose the display device.  Probe both and report, so
+    // the engine can pick the same way.
+    const char* nodes[] = { "/dev/dri/renderD128", "/dev/dri/card0", "/dev/dri/card1" };
+    int fd = -1;
+    for (const char* n : nodes) {
+        int f = open(n, O_RDWR);
+        if (f < 0) { printf("B drm        %-22s open: %s\n", n, strerror(errno)); continue; }
+        struct drm_vc4_create_bo probe_bo = {};
+        probe_bo.size = 4096;
+        int r = ioctl(f, DRM_IOCTL_VC4_CREATE_BO, &probe_bo);
+        printf("B drm        %-22s open: yes   VC4_CREATE_BO: %s\n", n,
+               r == 0 ? "yes" : strerror(errno));
+        if (r == 0) {
+            if (fd < 0) fd = f; else close(f);
+        } else close(f);
+        if (r != 0 && fd < 0) continue;
+    }
+    if (fd < 0) { printf("B drm        no usable node\n"); return 0; }
     struct drm_vc4_create_bo cbo = {};
-    cbo.size = (uint32_t)(W * H * 2);
+    cbo.size = (uint32_t)(W * H * 2 + 16384);   // slack: the driver may round the surface up
+    const size_t used = (size_t)W * H * 2;
     if (ioctl(fd, DRM_IOCTL_VC4_CREATE_BO, &cbo) != 0) {
         printf("B drm        VC4_CREATE_BO failed: %s\n", strerror(errno));
         return 0;
@@ -83,7 +108,16 @@ int main() {
     // probe's kernel-side convention is texel .x..w = columns 0..3 reversed at
     // upload.  For a feasibility answer, one value per texel is enough.
     uint16_t* px = (uint16_t*)map;
-    for (int i = 0; i < W * H; ++i) px[i] = (uint16_t)(0x1111 * ((i % 15) + 1));
+    // Four *distinct* nibbles per texel: the word's nibbles are (low to high)
+    // n0..n3, and the sampler reports them as .x..w in some order.  A pattern
+    // like 0x1111 cannot see a swizzle at all, which is how the first version of
+    // this probe "passed" while the engine read garbage.
+    // Column nibbles 0..3 in a word, pushed through the engine's import swizzle
+    // (gpu_dmabuf_swizzle: (v & 0xF0F0) | ((v & 0x000F) << 8) | ((v & 0x0F00) >> 8)).
+    auto swz = [](uint16_t v) { return (uint16_t)((v & 0xF0F0u) | ((v & 0x000Fu) << 8) | ((v & 0x0F00u) >> 8)); };
+    for (int i = 0; i < W * H; ++i) px[i] = swz((uint16_t)0x3210);
+    (void)used;
+    msync(map, cbo.size, MS_SYNC);
     munmap(map, cbo.size);
     int dmabuf = -1;
     if (drmPrimeHandleToFD(fd, cbo.handle, DRM_CLOEXEC, &dmabuf) != 0) {
@@ -169,11 +203,12 @@ int main() {
         glDrawArrays(GL_TRIANGLES, 0, 3);
         uint8_t back[8] = {};
         glReadPixels(0, 0, 2, 1, GL_RGBA, GL_UNSIGNED_BYTE, back);
-        printf("C sample     texel0 = %d %d %d %d   texel1 = %d %d %d %d  (expect 1 1 1 1 / 2 2 2 2)\n",
+        printf("C sample     texel0 .xyzw = %d %d %d %d   texel1 = %d %d %d %d\n",
                back[0], back[1], back[2], back[3], back[4], back[5], back[6], back[7]);
+        printf("C mapping    word 0x3210 through the engine swizzle should read 0 1 2 3\n");
         break;
     }
 
-    close(fd);
+    }
     return 0;
 }

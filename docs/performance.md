@@ -6180,3 +6180,37 @@ So a true 4-bit surface is reachable: `DRM_IOCTL_VC4_CREATE_BO` +
 `glEGLImageTargetTexture2DOES`.  Doing that in `make_q4_texture` would make the
 4-bit view memory-neutral instead of 2x, and the weights would be written
 straight into the mapped BO instead of uploaded through `glTexImage2D`.
+
+### 2026-11-15 — the dma-buf import works, but not at the widths the engine needs
+
+`probes/egl_image_probe` allocates the buffer itself and imports it as an
+EGLImage, which does get around `st_ChooseTextureFormat` (the surface is two
+bytes a texel, and the nibbles come back exactly).  The component order differs
+from the upload path -- a word whose nibbles are n0..n3 samples as
+(n2, n1, n0, n3) -- and `(v & 0xF0F0) | ((v & 0x000F) << 8) | ((v & 0x0F00) >> 8)`
+maps it back to column order, verified at 64x16.
+
+It does not survive a wider texture.  Same probe, same pattern, one process,
+linear import, pitch = width * 2:
+
+| shape | sampled |
+|---|---|
+| 64 x 16 | `0 1 2 3` (correct) |
+| 80 x 16 | `0 0 0 0` |
+| 96 x 16 | `0 0 0 0` |
+| 120 x 16 | `0 0 0 0` |
+| 128 x 16 | `0 0 0 0` |
+| 160 x 16 | `0 0 0 0` |
+| 192 x 16 | `0 0 0 0` |
+
+A larger BO (16 KB of slack) changes nothing, and neither does `msync` before
+the unmap, so it is not the size or the write-back.  The engine needs 192, 256
+and 384 texels wide (`cols / 4` of 768, 1024, 1536), so the linear import is not
+usable as it stands.  The next thing to try is the tiled modifier
+(`DRM_FORMAT_MOD_BROADCOM_VC4_T_TILED`) with the utile swizzle done by hand,
+rather than the linear one.
+
+The engine-side path was written, measured (memory-neutral: 50508 kB of V3D BOs
+against packed's 50888, where the glTexImage2D view costs 81948) and then
+withdrawn, because it answers wrongly at the engine's widths.  What is left in
+the tree is this probe and this section.
