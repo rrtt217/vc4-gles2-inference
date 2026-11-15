@@ -13,6 +13,7 @@ own copy of the surfaceless-EGL setup.
 | probe | answers | targets |
 |---|---|---|
 | `packunpack_probe` | which GLSL ES pack/unpack builtins does this driver actually run?  Every language feature the engine relies on, one draw each | `packunpack_probe_pi` |
+| `egl_image_probe` | can a 4-bit texture reach the TMU *without* Mesa choosing the format?  Yes on this board: a 2048-byte dma-buf BO (64x16 at two bytes a texel) imports through `EGL_LINUX_DMA_BUF_EXT` + `glEGLImageTargetTexture2DOES` and samples back as exact nibbles (1 1 1 1 / 2 2 2 2).  That path bypasses `st_ChooseTextureFormat`, which otherwise adds `PIPE_BIND_RENDER_TARGET` for `GL_RGBA4` and lands on RGBA8 because vc4 cannot render to B4G4R4A4 | on the board (`g++ ... -I/usr/include/libdrm -lEGL -lGLESv2 -ldrm`) |
 | `glsl_probe` | which GLSL ES dialect does the vc4 ES2 context really give us, and can the q4 nibble unpack use integer ops? | `glsl_probe_pi` |
 | `q4fmt_probe` | what does the VC4 texture unit return for a small UNORM component?  The q4 split layout depends on the exact rounding | `q4fmt_probe_pi` |
 | `rgba4444_probe` | does this driver give a real 4-bit-per-channel texture?  The q4 weight path is 4 bits per channel.  **Answered on VC4 (2026-11-14): yes** — exact `n/15`, same component order as Xe, 144/144 nibbles right on a 1216x192 matrix; see [`docs/performance.md`](../../docs/performance.md) | `rgba4444_probe`, `rgba4444_probe_pi` |

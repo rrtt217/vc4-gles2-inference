@@ -6155,3 +6155,28 @@ Consequences, both now in the code:
   weights become 122 MB, which is why the hybrid stopped loading in 2026-11-15
   while the packed view still did.  That is the regression the board reported,
   and it was this, not the CMA.
+
+### 2026-11-15 — the 4-bit surface exists, just not through glTexImage2D
+
+`st_ChooseTextureFormat` adds `PIPE_BIND_RENDER_TARGET` for `GL_RGBA4` (a GL
+texture may become a render target and Mesa cannot know), vc4 cannot render to
+B4G4R4A4 (`vc4_formats.c`: `rt = RT_NO`), so `find_supported_format` skips both
+two-byte candidates and takes `DEFAULT_RGBA_FORMATS`.  The retry that would drop
+the render-target binding runs only when nothing matches, and RGBA8 always
+matches, so no spelling and no mutability can reach it -- `glTexImage2D` with
+`GL_RGBA4` or with a 4444 client type, and `glTexStorage2D` with `GL_RGBA4`,
+all measure four bytes a texel (`Q4_TEX_ALLOC` against `bo_stats`).
+
+`probes/egl_image_probe` goes around that function: it allocates the buffer
+itself and imports it.
+
+    A GL   OES_EGL_image=yes    A EGL  image_base / dma_buf_import / dma_buf_modifiers = yes
+    B drm  64x16 at 2 bytes a texel = 2048 B, dma-buf fd 7
+    C import  ARGB4444 accepted
+    C sample  texel0 = 1 1 1 1   texel1 = 2 2 2 2     (exact nibbles)
+
+So a true 4-bit surface is reachable: `DRM_IOCTL_VC4_CREATE_BO` +
+`VC4_MMAP_BO` + `PRIME_HANDLE_TO_FD` + `EGL_LINUX_DMA_BUF_EXT` (linear) +
+`glEGLImageTargetTexture2DOES`.  Doing that in `make_q4_texture` would make the
+4-bit view memory-neutral instead of 2x, and the weights would be written
+straight into the mapped BO instead of uploaded through `glTexImage2D`.
