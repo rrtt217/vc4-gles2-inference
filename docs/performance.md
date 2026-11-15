@@ -6337,3 +6337,119 @@ Consequence for the gate: q4's PPL pin is a *format* pin, not a numerics pin.
 Re-baselined (Xe 326.1483) and expected to move by ~1% whenever the q4 path is
 rearranged.  The q8 PPL, the string pins and the swap matrix are the checks that
 have actually caught regressions, and none of them is affected.
+## 2026-11-15, later — the GPU greedy argmax: byte-identical, and a net loss on VC4
+
+The logits-pass entry above said the hybrid's 155 ms logits pass splits
+97 draw / 57 read-back, and that the read-back was avoidable: ask the GPU
+for the winning index instead of pulling 258 KiB to the CPU.  This entry
+records building that, and the measurement that killed the premise.
+
+**What was built.**  `Session::step_greedy` runs the forward pass and takes
+the argmax where the logits are: the proven `top2_fast_packed` kernel keeps
+the best (value, index) per 16-logit chunk, `top1_group` reduces 16 chunk
+winners to one per group, `top1_final` reduces the groups to one winner per
+tile, and the host reads `tiles * 4` bytes (168 B for the hybrid's 42 tiles)
+and keeps the first maximum across tiles.  Strict `>` at every level is
+`std::max_element`'s tie rule and the values travel as the stored q16
+integers, never re-rounded, so the winner is **byte-identical**, not close.
+The chat loops, the tool loop and the worker all take it; the plain path's
+decode timer wraps it.  Eligibility: greedy turns without penalties, marker
+masks, `LOGITS_OUT` or logprobs; the unpacked logits layout (i16 weights,
+ACT8) keeps the read-back.  `GPU_ARGMAX=1` enables it (opt-in, see below);
+`ARGMAX_DUMP=1` prints the chunk winners, the tile winners and the CPU
+argmax of the same logits; `READBACK_TIME=1` prices the finish and the
+transfer separately.  The three new scratch targets are in
+`reset_targets()`; `swap_matrix.py` passes with the worker load op.
+
+**The VC4 part, which cost five board rounds.**  Xe ran the first version
+byte-identical; the board returned token 0 for every prompt.  ARGMAX_DUMP
+localized it: the float maxima were all correct, but every index stuck at
+its first-iteration value.  What was tried, in order, all with the same
+symptom on the board and all byte-identical on Xe:
+
+| form | board |
+|---|---|
+| single-branch `if(v>best){best=v;bi=idx;}`, int index | index sticks |
+| index carried as float | index sticks |
+| two-branch best1/best2/i1/i2 (the top2 form) | index sticks |
+| stage 1 = the literal `top2_fast_packed` text | **exact** |
+| 96-iteration `top1_reduce` over the exact chunk winners | index sticks |
+| 16-iteration group loop with a runtime-bound `break` | index sticks |
+| 16-iteration group loop, no break, sentinel clear | **exact** |
+
+The pattern: **a loop the compiler does not unroll loses the conditional
+index updates; the float max survives.**  The 16-iteration literal-bound
+top2 loop is unrolled and exact; a 96-iteration loop, or a 16-iteration loop
+whose `break` bound is a runtime value, stays rolled and loses them.  The
+shipped reduction therefore keeps every loop at the unrollable length and
+has no runtime break: the pass clears the chunk target to the sentinel texel
+(-32768, index 65535) before stage 1, stage 1 draws only each tile's real
+chunks (the TOPK_FAST viewport), and the trailing sentinels can never win —
+-32768 is the smallest q16 value, and a tie keeps the earlier, real chunk.
+Recorded in `docs/vc4-glsl-costs.md` §6; only a board run catches this class.
+
+**Identity (both machines).**  Greedy text and TOKENS_OUT byte-identical
+with the arm on and off: Xe q8/q4/i16 and LFM2.5 q4 (two prompts), Pi Zero
+q8/q4 and LFM2.5-QAD q4 (two prompts); LOGITS_OUT dumps identical (the dump
+disqualifies the fast path by design); the plain completion path too.  Xe:
+regression.sh ACCEPT (q8 PPL 270.3170, q4 326.1483, both string pins, MoE
+determinism), swap_matrix.py PASS, warncheck 0, server selftest 108/108,
+shader_hashes additive only.
+
+**Timing (Pi Zero, protocol v1: discarded warm-up, interleaved timed pairs
+20 s apart, GPU_LAYER=1 KV_PACK=16, greedy).**  The hybrid rows use
+`IGNORE_EOS=1 --gen 16` (the model stops at 7 tokens on its own; a 5 s
+decode window was too short for the board's load swings).  The first
+campaign ran right after a two-engine CMA incident and is noise; the clean
+campaign is the second:
+
+| lfm pair | fast | slow | load (fast/slow) |
+|---|---:|---:|---|
+| 1 | 686.8 | 678.8 | 2.33 / 2.07 |
+| 2 | 706.2 | 677.1 | 2.04 / 1.73 |
+| 3 | 694.7 | 677.9 | 1.47 / 1.93 |
+| 4 | 699.4 | 697.6 | 1.32 / 1.54 |
+| 5 | 681.8 | 738.1 | 2.20 / 1.72 |
+| median | **694.7** | **678.8** | |
+
+Paired deltas +8.0 / +29.0 / +16.7 / +1.8 / -56.4, median **+8.0 ms/token —
+the reduction is slower**.  Dense (first campaign, --gen 16 natural EOS):
+q8 fast 189.6 / 188.3 / 190.7 vs slow 205.1 / 188.9 / 187.5 (medians 189.6
+vs 188.9), q4 fast 229.0 / 230.9 / 228.8 vs slow 236.3 / 227.0 / 225.5
+(medians 229.0 vs 227.0): neutral to +2 ms.  Xe plain-path interleaved pairs
+agree in sign: 31.99/29.15, 27.47/22.04, 21.35/19.23 (+2.8/+5.4/+2.1 ms).
+The board's first fast token also pays ~6.4 s of reduction-shader compile
+and QPU generation (one-time; the warm-up absorbs it).
+
+**Why — READBACK_TIME, steady-state hybrid token:**
+
+| path | stage | ms |
+|---|---|---:|
+| read-back | finish (waits the forward + logits draws) | ~156 |
+| read-back | **readback: 258 KiB + 64402-float decode** | **6.0-7.2** |
+| reduction | logits + finish | ~172 |
+| reduction | stage 1: clear + 42 top2 draws + finish | 12.3-15.3 |
+| reduction | group draw + finish | 0.9-1.5 |
+| reduction | final draw + finish | 0.8-1.3 |
+| reduction | readback: 168 B | 0.16-0.28 |
+
+**The read-back is ~6 ms, not 57.**  The PASS_DUP figure above was a replay
+artifact: the replay's finish waits on the replayed logits draw, and that
+wait is unavoidable GPU work, not transfer — the same trap the
+`LAYER_PROFILE` entry documents.  In the real flow the transfer plus the
+CPU decode of 64402 floats costs 6-7 ms.  The chunk pass re-reads the whole
+logits texture on-GPU (roughly the same fetches) and adds three pipeline
+drains and 44 draws: ~14 ms, which cannot beat 6.  The dense read-back is
+~1 ms (the 2026-11-03 PASS_DUP entry was right about that one), so the
+reduction loses there too.
+
+**Disposition.**  The full read-back stays the default everywhere;
+`GPU_ARGMAX=1` keeps the reduction as a byte-identical measurement arm — it
+may pay where `glReadPixels` is dearer than a texture re-read plus three
+drains, which VC4 is not.  The correction to the entry above: the 57 ms is
+not an avoidable read-back, and "the read-back is avoidable" was a hypothesis
+that the end-to-end A/B falsified.  What the investigation bought instead is
+the rolled-loop rule in `docs/vc4-glsl-costs.md` §6, the ARGMAX_DUMP /
+READBACK_TIME instruments, and a corrected cost model: the hybrid's logits
+pass is 97 ms of draw plus ~6 ms of read-back, and both are near their floor
+without changing the model.

@@ -296,6 +296,7 @@ in `docs/performance.md` with the numbers.
 | Merge the q4 gate into one draw | The gate is draw-bound and this driver cannot express it in one draw; the vec4 variant is not faster either. |
 | Pair q4 qkv rows | Not bit-exact *and* not faster. |
 | Batch prefill at B=4 | Priced on the real driver: the extra passes outweigh the shared fetch.  Two positions is the ceiling. |
+| GPU-side greedy argmax to skip the logits read-back | Measured 2026-11-15 (`GPU_ARGMAX=1`, kept opt-in): the hybrid's read-back is **~6 ms**, not the ~57 ms the PASS_DUP replay suggested (that was the finish waiting on the replayed draw); the chunk pass re-reads the whole logits texture on-GPU plus three pipeline drains, ~14 ms, so the reduction is a net **+8 ms/token** on the hybrid, +2 on dense.  The bring-up did buy the VC4 rolled-loop rule (`docs/vc4-glsl-costs.md` §6): a loop the compiler does not unroll loses conditional index updates. |
 
 ## Measurement rules that came out of this campaign
 

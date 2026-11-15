@@ -102,15 +102,15 @@ binary.  They are measurement hooks, not production settings.
 - `FFN_PAIR=0` — unpaired FFN rows; the paired q8/q4 path is the default (the
   paired shader covers q8 and q4, and `FFN_FUSE` only applies inside it).
 - `LOGITS_SPLIT=1` — unpaired logits rows.
-- `GPU_ARGMAX=0` / `GPU_ARGMAX=1` — greedy sampling reads the whole vocabulary
-  back and takes the argmax on the CPU, or forces the GPU reduction.  The
-  default follows `RMS_FUSED`: the reduction is on where the read-back is
-  dear (VC4), off elsewhere — on Xe the three reduction draws cost 2-5 ms a
-  token more than the cheap full read-back.  The reduction (the proven
-  `top2_fast_packed` chunk pass, then two small 16-bound reduce passes; one
-  texel per tile read back) is byte-identical to the read-back path: it
-  compares the exact stored integers and keeps the first maximum at every
-  level, which is `std::max_element`'s tie rule.  Only greedy turns without
+- `GPU_ARGMAX=1` — greedy sampling reduces the packed q16 logits to the
+  winning token on the GPU (the proven `top2_fast_packed` chunk pass, then
+  two small 16-bound reduce passes; one texel per tile read back) instead of
+  reading the whole vocabulary back.  **Opt-in: measured a net loss on VC4**
+  (the read-back is ~6 ms a token on the hybrid, the reduction ~14 ms; see
+  `docs/performance.md`, 2026-11-15), kept as a byte-identical measurement
+  arm.  The reduction compares the exact stored integers and keeps the first
+  maximum at every level, which is `std::max_element`'s tie rule, so the
+  winner is byte-identical to the read-back.  Only greedy turns without
   penalties, marker masks, `LOGITS_OUT` or logprobs take it; the unpacked
   logits layout (i16 weights, `ACT8`) always keeps the read-back.
 - `ARGMAX_DUMP=1` — with the greedy fast path, print the chunk winners, the

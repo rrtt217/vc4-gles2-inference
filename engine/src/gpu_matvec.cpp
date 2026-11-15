@@ -290,21 +290,25 @@ vector<float> GPU::logits_from(const vector<Mat>& tiles, GLuint x){
     }
 
 bool GPU::logits_argmax_ok(const vector<Mat>& tiles) const{
-        // GPU_ARGMAX=0 restores the full read-back inside the same binary,
-        // which is the A/B the measurement rules ask for; GPU_ARGMAX=1
-        // forces the reduction on any driver.  The default follows the
-        // rms_fused precedent: on where the read-back is dear (VC4), off
-        // elsewhere.  Measured on Xe: the three reduction draws cost 2-5 ms
-        // a token more than the cheap full read-back of a 6400 vocabulary,
-        // while on VC4 the dense read-back (~1 ms) and the reduction are a
-        // wash and the hybrid's 258 KiB read-back is 57 ms.  Only the packed
-        // q16 layout is reduced on the GPU: there the stored bytes are the
-        // exact integers the CPU compares, so the winner is byte-identical.
-        // The unpacked (i16-weight / ACT8) layout keeps the old path.
+        // Opt-in (GPU_ARGMAX=1); the full read-back is the default because
+        // the reduction is a measured net LOSS on VC4.  READBACK_TIME (Pi
+        // Zero, 2026-11-15) puts the hybrid's read-back at ~6 ms a token
+        // (258 KiB), not the ~57 ms the PASS_DUP replay suggested -- that
+        // figure was the finish waiting on the replayed logits draw, which
+        // is unavoidable GPU work, not transfer.  The chunk pass re-reads
+        // the whole logits texture on-GPU (~the same fetches) and adds three
+        // pipeline drains, ~14 ms in all, so it cannot beat the 6 ms
+        // read-back; the interleaved A/B agrees (hybrid ~+8 ms/token, dense
+        // ~+2).  Kept as a byte-identical measurement arm -- it may pay
+        // where glReadPixels is dearer -- and for the VC4 rolled-loop
+        // finding its bring-up produced (docs/vc4-glsl-costs.md §6).
+        // Only the packed q16 layout is reduced on the GPU: there the stored
+        // bytes are the exact integers the CPU compares, so the winner is
+        // byte-identical.  The unpacked (i16-weight / ACT8) layout keeps the
+        // read-back even when the flag is set.
         const char* v = getenv("GPU_ARGMAX");
-        if (v && strcmp(v, "0") == 0) return false;
-        if (v && strcmp(v, "1") == 0) return logits_pair_ok(tiles);
-        return needs_finish() && logits_pair_ok(tiles);
+        if (!(v && strcmp(v, "1") == 0)) return false;
+        return logits_pair_ok(tiles);
     }
 
 int GPU::logits_argmax_from(const vector<Mat>& tiles, GLuint x){
