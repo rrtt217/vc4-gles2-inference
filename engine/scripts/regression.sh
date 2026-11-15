@@ -25,6 +25,11 @@
 #                      GPU::reset_targets().  A Target that survives a scene
 #                      release is *reused* with a deleted name (silent garbage),
 #                      so the ledger has to stay complete.  No GPU, no model.
+#   0e. draw cap    - the 1024-fragment draw limit is kDrawCap, not a bare number
+#                      in gpu*.cpp; a wrong width fails silently (no GPU, no model)
+#   0f. layout       - every container under models/ round-trips through
+#                      tools/mmcf_format.py and the C++ constants agree (no GPU)
+#
 #   0d. q16 decode   - every q16 decode in the emitted GLSL folds the negative
 #                      rail with one of the two documented thresholds (32767.5
 #                      and 32768.0, equivalent because a decoded value is always
@@ -206,6 +211,19 @@ sh scripts/check_q16_decode.sh "$BIN" || {
 
 sh scripts/check_target_reset.sh || {
     echo "target reset FAIL: run scripts/check_target_reset.sh for the list" >&2
+    exit 1
+}
+
+# The draw cap and the container layout are two more checks that cost nothing and
+# were only in `make check`/CI: the acceptance gate is the one that runs on the
+# hardware, so it should not be the one with fewer checks (2026-11-15).
+sh scripts/check_draw_cap.sh || {
+    echo "draw cap FAIL: a gpu*.cpp uses a bare 1024 instead of kDrawCap" >&2
+    exit 1
+}
+
+python3 scripts/test_mmcf_format.py || {
+    echo "container layout FAIL: see scripts/test_mmcf_format.py" >&2
     exit 1
 }
 

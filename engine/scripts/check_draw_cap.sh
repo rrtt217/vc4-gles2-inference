@@ -20,7 +20,12 @@ cd "$(dirname "$0")/.." || exit 1
 bad=0
 for f in src/gpu*.cpp; do
     # drop // comments, then look for 1024
-    hits=$(sed 's|//.*||' "$f" | grep -nE '(^|[^0-9_.])1024([^0-9]|$)' | head -3)
+    # A bare 1024 that is a *scaling unit* is legitimate and common (`/ 1024` for
+    # kB, `* 1024` for kB->B); the draw cap is an additive bound (`+= 1024`,
+    # `min(1024,`, a default).  Flag the additive forms only (2026-11-15: the
+    # upload accounting's `/ 1024` tripped the first version).
+    hits=$(sed 's|//.*||' "$f" | grep -nE '(^|[^0-9_.])1024([^0-9]|$)' \
+           | grep -vE '([*/]|>>)[[:space:]]*1024' | head -3)
     if [ -n "$hits" ]; then
         echo "FAIL  $f uses a bare 1024; use kDrawCap (src/gpu_internal.h):" >&2
         printf '%s\n' "$hits" | sed 's/^/      /' >&2
