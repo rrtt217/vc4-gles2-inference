@@ -131,6 +131,7 @@ void GPU::reset_targets(){
     }
 
 void GPU::release_scene(){
+        gpu_dmabuf_release_all();
         // Deleting a name that is already gone is a no-op in GL, so a texture
         // rebuilt in place (the conv kernel) can sit in the list twice.
 
@@ -263,6 +264,18 @@ GLuint GPU::make_q4_texture(int w, int h, const void* data){
                 const uint16_t v = src[i];
                 rev[i] = (uint16_t)(((v & 0x000F) << 12) | ((v & 0x00F0) << 4) |
                                     ((v & 0x0F00) >> 4) | ((v & 0xF000) >> 12));
+        }
+        // Imported where the platform allows it: a two-byte surface, which the
+        // upload path cannot produce (gpu_dmabuf.cpp explains why).
+        // `rev`, not `src`: an imported surface reports the word's nibbles
+        // reversed (a self-check on the board: word 0xa727 samples as
+        // 10 7 2 7), the same order the upload path sees as .wzyx.
+        if (GLuint imported = gpu_dmabuf_texture(w, h, rev.data())) {
+                g_tex_bytes += (size_t)w * h * 2;
+                if (q4_tex_stats())
+                        fprintf(stderr, "q4tex  %5dx%-5d logical %6zu kB  dma-buf tiled import\n",
+                                w, h, (size_t)w * h * 2 / 1024);
+                return imported;
         }
         GLuint t = 0; glGenTextures(1, &t); g_scene_tex.push_back(t);
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, t); gl_state_forget_bindings();

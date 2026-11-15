@@ -1,19 +1,26 @@
-// Can a 4-bit texture reach the TMU *without* Mesa choosing the format?
+// Does a 4-bit (B4G4R4A4) dma-buf imported as a T-tiled EGLImage sample back
+// exactly, at the widths the engine uses?
 //
-// st_ChooseTextureFormat adds PIPE_BIND_RENDER_TARGET for GL_RGBA4 (GL textures
-// may become render targets and Mesa cannot know), vc4 cannot render to
-// B4G4R4A4 (vc4_formats.c: rt = RT_NO), so find_supported_format skips the two
-// two-byte candidates and lands on RGBA8.  The retry that would drop the render
-// target binding only runs when *nothing* matches, and DEFAULT_RGBA_FORMATS
-// always matches.  So glTexImage2D/glTexStorage2D cannot give a 2-byte surface
-// whatever the spelling (measured: docs/performance.md 2026-11-15).
+// Why this exists: glTexImage2D cannot give a two-byte surface on this driver.
+// `st_ChooseTextureFormat` adds PIPE_BIND_RENDER_TARGET for GL_RGBA4, vc4 cannot
+// render to B4G4R4A4 (`vc4_formats.c`: rt = RT_NO), so `find_supported_format`
+// skips both two-byte candidates and takes DEFAULT_RGBA_FORMATS; the retry that
+// would drop the render-target binding only runs when nothing matches, and RGBA8
+// always matches.  docs/performance.md (2026-11-15) has the measurements.
 //
-// EGLImage import goes around that function entirely: we allocate the BO
-// ourselves at two bytes a texel, export it as a dma-buf and hand it to the
-// sampler.  This probe asks whether that path exists on this board and whether
-// the sampler reads the nibbles correctly.
+// Importing our own buffer goes around that function.  Three things are needed
+// and each one cost a round:
+//   1. the modifier is *queried* (`eglQueryDmaBufModifiersEXT`); this board
+//      reports 0x0700000000000001, not a value to be spelled out by hand;
+//   2. the BO carries it (`DRM_IOCTL_VC4_SET_TILING`), or the import is
+//      EGL_BAD_MATCH;
+//   3. the plane pitch is present even for a tiled image, because Mesa's
+//      `dri2_check_dma_buf_format` requires it.
 //
-// Build on the board:  g++ -O2 -std=c++17 -o eglimg egl_image_probe.cpp -lEGL -lGLESv2
+// One shape a process (`EGL_IMG_SHAPE=WxH`, default 192x1536): a loop shares GL
+// state and the glTexImage2D control below starts failing on the second shape,
+// which made every later reading meaningless.  The control runs first, so a
+// broken harness cannot be mistaken for a broken import.
 
 #include "egl_surfaceless.h"
 
@@ -31,184 +38,288 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
-static const char* has(const char* list, const char* name) {
-    if (!list) return nullptr;
-    size_t n = strlen(name);
-    for (const char* p = list; (p = strstr(p, name)); p += n)
-        if ((p == list || p[-1] == ' ') && (p[n] == ' ' || p[n] == '\0')) return p;
-    return nullptr;
+// ---- the VC4 T-tiled layout, from Mesa's own arithmetic --------------------
+// vc4_tiling.c::t_utile_address: 4 KB tiles of 8x8 utiles, odd tile rows
+// mirrored, 1 KB stiles permuted by the even/odd maps.
+static uint32_t t_utile_address(uint32_t ux, uint32_t uy, uint32_t utile_stride) {
+    const uint32_t tile_stride = utile_stride >> 3;
+    uint32_t tile_x = ux >> 3, tile_y = uy >> 3;
+    const bool odd = (tile_y & 1) != 0;
+    if (odd) tile_x = tile_stride - tile_x - 1;
+    const uint32_t tile_offset = 4096u * (tile_y * tile_stride + tile_x);
+    const uint32_t stile_x = (ux >> 2) & 1, stile_y = (uy >> 2) & 1;
+    const uint32_t idx = (stile_y << 1) + stile_x;
+    static const uint32_t odd_map[4] = { 2, 1, 3, 0 };
+    static const uint32_t even_map[4] = { 0, 3, 1, 2 };
+    return tile_offset + 1024u * (odd ? odd_map[idx] : even_map[idx]);
+}
+
+// vc4_tiling_lt.c::swizzle_lt_{x,y} for cpp = 2: 8x4 utiles inside a stile.
+// Which arrangement the driver uses: settled by measurement below.
+static char g_map = 'a';
+
+static size_t t_offset(int x, int y, int w) {
+    const uint32_t utile_stride = (uint32_t)(w / 8);
+    const uint32_t ux = (uint32_t)x >> 3, uy = (uint32_t)y >> 2;
+    const uint32_t base = t_utile_address(ux & ~3u, uy & ~3u, utile_stride);
+    // Inside a stile (4x4 utiles = 32x16 texels at cpp 2) the layout is dense:
+    // vc4_t_image_helper hands the whole stile to the LT writer with a stride of
+    // 64 bytes, so a row is 32 texels = 64 bytes.  The utile *order* is in
+    // t_utile_address above; this used to apply the utile-internal swizzle here
+    // as well, which is what put every texel in the wrong place.
+    const uint32_t within = (((uint32_t)y & 15u) << 6) | (((uint32_t)x & 31u) << 1);
+    if (g_map == 'a') return base + within;
+    // Variants, to be settled by measurement rather than by reading: 'b' drops
+    // the stile permutation, 'c' keeps it but not the odd-tile-row mirroring,
+    // 'd' drops both.
+    const uint32_t tile_stride = utile_stride >> 3;
+    const uint32_t tile_x = ux >> 3, tile_y = uy >> 3;
+    const uint32_t stile_x = (ux >> 2) & 1u, stile_y = (uy >> 2) & 1u;
+    const uint32_t idx = (stile_y << 1) + stile_x;
+    const uint32_t tile_base = 4096u * (tile_y * tile_stride + tile_x);
+    if (g_map == 'b' || g_map == 'd') return tile_base + 1024u * idx + within;
+    static const uint32_t om[4] = { 2, 1, 3, 0 }, em[4] = { 0, 3, 1, 2 };
+    const bool odd = (tile_y & 1) != 0;
+    return tile_base + 1024u * (odd ? om[idx] : em[idx]) + within;
+}
+
+static size_t t_bytes(int w, int h) { return 4096u * (size_t)(w / 64) * (size_t)((h + 31) / 32); }
+
+// Nibbles n0..n3 in a word come back as (n2, n1, n0, n3) through an imported
+// surface -- measured, not assumed.
+static uint16_t iwz(uint16_t v) {
+    return (uint16_t)((v & 0xF0F0u) | ((v & 0x000Fu) << 8) | ((v & 0x0F00u) >> 8));
+}
+
+// Texel (x,y) is filled with the same nibble in all four components, value
+// v(x,y) = ((x + 192*y) % 15) + 1, so a wrong *position* reads a wrong value
+// even though the component order is invisible to it.  (0,0) carries 0x3210 to
+// check the component order separately.
+static int v_at(int x, int y) { return ((x + 192 * y) % 15) + 1; }
+static uint16_t word_at(int x, int y) {
+    return (x == 0 && y == 0) ? (uint16_t)0x3210 : (uint16_t)(v_at(x, y) * 0x1111);
+}
+static int expect_comp(int x, int y, int c) {
+    if (x == 0 && y == 0) return 3 - c;   // 0x3210 samples as 3 2 1 0? no: see below
+    return v_at(x, y);
+}
+
+static GLuint make_prog() {
+    static const char* vs = "attribute vec2 p;void main(){gl_Position=vec4(p,0.,1.);}";
+    // highp on the uniform *and* FragCoord: a fragment uniform defaults to
+    // mediump, and 191.5 through a 10-bit mantissa lands a texel away.
+    static const char* fs =
+        "precision highp float;uniform sampler2D T;uniform highp vec2 UV;"
+        "void main(){"
+        "vec4 c=texture2D(T,UV);gl_FragColor=vec4(c.x*15.0,c.y*15.0,c.z*15.0,c.w*15.0)/255.0;}";
+    auto sh = [](GLenum t, const char* src) {
+        GLuint h = glCreateShader(t);
+        glShaderSource(h, 1, &src, nullptr);
+        glCompileShader(h);
+        GLint ok = 0; glGetShaderiv(h, GL_COMPILE_STATUS, &ok);
+        if (!ok) { char log[512]; glGetShaderInfoLog(h, sizeof log, nullptr, log); printf("shader: %s\n", log); }
+        return h;
+    };
+    GLuint pr = glCreateProgram();
+    glAttachShader(pr, sh(GL_VERTEX_SHADER, vs));
+    glAttachShader(pr, sh(GL_FRAGMENT_SHADER, fs));
+    glLinkProgram(pr);
+    GLint ok = 0; glGetProgramiv(pr, GL_LINK_STATUS, &ok);
+    if (!ok) { char log[512]; glGetProgramInfoLog(pr, sizeof log, nullptr, log); printf("link: %s\n", log); }
+    return pr;
+}
+
+// Sample one texel per draw, at a centre handed in as a uniform: no per-fragment
+// coordinate arithmetic, which is where the earlier versions of this probe went
+// wrong (a one-texel shift that only appeared at 192 wide).
+static int compare(GLuint prog, GLuint tex, int W, int H, const char* what) {
+    GLuint fbo = 0, rt = 0;
+    glGenFramebuffers(1, &fbo);
+    glGenTextures(1, &rt);
+    glBindTexture(GL_TEXTURE_2D, rt);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rt, 0);
+    glUseProgram(prog);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glUniform1i(glGetUniformLocation(prog, "T"), 0);
+    GLuint vbo = 0;
+    static const float quad[] = { -1, -1, 3, -1, -1, 3 };
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof quad, quad, GL_STATIC_DRAW);
+    GLint loc = glGetAttribLocation(prog, "p");
+    glEnableVertexAttribArray(loc);
+    glVertexAttribPointer(loc, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+    glViewport(0, 0, 1, 1);
+    const GLint uvloc = glGetUniformLocation(prog, "UV");
+    int bad = 0, shown = 0;
+    const int pts[][2] = { {0,0}, {1,0}, {2,0}, {7,0}, {8,0}, {63,0}, {64,0}, {0,1}, {0,3}, {0,4},
+                           {3,3}, {W-1,0}, {0,H-1}, {W/2,H/2}, {W-1,H-1} };
+    for (auto& pt : pts) {
+        const int x = pt[0], y = pt[1];
+        if (x < 0 || y < 0 || x >= W || y >= H) continue;
+        glUniform2f(uvloc, (x + 0.5f) / W, (y + 0.5f) / H);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glFinish();
+        uint8_t got[4] = {};
+        glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, got);
+        const uint16_t w0 = word_at(x, y);
+        const int n[4] = { w0 & 0xF, (w0 >> 4) & 0xF, (w0 >> 8) & 0xF, (w0 >> 12) & 0xF };
+        const int want[4] = { n[2], n[1], n[0], n[3] };
+        int here = 0;
+        for (int c = 0; c < 4; ++c) if (got[c] != want[c]) ++here;
+        if (here) bad += here;
+        if (shown < 18) {
+            printf("  %-14s (%3d,%3d) read %2d %2d %2d %2d   want %2d %2d %2d %2d%s\n", what, x, y,
+                   got[0], got[1], got[2], got[3], want[0], want[1], want[2], want[3],
+                   here ? "" : "  ok");
+            ++shown;
+        }
+    }
+    printf("  %-22s %d of %d sampled components wrong%s\n", what, bad, 15 * 4, bad ? "" : "  <- exact");
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteTextures(1, &rt);
+    glDeleteBuffers(1, &vbo);
+    return bad;
 }
 
 int main() {
     EglSurfaceless egl = egl_surfaceless_init(2);
     if (!egl.ok()) return 1;
 
-    const char* gext = (const char*)glGetString(GL_EXTENSIONS);
-    const char* eext = eglQueryString(egl.dpy, EGL_EXTENSIONS);
-    printf("A renderer   %s\n", (const char*)glGetString(GL_RENDERER));
-    printf("A GL         OES_EGL_image=%s  OES_EGL_image_external=%s\n",
-           has(gext, "GL_OES_EGL_image") ? "yes" : "no",
-           has(gext, "GL_OES_EGL_image_external") ? "yes" : "no");
-    printf("A EGL        image_base=%s  dma_buf_import=%s  dma_buf_modifiers=%s\n",
-           has(eext, "EGL_KHR_image_base") ? "yes" : "no",
-           has(eext, "EGL_EXT_image_dma_buf_import") ? "yes" : "no",
-           has(eext, "EGL_EXT_image_dma_buf_import_modifiers") ? "yes" : "no");
-    if (!has(gext, "GL_OES_EGL_image") || !has(eext, "EGL_EXT_image_dma_buf_import")) {
-        printf("A verdict    this stack has no dma-buf image import; stop here\n");
-        return 0;
+    int W = 192, H = 1536;
+    if (const char* sh = getenv("EGL_IMG_SHAPE")) {
+        int w = 0, h = 0;
+        if (sscanf(sh, "%dx%d", &w, &h) == 2) { W = w; H = h; }
     }
+    if (const char* m = getenv("EGL_IMG_MAP")) g_map = m[0];
+    printf("shape        %dx%d  (%zu bytes, map %c)\n", W, H, t_bytes(W, H), g_map);
+    if (W % 64) printf("  note       width must be a multiple of 64 texels (utile_stride %% 8)\n");
 
-    // ---- B: a two-byte-per-texel BO we allocate ourselves -------------------
-    // The engine's actual shape, and the engine's own swizzle: 192x1536 is what
-    // a 768-column q4 matrix becomes, so this is the case that matters.
-    const int shapes[][2] = { {64,16}, {80,16}, {96,16}, {120,16}, {128,16}, {160,16}, {192,16} };
-    for (int si = 0; si < 7; ++si) {
-    const int W = shapes[si][0], H = shapes[si][1];
-    // card0 is the KMS node (mode setting + GEM, needs DRM master to modeset and
-    // usually root:video), renderD128 is the render node (GEM and rendering
-    // only, root:render, no master needed) -- the node a headless compute
-    // process is supposed to use, and the only one that exists on a host whose
-    // sandbox does not expose the display device.  Probe both and report, so
-    // the engine can pick the same way.
-    const char* nodes[] = { "/dev/dri/renderD128", "/dev/dri/card0", "/dev/dri/card1" };
-    int fd = -1;
-    for (const char* n : nodes) {
-        int f = open(n, O_RDWR);
-        if (f < 0) { printf("B drm        %-22s open: %s\n", n, strerror(errno)); continue; }
-        struct drm_vc4_create_bo probe_bo = {};
-        probe_bo.size = 4096;
-        int r = ioctl(f, DRM_IOCTL_VC4_CREATE_BO, &probe_bo);
-        printf("B drm        %-22s open: yes   VC4_CREATE_BO: %s\n", n,
-               r == 0 ? "yes" : strerror(errno));
-        if (r == 0) {
-            if (fd < 0) fd = f; else close(f);
-        } else close(f);
-        if (r != 0 && fd < 0) continue;
-    }
-    if (fd < 0) { printf("B drm        no usable node\n"); return 0; }
-    struct drm_vc4_create_bo cbo = {};
-    cbo.size = (uint32_t)(W * H * 2 + 16384);   // slack: the driver may round the surface up
-    const size_t used = (size_t)W * H * 2;
-    if (ioctl(fd, DRM_IOCTL_VC4_CREATE_BO, &cbo) != 0) {
-        printf("B drm        VC4_CREATE_BO failed: %s\n", strerror(errno));
-        return 0;
-    }
-    struct drm_vc4_mmap_bo mbo = {};
-    mbo.handle = cbo.handle;
-    if (ioctl(fd, DRM_IOCTL_VC4_MMAP_BO, &mbo) != 0) {
-        printf("B drm        VC4_MMAP_BO failed: %s\n", strerror(errno));
-        return 0;
-    }
-    void* map = mmap(nullptr, cbo.size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, mbo.offset);
-    if (map == MAP_FAILED) { printf("B drm        mmap failed: %s\n", strerror(errno)); return 0; }
-    // Nibbles the way the engine packs them: R is the most significant, and the
-    // probe's kernel-side convention is texel .x..w = columns 0..3 reversed at
-    // upload.  For a feasibility answer, one value per texel is enough.
-    uint16_t* px = (uint16_t*)map;
-    // Four *distinct* nibbles per texel: the word's nibbles are (low to high)
-    // n0..n3, and the sampler reports them as .x..w in some order.  A pattern
-    // like 0x1111 cannot see a swizzle at all, which is how the first version of
-    // this probe "passed" while the engine read garbage.
-    // Column nibbles 0..3 in a word, pushed through the engine's import swizzle
-    // (gpu_dmabuf_swizzle: (v & 0xF0F0) | ((v & 0x000F) << 8) | ((v & 0x0F00) >> 8)).
-    auto swz = [](uint16_t v) { return (uint16_t)((v & 0xF0F0u) | ((v & 0x000Fu) << 8) | ((v & 0x0F00u) >> 8)); };
-    for (int i = 0; i < W * H; ++i) px[i] = swz((uint16_t)0x3210);
-    (void)used;
-    msync(map, cbo.size, MS_SYNC);
-    munmap(map, cbo.size);
-    int dmabuf = -1;
-    if (drmPrimeHandleToFD(fd, cbo.handle, DRM_CLOEXEC, &dmabuf) != 0) {
-        printf("B drm        PRIME_HANDLE_TO_FD failed: %s\n", strerror(errno));
-        return 0;
-    }
-    printf("B drm        %dx%d at 2 bytes a texel = %u B, dma-buf fd %d\n",
-           W, H, cbo.size, dmabuf);
+    GLuint prog = make_prog();
 
-    // ---- C: import it and sample -------------------------------------------
-    auto create_image = (PFNEGLCREATEIMAGEKHRPROC)eglGetProcAddress("eglCreateImageKHR");
-    auto image_target = (PFNGLEGLIMAGETARGETTEXTURE2DOESPROC)eglGetProcAddress("glEGLImageTargetTexture2DOES");
-    if (!create_image || !image_target) {
-        printf("C import     eglCreateImageKHR/glEGLImageTargetTexture2DOES missing\n");
-        return 0;
-    }
-    // B4G4R4A4 (Mesa's PIPE_FORMAT_B4G4R4A4_UNORM) is DRM's ARGB4444 family;
-    // try both ends of it, since which one matches is a table on Mesa's side.
-    const uint32_t fourccs[] = { DRM_FORMAT_ARGB4444, DRM_FORMAT_ABGR4444 };
-    const char* names[] = { "ARGB4444", "ABGR4444" };
-    for (int k = 0; k < 2; ++k) {
-        EGLint attrs[] = {
-            EGL_WIDTH, W,
-            EGL_HEIGHT, H,
-            EGL_LINUX_DRM_FOURCC_EXT, (EGLint)fourccs[k],
-            EGL_DMA_BUF_PLANE0_FD_EXT, dmabuf,
-            EGL_DMA_BUF_PLANE0_OFFSET_EXT, 0,
-            EGL_DMA_BUF_PLANE0_PITCH_EXT, W * 2,
-            EGL_NONE
-        };
-        EGLImageKHR img = create_image(egl.dpy, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, nullptr, attrs);
-        if (img == EGL_NO_IMAGE_KHR) {
-            printf("C import     %s rejected (0x%x)\n", names[k], eglGetError());
-            continue;
-        }
+    // ---- control: the same pattern through glTexImage2D -------------------
+    // If this is not exact the harness is wrong and nothing below means
+    // anything.
+    {
+        std::vector<uint8_t> ref((size_t)W * H * 4);
+        for (int y = 0; y < H; ++y)
+            for (int x = 0; x < W; ++x) {
+                const uint16_t w0 = word_at(x, y);
+                const int n[4] = { w0 & 0xF, (w0 >> 4) & 0xF, (w0 >> 8) & 0xF, (w0 >> 12) & 0xF };
+                uint8_t* p4 = &ref[((size_t)y * W + x) * 4];
+                p4[0] = (uint8_t)(n[2] * 17);
+                p4[1] = (uint8_t)(n[1] * 17);
+                p4[2] = (uint8_t)(n[0] * 17);
+                p4[3] = (uint8_t)(n[3] * 17);
+            }
         GLuint tex = 0;
         glGenTextures(1, &tex);
         glBindTexture(GL_TEXTURE_2D, tex);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        while (glGetError() != GL_NO_ERROR) {}
-        image_target(GL_TEXTURE_2D, img);
-        GLenum err = glGetError();
-        printf("C import     %s accepted%s\n", names[k],
-               err ? " (but the bind raised an error)" : "");
-        if (err) { glDeleteTextures(1, &tex); continue; }
-
-        // Sample texel (0,0) and (1,0) through a 1x1 render and read back.
-        GLuint fbo = 0, rt = 0;
-        glGenFramebuffers(1, &fbo);
-        glGenTextures(1, &rt);
-        glBindTexture(GL_TEXTURE_2D, rt);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 2, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rt, 0);
-        static const char* vs = "attribute vec2 p;varying vec2 uv;void main(){uv=p*0.5+0.5;gl_Position=vec4(p,0.,1.);}";
-        static const char* fs =
-            // Sample the centres of texels 0 and 1 exactly, so the read-back is
-            // a comparison against the pattern and not an interpolation.
-            "precision highp float;uniform sampler2D T;uniform vec2 TS;"
-            "void main(){vec2 uv=(gl_FragCoord.xy-0.5)*TS+0.5*TS;"
-            "vec4 c=texture2D(T,uv);gl_FragColor=vec4(c.x*15.0,c.y*15.0,c.z*15.0,c.w*15.0)/255.0;}";
-        auto sh = [](GLenum t, const char* s) { GLuint h = glCreateShader(t); glShaderSource(h, 1, &s, nullptr); glCompileShader(h); return h; };
-        GLuint pr = glCreateProgram();
-        glAttachShader(pr, sh(GL_VERTEX_SHADER, vs));
-        glAttachShader(pr, sh(GL_FRAGMENT_SHADER, fs));
-        glLinkProgram(pr);
-        glUseProgram(pr);
-        glBindTexture(GL_TEXTURE_2D, tex);
-        glUniform1i(glGetUniformLocation(pr, "T"), 0);
-        glUniform2f(glGetUniformLocation(pr, "TS"), 1.0f / W, 1.0f / H);
-        GLuint vbo = 0;
-        static const float tri[] = { -1, -1, 3, -1, -1, 3 };
-        glGenBuffers(1, &vbo);
-        glBindBuffer(GL_ARRAY_BUFFER, vbo);
-        glBufferData(GL_ARRAY_BUFFER, sizeof tri, tri, GL_STATIC_DRAW);
-        GLint loc = glGetAttribLocation(pr, "p");
-        glEnableVertexAttribArray(loc);
-        glVertexAttribPointer(loc, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
-        glViewport(0, 0, 2, 1);
-        glDrawArrays(GL_TRIANGLES, 0, 3);
-        uint8_t back[8] = {};
-        glReadPixels(0, 0, 2, 1, GL_RGBA, GL_UNSIGNED_BYTE, back);
-        printf("C sample     texel0 .xyzw = %d %d %d %d   texel1 = %d %d %d %d\n",
-               back[0], back[1], back[2], back[3], back[4], back[5], back[6], back[7]);
-        printf("C mapping    word 0x3210 through the engine swizzle should read 0 1 2 3\n");
-        break;
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, W, H, 0, GL_RGBA, GL_UNSIGNED_BYTE, ref.data());
+        compare(prog, tex, W, H, "control glTexImage2D");
+        glDeleteTextures(1, &tex);
     }
 
+    // ---- the modifier the display actually offers -------------------------
+    auto query = (PFNEGLQUERYDMABUFMODIFIERSEXTPROC)eglGetProcAddress("eglQueryDmaBufModifiersEXT");
+    if (!query) { printf("no eglQueryDmaBufModifiersEXT\n"); return 1; }
+    EGLuint64KHR mods[8] = {};
+    EGLint n = 0;
+    if (!query(egl.dpy, (EGLint)DRM_FORMAT_ARGB4444, 8, mods, nullptr, &n) || n == 0) {
+        printf("ARGB4444: no modifier reported\n");
+        return 1;
     }
-    return 0;
+    uint64_t tiled = 0;
+    for (int i = 0; i < n; ++i) if (mods[i] != 0) tiled = mods[i];
+    printf("modifier     0x%llx%s\n", (unsigned long long)tiled, tiled ? "" : "  (only linear!)");
+    if (!tiled) return 1;
+
+    // ---- BO: create, tag with the modifier, fill, export -------------------
+    int fd = open("/dev/dri/card0", O_RDWR);
+    if (fd < 0) fd = open("/dev/dri/renderD128", O_RDWR);
+    if (fd < 0) { printf("no DRM node: %s\n", strerror(errno)); return 1; }
+    const size_t bytes = t_bytes(W, H);
+    struct drm_vc4_create_bo cbo = {};
+    cbo.size = (uint32_t)bytes;
+    if (ioctl(fd, DRM_IOCTL_VC4_CREATE_BO, &cbo) != 0) { printf("CREATE_BO: %s\n", strerror(errno)); return 1; }
+    struct drm_vc4_set_tiling st = {};
+    st.handle = cbo.handle;
+    st.modifier = tiled;
+    if (ioctl(fd, DRM_IOCTL_VC4_SET_TILING, &st) != 0) printf("SET_TILING: %s\n", strerror(errno));
+    struct drm_vc4_mmap_bo mbo = {};
+    mbo.handle = cbo.handle;
+    if (ioctl(fd, DRM_IOCTL_VC4_MMAP_BO, &mbo) != 0) { printf("MMAP_BO: %s\n", strerror(errno)); return 1; }
+    void* map = mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, mbo.offset);
+    if (map == MAP_FAILED) { printf("mmap: %s\n", strerror(errno)); return 1; }
+    memset(map, 0, bytes);
+    // EGL_IMG_FILL=tiled (the T layout) or linear (texel i at byte 2i).  Running
+    // both tells us which layout the driver is actually reading, instead of
+    // guessing at the offset between them.
+    const char* fill = getenv("EGL_IMG_FILL");
+    const bool linear_fill = fill && strcmp(fill, "linear") == 0;
+    // EGL_IMG_FILL=driver leaves the buffer alone and uploads through
+    // glTexSubImage2D once the image is bound, so *the driver* does the tiling.
+    // No layout to know, which is the whole point of trying it.
+    const bool driver_fill = fill && strcmp(fill, "driver") == 0;
+    printf("fill         %s\n", driver_fill ? "driver (glTexSubImage2D)" : linear_fill ? "linear" : "tiled");
+    if (!driver_fill) {
+        for (int y = 0; y < H; ++y)
+            for (int x = 0; x < W; ++x) {
+                const size_t off = linear_fill ? ((size_t)y * W + x) * 2 : t_offset(x, y, W);
+                *(uint16_t*)((char*)map + off) = iwz(word_at(x, y));
+            }
+        msync(map, bytes, MS_SYNC);
+    }
+    munmap(map, bytes);
+    struct drm_prime_handle ph = {};
+    ph.handle = cbo.handle;
+    ph.flags = DRM_CLOEXEC;
+    if (ioctl(fd, DRM_IOCTL_PRIME_HANDLE_TO_FD, &ph) != 0) { printf("PRIME: %s\n", strerror(errno)); return 1; }
+
+    // ---- import and compare ------------------------------------------------
+    auto create_image = (PFNEGLCREATEIMAGEKHRPROC)eglGetProcAddress("eglCreateImageKHR");
+    auto image_target = (PFNGLEGLIMAGETARGETTEXTURE2DOESPROC)eglGetProcAddress("glEGLImageTargetTexture2DOES");
+    if (!create_image || !image_target) { printf("no EGLImage entry points\n"); return 1; }
+    EGLint a[] = {
+        EGL_WIDTH, W,
+        EGL_HEIGHT, H,
+        EGL_LINUX_DRM_FOURCC_EXT, (EGLint)DRM_FORMAT_ARGB4444,
+        EGL_DMA_BUF_PLANE0_FD_EXT, ph.fd,
+        EGL_DMA_BUF_PLANE0_OFFSET_EXT, 0,
+        EGL_DMA_BUF_PLANE0_PITCH_EXT, W * 2,     // required even when tiled
+        EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT, (EGLint)(tiled & 0xffffffffu),
+        EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT, (EGLint)(tiled >> 32),
+        EGL_NONE
+    };
+    EGLImageKHR img = create_image(egl.dpy, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, nullptr, a);
+    if (img == EGL_NO_IMAGE_KHR) { printf("import rejected: 0x%x\n", eglGetError()); return 1; }
+    GLuint tex = 0;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    image_target(GL_TEXTURE_2D, img);
+    if (GLenum e = glGetError()) { printf("bind rejected: 0x%x\n", e); return 1; }
+    if (driver_fill) {
+        std::vector<uint16_t> cpu((size_t)W * H);
+        for (int y = 0; y < H; ++y)
+            for (int x = 0; x < W; ++x) cpu[(size_t)y * W + x] = word_at(x, y);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, W, H, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4, cpu.data());
+        printf("upload       glTexSubImage2D into the imported image: err 0x%x\n", glGetError());
+    }
+    int bad = compare(prog, tex, W, H, "dma-buf T-tiled");
+    return bad ? 2 : 0;
 }

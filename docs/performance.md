@@ -6214,3 +6214,44 @@ The engine-side path was written, measured (memory-neutral: 50508 kB of V3D BOs
 against packed's 50888, where the glTexImage2D view costs 81948) and then
 withdrawn, because it answers wrongly at the engine's widths.  What is left in
 the tree is this probe and this section.
+
+### 2026-11-15 — the 4-bit view is memory-neutral, and the hybrid fits
+
+The view used to cost twice the packed layout because `glTexImage2D` cannot
+produce a two-byte surface on this driver (previous section).  It does not need
+to: the surface is allocated here and imported as a T-tiled dma-buf EGLImage
+(`engine/src/gpu_dmabuf.cpp`), and the weights are written with a plain
+`glTexSubImage2D` so the *driver* does the tiling.
+
+Three things were needed and each cost a round:
+
+- the modifier is queried (`eglQueryDmaBufModifiersEXT`); this board answers
+  `0x0700000000000001`, not the value a reader would compute from the vendor id;
+- the BO carries it (`DRM_IOCTL_VC4_SET_TILING`), or the import is `EGL_BAD_MATCH`;
+- the plane pitch is present even for a tiled image -- `dri2_check_dma_buf_format`
+  requires `DMABufPlanePitches` on every plane.
+
+The surface also reports the word's nibbles reversed, the same order the upload
+path sees as `.wzyx`, so the import is handed the `rev` buffer the upload path
+already builds; `Q4_IMPORT_CHECK=1` is what showed it (word `0x727a` with nibbles
+10 7 2 7 samples as 7 2 7 10).
+
+Board, minimind3 q4, both arms alive at the same point, `bo_stats` + `TIMING`:
+
+| view | V3D BOs | decode (16 tokens) |
+|---|---:|---:|
+| 4-bit, dma-buf import | **51524 kB** (133 BOs) | **224.8 ms** |
+| packed | 50892 kB (191 BOs) | 292.8 ms |
+
++1.2% memory (it was +61% through `glTexImage2D`) and -23% time.  The golden
+strings are unchanged on the board for q8 and q4, and the import path against the
+packed one is **cosine 0.999553**, max abs 0.39, mean 0.075 on logits spanning
+-11.4 to 14.5 -- i.e. the `15*(n/15)` reassociation the view always had, not a
+layout error (a layout error reads 0.7-0.9).
+
+**LFM2.5-230M q4 now loads on the board**, which it had not done since the view
+became the default: 61 MB of q4 weights stay 61 MB instead of becoming 122.  Its
+greedy string with the view is one token different from the packed one
+(`我是一个AI的一个智能助手` against `我是一个一个简单而富有趣`), which is the
+same reassociation amplified by a hybrid's conv path -- quote the packed string
+for the hybrid, and the dense pins for the view.

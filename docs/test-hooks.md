@@ -170,20 +170,27 @@ binary.  They are measurement hooks, not production settings.
   methodology: it drops the four P fetches and the scale/min decode per group
   (constant scale), with wrong weights on purpose.  It measured 84 ms of the
   gate's 159 on the Pi, which is why the group plane is the next target.
-- `Q4_FMT=rgba4` — bind every INT4 weight matrix as `GL_RGBA4` texels at twice
-  the width: four weights per texel, sampled as n/15 with the 15 folded into the
-  group scale, so the kernel decodes nothing.  **Opt-in**, and the reason is
-  memory: the driver stores those texels as RGBA8 whatever the internal format
-  says (measured in the engine's own context against the driver's BO ledger,
-  2026-11-15: 8 x 1024x1024 costs 32776 kB as RGBA8 and 36872 kB as "4444", four
-  bytes a texel either way), so the view holds twice the packed view's bytes.
-  Worth it where it fits -- -14% on a dense q4 token on the Pi (247 against
-  276 ms) -- and a regression on a model that only just fits packed.
-  `Q4_FMT=0` or an unset `Q4_FMT` is the packed view.  Still refused on the
-  unchunked FFN path (`ffn_split` -> `matvec_to_row` reads packed nibbles).  One
-  builder per kernel (`matvec_i4*_4x4`), kept separate so the packed text and
-  its shader hash cannot move.  Not bit-exact: `15*(n/15)` is not exactly `n`,
-  so q4 PPL moves ~1.3% and the greedy strings have not moved on either machine.
+- `Q4_FMT=rgba4` — bind every INT4 weight matrix as a four-bit texel surface
+  at twice the width: four weights per texel, sampled as n/15 with the 15 folded
+  into the group scale, so the kernel decodes nothing.  **Default on.**  The
+  surface is allocated here and imported as a T-tiled dma-buf EGLImage
+  (`engine/src/gpu_dmabuf.cpp`), because `glTexImage2D` cannot produce a
+  two-byte surface on this driver at all -- `st_ChooseTextureFormat` adds
+  `PIPE_BIND_RENDER_TARGET` for `GL_RGBA4`, vc4 cannot render to B4G4R4A4, and
+  `find_supported_format` then takes DEFAULT_RGBA_FORMATS, so the upload stores
+  RGBA8 with the nibbles expanded.  Measured on the board: **51524 kB of V3D BOs
+  against packed's 50892** (+1.2%, where the upload path cost 81948, +61%) and
+  **224.8 against 292.8 ms** a token.  Where the import is unavailable (no vc4,
+  no render node) it falls back to the upload, which is correct but costs the
+  2x.  `Q4_FMT=0` keeps the packed view for an A/B.  Still refused on the
+  unchunked FFN path (`ffn_split` reads packed nibbles).  Not bit-exact:
+  `15*(n/15)` is not exactly `n`, so q4 PPL reads ~326 against the packed 330
+  and the greedy strings have not moved on either machine.
+- `Q4_IMPORT_CHECK=1` — after the first imported q4 surface, sample texel (0,0)
+  through a 1x1 render and print the word handed in against the four components
+  that came back.  This is what showed the imported surface reports the word's
+  nibbles reversed, i.e. that the import must be given the same `rev` buffer the
+  upload path uses.
 - `Q4_TEX_STATS=1` — print, next to every texture upload, the `CmaFree` delta
   against the logical size.  **Read the caveat in the engine before using it as a
   measurement**: on this driver those deltas are page-cache migration, not the

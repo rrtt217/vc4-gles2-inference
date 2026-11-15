@@ -46,3 +46,11 @@ void ffn_sync();                          // glFlush+glFinish if FFN_SYNC is set
 // *silently* -- the read-back returns the previous contents of the target, which
 // looks like a plausible number.  scripts/check_draw_cap.sh keeps it named.
 constexpr int kDrawCap = 1024;
+
+// gpu_dmabuf.cpp: a 4-bit texture allocated and imported by hand -- the only
+// way to get a two-byte-per-texel surface out of this driver.
+void gpu_dmabuf_init(EGLDisplay dpy);
+bool gpu_dmabuf_available();
+GLuint gpu_dmabuf_texture(int w, int h, const uint16_t* data);
+void gpu_dmabuf_release_all();
+int gpu_dmabuf_count();

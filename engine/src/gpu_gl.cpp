@@ -177,6 +177,7 @@ void GPU::init_egl(){
             cerr << "EGL context creation failed\n"; exit(1);
         }
         ctx_ = ctx;
+        gpu_dmabuf_init(dpy_);
         const char* r = (const char*)glGetString(GL_RENDERER);
         renderer_ = r ? r : "";
         if (q4_shift_wanted()) {
