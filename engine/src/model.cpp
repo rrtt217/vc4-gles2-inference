@@ -214,6 +214,15 @@ void Model::apply_q4_fmt(){
                         for (int l = 0; l < layers; ++l) { want(w1[l]); want(w3[l]); want(w2[l]); }
                 if ((int)qkv.size() >= layers)
                         for (int l = 0; l < layers; ++l) { want(qkv[l]); want(wo[l]); }
+                // The hybrid's conv block: three 1024-row slices of in_proj plus
+                // out_proj, all INT4 and all through matvec_to / matvec_add,
+                // which already have a 4x4 kernel.  They used to keep the packed
+                // view, so the block missed the zero-decode path.
+                if ((int)conv_in_b.size() >= layers)
+                        for (int l = 0; l < layers; ++l) {
+                                want(conv_in_b[l]); want(conv_in_c[l]); want(conv_in_x[l]);
+                                want(conv_out[l]);
+                        }
         }
         for (Mat* m : mark4) m->fmt4 = true;
 }

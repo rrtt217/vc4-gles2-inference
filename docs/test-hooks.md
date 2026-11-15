@@ -170,7 +170,8 @@ binary.  They are measurement hooks, not production settings.
   methodology: it drops the four P fetches and the scale/min decode per group
   (constant scale), with wrong weights on purpose.  It measured 84 ms of the
   gate's 159 on the Pi, which is why the group plane is the next target.
-- `Q4_FMT=rgba4` — bind every INT4 weight matrix as a four-bit texel surface
+- `Q4_FMT=rgba4` — bind every INT4 weight matrix (qkv, wo, w13 and, on the
+  hybrid, the conv block's `in_proj` slices and `out_proj`) as a four-bit texel surface
   at twice the width: four weights per texel, sampled as n/15 with the 15 folded
   into the group scale, so the kernel decodes nothing.  **Default on.**  The
   surface is allocated here and imported as a T-tiled dma-buf EGLImage

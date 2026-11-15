@@ -6282,3 +6282,33 @@ exactly when the driver reports ESSL 3 -- the same test the q4 shift path uses.
 The output is unchanged on both machines (the pins hold: the sampled values are
 n/15 either way), so this is a memory change only, and it cannot be measured in
 process RSS because the texture lives on the driver's side.
+
+### 2026-11-15 — the conv block joins the 4-bit view
+
+`apply_q4_fmt` marked qkv/wo/w13 and left the hybrid's conv matrices packed, so
+the block that is 16% of a hybrid token kept the nibble decode.  The three
+`in_proj` slices (`conv_in_b/c/x`) and `conv_out` are ordinary INT4 Mats and both
+their kernels -- `matvec_to` and `matvec_add` -- already had a 4x4 variant, so
+marking them was the whole change.
+
+Xe, LAYER_PROFILE on lfm2.5 q4, same binary either way (`Q4_FMT=0` turns the view
+off), 6 tokens:
+
+| view | conv, ms a call | conv total |
+|---|---:|---:|
+| 4-bit | **1.768** | 325.3 ms |
+| packed | 2.036 | 374.6 ms |
+
+-13.2% on the stage, and the stage is ~16% of a token, so ~2% of the token.
+
+Board, the whole hybrid, interleaved, load 2.5:
+
+| | decode |
+|---|---:|
+| 4-bit (conv included) | **699 / 703 ms** a token |
+| packed | 911 / 919 ms |
+
+-23% for the hybrid as a whole.  The pins did not move: minimind3 q8 still prints
+`我是一个AI助手，没有自我意识...`, q4 `我是MiniMind，一个高效的小参数AI模型...`,
+and the hybrid keeps its 4-bit string `我是一个AI的一个智能助手` against packed's
+`我是一个一个简单而富有趣` -- the conv change did not move it.
