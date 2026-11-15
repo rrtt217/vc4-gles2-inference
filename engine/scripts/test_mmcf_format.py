@@ -19,6 +19,7 @@ ways:
 Reads headers and record tables only -- no weights, no GPU, no model.
 """
 
+import os
 import re
 import struct
 import sys
@@ -32,7 +33,11 @@ import mmcf_format as fmt  # noqa: E402
 
 
 def containers():
-    return sorted((ROOT / "models").rglob("*.mmcf"))
+    """Every container in the store; `MMCF_MODELS` overrides it (the board's gate
+    tree has no models/, the runtime has them)."""
+    base = os.environ.get("MMCF_MODELS")
+    root = Path(base).expanduser().resolve() if base else (ROOT / "models")
+    return sorted(root.rglob("*.mmcf"))
 
 
 def cpp_constants():
@@ -53,7 +58,7 @@ def cpp_constants():
 
 def check_container(path):
     """(ok, message) for one container."""
-    rel = path.relative_to(ROOT)
+    rel = path.relative_to(ROOT) if ROOT in path.parents else path.name
     with path.open("rb") as f:
         head = f.read(fmt.HEADER_SIZE)
         try:
@@ -96,7 +101,8 @@ def main() -> int:
     bad = 0
     files = containers()
     if not files:
-        print("no containers under models/ -- nothing to round-trip")
+        print("SKIP  no containers (set MMCF_MODELS to a store; the C++ constants are "
+              "still checked below)")
     for path in files:
         ok, msg = check_container(path)
         print(("ok    " if ok else "FAIL  ") + msg if not ok else "  " + msg)
@@ -109,7 +115,8 @@ def main() -> int:
 
     if bad:
         return 1
-    print("mmcf format: ok (%d containers round-tripped, C++ constants agree)" % len(files))
+    print("mmcf format: ok (%d containers round-tripped, C++ constants agree)"
+          % len(files) if files else "mmcf format: ok (no store here; C++ constants agree)")
     return 0
 
 

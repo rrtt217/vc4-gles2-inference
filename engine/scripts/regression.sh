@@ -222,8 +222,8 @@ sh scripts/check_draw_cap.sh || {
     exit 1
 }
 
-python3 scripts/test_mmcf_format.py || {
-    echo "container layout FAIL: see scripts/test_mmcf_format.py" >&2
+MMCF_MODELS=${MMCF_MODELS:-../models} python3 scripts/test_mmcf_format.py || {
+    echo "container layout FAIL: see scripts/test_mmcf_format.py (MMCF_MODELS=$MMCF_MODELS)" >&2
     exit 1
 }
 
