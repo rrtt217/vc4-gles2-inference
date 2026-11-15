@@ -139,6 +139,9 @@ uint64_t fnv64(const std::string& s);
 // splits one logical line and scatters the PROMPT tags of CHAT_DUMP=1.
 std::string dump_escape(const std::string& t);
 
+// A field out of /proc/meminfo by name prefix (CmaFree, MemFree); -1 if absent.
+long long proc_meminfo_kb(const char* key);
+
 // Environment switches, read one way.  The engine has 93 of them and 206 call
 // sites, and 21 of those read the same variable twice
 // (`getenv(X) ? atoi(getenv(X)) : d`), which is both slow in a per-layer loop and

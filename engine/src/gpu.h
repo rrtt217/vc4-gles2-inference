@@ -20,6 +20,7 @@ bool gpu_q4_shift();
 void gpu_force_q4_shift(bool on);
 double run_time_ms();
 int gpu_upload_textures();
+size_t gpu_scene_bytes();   // textures this scene has uploaded so far
 double gpu_upload_texture_ms();
 
 struct Candidate { float value; int token; };

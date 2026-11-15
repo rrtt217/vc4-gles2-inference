@@ -69,3 +69,13 @@ std::string dump_escape(const std::string& t) {
     }
     return o;
 }
+
+long long proc_meminfo_kb(const char* key) {
+    std::ifstream f("/proc/meminfo");
+    std::string line;
+    const size_t n = strlen(key);
+    while (std::getline(f, line))
+        if (line.compare(0, n, key) == 0) return atoll(line.c_str() + n + 1);
+    return -1;
+}
+

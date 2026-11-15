@@ -180,6 +180,15 @@ void GPU::init_egl(){
         gpu_dmabuf_init(dpy_);
         const char* r = (const char*)glGetString(GL_RENDERER);
         renderer_ = r ? r : "";
+        // A software rasteriser is not a machine the pins apply to: the golden
+        // strings and PPL are per GPU, and llvmpipe means the sandbox lost
+        // /dev/dri (2026-11-15).  Say it once, loudly, so a green gate cannot be
+        // read as a hardware run.  scripts/regression.sh greps this line.
+        if (renderer_.find("llvmpipe") != string::npos ||
+            renderer_.find("softpipe") != string::npos ||
+            renderer_.find("swrast") != string::npos)
+            fprintf(stderr, "renderer: %s -- software rasteriser: timings and machine pins "
+                            "do not apply\n", renderer_.c_str());
         if (q4_shift_wanted()) {
                 const char* glsl = (const char*)glGetString(GL_SHADING_LANGUAGE_VERSION);
                 g_q4_shift_ok = glsl && strncmp(glsl, "OpenGL ES GLSL ES 3", 19) == 0;

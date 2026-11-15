@@ -26,14 +26,6 @@
 #include "sampling.h"
 #include "tools.h"
 
-static long long proc_meminfo_kb(const char* key) {
-    std::ifstream f("/proc/meminfo");
-    std::string line;
-    const size_t n = strlen(key);
-    while (std::getline(f, line))
-        if (line.compare(0, n, key) == 0) return atoll(line.c_str() + n + 1);
-    return -1;
-}
 
 
 // Requests and control lines arrive on stdin, and a *cancel* has to be seen

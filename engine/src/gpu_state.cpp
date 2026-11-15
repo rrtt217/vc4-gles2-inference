@@ -27,6 +27,8 @@
 static std::vector<GLuint> g_scene_tex;
 static std::vector<GLuint> g_scene_fbo;
 
+static size_t g_tex_bytes;   // this scene's uploaded texture bytes
+
 int g_up_tex = 0;
 double g_up_tex_ms = 0.0;
 
@@ -139,6 +141,10 @@ void GPU::release_scene(){
         for (GLuint f : g_scene_fbo) glDeleteFramebuffers(1, &f);
         g_scene_tex.clear();
         g_scene_fbo.clear();
+        // The counter is the *current* scene's footprint; leaving it cumulative
+        // made a 161 MB container report "342166488 B so far" after a swap to it
+        // (2026-11-15), which reads like a leak and is not one.
+        g_tex_bytes = 0;
         // The per-layer handle vectors point at names that are gone.  Keeping
         // them would make a reload reuse or re-delete stale names; the textures
         // themselves are already in the ledger above.
@@ -197,7 +203,7 @@ static void report_mem(const char* tag){
                 fprintf(stderr, "%s: MemFree %ld kB (no CMA)\n", tag, mem_free);
 }
 
-static size_t g_tex_bytes = 0;    // uploaded texture bytes, for the failure log
+size_t gpu_scene_bytes(){ return g_tex_bytes; }
 
 // Q4_TEX_STATS=1: print, per texture, which path it took and its logical size.
 // It deliberately does *not* report a CmaFree delta any more: on this driver

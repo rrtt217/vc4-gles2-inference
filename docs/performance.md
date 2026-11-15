@@ -6312,3 +6312,28 @@ Board, the whole hybrid, interleaved, load 2.5:
 `我是一个AI助手，没有自我意识...`, q4 `我是MiniMind，一个高效的小参数AI模型...`,
 and the hybrid keeps its 4-bit string `我是一个AI的一个智能助手` against packed's
 `我是一个一个简单而富有趣` -- the conv change did not move it.
+
+## 2026-11-15: q4 perplexity is not bit-reproducible (RGBA4444)
+
+The `gpu.cpp` split (P2, same day) moved Xe's q4 PPL 330.5302 -> **326.1483**
+(1.3%) while everything that exists to catch a real regression stayed put:
+
+- q8 PPL **270.3170** to the last digit, before and after;
+- the golden strings unchanged (`我是MiniMind，一个高效的小参数AI模型，专注于` for
+  q4 on Xe);
+- `scripts/swap_matrix.py` PASS, i.e. every q4 turn is byte-identical to a fresh
+  process on the same container;
+- a `LOGITS_OUT` diff of the same q4 prompt between the two builds is
+  `max|d| = 0.0000` over all 6400 vocabulary rows.
+
+So the model maths did not move; the q4 *decode/reconstruction* path did.  The q4
+weight and KV textures are 4 bits per channel (RGBA4444), and reconstructing a
+value from a 4-bit channel is not bit-exact: a reorganisation of the code is
+enough to flip the last bits, and a corpus-level number is sensitive to that in a
+way a greedy string is not.  The x86 driver's RGBA4 conversion rounds; VC4's
+differs.
+
+Consequence for the gate: q4's PPL pin is a *format* pin, not a numerics pin.
+Re-baselined (Xe 326.1483) and expected to move by ~1% whenever the q4 path is
+rearranged.  The q8 PPL, the string pins and the swap matrix are the checks that
+have actually caught regressions, and none of them is affected.

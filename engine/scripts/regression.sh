@@ -41,6 +41,11 @@
 #                      prints the string.  A deliberate numeric change
 #                      re-baselines them in the same commit, with PPL and the
 #                      behaviour checks as evidence - see AGENTS.md.
+#   3b. renderer     - a software rasteriser (llvmpipe in a sandbox without
+#                      /dev/dri) is not a machine the pins apply to.  The engine
+#                      says so on stderr and the gate stops: a green ACCEPT from a
+#                      software run would be a lie (2026-11-15).
+#
 #   4. ppl           - printed for the q8 baseline/ACT8=2/ACT8=1 and for the
 #                      q4 baseline; compared against PPL_EXPECT /
 #                      Q4_PPL_EXPECT (default 1% tolerance) when set.
@@ -117,6 +122,15 @@ answer() {
 # line, so a run that does not emit EOS would otherwise fail the terminator
 # check; strip it before anything judges the text.
 text() { answer "$@" | sed -n 's/^Assistant: //p' | head -1 | sed 's/\[stopped.*//'; }
+
+# A software rasteriser invalidates every pin below it, so stop before them.
+if MODEL="$Q8" GPU_LAYER=1 KV_PACK=16 "$BIN" --prompt x --gen 1 2>&1 >/dev/null \
+        | grep -q "software rasteriser"; then
+    echo "FAIL  the renderer is a software rasteriser (no /dev/dri?); pins and PPL" >&2
+    echo "      do not apply to it, so this run cannot accept the tree.  Use the board" >&2
+    echo "      or a machine with a GPU, or the no-GPU half: make -C engine check." >&2
+    exit 1
+fi
 
 check_prefix() {
     tag="$1" want="$2" got="$3"

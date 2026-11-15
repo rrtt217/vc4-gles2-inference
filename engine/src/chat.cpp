@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <sys/stat.h>
 #include <fstream>
 #include <iostream>
 #include <random>
@@ -478,6 +479,31 @@ int Chat::repl() {
             if (line.rfind("/model ", 0) == 0) {
                 const string path = line.substr(7);
                 const auto t_swap = Clock::now();
+                  // A swap has to fit: the new container's textures and its KV cache
+                  // arrive *after* the old scene is released, and on the Pi Zero the CMA
+                  // is the limit.  Refuse here, while the current model still works,
+                  // instead of running out mid-upload -- that path exits the process and
+                  // the session is gone (measured 2026-11-15: minimind3 q8 at SEQ=768 ->
+                  // lfm2.5 qad q4 failed on texture 314 of 314 with CmaFree 2 MB; a fresh
+                  // process loads the same container in 38 s).
+                  struct stat st {};
+                  if (stat(path.c_str(), &st) != 0) {
+                      cerr << "/model: cannot read " << path << "\n";
+                      continue;
+                  }
+                  // Only a machine whose GL memory *is* CMA can answer this: desktop kernels
+                  // report CmaTotal 0 and the heuristic would refuse every swap.
+                  const long long cma_total = proc_meminfo_kb("CmaTotal");
+                  const long long cma = proc_meminfo_kb("CmaFree");
+                  const long long after = cma + (long long) gpu_scene_bytes();
+                  const long long need = (long long) st.st_size + (48LL << 20);   // + KV and targets
+                  if (cma_total > (64LL << 10) && cma >= 0 && after < need) {
+                      fprintf(stderr, "/model: %s needs about %lld MB of CMA (container plus KV "
+                              "heuristic) and releasing the current model would leave %lld MB; "
+                              "keeping it.  Start a new process with the new container.\n",
+                              path.c_str(), need >> 20, after >> 20);
+                      continue;
+                  }
                 app.gpu.release_scene();
                 app.model.reset();
                 if (!app.model.load(path)) { cerr << "no model loaded; leaving\n"; return 1; }
