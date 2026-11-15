@@ -410,33 +410,30 @@ string top2_fast_packed(int rows, int chunk) {
 // by 256 would not change the ordering).  Strict > keeps the first chunk on
 // a tie -- max_element's rule, applied at every level.
 //
-// Why 16 and not one 96-iteration loop: measured on VC4 (2026-11-15,
-// ARGMAX_DUMP), a loop too long to unroll loses every conditional index
-// update after the first iteration -- the float max stays correct, the
-// index sticks -- while the 16-iteration top2 loop is exact on this board.
-// Every loop in the reduction therefore stays at the proven length, and
-// the last tile's short chunk count (lc) is honoured with the same
-// break-on-index form top2 uses.  Groups past lc write the sentinel
-// (-32768, 65535): the smallest q16 value cannot beat a real winner, and a
-// tie keeps the earlier (real) group.
+// Why this shape: measured on VC4 (2026-11-15, ARGMAX_DUMP), a loop the
+// compiler does not unroll loses every conditional index update after the
+// first iteration -- the float max stays correct, the index sticks.  A
+// 96-iteration reduce and a 16-iteration loop with a runtime-bound break
+// both showed it; the top2 loop with its literal bound is exact.  So this
+// loop has NO break at all: the pass clears the chunk target to the
+// sentinel texel (-32768, 65535) before stage 1, the short last tile's
+// trailing chunks stay sentinel, and the smallest q16 value can never beat
+// a real winner (a tie keeps the earlier, real chunk).
 string top1_group(int n) {
     return "precision highp float;"
-        "uniform sampler2D L;uniform float nr,lc;"
+        "uniform sampler2D L;uniform float nr;"
         "void main(){int g=int(gl_FragCoord.x);int r=int(gl_FragCoord.y);"
         "int start=g*16;"
-        "int lim=int(mix(float(" + to_string(n) + "),lc,(float(r)==nr-1.0)?1.0:0.0));"
         "float best1=-1e30,best2=-1e30;int i1=0,i2=0;"
-        "for(int k=0;k<16;k++){int c=start+k;if(c>=lim)break;"
+        "for(int k=0;k<16;k++){int c=start+k;"
         "vec4 t=texture2D(L,vec2((float(c*2)+0.5)/" + to_string(n * 2) + ".0,(float(r)+0.5)/nr));"
         "float v=floor(t.r*255.0+0.5)*256.0+floor(t.g*255.0+0.5);"
         "if(v>=32768.0)v-=65536.0;"
         "int idx=int(floor(t.b*255.0+0.5)*256.0+floor(t.a*255.0+0.5));"
         "if(v>best1){best2=best1;i2=i1;best1=v;i1=idx;}else if(v>best2){best2=v;i2=idx;}}"
-        "float bv=(start>=lim)?-32768.0:best1;"
-        "float bi=(start>=lim)?65535.0:float(i1);"
-        "if(bv<0.0)bv+=65536.0;"
-        "float vh=floor(bv/256.0),vl=bv-vh*256.0;"
-        "float ih=floor(bi/256.0),il=bi-ih*256.0;"
+        "if(best1<0.0)best1+=65536.0;"
+        "float vh=floor(best1/256.0),vl=best1-vh*256.0;"
+        "float ih=floor(float(i1)/256.0),il=float(i1)-ih*256.0;"
         "gl_FragColor=vec4(vh/255.0,vl/255.0,ih/255.0,il/255.0);}";
 }
 

@@ -313,10 +313,22 @@ int GPU::logits_argmax_from(const vector<Mat>& tiles, GLuint x){
         const int cw = max_chunks * 2;
         if (argmax_chunk_.tex == 0 || argmax_chunk_.w != cw || argmax_chunk_.h != rows)
             argmax_chunk_ = make_target(cw, rows);
+        // Clear to the sentinel texel (-32768, 65535): the short last tile's
+        // trailing chunks keep it, so the group reduce needs no break (a
+        // runtime-bound break kept the loop rolled, and VC4 loses the index
+        // updates of a rolled loop -- see top1_group).  The sentinel is the
+        // smallest q16 value and can never win.  Stage 1 draws only each
+        // tile's real chunks (the TOPK_FAST viewport), so nothing overwrites
+        // the trailing sentinels; re-cleared every token because the target
+        // is reused and a fresh one is zero-filled, not sentinel.
+        bind_fbo(argmax_chunk_.fbo);
+        glClearColor(128.0f / 255.0f, 0.0f, 1.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
         for (int i = 0; i < rows; ++i) {
             GLuint p = x_top2_fast_packed(tiles[i].rows, chunk);
             bind_fbo(argmax_chunk_.fbo);
-            glViewport(0, i, cw, 1);
+            glViewport(0, i, ((tiles[i].rows + chunk - 1) / chunk) * 2, 1);
             use_program(p);
             bind_tex(0, logits_target_.tex);
             set_sampler(p, "L", 0);
@@ -359,7 +371,6 @@ int GPU::logits_argmax_from(const vector<Mat>& tiles, GLuint x){
             bind_tex(0, argmax_chunk_.tex);
             set_sampler(p, "L", 0);
             glUniform1f(uloc(p, "nr"), (float)rows);
-            glUniform1f(uloc(p, "lc"), (float)((tiles[rows - 1].rows + chunk - 1) / chunk));
             setup_attrib(p);
             glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         }
