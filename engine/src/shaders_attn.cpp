@@ -414,6 +414,13 @@ string top2_fast_packed(int rows, int chunk) {
 // across tokens, and a stale texel must not be able to win.  -32768 is the
 // smallest q16 value, so a sentinel can at most tie a real rail value, and
 // the tie keeps the earlier (real) chunk.
+//
+// The winning index is carried as a FLOAT, not an int.  Measured on VC4
+// (2026-11-15, ARGMAX_DUMP): an int assigned under a condition inside the
+// loop keeps its first-iteration value -- every chunk reported its start
+// index while the float max was correct -- so the loop-carried index state
+// stays in the float domain, where the conditional updates work.  Indices
+// are <= 65535, exact in float32.
 string top1_packed(int rows, int chunk) {
     return "precision highp float;"
         "uniform sampler2D L;uniform float tr,nr;"
@@ -422,14 +429,14 @@ string top1_packed(int rows, int chunk) {
         "float dh(vec4 c){return dv(floor(c.b*255.0+0.5)*256.0+floor(c.a*255.0+0.5));}"
         "void main(){int x=int(gl_FragCoord.x);int start=x*" + to_string(chunk) + ";"
         "if(start>=" + to_string(rows) + "){gl_FragColor=vec4(128.0/255.0,0.0,1.0,1.0);return;}"
-        "float best=-1e30;int bi=0;"
+        "float best=-1e30,bi=0.0;"
         "for(int k=0;k<" + to_string(chunk) + ";k++){int idx=start+k;if(idx>=" + to_string(rows) + ")break;"
         "int h=idx/2;vec4 c=texture2D(L,vec2((float(h)+0.5)/" + to_string(kLogitsGridPacked) + ".0,(tr+0.5)/nr));"
         "float v=((h*2)==idx)?dl(c):dh(c);"
-        "if(v>best){best=v;bi=idx;}}"
+        "if(v>best){best=v;bi=float(idx);}}"
         "float bv=best*256.0;if(bv<0.0)bv+=65536.0;"
         "float vh=floor(bv/256.0),vl=bv-vh*256.0;"
-        "float ih=floor(float(bi)/256.0),il=float(bi)-ih*256.0;"
+        "float ih=floor(bi/256.0),il=bi-ih*256.0;"
         "gl_FragColor=vec4(vh/255.0,vl/255.0,ih/255.0,il/255.0);}";
 }
 
@@ -440,20 +447,21 @@ string top1_packed(int rows, int chunk) {
 // (dividing by 256 would not change the ordering).  Strict > again keeps the
 // first chunk on a tie, and the host keeps the first tile, so the global
 // winner is the smallest token id among the maxima -- max_element's rule.
+// Both loop-carried winners are floats, for the VC4 reason in top1_packed.
 string top1_reduce(int n) {
     return "precision highp float;"
         "uniform sampler2D L;uniform float nr;"
         "void main(){int r=int(gl_FragCoord.y);"
-        "float best=-1e30;int bi=0;"
+        "float best=-1e30,bi=0.0;"
         "for(int c=0;c<" + to_string(n) + ";c++){"
         "vec4 t=texture2D(L,vec2((float(c)+0.5)/" + to_string(n) + ".0,(float(r)+0.5)/nr));"
         "float v=floor(t.r*255.0+0.5)*256.0+floor(t.g*255.0+0.5);"
         "if(v>=32768.0)v-=65536.0;"
-        "int idx=int(floor(t.b*255.0+0.5)*256.0+floor(t.a*255.0+0.5));"
-        "if(v>best){best=v;bi=idx;}}"
+        "float fi=floor(t.b*255.0+0.5)*256.0+floor(t.a*255.0+0.5);"
+        "if(v>best){best=v;bi=fi;}}"
         "if(best<0.0)best+=65536.0;"
         "float vh=floor(best/256.0),vl=best-vh*256.0;"
-        "float ih=floor(float(bi)/256.0),il=float(bi)-ih*256.0;"
+        "float ih=floor(bi/256.0),il=bi-ih*256.0;"
         "gl_FragColor=vec4(vh/255.0,vl/255.0,ih/255.0,il/255.0);}";
 }
 
