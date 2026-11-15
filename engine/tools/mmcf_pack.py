@@ -27,6 +27,7 @@ a re-baseline.
 import argparse
 import json
 import os
+from pathlib import Path
 import struct
 import sys
 import zlib
@@ -45,9 +46,19 @@ from mmcf_hf import (ACTIVATION_RAIL, RESIDUAL_RAIL, RESIDUAL_WARN, is_llama2c,
 # The record layout lives in mmcf_format.py (one copy for the packer, the dump tool
 # and the requantiser); `header_magic` etc. below are legacy checkpoint magics,
 # which only this tool reads.
-from mmcf_format import (MAGIC, REC_SIZE_V2, REC_SIZE_V3, rec_size,  # noqa: E402
-                         rec_unpack, pack_rec, tlv, crc32)
+from mmcf_format import (MAGIC, REC_SIZE_V2, REC_SIZE_V3, HEADER_SIZE, TEMPLATE_KINDS, rec_size,  # noqa: E402
+                         rec_unpack, pack_rec, tlv, crc32,
+                         DT_F32, DT_I16, DT_Q8U8, DT_Q8I8, DT_Q4, DT_BLOB)
+from mmcf_hf import T_EMB, T_EMB_I16, T_LOGITS  # noqa: E402
 
+# Tensor ids the extract left behind (2ca97cf); the values are the format's.
+T_TOKENIZER = 0x30
+
+
+# The tensor table's alignment.  It moved into mmcf_format.py's extract and was
+# left undefined here, so the packer died on any real pack (2ca97cf); the value
+# is the one the format was built with.
+ALIGN = 16
 
 MAGIC_Q8 = 0x51384D31      # Q8M1
 MAGIC_Q8_V2 = 0x51384D32   # Q8M2
