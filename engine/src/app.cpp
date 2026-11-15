@@ -11,9 +11,16 @@
 
 #include "common.h"
 
+#include <EGL/egl.h>
+
 #if defined(__linux__)
 #include <unistd.h>
 #endif
+
+// GLES3 entry point the engine does not otherwise use: immutable texture
+// storage, which cannot be substituted by the driver the way glTexImage2D's
+// internal format can.
+typedef void (*PFNGLTEXSTORAGE2D)(GLenum, GLsizei, GLenum, GLsizei, GLsizei);
 
 // Q4_TEX_ALLOC=4444|4444u|8888: allocate eight 1024x1024 textures *in this
 // context, before any model is loaded, then hold still for 20 s so the shell
@@ -24,8 +31,10 @@
 static void q4_alloc_probe() {
         const char* e = getenv("Q4_TEX_ALLOC");
         if (!e) return;
+        fprintf(stderr, "alloc probe: GL_VERSION=%s  GLSL=%s\n",
+                (const char*)glGetString(GL_VERSION), (const char*)glGetString(GL_SHADING_LANGUAGE_VERSION));
         const bool four = strncmp(e, "4444", 4) == 0;
-        const bool sized = four && e[4] == 's';      // 4444s = sized GL_RGBA4
+        const bool sized = four && (e[4] == 's' || e[4] == 's');  // 4444s = sized GL_RGBA4
         const int n = 8, S = 1024;
         std::vector<uint32_t> z8((size_t)S * S, 0x5a5a5a5a);
         std::vector<uint16_t> z4((size_t)S * S / 2, 0x5555);
@@ -41,8 +50,20 @@ static void q4_alloc_probe() {
                 while (glGetError() != GL_NO_ERROR) {}
                 if (four) {
                         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-                        glTexImage2D(GL_TEXTURE_2D, 0, sized ? GL_RGBA4 : GL_RGBA, S, S, 0,
-                                     GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4, z4.data());
+                        if (strcmp(e, "4444st") == 0) {
+                                // ES3 immutable storage: the format cannot be
+                                // substituted, so if this is 2 bytes a texel the
+                                // mutable glTexImage2D path is what loses it.
+                                PFNGLTEXSTORAGE2D st =
+                                        (PFNGLTEXSTORAGE2D)eglGetProcAddress("glTexStorage2D");
+                                if (st) st(GL_TEXTURE_2D, 1, GL_RGBA4, S, S);
+                                else fprintf(stderr, "alloc probe: no glTexStorage2D\n");
+                                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, S, S, GL_RGBA,
+                                                GL_UNSIGNED_SHORT_4_4_4_4, z4.data());
+                        } else {
+                                glTexImage2D(GL_TEXTURE_2D, 0, sized ? GL_RGBA4 : GL_RGBA, S, S, 0,
+                                             GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4, z4.data());
+                        }
                         glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
                 } else {
                         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, S, S, 0, GL_RGBA,
@@ -52,7 +73,7 @@ static void q4_alloc_probe() {
         }
         glFinish();
         fprintf(stderr, "alloc probe: %d x %dx%d %s, %d refused; holding 20 s for bo_stats\n",
-                n, S, S, four ? (sized ? "GL_RGBA4 sized" : "GL_RGBA unsized +4444") : "RGBA8", bad);
+                n, S, S, four ? (strcmp(e, "4444st") == 0 ? "GL_RGBA4 via glTexStorage2D" : sized ? "GL_RGBA4 sized" : "GL_RGBA unsized +4444") : "RGBA8", bad);
         fflush(stderr);
 #if defined(__linux__)
         sleep(20);
