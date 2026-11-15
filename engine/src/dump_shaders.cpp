@@ -149,8 +149,6 @@ vector<Case> cases() {
     add(v, "top2_6400_256", [] { return top2(6400, 256); });
     add(v, "top2_fast_packed_6400_256", [] { return top2_fast_packed(6400, 256); });
     add(v, "top2_packed_6400_256", [] { return top2_packed(6400, 256); });
-    add(v, "top1_packed_1536_16", [] { return top1_packed(1536, 16); });
-    add(v, "top1_packed_256_16", [] { return top1_packed(256, 16); });
     add(v, "top1_reduce_96", [] { return top1_reduce(96); });
 
     // --- the hybrid (conv) block.  Its three elementwise passes are the only

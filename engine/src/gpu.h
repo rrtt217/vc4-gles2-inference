@@ -258,7 +258,6 @@ private:
     GLuint x_q8_pair_logits(int rows, int cols, bool wrow = false);
     GLuint x_top2_fast_packed(int rows, int chunk);
     GLuint x_top2_packed(int rows, int chunk);
-    GLuint x_top1_packed(int rows, int chunk);
     GLuint x_top1_reduce(int n);
     bool logits_pair() const;
     bool logits_pair_ok(const vector<Mat>& tiles) const;

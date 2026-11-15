@@ -305,15 +305,18 @@ int GPU::logits_argmax_from(const vector<Mat>& tiles, GLuint x){
         const int chunk = 16;
         int max_chunks = 0;
         for (auto& t : tiles) max_chunks = max(max_chunks, (t.rows + chunk - 1) / chunk);
-        if (argmax_chunk_.tex == 0 || argmax_chunk_.w != max_chunks || argmax_chunk_.h != rows)
-            argmax_chunk_ = make_target(max_chunks, rows);
-        // Stage 1: one fragment per chunk.  Every tile draws the full
-        // max_chunks width; the shader writes the sentinel for chunks past
-        // its row count, so no texel of the reused target stays stale.
+        // Stage 1 reuses the proven top2_fast_packed kernel verbatim (two
+        // ranks per chunk; only rank 0 is read afterwards).  A dedicated
+        // single-rank text lost the index updates on VC4 -- see the comment
+        // in shaders_attn.cpp -- so the reduction stays on the kernel the
+        // candidate path already verifies on this board.
+        const int cw = max_chunks * 2;
+        if (argmax_chunk_.tex == 0 || argmax_chunk_.w != cw || argmax_chunk_.h != rows)
+            argmax_chunk_ = make_target(cw, rows);
         for (int i = 0; i < rows; ++i) {
-            GLuint p = x_top1_packed(tiles[i].rows, chunk);
+            GLuint p = x_top2_fast_packed(tiles[i].rows, chunk);
             bind_fbo(argmax_chunk_.fbo);
-            glViewport(0, i, max_chunks, 1);
+            glViewport(0, i, cw, 1);
             use_program(p);
             bind_tex(0, logits_target_.tex);
             set_sampler(p, "L", 0);
@@ -328,11 +331,11 @@ int GPU::logits_argmax_from(const vector<Mat>& tiles, GLuint x){
         // the same logits, so a wrong winner can be located stage by stage.
         const bool dbg = getenv("ARGMAX_DUMP");
         if (dbg) {
-            vector<uint8_t> c = read_bytes(argmax_chunk_, max_chunks, rows);
+            vector<uint8_t> c = read_bytes(argmax_chunk_, cw, rows);
             for (int r = 0; r < min(rows, 2); ++r) {
                 fprintf(stderr, "ARGMAX chunk row %d:", r);
                 for (int j = 0; j < min(max_chunks, 6); ++j) {
-                    const size_t o = ((size_t)r * max_chunks + j) * 4;
+                    const size_t o = ((size_t)r * cw + j * 2) * 4;
                     int v = (int)c[o] * 256 + c[o + 1]; if (v >= 32768) v -= 65536;
                     int idx = (int)c[o + 2] * 256 + c[o + 3];
                     fprintf(stderr, " (%d,%d)", v, idx);
@@ -342,8 +345,11 @@ int GPU::logits_argmax_from(const vector<Mat>& tiles, GLuint x){
         }
 
         // Stage 2: one fragment per tile row, reducing that row's chunk
-        // winners.  One draw for the whole grid (rows fragments, under the
-        // draw cap for every vocabulary the packer produces).
+        // winners (the rank-0 texels, at even x).  One draw for the whole
+        // grid (rows fragments, under the draw cap for every vocabulary the
+        // packer produces).  The last tile may be short: its trailing chunks
+        // hold the top2 kernel's empty-chunk output, so the reduce stops at
+        // that tile's real chunk count (lc).
         if (argmax_tile_.tex == 0 || argmax_tile_.w != 1 || argmax_tile_.h != rows)
             argmax_tile_ = make_target(1, rows);
         {
@@ -354,6 +360,7 @@ int GPU::logits_argmax_from(const vector<Mat>& tiles, GLuint x){
             bind_tex(0, argmax_chunk_.tex);
             set_sampler(p, "L", 0);
             glUniform1f(uloc(p, "nr"), (float)rows);
+            glUniform1f(uloc(p, "lc"), (float)((tiles[rows - 1].rows + chunk - 1) / chunk));
             setup_attrib(p);
             glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         }
@@ -385,10 +392,10 @@ int GPU::logits_argmax_from(const vector<Mat>& tiles, GLuint x){
                     token == cpu ? "MATCH" : "MISMATCH");
             // Per-chunk winners of tile 0, GPU against CPU, to localise a
             // wrong index to the stage that produced it.
-            vector<uint8_t> c = read_bytes(argmax_chunk_, max_chunks, rows);
+            vector<uint8_t> c = read_bytes(argmax_chunk_, cw, rows);
             const int M = tiles[0].rows;
             for (int ch = 0; ch < max_chunks; ++ch) {
-                const size_t o = (size_t)ch * 4;
+                const size_t o = (size_t)ch * 2 * 4;
                 int gv = (int)c[o] * 256 + c[o + 1]; if (gv >= 32768) gv -= 65536;
                 int gi = (int)c[o + 2] * 256 + c[o + 3];
                 float bv = -1e30f; int bi = -1;
@@ -700,10 +707,6 @@ GLuint GPU::x_top2_fast_packed(int rows, int chunk){
 
 GLuint GPU::x_top2_packed(int rows, int chunk){
         return x_prog("xt2p_" + to_string(rows) + "_" + to_string(chunk), top2_packed(rows, chunk));
-    }
-
-GLuint GPU::x_top1_packed(int rows, int chunk){
-        return x_prog("xt1p_" + to_string(rows) + "_" + to_string(chunk), top1_packed(rows, chunk));
     }
 
 GLuint GPU::x_top1_reduce(int n){
