@@ -6098,3 +6098,20 @@ confirmation that the ratio is ~1.3x, not as the number itself.
 For the record, the goal this session set out from was 1.45x (276 against 190),
 and the path was: nibble reversal at upload (268.5), w2 on the 4-bit view
 (266), qkv/wo (252.9), scalar accumulate instead of `dot()` (247.2).
+
+### 2026-11-15 — the 4-bit view on the hybrid, verified on Xe
+
+The hybrid was refused the 4-bit weight view on the strength of a board failure
+that turned out to be CMA starvation.  Xe has no such limit, so the question
+could be asked directly.  With the refusal lifted, lfm2.5-230M q4 answers
+**identically** to the packed view on both prompts tried:
+
+    "用一句话介绍你自己。"           -> 我是一个聊天机器人，专注...
+    "What is the capital of France?" -> The capital of France is Paris.
+
+`swap_matrix.py` still passes with the hybrid in the chain (every swap turn
+byte-identical to a fresh process) and `regression.sh` is ACCEPT with q4 PPL
+326.1483 unchanged.  So the 4-bit view is the default for every q4 matrix, the
+hybrid included; what a board with little CMA free does is now a legible
+failure (`make_texture` reports the size, the texture budget and `CmaFree`)
+instead of the old silent `FBO incomplete`.

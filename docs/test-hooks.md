@@ -170,19 +170,21 @@ binary.  They are measurement hooks, not production settings.
   methodology: it drops the four P fetches and the scale/min decode per group
   (constant scale), with wrong weights on purpose.  It measured 84 ms of the
   gate's 159 on the Pi, which is why the group plane is the next target.
-- `Q4_FMT=0` — disable the 4-bit FFN gate view described next, restoring the
-  packed nibbles for an A/B in one binary.  (`Q4_FMT=rgba4` names the default
-  explicitly; the value is otherwise ignored.)  `Q4_FMT=force` bypasses the two
-  refusals below — diagnostics only, for reproducing the hybrid failure under
-  the `make_target`/`make_texture` diagnostics.
-- `Q4_FMT=rgba4` — bind the FFN gate's INT4 matrices as `GL_RGBA4` at twice the
-  width (four weights per texel, sampled as n/15, with 15 folded into the group
-  scale) instead of packed nibbles.  Zero decode in the kernel; the bytes are
-  the container's own, so no re-packing.  Default off, gate kernel only —
-  `matvec_i4_pair_swiglu_4x4`, a separate builder so the packed text and its
-  shader hash cannot move.  Not bit-exact: `15*(n/15)` is not exactly `n`, so
-  logits move by ~1 ULP even where the sampler is exact (Xe), and the greedy
-  string is the tripwire.
+- `Q4_FMT=0` — disable the 4-bit weight view below, restoring the packed
+  nibbles for an A/B in one binary.  (`Q4_FMT=rgba4` names the default
+  explicitly; any other value is ignored.)
+- `Q4_FMT=rgba4` — bind every INT4 weight matrix as `GL_RGBA4` at twice the
+  width: four weights per texel, sampled as n/15 with the 15 folded into the
+  group scale, so the kernel decodes nothing.  The bytes are the container's
+  own, so there is no re-packing and no format change.  **Default on** for qkv,
+  wo, w13 and w2, the hybrid (conv + attention) model included -- verified on Xe
+  against the packed view, and the earlier board failure turned out to be CMA
+  starvation, which reproduces on the packed view too.  Still refused on the
+  unchunked FFN path (`ffn_split` -> `matvec_to_row` reads packed nibbles).
+  One builder per kernel (`matvec_i4*_4x4`), kept separate so the packed text
+  and its shader hash cannot move.  Not bit-exact: `15*(n/15)` is not exactly
+  `n`, so logits move by ~1 ULP and q4 PPL by ~1.3%; the greedy strings have
+  not moved on either machine.
 - `KV_SCALE=N` — KV fixed-point scale (default 16384; q16 uses 2048, q8 uses 16).
 - `KV_PACK=16|8` — packed KV layout: two int16 per RGBA8 texel (width 384) or
   four int8 (width 192), instead of one 24-bit value (width 768).  A hybrid

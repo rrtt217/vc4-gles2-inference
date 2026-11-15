@@ -172,23 +172,17 @@ void Model::apply_q4_fmt(){
         // measurement rules ask for.
         const char* v = getenv("Q4_FMT");
         if (v && strcmp(v, "0") == 0) return;
-        // Q4_FMT=force bypasses the two refusals below so the failure they
-        // guard against can be reproduced under the diagnostics in
-        // GPU::make_target / make_texture.  Diagnostics only: the hybrid path
-        // and the unchunked path are wrong with the 4-bit view until the cause
-        // is understood.
-        const bool force = v && strcmp(v, "force") == 0;
-        // The hybrid (conv + attention) model dies on an incomplete FBO with
-        // the gate bound as 4-bit texels and the root cause is not yet known
-        // (LFM2.5 q4, 2026-11-15, before the first token).  Until it is
-        // understood the hybrid keeps the packed view.
-        if (hybrid && !force) {
-                if (v) cerr << "Q4_FMT: not supported on the hybrid model; using the packed view\n";
-                return;
-        }
+        // The hybrid is not refused any more: the failure that looked like a
+        // 4-bit-format problem was the board running out of CMA while its other
+        // services held most of it, and it reproduced on the packed view as
+        // well (docs/performance.md, 2026-11-15).  Verified on Xe: the 4-bit
+        // view answers identically to the packed one on lfm2.5-230M q4
+        // ("我是一个聊天机器人..." and "The capital of France is Paris." for both).
+        // If a board with little CMA free cannot hold the model, the upload now
+        // says so with the size, the texture budget and CmaFree.
         // Only the fused, chunked gate reads the 4-bit view.  The unchunked
         // path (ffn_split -> matvec_to_row + swiglu_2row) reads packed nibbles.
-        if (!ffn_chunked && !force) {
+        if (!ffn_chunked) {
                 if (v) cerr << "Q4_FMT: the unchunked FFN path is not supported; using the packed view\n";
                 return;
         }
