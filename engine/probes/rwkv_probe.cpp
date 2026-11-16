@@ -502,6 +502,44 @@ static void test_matvec_add(int dim, bool wrow) {
     if (st) glDeleteTextures(1,&st);
 }
 
+// I. render an I24_1 activation to an FBO, then matvec_q8 (X4Q = 4 fetches from
+// X) samples THAT rendered texture.  A/B glFinish between render and matvec.
+static void test_render_matvec(int dim, bool finish) {
+    const int cols = dim, rows = dim;
+    vector<int8_t> w((size_t)rows*cols);
+    for (int r = 0; r < rows; ++r) for (int c = 0; c < cols; ++c)
+        w[(size_t)r*cols+c] = (int8_t)(((r*7+c*13)%9)-4);
+    vector<uint8_t> wp((size_t)(cols/4)*rows*4);
+    for (int r = 0; r < rows; ++r) for (int q = 0; q < cols/4; ++q)
+        for (int j = 0; j < 4; ++j)
+            wp[((size_t)r*(cols/4)+q)*4+j] = (uint8_t)(w[(size_t)r*cols+4*q+j]+128);
+    GLuint wt = tex(cols/4, rows, wp);
+    vector<int> xraw(cols);
+    for (int c = 0; c < cols; ++c) xraw[c] = (int)((c*2654435761u)%512u)-256;
+    // render the activation to an FBO texture (not uploaded)
+    GLuint tA; GLuint fA = mkfbo(cols, tA);
+    string fs1 = string("precision highp float;\n") + x_glsl(XFormat::I24_1) +
+        "uniform sampler2D S;void main(){int i=int(gl_FragCoord.x);"
+        "gl_FragColor=texture2D(S,vec2((float(i)+0.5)/" + std::to_string(cols) + ".0,0.5));}";
+    GLuint src = tex(cols, 1, q24_bytes(xraw, cols, 1));
+    GLuint p1 = prog(fs1);
+    glBindFramebuffer(GL_FRAMEBUFFER, fA); glViewport(0,0,cols,1);
+    glUseProgram(p1); bind(p1,"S",0,src); tri(p1);
+    if (finish) { glFlush(); glFinish(); }
+    // matvec reads the rendered tA
+    GLuint p2 = prog(matvec_q8(rows, cols, XFormat::I24_1, false));
+    out_begin(rows); glUseProgram(p2); bind(p2,"W",0,wt); bind(p2,"X",1,tA);
+    glUniform1f(glGetUniformLocation(p2,"ws"),1.0f); tri(p2);
+    vector<int> g = read_q24(rows);
+    vector<int> want(rows);
+    for (int r = 0; r < rows; ++r) { float s=0; for (int c=0;c<cols;++c) s+=(float)w[(size_t)r*cols+c]*(float)xraw[c];
+        long q=lrintf(s); want[r]=(int)std::max(-32768L,std::min(32767L,q)); }
+    char nm[64]; snprintf(nm,sizeof nm,"I render->matvec i24 finish%d",finish);
+    report(nm, g, want, 1);
+    glDeleteProgram(p1); glDeleteProgram(p2);
+    glDeleteFramebuffers(1,&fA); glDeleteTextures(1,&tA); glDeleteTextures(1,&wt); glDeleteTextures(1,&src);
+}
+
 int main(int argc, char** argv) {
     bool want_es3 = !(argc > 1 && strcmp(argv[1], "gles2") == 0);
     if (want_es3) { setenv("MESA_GLES_VERSION_OVERRIDE", "3.0", 0);
@@ -551,6 +589,9 @@ int main(int argc, char** argv) {
     printf("\nH. matvec_add I24_1 + q16 residual (wrow off/on)\n");
     test_matvec_add(D, false);
     test_matvec_add(D, true);
+    printf("\nI. render->matvec I24_1 4-fetch (glFinish A/B)\n");
+    test_render_matvec(D, false);
+    test_render_matvec(D, true);
     if (g_es3) { printf("\nD. bit-cast f32 round trip (dither A/B)\n");
         test_bitcast(D, false); test_bitcast(D, true); }
     else printf("\nD. skipped (no ESSL 3.00)\n");
