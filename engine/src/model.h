@@ -99,7 +99,12 @@ public:
     // qkv itself is not uploaded for an RWKV container -- these three are, so
     // the weight traffic and the texture memory are the same as one draw.
     vector<Mat> rwkv_r, rwkv_k, rwkv_v;
-    void split_rwkv();
+    // split_rwkv(max_dim) also chunks the channel-mix key/value when the key's
+    // row count (the FFN width) exceeds the GL target limit (VC4 2048): it reuses
+    // ffn_chunked/ffn_chunk and w1a/w1b (key row halves) + w2a/w2b (value col
+    // halves), exactly like the dense FFN split, so the layer loop draws two
+    // <=2048-row textures instead of one 3072-row upload (GL_INVALID_VALUE).
+    void split_rwkv(int max_dim);
     // Metadata key 17: the head's input (the final LayerNorm's output) is
     // written *2^-k so it fits the q16 activation rail, and every logits tile's
     // scale already carries the *2^k, so the dot product comes out in the

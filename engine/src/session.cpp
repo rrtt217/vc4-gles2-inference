@@ -770,12 +770,24 @@ vector<float> Session::forward_rwkv(int token){
                 xk2[i] = xn2[i] + sx * cml[i];
             }
             memcpy(sh2, xn2.data(), sizeof(float) * dim);
-            vector<float> h = rwkv_mv(m_.w1[l], xk2);
             // relu^2: the square is the one place the block amplifies instead
             // of attenuating (Q-1: peak 91.95 against the q16 rail's 128).
+            // On VC4 the key is chunked (split_rwkv) so each matvec texture is
+            // <=2048 rows; the two relu^2 halves are recombined by the value halves.
             float hmax = 0.0f;
-            for (float& z : h) { z = z > 0.0f ? z * z : 0.0f; hmax = std::max(hmax, z); }
-            x = add_q16(x, rwkv_mv(m_.w2[l], h));
+            vector<float> cm_out;
+            if (m_.ffn_chunked) {
+                vector<float> ha = rwkv_mv(m_.w1a[l], xk2);
+                vector<float> hb = rwkv_mv(m_.w1b[l], xk2);
+                for (float& z : ha) { z = z > 0.0f ? z * z : 0.0f; hmax = std::max(hmax, z); }
+                for (float& z : hb) { z = z > 0.0f ? z * z : 0.0f; hmax = std::max(hmax, z); }
+                cm_out = add_q16(rwkv_mv(m_.w2a[l], ha), rwkv_mv(m_.w2b[l], hb));
+            } else {
+                vector<float> h = rwkv_mv(m_.w1[l], xk2);
+                for (float& z : h) { z = z > 0.0f ? z * z : 0.0f; hmax = std::max(hmax, z); }
+                cm_out = rwkv_mv(m_.w2[l], h);
+            }
+            x = add_q16(x, cm_out);
             // RWKV_DUMP: the peaks the block has to keep inside its rails --
             // the recurrence's |S|max (f32 today, S-1), the residual (q16 rail
             // 128, R-1) and the relu^2 hidden (Q-1, the tensor closest to the

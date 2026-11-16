@@ -20,7 +20,7 @@ void App::prepare_model() {
     // happen while the weights are still borrowed from the container mapping
     // (release_map() drops it at the end of upload_weights()), so it runs here
     // with the other prepare-time steps and the swap repeats it.
-    model.split_rwkv();
+    model.split_rwkv(gpu.max_target_dim());
     model.apply_q4_fmt();          // Q4_FMT=rgba4: gate matrices as 4-bit texels
     model.apply_hidden_scale();
     if (getenv("SHADER_TIME")) fprintf(stderr, "STARTUP %7.1f ms  ffn split\n", run_time_ms());

@@ -217,7 +217,7 @@ void Model::split_ffn(int max_dim){
 // three matrices because they are drawn by the same kernel, and the layer loop
 // needs them one at a time -- each band takes its own token-shifted input
 // (x_r / x_k / x_v), so one 3*dim-row draw cannot serve it.
-void Model::split_rwkv(){
+void Model::split_rwkv(int max_dim){
         if (!is_rwkv()) return;
         rwkv_r.assign(layers, Mat());
         rwkv_k.assign(layers, Mat());
@@ -228,6 +228,23 @@ void Model::split_rwkv(){
                 rwkv_r[l] = slice_rows(qkv[l], 0, dim);
                 rwkv_k[l] = slice_rows(qkv[l], dim, 2 * dim);
                 rwkv_v[l] = slice_rows(qkv[l], 2 * dim, 3 * dim);
+        }
+        // Channel-mix key is hidden x dim; on VC4 a 3072-row texture is illegal.
+        // Chunk it (and the value's columns) like the dense FFN so each upload
+        // stays <= max_dim.  Xe (16384) never chunks.
+        const int F = w1.empty() ? 0 : w1[0].rows;
+        if (F > max_dim) {
+                const int c = (F + 1) / 2;
+                ffn_chunked = true;
+                ffn_chunk = c;
+                w1a.resize(layers); w1b.resize(layers);
+                w2a.resize(layers); w2b.resize(layers);
+                for (int l = 0; l < layers; ++l) {
+                        w1a[l] = slice_rows(w1[l], 0, c);
+                        w1b[l] = slice_rows(w1[l], c, F);
+                        w2a[l] = slice_cols(w2[l], 0, c);
+                        w2b[l] = slice_cols(w2[l], c, F);
+                }
         }
 }
 
