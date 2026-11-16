@@ -795,6 +795,10 @@ vector<float> Session::forward_rwkv(int token){
                 cm_out = rwkv_mv(m_.w2[l], h);
             }
             x = add_q16(x, cm_out);
+            { static int cdbg_tok = 0; static bool cdump_init = false; static bool cdump = false;
+              if (!cdump_init) { cdump = env_set("RWKV_STAGE_DUMP"); cdump_init = true; }
+              if (cdump && cdbg_tok == 0) { float mx=0; for(float v:x) mx=std::max(mx,fabsf(v));
+                  fprintf(stderr, "STAGE CPU l=%d max=%.4f first=%.4f %.4f %.4f\n", l, mx, x[0], x[1], x[2]); } }
             // RWKV_DUMP: the peaks the block has to keep inside its rails --
             // the recurrence's |S|max (f32 today, S-1), the residual (q16 rail
             // 128, R-1) and the relu^2 hidden (Q-1, the tensor closest to the
@@ -856,13 +860,21 @@ vector<float> Session::forward_gpu_rwkv(int token){
         if (!m_.rwkv_tok_norm.empty())
             x = rwkv_layernorm(x, m_.rwkv_tok_norm.data(), m_.rwkv.norm_eps);
         GLuint resid = gpu_.rwkv_upload_x0(x);
+        static int dbg_tok = 0;
+        const bool dump = env_set("RWKV_STAGE_DUMP") && dbg_tok == 0;
         for (int l = 0; l < m_.layers; ++l) {
             if (g_stop) break;
             float* cs = rwkv_wkv_cpu_
                 ? rwkv_state_.wkv.data() + (size_t)l * m_.heads * m_.rwkv.head_size * m_.rwkv.head_size
                 : nullptr;
             resid = gpu_.rwkv_block(l, m_, resid, cs);
+            if (dump) {
+                vector<float> rr = gpu_.rwkv_read_residual(resid);
+                float mx = 0; for (float v : rr) mx = std::max(mx, fabsf(v));
+                fprintf(stderr, "STAGE GPU l=%d max=%.4f first=%.4f %.4f %.4f\n", l, mx, rr[0], rr[1], rr[2]);
+            }
         }
+        ++dbg_tok;
         gpu_.rwkv_flip();
         return gpu_.rwkv_read_residual(resid);
     }
