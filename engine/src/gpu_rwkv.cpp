@@ -427,7 +427,15 @@ GLuint GPU::rwkv_block(int l, const Model& m, GLuint resid, float* cpu_wkv_state
             vector<uint8_t> b = read_bytes(t, t.w, 1);
             auto val=[&](int i){int u=(int)b[(size_t)i*4+1]*65536+(int)b[(size_t)i*4+2]*256+(int)b[(size_t)i*4+3]-8388608;return (u/256.0f)/div;};
             float mx=0; for(int i=0;i<t.w;++i) mx=std::max(mx,fabsf(val(i)));
-            fprintf(stderr,"OP GPU l1 %s max=%.4f first=%.4f %.4f %.4f\n",nm,mx,val(0),val(1),val(2));
+            fprintf(stderr,"OP GPU l%d %s max=%.4f first=%.4f %.4f %.4f\n",l,nm,mx,val(0),val(1),val(2));
+        };
+        auto DQ = [&](const char* nm, RwkvTmp idx) {
+            if (!env_set("RWKV_STAGE_DUMP") || l > 1) return;
+            sync(); Target& t = rwkv_tmp(idx);
+            vector<uint8_t> b = read_bytes(t, t.w, 1);
+            auto val=[&](int i){int u=(b[(size_t)i*4]<<8)|b[(size_t)i*4+1];return (u>=32768?u-65536:u)/256.0f;};
+            float mx=0; for(int i=0;i<t.w;++i) mx=std::max(mx,fabsf(val(i)));
+            fprintf(stderr,"OPQ GPU l%d %s max=%.4f first=%.4f %.4f %.4f\n",l,nm,mx,val(0),val(1),val(2));
         };
         // O1-O3: att_norm, then the six token-shifted inputs; shift := xn.
         GLuint xn = (l == 0) ? rwkv_ln_p(resid, rwkv_const(l, RC_ATTNorm), rwkv_tmp(RT_XN))
@@ -554,7 +562,9 @@ GLuint GPU::rwkv_block(int l, const Model& m, GLuint resid, float* cpu_wkv_state
         // O18/O19: W_o + residual (fused q16 add, matches the CPU grid).
         if (l == 0) {
             GLuint wo_t = rwkv_mv(m.wo[l], y, rwkv_tmp(RT_U));
+            D("wo_t", RT_U, 1);
             resid = rwkv_first_add(rwkv_x0_.tex, wo_t, rwkv_tmp(RT_RES));
+            DQ("resid_after_wo", RT_RES);
         } else {
             Target& wo_out = (resid == rwkv_tmp(RT_RES).tex) ? rwkv_tmp(RT_RES2) : rwkv_tmp(RT_RES);
             GLuint wo_t = rwkv_mv(m.wo[l], y, rwkv_tmp(RT_U));
@@ -587,7 +597,9 @@ GLuint GPU::rwkv_block(int l, const Model& m, GLuint resid, float* cpu_wkv_state
             ha = rwkv_sqrelu(ha, rwkv_tmp(RT_CMH2));
             D("sqrelu_a", RT_CMH2, 1);
             GLuint hb = rwkv_mv(m.w1b[l], xk2, rwkv_tmp(RT_CMH3));
+            D("cmkey_b", RT_CMH3, 1);
             hb = rwkv_sqrelu(hb, rwkv_tmp(RT_CMH4));
+            D("sqrelu_b", RT_CMH4, 1);
             // mid != resid; the final add reuses resid's (now dead) buffer.
             Target& mid = (resid == rwkv_tmp(RT_RES).tex) ? rwkv_tmp(RT_RES2) : rwkv_tmp(RT_RES);
             Target& fin = (resid == rwkv_tmp(RT_RES).tex) ? rwkv_tmp(RT_RES) : rwkv_tmp(RT_RES2);
@@ -595,7 +607,10 @@ GLuint GPU::rwkv_block(int l, const Model& m, GLuint resid, float* cpu_wkv_state
             D("cmt_a", RT_U, 1);
             GLuint mid_r = rwkv_res_add(resid, ca, mid);
             GLuint cb = rwkv_mv(m.w2b[l], hb, rwkv_tmp(RT_U));
-            return rwkv_res_add(mid_r, cb, fin);
+            D("cmt_b", RT_U, 1);
+            GLuint fr = rwkv_res_add(mid_r, cb, fin);
+            DQ("resid_final", (fin.tex == rwkv_tmp(RT_RES).tex) ? RT_RES : RT_RES2);
+            return fr;
         }
         GLuint h = rwkv_mv(m.w1[l], xk2, rwkv_tmp(RT_CMH));
         h = rwkv_sqrelu(h, rwkv_tmp(RT_CMH2));
