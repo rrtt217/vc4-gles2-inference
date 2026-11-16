@@ -194,6 +194,12 @@ binary.  They are measurement hooks, not production settings.
   rows on Xe and VC4) and ~43% faster at the engine's 1216-row chunk
   (6.55 -> 3.74 ms/draw).  The legacy pricing arms below route to the nested
   body too.
+- `Q4_QKV_NESTED=1`, `Q4_W2_NESTED=1` — the same flat-loop rewrite for the
+  qkv (`matvec_i4_4x4`) and w2/wo (`matvec_i4_add_4x4`) 4-bit kernels; each
+  switch restores that kernel's nested form for the A/B.  The flat forms are
+  byte-identical (same per-group operation order via conditional float
+  updates; the w2 keeps its generic `X4Q` activation decode).  Set all three
+  `*_NESTED` switches for the full nested q4 baseline.
 - `Q4_4X4_FLAT=1`, `Q4_4X4_FLAT8=1`, `Q4_4X4_FLAT8M=1`, `Q4_4X4_FLAT8G=1`,
   `Q4_4X4_FLAT8B=1` — structure arms for the residual gap that survives
   `NOP`+`Q4_NOMIN` (all q4 metadata gone, yet ~1.5x the q8 gate).  `FLAT`/`FLAT8`

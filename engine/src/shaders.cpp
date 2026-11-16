@@ -1253,6 +1253,12 @@ static bool q4x4_flat8b(){ return getenv("Q4_4X4_FLAT8B") != nullptr; }
 // ms/draw).  The legacy pricing arms (NOP/ONEW/ONEROW/NOOUT/NOMIN) are defined
 // on the nested body, so they route there too.
 static bool q4x4_nested(){ return getenv("Q4_GATE_NESTED") != nullptr; }
+// Same flat-loop rewrite for the qkv and w2/wo 4-bit kernels (still nested
+// after the gate landed).  Q4_QKV_NESTED=1 / Q4_W2_NESTED=1 restore each
+// nested form for the A/B; the flat form is byte-identical (same per-group
+// operation order via conditional float updates).
+static bool q4qkv_nested(){ return getenv("Q4_QKV_NESTED") != nullptr; }
+static bool q4w2_nested(){ return getenv("Q4_W2_NESTED") != nullptr; }
 
 static string i4_gate_flat(int rows, int cols, XFormat xf, bool inl, int hs, bool wide) {
     const string HD = hid_scale_def(hs), HM = hid_scale_mul(hs);
@@ -1532,8 +1538,38 @@ string matvec_i4_pair_swiglu_4x4(int rows, int cols, XFormat xf, bool inl, int h
 // Q4_FMT=rgba4 for qkv (one row a fragment) and wo (residual add).  Same
 // transformation as the gate: two 4-bit texels per eight weights, no decode,
 // the group scale folded into two constants, nibbles reversed at upload.
+// Flat 8-wide qkv matvec, byte-identical to the nested matvec_i4_4x4: one row
+// per fragment, d/xsum reset at the group start (q%4==0), accumulate per
+// iteration, flush s+=sc*d+mn*xsum at the group end (q%4==3).  Conditional
+// float updates, which VC4 preserves (docs/vc4-glsl-costs.md §6).
+static string i4_qkv_flat(int rows, int cols, XFormat xf, bool inl) {
+    const int texw = cols / 4;
+    const int groups = (cols + 31) / 32;
+    const string ROWS = to_string(rows), GROUPS = to_string(groups),
+                 TEXW = to_string(texw), ITERS = to_string(cols / 8);
+    return q4_head(xf, inl) + q24_helpers() +
+        "uniform sampler2D W,P,X;uniform float ps;"
+        "void main(){int r=int(gl_FragCoord.x);float s=0.0;"
+        "float vr=(float(r)+0.5)/float(" + ROWS + "),itw=1.0/float(" + TEXW + ");"
+        "float sc=0.0,mn=0.0,d=0.0,xsum=0.0;"
+        "for(int q=0;q<" + ITERS + ";q++){"
+        "int g=q/4;"
+        "if(q-g*4==0){"
+        "d=0.0;xsum=0.0;"
+        "vec4 p=texture2D(P,vec2((float(g)+0.5)/float(" + GROUPS + "),vr));"
+        "float u=65280.0*15.0*ps,v=255.0*15.0*ps;"
+        "sc=p.r*u+p.g*v;mn=x_i16raw(p.ba)*ps;}"
+        "int c=q*8;" + q4_act(xf, cols, inl) + q4_xsum() +
+        "float c0=(float(q*2)+0.5)*itw,c1=c0+itw;"
+        "vec4 w0=texture2D(W,vec2(c0,vr)),w1=texture2D(W,vec2(c1,vr));"
+        "d+=w0.x*xa.x+w0.y*xa.y+w0.z*xa.z+w0.w*xa.w+w1.x*xb.x+w1.y*xb.y+w1.z*xb.z+w1.w*xb.w;"
+        "if(q-g*4==3){s+=sc*d+mn*xsum;}}"
+        "gl_FragColor=x_i24encq(s);}";
+}
+
 string matvec_i4_4x4(int rows, int cols, XFormat xf, bool inl) {
     need_shape("matvec_i4_4x4", rows, cols, 32);
+    if (!q4qkv_nested() && !q4_nomin()) return i4_qkv_flat(rows, cols, xf, inl);
     const int texw = cols / 4;
     const int groups = (cols + 31) / 32;
     const string ROWS = to_string(rows), GROUPS = to_string(groups), TEXW = to_string(texw);
@@ -1557,8 +1593,43 @@ string matvec_i4_4x4(int rows, int cols, XFormat xf, bool inl) {
         "gl_FragColor=x_i24encq(s);}";
 }
 
+// Flat 8-wide w2/wo residual-add matvec, byte-identical to the nested
+// matvec_i4_add_4x4.  Keeps the generic X4Q activation decode (this kernel
+// never used the inline dA/dB form) and the residual add.  Same per-group
+// conditional float structure as the flat qkv/gate.
+static string i4_w2_flat(int rows, int cols, XFormat xf, XFormat rf) {
+    const int texw = cols / 4;
+    const int groups = (cols + 31) / 32;
+    const int axw = x_texels(cols, xf);
+    const string ROWS = to_string(rows), GROUPS = to_string(groups),
+                 TEXW = to_string(texw), ITERS = to_string(cols / 8), AXW = to_string(axw);
+    return head(xf) + x_residual_glsl(rf) +
+        "uniform sampler2D W,P,X,R;uniform float ps;"
+        "void main(){int r=int(gl_FragCoord.x);float s=0.0;"
+        "float vr=(float(r)+0.5)/float(" + ROWS + "),itw=1.0/float(" + TEXW + ");"
+        "float sc=0.0,mn=0.0,d=0.0,xsum=0.0;"
+        "for(int q=0;q<" + ITERS + ";q++){"
+        "int g=q/4;"
+        "if(q-g*4==0){"
+        "d=0.0;xsum=0.0;"
+        "vec4 p=texture2D(P,vec2((float(g)+0.5)/float(" + GROUPS + "),vr));"
+        "float u=65280.0*15.0*ps,v=255.0*15.0*ps;"
+        "sc=p.r*u+p.g*v;mn=x_i16raw(p.ba)*ps;}"
+        "int c=q*8;"
+        "vec4 xa=X4Q(X,c," + AXW + ".0);"
+        "vec4 xb=X4Q(X,c+4," + AXW + ".0);"
+        + q4_xsum() +
+        "float c0=(float(q*2)+0.5)*itw,c1=c0+itw;"
+        "vec4 w0=texture2D(W,vec2(c0,vr)),w1=texture2D(W,vec2(c1,vr));"
+        "d+=w0.x*xa.x+w0.y*xa.y+w0.z*xa.z+w0.w*xa.w+w1.x*xb.x+w1.y*xb.y+w1.z*xb.z+w1.w*xb.w;"
+        "if(q-g*4==3){s+=sc*d+mn*xsum;}}"
+        "float res=R1Q(R,r," + to_string(x_texels(rows, rf)) + ".0);"
+        "gl_FragColor=XST1Q(s+res);}";
+}
+
 string matvec_i4_add_4x4(int rows, int cols, XFormat xf, XFormat rf) {
     need_shape("matvec_i4_add_4x4", rows, cols, 32);
+    if (!q4w2_nested() && !q4_nomin()) return i4_w2_flat(rows, cols, xf, rf);
     const int texw = cols / 4;
     const int groups = (cols + 31) / 32;
     const int axw = x_texels(cols, xf);
