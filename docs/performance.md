@@ -6460,3 +6460,79 @@ the packed view's 325.3751, +0.8% — the format-pin behaviour the RGBA4 entry
 predicts, measured here for the record), the q8/q4 string pins, the poem
 behaviour check, hybrid determinism (two runs byte-identical), and the
 default byte-identical to the pre-argmax binary on q8/q4/hybrid.
+## 2026-11-16 — the q4 gate's unattributed 1.5x was the nested loop; the flat gate is byte-identical and -43%
+
+The 2026-11-15 entry left ~2.5 ms/draw of the q4/q8 gate gap unattributed:
+with the P plane and the min term both removed, the 4-bit gate still ran
+~6.7 ms against q8's 4.4 at 1216 rows.  Static counting said the gap could
+not be arithmetic — per 32 columns the metadata-free q4 gate issues the
+same 48 fetches and 128 MACs as q8, but **zero** weight-decode FMADs (q8
+pays 128 `c*255-128`) and cheaper coordinates.  Less work, yet slower: the
+cost had to be the loop shape.
+
+**The decomposition (`q4mv_probe`, Pi Zero, 1216 rows, 2000 pipelined
+draws, ms/draw; new arms `Q4_4X4_FLAT*`).**
+
+| arm | ms/draw | what it removes |
+|---|---:|---|
+| q8 reference | 4.45 | — |
+| 4x4 nested, full metadata (default) | 6.55 | — |
+| nested, `NOP`+`NOMIN` (no metadata) | 5.85 | P fetch + scale/min |
+| `FLAT` — q8's single 4-wide loop, no metadata | 4.27 | the nesting |
+| `FLAT8` — single 8-wide loop, no metadata | 2.90 | nesting + per-group reset |
+| `FLAT8M` — flat 8-wide, metadata per iteration (96x) | 4.70 | — |
+| `FLAT8G` — flat 8-wide, metadata per group via conditional (24x) | 3.70 | — |
+| **`FLAT8B` — flat 8-wide, byte-identical per-group arithmetic** | **3.74** | — |
+
+The nested group loop itself costs ~2.95 ms/draw (5.85 nested-no-metadata
+vs 2.90 flat-no-metadata).  VC4 does not unroll the inner 4-iteration loop
+inside the outer group loop, and the rolled nested structure schedules
+badly; a single flat loop of 96 eight-weight iterations pipelines the
+weight fetches properly.  The 8-wide form beats the 4-wide (2.90 vs 4.27):
+fewer iterations, eight fetches sharing one coordinate pair.
+
+**Byte identity.**  `FLAT8B` keeps the nested kernel's exact operation
+order in the flat loop: `d1/d2/e1/e2/xsum` reset at the group start
+(`q%4==0`), accumulate per iteration in the same tap order, flush
+`s10+=sa1*d1+ma1*xsum` at the group end (`q%4==3`).  The conditional
+updates are all **float**, which the VC4 rolled-loop rule preserves
+(`docs/vc4-glsl-costs.md` §6 — it is conditional *int index* updates that
+are lost).  Probe hash matches the nested kernel at every size on both
+machines: VC4 304 `adee9498`, 608 `63e355a2`, 1216 `776b29b8`, 2048
+`428b8e1f`; Xe 1216 `056eeba9`.  Engine greedy text + TOKENS_OUT identical
+with `Q4_GATE_NESTED=1` on Xe (q4/q8) and the board (q4 and LFM2.5-QAD).
+
+**Row sweep (FLAT8B vs nested, ms/draw):** 304 2.31→1.59, 608 3.89→2.42,
+1216 6.55→3.74, 2048 10.14→5.72 — -31% to -44%, growing with rows.
+
+**Token A/B (Pi Zero, protocol v1: discarded warm-up, three interleaved
+pairs 20 s apart, `GPU_LAYER=1 KV_PACK=16`, greedy, `--gen 16`; flat
+default vs `Q4_GATE_NESTED=1`).**
+
+| model | flat (median) | nested (median) | delta |
+|---|---:|---:|---|
+| MiniMind3 q4 | **185.7** (185.5/187.9/185.7) | 226.7 (227.8/226.7/226.2) | **-41 ms, -18%** |
+| LFM2.5-QAD q4 (`IGNORE_EOS`) | **566.3** (566.3/562.9/567.4) | 675.2 (680.8/675.2/672.5) | **-109 ms, -16%** |
+
+q4 load 0.6-1.2, hybrid load 1.4-2.8.  **MiniMind3 q4 at 185.7 ms/token is
+now faster than q8 (~190)** — the q4/q8 ratio flips from 1.18x to ~0.98x.
+The gate is ~50% of the q4 token (16 gate draws/token), so the -2.8 ms/draw
+kernel win lands as ~41 ms/token, on the prediction.
+
+**Acceptance.**  Xe: regression.sh ACCEPT (q8 PPL 270.3170, q4 326.1483 —
+both pins to the digit, both string pins, MoE determinism), swap_matrix.py
+PASS, warncheck 0.  Board: q8 PPL 271.2855 (pin), q4 PPL 328.0042
+(unchanged from the pre-gate 4-bit value), q4/hybrid flat==nested.  The
+shader dump now covers the 4x4 gate/qkv/w2 (it had only the packed gate);
+`shader_hashes.txt` gains those four entries and nothing else moves.
+`check_q16_decode.sh` learned the one unsigned reconstruction — the q4
+group scale `65280.0*15.0*ps` builds a positive constant and carries no
+negative rail — which the newly-dumped 4x4 kernels exposed.
+
+**Disposition.**  The flat 8-wide gate (`FLAT8B`) is the default;
+`Q4_GATE_NESTED=1` restores the nested form for the A/B, and the legacy
+pricing arms (`NOP`/`ONEW`/`ONEROW`/`NOOUT`/`NOMIN`) route to the nested
+body they are defined on.  The qkv (`matvec_i4_4x4`) and w2/wo
+(`matvec_i4_add_4x4`) 4-bit kernels are still nested — the same flat-loop
+rewrite applies to them (qkv ~14%, w2 ~23% of the token), the obvious next
+step.
