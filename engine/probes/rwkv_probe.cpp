@@ -317,6 +317,38 @@ static void test_bitcast(int dim, bool dither) {
     glDeleteProgram(p2); glDeleteTextures(1,&it);
 }
 
+// A3. 2D NPOT q24 fetch via ES3 texture() (the norm affines' rd24es_2d and the
+// WKV state use texture(), not texture2D).  VC4 Mesa may treat NPOT 2D differently
+// under ESSL 3.00 than under 1.00.
+static void test_const2d_es3(int dim, int rows) {
+    if (!g_es3) { printf("  A3 skipped (no ES3)\n"); return; }
+    vector<int> raw((size_t)dim*rows);
+    for (int r = 0; r < rows; ++r) for (int i = 0; i < dim; ++i)
+        raw[(size_t)r*dim+i] = (int)((i*2654435761u + r*7919u)%16777216u)-8388608;
+    vector<uint8_t> px = q24_bytes(raw, dim, rows);
+    GLuint kt = tex(dim, rows, px);
+    for (int r = 0; r < rows; ++r) {
+        string fs = "precision highp float;uniform sampler2D K;"
+            "void main(){int i=int(gl_FragCoord.x);"
+            "gl_FragColor=texture(K,vec2((float(i)+0.5)/" + std::to_string(dim) + ".0,(float(" +
+            std::to_string(r) + ")+0.5)/" + std::to_string(rows) + ".0));}";
+        GLuint p = prog(fs, true); if (!p) { printf("  A3 link fail\n"); ++failures; return; }
+        out_begin(dim); glUseProgram(p); bind(p,"K",0,kt); tri(p);
+        const uint8_t* g = out_end();
+        int bad=0, first=-1;
+        for (int i = 0; i < dim; ++i) { const uint8_t* w=&px[(size_t)(r*dim+i)*4]; const uint8_t* o=&g[(size_t)i*4];
+            if (w[1]!=o[1]||w[2]!=o[2]||w[3]!=o[3]) { ++bad; if(first<0)first=i; } }
+        char nm[64]; snprintf(nm,sizeof nm,"A3 ES3 texture() 2D %dx%d r%d",dim,rows,r);
+        printf("  %-34s %s bad=%d/%d", nm, bad?"FAIL":"PASS", bad, dim);
+        if (bad) printf("  [%d] got %02x%02x%02x want %02x%02x%02x", first,
+            g[first*4+1],g[first*4+2],g[first*4+3],
+            px[(size_t)(r*dim+first)*4+1],px[(size_t)(r*dim+first)*4+2],px[(size_t)(r*dim+first)*4+3]);
+        printf("\n"); if (bad) ++failures;
+        glDeleteProgram(p);
+    }
+    glDeleteTextures(1,&kt);
+}
+
 // E. The matvec activation fetch: I24_1 X4Q does FOUR texture2D fetches from
 // sampler X in one fragment (I16_2's inline form does two).  wrow_probe found
 // multi-fetch from one sampler undefined on VC4 for a tall plane; this names
@@ -356,6 +388,44 @@ static void test_matvec(int dim, XFormat xf) {
     glDeleteProgram(p); glDeleteTextures(1,&wt); glDeleteTextures(1,&xt);
 }
 
+// F. render -> fetch chain: render x_q24enc to one FBO, then sample THAT texture
+// in the next pass.  VC4's tile pipeline does not order the sample after the
+// render without a finish (the engine's needs_finish() paths do this; the RWKV
+// rwkv_draw1 path does not).  A/B glFinish between the two passes.
+static GLuint mkfbo(int w, GLuint& t) {
+    glGenTextures(1, &t); glBindTexture(GL_TEXTURE_2D, t);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    GLuint f; glGenFramebuffers(1, &f); glBindFramebuffer(GL_FRAMEBUFFER, f);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t, 0);
+    return f;
+}
+static void test_render_fetch(int dim, bool finish) {
+    GLuint tA; GLuint fA = mkfbo(dim, tA);
+    string fs1 = string("precision highp float;\n") + x_glsl(XFormat::I24_1) +
+        "void main(){int i=int(gl_FragCoord.x);gl_FragColor=x_q24enc(float(i)*0.5);}";
+    GLuint p1 = prog(fs1);
+    glBindFramebuffer(GL_FRAMEBUFFER, fA); glViewport(0,0,dim,1);
+    glUseProgram(p1); tri(p1);
+    if (finish) { glFlush(); glFinish(); }
+    // fetch tA, re-encode to the standard out target
+    string fs2 = string("precision highp float;\n") + x_glsl(XFormat::I24_1) +
+        "uniform sampler2D X;void main(){int i=int(gl_FragCoord.x);"
+        "float v=x_q24(texture2D(X,vec2((float(i)+0.5)/" + std::to_string(dim) + ".0,0.5)));"
+        "gl_FragColor=x_q24enc(v);}";
+    GLuint p2 = prog(fs2);
+    out_begin(dim); glUseProgram(p2); bind(p2,"X",0,tA); tri(p2);
+    vector<int> g = read_q24(dim);
+    vector<int> want(dim); for (int i=0;i<dim;++i) want[i]=i*128; // round(i*0.5*256)
+    char nm[64]; snprintf(nm,sizeof nm,"F render->fetch finish%d",finish);
+    report(nm, g, want, 0);
+    glDeleteProgram(p1); glDeleteProgram(p2);
+    glDeleteFramebuffers(1,&fA); glDeleteTextures(1,&tA);
+}
+
 int main(int argc, char** argv) {
     bool want_es3 = !(argc > 1 && strcmp(argv[1], "gles2") == 0);
     if (want_es3) { setenv("MESA_GLES_VERSION_OVERRIDE", "3.0", 0);
@@ -385,6 +455,7 @@ int main(int argc, char** argv) {
     test_const2d(D, 6); test_const2d(D, 3); test_const2d(D, 2);
     test_lerp_const(D, 0, 6); test_lerp_const(D, 3, 6); test_lerp_const(D, 5, 6);
     test_lerp_const(D, 0, 1);
+    test_const2d_es3(D, 6); test_const2d_es3(D, 3); test_const2d_es3(D, 2);
     printf("\nB. I24_1 render/fetch round trip (dither A/B)\n");
     test_i24(D, false); test_i24(D, true);
     printf("\nC. shipped elementwise\n");
@@ -392,6 +463,9 @@ int main(int argc, char** argv) {
     printf("\nE. matvec activation fetch (I24_1 X4Q 4-fetch vs I16_2 2-fetch)\n");
     test_matvec(D, XFormat::I16_2);
     test_matvec(D, XFormat::I24_1);
+    printf("\nF. render->fetch chain (glFinish A/B)\n");
+    test_render_fetch(D, false);
+    test_render_fetch(D, true);
     if (g_es3) { printf("\nD. bit-cast f32 round trip (dither A/B)\n");
         test_bitcast(D, false); test_bitcast(D, true); }
     else printf("\nD. skipped (no ESSL 3.00)\n");
