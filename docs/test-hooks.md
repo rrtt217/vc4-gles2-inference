@@ -386,3 +386,6 @@ win, and the worker protocol sets them per request.
 
 - `RWKV_CHUNK_TEST=1`：在桌面（GL 上限 16384）强制 RWKV channel-mix 按 2048 行分块，
   复现/验证 VC4 的分块路径（Pi 天然触发）。只影响 split_rwkv 的 max_dim。
+
+- `RWKV_GPU=1`：启用 RWKV-7 GPU 融合层循环（P6，默认 CPU 串行）。
+- `RWKV_GPU_DBG=1`：RWKV GPU 路径逐层诊断打印（P6）。
