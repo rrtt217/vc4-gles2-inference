@@ -16,7 +16,7 @@ Layout
 
     0   header 64 B
     64  metadata: TLV records (u16 key, u16 type, u32 len, payload)
-        tensor table: n * 48 B (v2, dense) or n * 64 B (v3, MoE)
+        tensor table: n * 48 B (v2, dense), n * 64 B (v3 MoE and v4 RWKV-7)
         data: every tensor 16-byte aligned
 
 This tool also verifies itself: `--verify` re-reads the file and compares every
@@ -26,6 +26,7 @@ a re-baseline.
 
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 import struct
@@ -48,7 +49,9 @@ from mmcf_hf import (ACTIVATION_RAIL, RESIDUAL_RAIL, RESIDUAL_WARN, is_llama2c,
 # which only this tool reads.
 from mmcf_format import (MAGIC, REC_SIZE_V2, REC_SIZE_V3, HEADER_SIZE, TEMPLATE_KINDS, rec_size,  # noqa: E402
                          rec_unpack, pack_rec, tlv, crc32,
-                         DT_F32, DT_I16, DT_Q8U8, DT_Q8I8, DT_Q4, DT_BLOB)
+                         DT_F32, DT_I16, DT_Q8U8, DT_Q8I8, DT_Q4, DT_BLOB,
+                         VERSION_DENSE, VERSION_MOE, VERSION_RWKV7,
+                         KEY_RWKV, KEY_LOGIT_SHIFT, RWKV_FLAG_GATE, pack_rwkv_meta)
 from mmcf_hf import T_EMB, T_EMB_I16, T_LOGITS  # noqa: E402
 
 # Tensor ids the extract left behind (2ca97cf); the values are the format's.
@@ -344,6 +347,21 @@ def build(meta, tensors, tok_blob, args):
         md += tlv(13, 1, struct.pack("<4i", int(meta["experts"]), int(meta["top_k"]),
                                      int(meta["moe_hidden"]),
                                      1 if meta.get("norm_topk") else 0))
+    # key 16: the RWKV-7 block (version 4).  Arch, WKV head width, a flag word,
+    # the LayerNorm epsilon and the four low ranks -- the ranks cannot be
+    # re-derived from the shapes (llama.cpp's formula is wrong for 0.4B's
+    # gate), and the dimensions the runtime indexes by cannot be guessed.
+    if meta.get("rwkv"):
+        r = meta["rwkv"]
+        md += tlv(KEY_RWKV, 1, pack_rwkv_meta(
+            arch=r["arch"], head_size=r["head_size"],
+            flags=RWKV_FLAG_GATE if r.get("gate") else 0,
+            norm_eps=r["norm_eps"], r_w=r["r_w"], r_a=r["r_a"],
+            r_v=r["r_v"], r_g=r["r_g"]))
+    # key 17: the head input is stored *2^-k, and the logits tiles' scales
+    # already carry the *2^k (mmcf_hf.py folds it in).  Absent = k = 0.
+    if meta.get("logit_shift"):
+        md += tlv(KEY_LOGIT_SHIFT, 1, struct.pack("<B", int(meta["logit_shift"])))
     specials = (-1, -1, -1, -1, -1, -1)
     if tok_blob is not None:
         vocab = vocab_of(tok_blob, len(tok_blob) and 200000 or 0)
@@ -357,7 +375,8 @@ def build(meta, tensors, tok_blob, args):
     meta_off = HEADER_SIZE
     table_off = meta_off + len(md)
     table_off = (table_off + ALIGN - 1) // ALIGN * ALIGN
-    version = 3 if meta.get("experts") else 2
+    version = (VERSION_RWKV7 if meta.get("rwkv") else
+               VERSION_MOE if meta.get("experts") else VERSION_DENSE)
     rsize = rec_size(version)
     table = bytearray()
     data = bytearray()
@@ -408,7 +427,7 @@ def verify(path, tensors, tok=None):
     if raw[:4] != MAGIC:
         raise SystemExit("verify: bad magic")
     ver, hsz, n, caps, mo, ms, doff, fsz, _crc = struct.unpack("<HHIIIIQQI", raw[4:44])
-    if ver not in (2, 3) or hsz != HEADER_SIZE:
+    if ver not in (VERSION_DENSE, VERSION_MOE, VERSION_RWKV7) or hsz != HEADER_SIZE:
         raise SystemExit("verify: header mismatch")
     hcrc, = struct.unpack("<I", raw[40:44])
     if zlib.crc32(raw[:40]) & 0xFFFFFFFF != hcrc:
@@ -614,6 +633,39 @@ def main():
                   "rail at the positions that reach %.0f after scaling (%.0f%% of that "
                   "hidden is cut); the error is silent.  See docs/checkpoint-container.md."
                   % (scaled, loss))
+    # RWKV-7's channel mix is relu(x)^2 and its *square* is what travels through
+    # the q16 activation rail -- the block's only amplifier, and on 0.1B the
+    # stream closest to the rail.  The block above already reports the peak and
+    # decides key 15; this line states the margin the plan asks for.
+    if meta.get("rwkv") and hpeaks:
+        worst = max(hpeaks)
+        print("sqrelu: peak %.2f at layer %d, %.2fx under the %.1f activation rail"
+              % (worst, hpeaks.index(worst), ACTIVATION_RAIL / worst, ACTIVATION_RAIL))
+    # The head's input is the final LayerNorm's output, 2.5x over the same rail
+    # on 0.1B.  It cannot be scaled per layer (there is one of it), so key 17
+    # stores it *2^-k and the logits tiles read back *2^k.
+    fpeak = meta.get("final_ln_peak")
+    if fpeak:
+        k = int(meta.get("logit_shift") or 0)
+        print("final ln: peak %.2f (%.2fx the %.1f activation rail); stored *2^-%d, "
+              "logits tile scales *2^%d (metadata key %s)"
+              % (fpeak, fpeak / ACTIVATION_RAIL, ACTIVATION_RAIL, k, k,
+                 "17" if k else "17 absent"))
+        bound = meta.get("final_ln_bound")
+        if bound:
+            print("final ln: analytic worst case %.1f (sqrt(dim)*max|w| + max|b|) "
+                  "would need k=%d; a prompt that reached it would clip at %.1f"
+                  % (bound, max(0, math.ceil(math.log2(bound / ACTIVATION_RAIL))),
+                     (1 << k) * ACTIVATION_RAIL))
+    # The WKV state is not a rail: it is a per-head 64x64 recurrence that is
+    # never renormalised, so its magnitude is what decides whether the Pi can
+    # hold it in fixed point at all (docs/rwkv7-plan.zh-CN.md, S-1).  Nothing in
+    # the container changes because of it; it is measured, not enforced.
+    speaks = meta.get("state_peaks")
+    if speaks:
+        worst = max(speaks)
+        print("wkv state: |max| %.1f at layer %d, per layer %s"
+              % (worst, speaks.index(worst), " ".join("%.1f" % v for v in speaks)))
     # Sources without rope fields cannot state their rope, and a wrong theta or
     # half flag silently degrades every position: refuse to guess unless the
     # caller says so.

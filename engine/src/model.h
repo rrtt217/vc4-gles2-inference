@@ -50,6 +50,63 @@ public:
     };
     vector<Mat> router;                // [layers]
     vector<vector<MoeExpert>> moe;     // [layers][experts]
+
+    // RWKV-7 (MMCF v4, metadata key 16, docs/checkpoint-container.md).  It is
+    // not a transformer block: no qkv semantics, no RoPE, no KV cache, one
+    // 64x64 recurrence per head per layer and two token-shift vectors per
+    // layer.  The reader fills these; the layer loop that consumes them is
+    // session.cpp's (docs/rwkv7-plan.zh-CN.md, P2).  The four big matrices
+    // reuse the dense fields on purpose -- `qkv` is [W_r; W_k; W_v] (3*dim x
+    // dim), `wo` is W_o, `w1` the channel mix's key matrix (hidden x dim) and
+    // `w2` its value matrix (dim x hidden) -- because their ids are the dense
+    // ones, so the q4 and per-row-scale machinery needs no second path.
+    struct Rwkv {
+        int arch = 0;             // 0 = not RWKV, 1 = rwkv7 (key 16's arch)
+        int head_size = 0;        // the WKV head width (64)
+        int r_w = 0, r_a = 0, r_v = 0, r_g = 0;   // the four low ranks
+        bool gate = false;        // the time-mix gate branch is present
+        // LayerNorm epsilon from the file.  The per-head group norm keeps the
+        // architecture's own 64e-5: it is not a parameter of the model.
+        float norm_eps = 1e-5f;
+    };
+    Rwkv rwkv;
+    bool is_rwkv() const { return rwkv.arch != 0; }
+    // One row per layer, cols = count*dim, groups in the HF/GGUF order (so a
+    // row can be compared against llama.cpp's tensor by tensor name).  The
+    // two model-wide norms are a single row and absent when the source has no
+    // token norm at all (rwkv_vocab's own 0.1B has one, llama.cpp reads it as
+    // token_embd_norm).
+    vector<float> rwkv_lerp;       // 0x1A: r, w, k, v, a, g
+    vector<float> rwkv_bias;       // 0x1B: w0, a0, v0
+    vector<float> rwkv_scale;      // 0x1C: k_k, k_a, r_k
+    vector<float> rwkv_att_norm;   // 0x1D: w, b
+    vector<float> rwkv_att_norm_2; // 0x1E: w, b
+    vector<float> rwkv_ln_x;       // 0x1F: w, b (the per-head group norm)
+    vector<float> rwkv_cm_lerp;    // 0x21
+    vector<float> rwkv_tok_norm;   // 0x22: w, b; empty when absent
+    vector<float> rwkv_out_norm;   // 0x23: w, b
+    // The four low-rank pairs, one Mat per layer: down is (rank x dim) and up
+    // is (dim x rank).  v (0x26/0x27) is empty on layer 0, which records
+    // v_first instead of mixing it; g (0x2A/0x2B) is empty when key 16 says
+    // the model has no gate.
+    vector<Mat> rwkv_w1, rwkv_w2, rwkv_v1, rwkv_v2;
+    vector<Mat> rwkv_a1, rwkv_a2, rwkv_g1, rwkv_g2;
+    // The three row bands of qkv[l] = [W_r; W_k; W_v].  The container carries
+    // them as one 3*dim x dim matrix (the dense qkv id), and the layer loop
+    // needs three Mats because each band is drawn with its own token-shifted
+    // input: split_rwkv() fills these from slice_rows() (the bytes stay
+    // borrowed, so this is three texture views of one mapping, not a copy).
+    // qkv itself is not uploaded for an RWKV container -- these three are, so
+    // the weight traffic and the texture memory are the same as one draw.
+    vector<Mat> rwkv_r, rwkv_k, rwkv_v;
+    void split_rwkv();
+    // Metadata key 17: the head's input (the final LayerNorm's output) is
+    // written *2^-k so it fits the q16 activation rail, and every logits tile's
+    // scale already carries the *2^k, so the dot product comes out in the
+    // model's own units.  0 (or an absent key) means no scaling, which is every
+    // container packed before 2026-11-16; RWKV-7 0.1B needs 2 (its final LN
+    // peaks at 315.6, 2.5x the rail).
+    int logit_shift = 0;
     // Drop everything this model owns, so the same object can hold a different
     // container.  Assigning a fresh instance is deliberate: the field list is
     // long (19 groups of vectors plus the scalars), and a hand-written reset

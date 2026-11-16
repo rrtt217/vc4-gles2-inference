@@ -139,6 +139,12 @@ void Model::release_map(){
     };
     clear(qkv); clear(wo); clear(w13); clear(w1); clear(w3); clear(w2); clear(logits_tiles);
     clear(w1a); clear(w1b); clear(w3a); clear(w3b); clear(w2a); clear(w2b);
+    // The RWKV-7 low-rank pairs are the only other Mats that point into the
+    // mapping; a swap that left them behind would keep a stale ext8/ext4.
+    clear(rwkv_w1); clear(rwkv_w2); clear(rwkv_v1); clear(rwkv_v2);
+    clear(rwkv_a1); clear(rwkv_a2); clear(rwkv_g1); clear(rwkv_g2);
+    // The three [W_r; W_k; W_v] bands are views into the same mapping.
+    clear(rwkv_r); clear(rwkv_k); clear(rwkv_v);
 }
 
 void Model::materialize(Mat& m){
@@ -150,6 +156,13 @@ void Model::materialize(Mat& m){
 }
 
 void Model::split_ffn(int max_dim){
+        // RWKV-7's channel mix is one (hidden x dim) key and one (dim x hidden)
+        // value matrix, not a w1/w3 gate pair: splitting it needs a decision
+        // from the layer loop that will read it (P2), and slicing here would
+        // also index an empty w3.  A 3072-row matrix is over VC4's 2048-row
+        // upload limit, so the 0.1B on the board is a P5 item, not a reader
+        // one.
+        if (is_rwkv()) return;
         if (is_moe()) {
                 // The 2048-row texture/viewport limit applies to the expert FFN,
                 // not to the (unused) dense width.  Each expert is chunked on
@@ -194,6 +207,29 @@ void Model::split_ffn(int max_dim){
         }
         w1.clear(); w3.clear(); w2.clear();
     }
+
+// The three row bands of qkv[l] = [W_r; W_k; W_v], as Mats the matvec family
+// can draw.  Runs before the upload (the bands are borrowed views into the
+// checkpoint mapping, which release_map() drops after the upload), and after
+// read_tables() has checked qkv[l] is 3*dim x dim.
+//
+// This is the plan's P2 item 2: the container reuses the dense qkv id for the
+// three matrices because they are drawn by the same kernel, and the layer loop
+// needs them one at a time -- each band takes its own token-shifted input
+// (x_r / x_k / x_v), so one 3*dim-row draw cannot serve it.
+void Model::split_rwkv(){
+        if (!is_rwkv()) return;
+        rwkv_r.assign(layers, Mat());
+        rwkv_k.assign(layers, Mat());
+        rwkv_v.assign(layers, Mat());
+        for (int l = 0; l < layers; ++l) {
+                if (qkv[l].rows != 3 * dim) refuse("rwkv layer " + std::to_string(l) +
+                                                   "'s rkv is not 3*dim rows");
+                rwkv_r[l] = slice_rows(qkv[l], 0, dim);
+                rwkv_k[l] = slice_rows(qkv[l], dim, 2 * dim);
+                rwkv_v[l] = slice_rows(qkv[l], 2 * dim, 3 * dim);
+        }
+}
 
 void Model::apply_q4_fmt(){
         // Adopted 2026-11-15: the 4-bit view is the default for the dense FFN
@@ -476,7 +512,11 @@ bool Model::parse_header() {
         if (fsize_ < 64) { cerr << "mmcf: truncated header\n"; return false; }
         const uint8_t* h = fbase_;
         version_ = rd16(h + 4);
-        if (version_ != 2 && version_ != 3) {
+        // 2 dense, 3 mixture of experts, 4 RWKV-7.  v4 keeps v3's 64-byte
+        // record: everything it adds is model-wide (metadata key 16) or a new
+        // tensor kind whose shape the record already carries, so no per-tensor
+        // field had to grow (docs/checkpoint-container.md, "v4").
+        if (version_ != 2 && version_ != 3 && version_ != 4) {
                 cerr << "mmcf: unsupported version " << version_ << "\n";
                 return false;
         }
@@ -602,6 +642,26 @@ bool Model::parse_metadata() {
                 } else if (key == 10 && type == 1 && len >= 2) {
                         add_bos = payload[0] == 255 ? -1 : (int)payload[0];
                         add_eos = payload[1] == 255 ? -1 : (int)payload[1];
+                } else if (key == 17 && type == 1 && len >= 1) {
+                        // The head input's store exponent (see model.h).
+                        logit_shift = (int)payload[0];
+                        if (logit_shift > 5) {
+                                cerr << "mmcf: logits input scale 2^-" << logit_shift
+                                     << " is out of range (0..5)\n";
+                                return false;
+                        }
+                } else if (key == 16 && type == 1 && len >= 16) {
+                        // RWKV-7 (v4): arch, head width, flags, pad, eps, four
+                        // ranks -- little endian <BBBBfHHHH>.
+                        rwkv.arch = (int)payload[0];
+                        rwkv.head_size = (int)payload[1];
+                        rwkv.gate = (payload[2] & 1) != 0;
+                        float e; memcpy(&e, payload + 4, 4);
+                        rwkv.norm_eps = e;
+                        rwkv.r_w = (int)rd16(payload + 8);
+                        rwkv.r_a = (int)rd16(payload + 10);
+                        rwkv.r_v = (int)rd16(payload + 12);
+                        rwkv.r_g = (int)rd16(payload + 14);
                 }
                 p += 8 + len;
         }
@@ -613,6 +673,50 @@ bool Model::parse_metadata() {
         if (getenv("SEQ")) seq = atoi(getenv("SEQ"));
         head_dim = dim / heads;
         kv_dim = kv_heads * head_dim;
+        // RWKV-7: the version and the metadata have to agree, and the head
+        // width the WKV state is indexed by is stated twice (key 1's
+        // dim/heads and key 16's head_size), so the reader checks them
+        // against each other instead of picking one.
+        if (rwkv.arch != 0) {
+                if (version_ != 4) {
+                        cerr << "mmcf: RWKV metadata in a version " << version_
+                             << " container (RWKV is version 4)\n";
+                        return false;
+                }
+                if (rwkv.arch != 1) {
+                        cerr << "mmcf: unknown rwkv arch " << rwkv.arch << "\n";
+                        return false;
+                }
+                if (rwkv.head_size <= 0 || head_dim != rwkv.head_size) {
+                        cerr << "mmcf: rwkv head size " << rwkv.head_size
+                             << " but dim/heads is " << dim << "/" << heads << "\n";
+                        return false;
+                }
+                if (!(rwkv.norm_eps > 0.0f)) {
+                        cerr << "mmcf: rwkv LayerNorm epsilon " << rwkv.norm_eps
+                             << " is not positive\n";
+                        return false;
+                }
+                if (rwkv.r_w <= 0 || rwkv.r_a <= 0 || rwkv.r_v <= 0) {
+                        cerr << "mmcf: rwkv low ranks " << rwkv.r_w << "/" << rwkv.r_a
+                             << "/" << rwkv.r_v << " must be positive (decay, ICLR and "
+                             "value-residual are not optional)\n";
+                        return false;
+                }
+                if (experts > 0) {
+                        cerr << "mmcf: a container cannot be RWKV-7 and mixture of "
+                             "experts at once\n";
+                        return false;
+                }
+                if (!layer_type.empty()) {
+                        cerr << "mmcf: layer types (key 14) in an RWKV-7 container; "
+                             "its layers are all one kind\n";
+                        return false;
+                }
+        } else if (version_ == 4) {
+                cerr << "mmcf: version 4 without the RWKV-7 metadata (key 16)\n";
+                return false;
+        }
         if (!layer_type.empty() && (int)layer_type.size() != layers) {
                 cerr << "mmcf: layer types " << layer_type.size() << " for "
                      << layers << " layers\n";
@@ -694,6 +798,46 @@ bool Model::read_tables() {
         };
 
         auto as_mat = [&](const MmcfRec& r, Mat& m) { if (r.dtype == 1) as_i16(r, m); else as_q8(r, m); };
+
+        // RWKV-7's per-channel vectors arrive as f32 rows: one record per kind,
+        // `rows` layers wide (1 for the two model-wide norms) and
+        // `groups * dim` columns, in the HF/GGUF order.  A wrong width here
+        // would not fail at the shape check below but inside a kernel, so it
+        // is checked against the metadata's own dim.
+        auto as_rwkv_vec = [&](const MmcfRec& r, vector<float>& dst, int groups,
+                               bool global, const char* name) {
+                const uint32_t want_rows = global ? 1u : (uint32_t)layers;
+                if (r.dtype != 0 || r.rows != want_rows ||
+                    r.cols != (uint32_t)(groups * dim) ||
+                    r.bytes != (uint64_t)r.rows * r.cols * 4) {
+                        cerr << "mmcf: rwkv " << name << " is dtype " << (int)r.dtype
+                             << " " << r.rows << "x" << r.cols << " (" << r.bytes
+                             << " B); the block wants f32 " << want_rows << "x"
+                             << groups * dim << "\n";
+                        return false;
+                }
+                as_f32(r, dst);
+                return true;
+        };
+        // The eight low-rank kinds, indexed by layer.
+        rwkv_w1.resize(layers); rwkv_w2.resize(layers);
+        rwkv_v1.resize(layers); rwkv_v2.resize(layers);
+        rwkv_a1.resize(layers); rwkv_a2.resize(layers);
+        rwkv_g1.resize(layers); rwkv_g2.resize(layers);
+        auto rwkv_mat = [&](int base, int layer) -> Mat* {
+                if (layer < 0 || layer >= layers) return nullptr;
+                switch (base) {
+                case 0x24: return &rwkv_w1[layer];
+                case 0x25: return &rwkv_w2[layer];
+                case 0x26: return &rwkv_v1[layer];
+                case 0x27: return &rwkv_v2[layer];
+                case 0x28: return &rwkv_a1[layer];
+                case 0x29: return &rwkv_a2[layer];
+                case 0x2A: return &rwkv_g1[layer];
+                case 0x2B: return &rwkv_g2[layer];
+                default: return nullptr;
+                }
+        };
 
         vector<Mat> layers_qkv, layers_wo, layers_w1, layers_w3, layers_w13, layers_w2;
         vector<Mat> layers_conv_in, layers_conv_out;
@@ -824,6 +968,29 @@ bool Model::read_tables() {
                         }
                         break;
                 case 0x19: if (layer < layers) as_mat(r, layers_conv_out[layer]); break;
+                // RWKV-7: nine f32 vector groups and eight low-rank pairs.  The
+                // two model-wide norms (0x22/0x23) carry layer bits 0 because
+                // there is one of each for the whole model.
+                case 0x1A: if (!as_rwkv_vec(r, rwkv_lerp, 6, false, "time_mix_lerp")) return false; break;
+                case 0x1B: if (!as_rwkv_vec(r, rwkv_bias, 3, false, "time_mix_bias")) return false; break;
+                case 0x1C: if (!as_rwkv_vec(r, rwkv_scale, 3, false, "time_mix_scale")) return false; break;
+                case 0x1D: if (!as_rwkv_vec(r, rwkv_att_norm, 2, false, "att_norm")) return false; break;
+                case 0x1E: if (!as_rwkv_vec(r, rwkv_att_norm_2, 2, false, "att_norm_2")) return false; break;
+                case 0x1F: if (!as_rwkv_vec(r, rwkv_ln_x, 2, false, "time_mix_ln")) return false; break;
+                case 0x21: if (!as_rwkv_vec(r, rwkv_cm_lerp, 1, false, "channel_mix_lerp")) return false; break;
+                case 0x22: if (!as_rwkv_vec(r, rwkv_tok_norm, 2, true, "tok_norm")) return false; break;
+                case 0x23: if (!as_rwkv_vec(r, rwkv_out_norm, 2, true, "output_norm")) return false; break;
+                case 0x24: case 0x25: case 0x26: case 0x27:
+                case 0x28: case 0x29: case 0x2A: case 0x2B: {
+                        Mat* m = rwkv_mat(base, layer);
+                        if (!m) {
+                                cerr << "mmcf: rwkv tensor 0x" << std::hex << r.id
+                                     << std::dec << " has no layer\n";
+                                return false;
+                        }
+                        as_mat(r, *m);
+                        break;
+                }
                 case 0x20: { Mat m; as_mat(r, m); logits_tiles.push_back(m); break; }
                 case 0x30:   // tokenizer blob, borrowed from the mapping
                         tok_blob = fbase_ + data_off_ + r.off;
@@ -860,6 +1027,7 @@ bool Model::read_tables() {
                 else if (kind == 0x17 && layer < (int)layers_conv_in.size()) m = &layers_conv_in[layer];
                 else if (kind == 0x19 && layer < (int)layers_conv_out.size()) m = &layers_conv_out[layer];
                 else if (kind == 0x20 && layer < (int)logits_tiles.size()) m = &logits_tiles[layer];
+                else if (kind >= 0x24 && kind <= 0x2B) m = rwkv_mat(kind, layer);
                 if (!m || m->rows != (int)r.rows || r.bytes != (size_t)r.rows * 4) {
                         cerr << "mmcf: row scale plane 0x" << std::hex << r.id << std::dec
                              << " expert " << expert << " does not match its matrix\n";
@@ -939,6 +1107,10 @@ bool Model::read_tables() {
                 else if (kind == 0x15 && layer < (int)layers_w2.size()) layers_w2[layer] = m;
                 else if (kind == 0x17 && layer < (int)layers_conv_in.size()) layers_conv_in[layer] = m;
                 else if (kind == 0x19 && layer < (int)layers_conv_out.size()) layers_conv_out[layer] = m;
+                else if (kind >= 0x24 && kind <= 0x2B) {
+                        Mat* dst = rwkv_mat(kind, layer);
+                        if (dst) *dst = m;
+                }
         }
         conv_in = layers_conv_in;
         conv_out = layers_conv_out;
@@ -1024,6 +1196,96 @@ bool Model::read_tables() {
                 else w13.push_back(layers_w13[l]);
                 w2.push_back(layers_w2[l]);
         }
+        if (is_rwkv()) {
+                // The shapes key 16 makes checkable.  Without this the four
+                // reused ids would load as a transformer block with an RWKV
+                // head width, and the first kernel to run would read the
+                // wrong rows -- the same failure the MoE reader refuses.
+                if (!quant_split_) {
+                        cerr << "mmcf: an RWKV-7 container must say split_w13: its "
+                                "channel mix is the w1/w2 pair (0x12/0x15), there is no "
+                                "fused W13\n";
+                        return false;
+                }
+                struct VecWant { const vector<float>* v; size_t n; const char* name; };
+                const VecWant wants[] = {
+                        {&rwkv_lerp, (size_t)layers * 6 * dim, "time_mix_lerp"},
+                        {&rwkv_bias, (size_t)layers * 3 * dim, "time_mix_bias"},
+                        {&rwkv_scale, (size_t)layers * 3 * dim, "time_mix_scale"},
+                        {&rwkv_att_norm, (size_t)layers * 2 * dim, "att_norm"},
+                        {&rwkv_att_norm_2, (size_t)layers * 2 * dim, "att_norm_2"},
+                        {&rwkv_ln_x, (size_t)layers * 2 * dim, "time_mix_ln"},
+                        {&rwkv_cm_lerp, (size_t)layers * dim, "channel_mix_lerp"},
+                        {&rwkv_out_norm, (size_t)2 * dim, "output_norm"},
+                };
+                for (const VecWant& w : wants) {
+                        if (w.v->size() != w.n) {
+                                cerr << "mmcf: rwkv " << w.name << " has " << w.v->size()
+                                     << " values, the block wants " << w.n << "\n";
+                                return false;
+                        }
+                }
+                // The token norm is optional: a source without a pre_ln has
+                // none, and llama.cpp treats the missing one as absent too.
+                if (!rwkv_tok_norm.empty() && rwkv_tok_norm.size() != (size_t)2 * dim) {
+                        cerr << "mmcf: rwkv tok_norm has " << rwkv_tok_norm.size()
+                             << " values, the block wants " << 2 * dim << "\n";
+                        return false;
+                }
+                auto bad_shape = [&](const char* what, int l, const Mat& m,
+                                    int rows, int cols) {
+                        cerr << "mmcf: rwkv " << what << " of layer " << l << " is "
+                             << m.rows << "x" << m.cols << ", the block wants " << rows
+                             << "x" << cols << "\n";
+                        return false;
+                };
+                for (int l = 0; l < layers; ++l) {
+                        if (qkv[l].rows != 3 * dim || qkv[l].cols != dim)
+                                return bad_shape("rkv", l, qkv[l], 3 * dim, dim);
+                        if (wo[l].rows != dim || wo[l].cols != dim)
+                                return bad_shape("wo", l, wo[l], dim, dim);
+                        if (w1[l].rows != hidden || w1[l].cols != dim)
+                                return bad_shape("channel_mix_key", l, w1[l], hidden, dim);
+                        if (w2[l].rows != dim || w2[l].cols != hidden)
+                                return bad_shape("channel_mix_value", l, w2[l], dim, hidden);
+                        struct PairWant {
+                                const vector<Mat>* down; const vector<Mat>* up;
+                                int rank; const char* name; bool skip_first; bool required;
+                        };
+                        const PairWant pairs[] = {
+                                {&rwkv_w1, &rwkv_w2, rwkv.r_w, "decay", false, true},
+                                {&rwkv_a1, &rwkv_a2, rwkv.r_a, "iclr", false, true},
+                                {&rwkv_v1, &rwkv_v2, rwkv.r_v, "value", true, true},
+                                {&rwkv_g1, &rwkv_g2, rwkv.r_g, "gate", false, rwkv.gate},
+                        };
+                        for (const PairWant& pw : pairs) {
+                                const Mat& d = (*pw.down)[l];
+                                const Mat& u = (*pw.up)[l];
+                                if (!d.rows && !u.rows) {
+                                        // layer 0 records v_first instead of
+                                        // mixing it, so it has no value pair; a
+                                        // gated model must have every gate.
+                                        if (pw.skip_first && l == 0) continue;
+                                        if (!pw.required) continue;
+                                        cerr << "mmcf: rwkv " << pw.name << " low rank of "
+                                                "layer " << l << " is missing\n";
+                                        return false;
+                                }
+                                if (d.rows != pw.rank || d.cols != dim)
+                                        return bad_shape(pw.name, l, d, pw.rank, dim);
+                                if (u.rows != dim || u.cols != pw.rank)
+                                        return bad_shape(pw.name, l, u, dim, pw.rank);
+                        }
+                }
+                if (!rwkv.gate) {
+                        for (int l = 0; l < layers; ++l) {
+                                if (!rwkv_g1[l].rows && !rwkv_g2[l].rows) continue;
+                                cerr << "mmcf: rwkv gate tensors on layer " << l
+                                     << " but key 16 says the model has no gate\n";
+                                return false;
+                        }
+                }
+        }
         if (hybrid) {
                 if (conv_k < 2) {
                         cerr << "mmcf: a typed hybrid container with no conv kernel\n";
@@ -1072,6 +1334,16 @@ bool Model::read_tables() {
                      << " prebiased=" << qkv[0].prebiased << " w2[0]=" << w2[0].rows << "x" << w2[0].cols
                      << " logits=" << logits_tiles.size() << " " << logits_tiles[0].rows << "x" << logits_tiles[0].cols
                      << " emb=" << emb_q8.size() << " embs=" << emb_scale.size() << "\n";
+                if (is_rwkv())
+                        cerr << "MMCF rwkv arch=" << rwkv.arch << " head=" << rwkv.head_size
+                             << " r_w/a/v/g=" << rwkv.r_w << "/" << rwkv.r_a << "/"
+                             << rwkv.r_v << "/" << rwkv.r_g << " gate=" << rwkv.gate
+                             << " eps=" << rwkv.norm_eps
+                             << " tok_norm=" << rwkv_tok_norm.size()
+                             << " lerp=" << rwkv_lerp.size()
+                             << " qkv0=" << qkv[0].rows << "x" << qkv[0].cols
+                             << " cm=" << w1[0].rows << "x" << w1[0].cols
+                             << " logit_shift=" << logit_shift << "\n";
         }
         // A container written with --head-dedup has no T_LOGITS tiles: a tied
         // head *is* the embedding matrix, whose rows already carry one scale
@@ -1121,9 +1393,19 @@ bool Model::read_tables() {
                         logits_tiles.push_back(std::move(m));
                 }
         }
-        if ((!has_q8_emb && !has_i16_emb && !has_q6_emb) || (int)rms_att.size() != layers * dim ||
-            logits_tiles.empty()) {
-                cerr << "mmcf: missing required tensors\n";
+        if (!has_q8_emb && !has_i16_emb && !has_q6_emb) {
+                cerr << "mmcf: missing required tensors (no embedding)\n";
+                return false;
+        }
+        // The RMSNorm weights are a transformer tensor; an RWKV-7 container
+        // carries LayerNorm w+b instead (ids 0x1D-0x1F, 0x22, 0x23) and is
+        // checked above.
+        if (!is_rwkv() && (int)rms_att.size() != layers * dim) {
+                cerr << "mmcf: missing required tensors (rms_att)\n";
+                return false;
+        }
+        if (logits_tiles.empty()) {
+                cerr << "mmcf: missing required tensors (no logits tiles)\n";
                 return false;
         }
         // The vocabulary tiles are the contract the shaders and the token
@@ -1154,6 +1436,11 @@ bool Model::read_tables() {
                         return false;
                 }
         }
+        // An RWKV-7 container is runnable since P2: Session::forward_rwkv() is
+        // the layer loop for the block, and split_rwkv() has already turned its
+        // [W_r; W_k; W_v] into the three Mats that loop draws.  The refusals
+        // that remain are the shape checks above -- a file that loads is a file
+        // that runs.
         (void)quant_group_;
         return true;
 }

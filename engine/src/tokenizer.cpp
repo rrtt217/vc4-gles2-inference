@@ -23,6 +23,9 @@ bool Tokenizer::load_memory(const void* data, size_t bytes, int n){
             if (len < 0 || !need((size_t)len)) { cerr << "tokenizer blob truncated\n"; return false; }
             string s((const char*)p, (size_t)len); p += len;
             vocab_.push_back(s); scores_.push_back(score); lookup_[s] = i;
+            if (s.size() > max_len_) max_len_ = s.size();
+            if (!s.empty() && s.size() > first_max_[(unsigned char)s[0]])
+                first_max_[(unsigned char)s[0]] = s.size();
         }
         for (int i = 0; i < (int)vocab_.size(); ++i) {
             const string& s = vocab_[i];
@@ -45,6 +48,9 @@ bool Tokenizer::load(const string& path, int n){
             f.read((char*)&score, 4); f.read((char*)&len, 4);
             string s(len, '\0'); f.read(&s[0], len);
             vocab_.push_back(s); scores_.push_back(score); lookup_[s] = i;
+            if (s.size() > max_len_) max_len_ = s.size();
+            if (!s.empty() && s.size() > first_max_[(unsigned char)s[0]])
+                first_max_[(unsigned char)s[0]] = s.size();
         }
         for (int i = 0; i < (int)vocab_.size(); ++i) {
             const string& s = vocab_[i];
@@ -63,6 +69,8 @@ bool Tokenizer::load(const string& path, int n){
 void Tokenizer::set_qwen(bool q){ qwen_ = q; }
 
 void Tokenizer::set_bytelevel(bool b){ bytelevel_ = b; }
+
+void Tokenizer::set_rwkv(bool r){ rwkv_ = r; }
 
 void Tokenizer::encode_into(const string& text, bool allow_specials, vector<int>& t) const {
         for (size_t i = 0; i < text.size();) {
@@ -101,6 +109,56 @@ void Tokenizer::encode_into(const string& text, bool allow_specials, vector<int>
         }
 }
 
+// RWKV World tokenisation is one rule: at every position take the longest
+// vocabulary entry that fits in what is left.  There is no merge pass, so the
+// scores in the blob are unused -- and an all-zero-score blob fed to
+// bpe_merge() is not a no-op, it merges by insertion order (0.0 beats the
+// -1e30 initial best), which is why RWKV mode must bypass that call.
+//
+// The reference (rwkv/utils.py RWKV_TOKENIZER.encodeBytes, a 256-way TRIE)
+// matches over raw bytes, so this does too: a match may end mid-UTF-8-
+// character, exactly like the reference.  When no entry of any length matches,
+// fall back the way the byte-level path does (one UTF-8 character, then single
+// bytes) so a hole in the table costs that byte instead of the rest of the
+// string.  The RWKV blob carries all 256 single bytes, so that path is a
+// guard, not a routine case.
+void Tokenizer::encode_greedy(const string& text, vector<int>& t) const {
+        static bool warned = false;
+        const size_t n = text.size();
+        size_t i = 0;
+        while (i < n) {
+            // No entry starts with this byte -> nothing can match here; skip
+            // straight to the fallback instead of 128 failed lookups.
+            size_t len = max_len_ < n - i ? max_len_ : n - i;
+            size_t cap = first_max_[(unsigned char)text[i]];
+            if (cap < len) len = cap;
+            size_t hit = (size_t)-1;
+            int id = -1;
+            for (; len >= 1; --len) {
+                auto it = lookup_.find(text.substr(i, len));
+                if (it != lookup_.end()) { id = it->second; hit = len; break; }
+            }
+            if (id >= 0) { t.push_back(id); i += hit; continue; }
+            // Nothing matched.  The downward scan above may have stopped short
+            // of a UTF-8 character's width (first_max_ caps it), so try the
+            // whole character once, then give up on this byte.
+            size_t clen = 1;
+            unsigned char c = (unsigned char)text[i];
+            if ((c & 0xE0) == 0xC0) clen = 2;
+            else if ((c & 0xF0) == 0xE0) clen = 3;
+            else if ((c & 0xF8) == 0xF0) clen = 4;
+            if (i + clen > n) clen = 1;
+            auto it = lookup_.find(text.substr(i, clen));
+            if (it != lookup_.end()) { t.push_back(it->second); i += clen; continue; }
+            if (!warned) {
+                warned = true;
+                cerr << "tokenizer: byte 0x" << hex << (int)c << dec
+                     << " is not in the RWKV vocabulary; skipping it\n";
+            }
+            ++i;
+        }
+}
+
 void Tokenizer::bpe_merge(vector<int>& t) const {
         while (true) {
             float best = -1e30f; int bid = -1, ba = -1, bb = -1;
@@ -129,6 +187,11 @@ void Tokenizer::bpe_merge(vector<int>& t) const {
 vector<int> Tokenizer::encode(const string& text, bool bos , bool dummy_prefix ){
         vector<int> t;
         if (bos && bos_id_ >= 0) t.push_back(bos_id_);
+        // RWKV: no dummy prefix, no space fold, no special-token table and no
+        // merge pass.  The reference tokenizer sees the raw string and nothing
+        // else; the vocabulary already carries the <|...|> markers as ordinary
+        // entries, so matching them first could only ever shorten a match.
+        if (rwkv_) { encode_greedy(text, t); return t; }
         // GPT-2/SmolLM/Qwen style tokenizers fold the leading space into the
         // first word (" capital" is one token), so it must be prepended to the
         // text and not emitted as its own token.  TOK_SPACE_FOLD=1 selects that;
@@ -155,6 +218,17 @@ vector<int> Tokenizer::encode(const string& text, bool bos , bool dummy_prefix )
 vector<int> Tokenizer::encode_parts(const vector<PromptPart>& parts, bool bos, bool dummy_prefix) {
         vector<int> t;
         if (bos && bos_id_ >= 0) t.push_back(bos_id_);
+        // RWKV mode joins the parts first: they are contiguous slices of the
+        // rendered prompt, and greedy longest match is not boundary-
+        // independent, so encoding piece by piece would lose a token that
+        // spans a template/message seam.  Nothing is given up by joining --
+        // this mode does not treat template text as special.
+        if (rwkv_) {
+            string all;
+            for (auto& p : parts) all += p.text;
+            encode_greedy(all, t);
+            return t;
+        }
         bool nonempty = false;
         for (auto& p : parts) if (!p.text.empty()) { nonempty = true; break; }
         if (dummy_prefix && nonempty) {
@@ -178,6 +252,11 @@ string Tokenizer::id_text(int id) const{
 string Tokenizer::decode(const vector<int>& toks, int prev ){
         string out;
         for (int id : toks) {
+            if (id < 0 || id >= (int)vocab_.size()) continue;
+            // RWKV entries are raw bytes: emit them as they are.  There is no
+            // <0xNN> convention to decode (that is the byte-level BPE
+            // fallback spelling) and no leading-space fold.
+            if (rwkv_) { out += vocab_[(size_t)id]; prev = id; continue; }
             string p = vocab_[id];
             if (!qwen_ && prev == 1 && !p.empty() && p[0] == ' ') p = p.substr(1);
             if (p.size() == 6 && p[0] == '<' && p[1] == '0' && p[2] == 'x' && p[5] == '>') {

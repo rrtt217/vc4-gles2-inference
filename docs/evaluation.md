@@ -366,3 +366,186 @@ A-D, or a letter-prior model scores above chance for free.
 For instruction cases the schema is
 `{"id","lang","prompt","gen","checks":[...],"good_example","bad_example"}`;
 after editing, `--selftest` must report zero mismatches.
+
+## 2026-11-16 — RWKV-7 0.1B (q8r): a third architecture in the same batteries
+
+Machine: laptop, Intel Iris Xe (ADL GT2), Mesa 26.2.5, `GPU_LAYER=1
+KV_PACK=16`.  Container: `models/rwkv7/packed/rwkv7-g1d-0.1b.q8r.chat.mmcf`
+(the official BlinkDL g1d 0.1B checkpoint, q8 with one scale per output row,
+MMCF v4, embedded World-vocab tokenizer and the official G1 **nothink** chat
+template, key 8 bos 0 / eos 261 / stop 261, key 17 logit_shift 2, seq 512).
+The layer loop's faithfulness is verified separately (engine ↔ oracle-on-
+container-weights cos 0.9976–0.9990 across four prompts, top-1 4/4; the R-1
+residual-grid PPL study and the Xe pins are in
+[performance.md](performance.md)'s 2026-11-16 sections) — the numbers below
+measure the model, not the engine.
+
+**Protocol — three things differ from the 2026-11-12 rows, all deliberate:**
+
+* **Sampling is the model card's recommendation**, not greedy and not the
+  engine default: **temperature 1.0, top_p 0.3, repetition_penalty 1.2**
+  (source: the fla-hub/rwkv7-0.1B-g1 model card; the repo's
+  generation_config.json carries only bos/eos, so the card is the authority).
+  One copy lives in `evalkit.RWKV_SAMPLING`; `eval_ifeval.py --preset auto`
+  (the new default) and `eval_translate.py --preset auto` pick it for any
+  container that declares RWKV-7 (metadata key 16) and keep the historical
+  presets for everything else.  The minimind/lfm/greedy presets are unchanged.
+* **The multiple-choice battery runs in completion mode** (`bench_mc.py
+  --completion`, no `--chat`).  RWKV's chat template puts a think marker at
+  the answer position: the first decoded token is the marker, not a letter, so
+  chat-mode letter logits score noise (a 100-item chat-mode run measured
+  fmt ≈ 0 and acc at the null; it is archived at
+  `models/rwkv7/phase4/eval_mc_chat_invalid/`).  In completion mode the same
+  prompt's first token is the letter itself (fmt 1.000 on the probe).  The
+  transformer rows above stay in chat mode; the letter-splice probe works in
+  both.
+* **ifeval uses 2 seeds** (48 attempts — the 2026-11-12 table's protocol, cut
+  from 3 for machine time); **translate is sampled** with the card preset
+  (seed 0) where the old rows are greedy — read the cross-model comparison
+  with that in mind (the MiniMind pair's *sampled* translate numbers, 0.085 /
+  0.130, are the closer comparison).
+
+The template itself is the official G1 nothink render (`Assistant: \n`
+with a complete empty think block; `open_thinking` defaults to false).  Two
+same-day truncation accidents in the repo's copy (a dropped closing `>`,
+then a dropped opening tag) were found by hex comparison against the official
+tokenizer_config.json and fixed before the final runs; the rounds measured on
+the broken renders are archived with READMEs, not reported.  The container's
+stop id 261 is `\n\n`: a reply ends at its first blank line, which is a
+property of the shipped model and visible in the multi-line ifeval cases.
+
+### Multiple choice (RWKV in completion mode)
+
+100 items (50 zh + 50 en), one deterministic run each (`--gen 0`, letter
+logits).  The first three rows are the 2026-11-12 chat-mode results, unchanged;
+the RWKV row is completion mode.
+
+| Model | acc | acc_cal | fmt | p_gold | null (acc / acc_cal) | zh | en |
+|---|---:|---:|---:|---:|---|---:|---:|
+| MiniMind3 dense q8 (64M) | 0.220 | 0.320 | 0.880 | 0.255 | 0.253 ± 0.032 / 0.260 ± 0.033 | 0.16 | 0.28 |
+| MiniMind3-MoE q8 (198M-A64M) | 0.250 | 0.250 | 0.620 | 0.254 | 0.251 ± 0.017 / 0.244 ± 0.035 | 0.24 | 0.26 |
+| LFM2.5-230M QAD q4 | **0.380** | **0.400** | 0.880 | 0.404 | 0.250 ± 0.038 / 0.254 ± 0.033 | 0.28 | **0.48** |
+| RWKV-7 0.1B q8r (completion) | 0.240 | 0.310 | 0.740 | 0.262 | 0.251 ± 0.040 / 0.255 ± 0.039 | 0.16 | 0.32 |
+
+Reading the RWKV row:
+
+* **Raw accuracy is at the null**: 0.240 against 0.251 ± 0.040 — the letter
+  choice carries no information about the question, the same place the
+  MiniMind pair sits.  The calibrated 0.310 against its own null 0.255 ± 0.039
+  is 1.4 sigma — a lead, not a result (the dense MiniMind's 1.8 sigma is the
+  same kind of lead).  The LFM remains the only model with a resolved signal.
+* **It answers in the asked format** (fmt 0.740): three quarters of the items
+  have a letter as the full-vocabulary argmax at the answer position.  The
+  split is language-shaped — zh 0.92, en 0.56: on English items the model
+  often wants to write prose first.  The letter prior is mild (A 45, B 24,
+  C 24, D 7 out of 100), between the dense model's C-65 and the MoE's A-94.
+* **English-centric knowledge**: en 0.32 vs zh 0.16, the opposite weighting
+  of the Chinese-tuned MiniMind pair's training data.  Categories: math 6/19,
+  science 7/23, common sense 5/17, geography 0/12, logic 0/3.  Difficulty is
+  inverted (easy 0.17, medium 0.22, hard 0.40) — at 100 items that is noise,
+  the same non-ordering the 2026-11-12 table showed.
+
+### Instruction following (RWKV preset, 2 seeds)
+
+24 cases, 2 samples each (48 attempts), the card preset above.  The first
+three rows are the 2026-11-12 results (minimind/lfm presets), unchanged.
+
+| Model | pass | hard pass | zh | en | most-failed checks (count over 48 attempts) |
+|---|---:|---:|---:|---:|---|
+| MiniMind3 dense q8 (64M) | 0.188 | 0.167 | 0.25 | 0.14 | max_words 8, json_valid+json_keys 6+6, bullets 4, starts_with 4, ends_with 4, max_chars 4 |
+| MiniMind3-MoE q8 (198M-A64M) | 0.188 | 0.167 | 0.25 | 0.14 | identical pattern to the dense model |
+| LFM2.5-230M QAD q4 | **0.562** | **0.542** | 0.45 | **0.64** | json_valid+json_keys 6+6, max_words 6, max_chars 4, bullets 2, absent_regex 2 |
+| RWKV-7 0.1B q8r (rwkv preset) | 0.250 | 0.208 | **0.40** | 0.14 | max_words 8, json_valid+json_keys 6+6, ends_with 4, max_chars 4, max_lines 3, min_lines/is_upper/starts_with/contains_none/regex/absent_regex 2 each, bullets/numbered_list 1 each |
+
+* **Between the MiniMind pair and the LFM**: 0.250 vs 0.188 / 0.562.  The
+  hard-pass cases are the MiniMind pattern — the four "write something long"
+  cases (if-07, if-08, if-13, if-15) that any verbose answer passes — plus
+  if-21 (a steps answer).  if-04 and if-16 pass on one seed only: the gap
+  between pass 0.250 and hard-pass 0.208 is those two.
+* **JSON is the universal failure**: 6 of 6 attempts, like every model in
+  this table — the reply wraps or rambles instead of emitting the object.
+  max_words (8) is the other big one: the model answers at length.
+* **Chinese instructions work, English ones do not**: zh 0.40 vs en 0.14.
+  The zh pass rate is close to the LFM's 0.45; the en cell is the MiniMind
+  pair's 0.14.  A 0.1B model with English-centric pretraining still follows
+  the *format* of a Chinese instruction better than an English one — the
+  instruction language and the knowledge language are different axes.
+
+
+### Translation (RWKV preset, seed 0)
+
+30 items (15 sentences x 2 directions), chrF against the reference.  The first
+three rows are the 2026-11-12 **greedy** results, unchanged; the RWKV row is
+**sampled** with the card preset (the protocol the user directed for RWKV), so
+the closer cross-model comparison is the MiniMind pair's sampled numbers
+quoted below the old table (dense 0.085, MoE 0.130, LFM 0.335).
+
+| Model | chrF | zh→en | en→zh | chrF ≥ 0.5 | chrF ≥ 0.3 | copies source | meta-preamble | len |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| MiniMind3 dense q8 (64M, greedy) | 0.130 | 0.203 | 0.058 | 2/30 | 2/30 | 9/30 | 15/30 | 3.0 |
+| MiniMind3-MoE q8 (198M-A64M, greedy) | 0.133 | 0.172 | 0.094 | 1/30 | 2/30 | 7/30 | 12/30 | 2.1 |
+| LFM2.5-230M QAD q4 (greedy) | **0.328** | **0.368** | **0.287** | **8/30** | **13/30** | 3/30 | 2/30 | 1.0 |
+| RWKV-7 0.1B q8r (sampled) | 0.099 | 0.139 | 0.059 | 0/30 | 4/30 | 18/30 | 8/30 | 3.43 |
+
+* **It does not translate.**  0 of 30 outputs are usable (chrF ≥ 0.5), 4 of 30
+  half-right; 18 of 30 are more than half source script (the copy column),
+  and the mean length is 3.4x the reference — it rambles.  en→zh is the worst
+  cell (0.059, 10/15 copies): asked for Chinese, it repeats the English
+  source, sometimes with a "Translation:" preamble (8/30 overall).
+* **The failure modes are visible in the hypotheses** (kept in the dump):
+  zh→en-01 answers `"Today is a great day."` — correct words, but
+  quote-wrapped and repeated twice, which chrF punishes (0.191); en-zh-08
+  expands "Learning a new language requires time and patience." into a
+  paragraph of Chinese advice (0.448, the battery's best cell); zh-en-09
+  emits the Chinese source unchanged (0.000).  A model that *can* produce the
+  right sentence sometimes, wrapped in the wrong behaviour, is exactly what
+  the 0.099 mean says.
+* **At its own sampling protocol it is the MiniMind pair's league** (0.099
+  vs 0.085 / 0.130 sampled), not the LFM's (0.335 sampled).  The LFM's
+  translation remains the only one a chat user would notice.
+
+### What the RWKV rows say overall
+
+* **The quality ceiling is the model's, not the engine's.**  The engine runs
+  g1d faithfully (the cos/PPL evidence in performance.md), and the three
+  batteries still place it with the MiniMind pair: MC at the null, ifeval
+  0.25, no translation.  The LFM2.5-230M is the only model in the table with
+  a resolved MC signal, real instruction following and usable translation.
+  RWKV-7's value here is the architecture (a 2.36 MB recurrent state instead
+  of a KV cache, O(1) per-token memory) — not a quality win at 0.1B.
+* **The language split is consistent**: English-centric knowledge (MC en
+  0.32 > zh 0.16) with Chinese instruction format following better than
+  English (ifeval zh 0.40 > en 0.14).  Read the two batteries together.
+* **Perplexity context** (gate corpus, SEQ=512 warm window): engine q8r
+  9.2919 against the f32 oracle's 8.1014 on the same token stream; per-row
+  scales are worth −23% PPL over per-matrix (12.0831), and the q16 residual
+  grid costs ~0.05 nats/token (the R-1 study in performance.md decided q16
+  stays the default — q24's wider range is unused at a 37.4 residual peak).
+
+### Reproducing the RWKV rows
+
+```bash
+python3 engine/scripts/bench_mc.py \
+  --model rwkv7-q8r=models/rwkv7/packed/rwkv7-g1d-0.1b.q8r.chat.mmcf \
+  --data engine/scripts/eval/mc_zh.jsonl --data engine/scripts/eval/mc_en.jsonl \
+  --out /tmp/eval_mc --completion --resume
+
+python3 engine/scripts/eval_ifeval.py \
+  --model rwkv7-q8r=models/rwkv7/packed/rwkv7-g1d-0.1b.q8r.chat.mmcf \
+  --preset rwkv --seeds 2 \
+  --data engine/scripts/eval/ifeval.jsonl --out /tmp/eval_ifeval
+
+python3 engine/scripts/eval_translate.py \
+  --model rwkv7-q8r=models/rwkv7/packed/rwkv7-g1d-0.1b.q8r.chat.mmcf \
+  --preset rwkv \
+  --data engine/scripts/eval/translate.jsonl --out /tmp/eval_translate
+```
+
+`--preset auto` (the default) picks the rwkv preset for this container by
+itself; the explicit `--preset rwkv` above pins the protocol.  Raw dumps from
+the 2026-11-16 runs: `models/rwkv7/phase4/eval_mc/`, `eval_ifeval/`,
+`eval_translate/`; the superseded rounds (chat-mode MC, greedy ifeval,
+truncated-template ifeval) are archived next to them with READMEs.  The
+per-item files keep every probability / reply, so a surprising number can be
+re-checked without the GPU.
+

@@ -24,6 +24,14 @@ import struct
 import numpy as np
 
 from mmcf_grid import LOGITS_GRID
+# The container's own tables for the RWKV-7 (v4) ids and metadata key 16.
+# They live in mmcf_format.py so the packer, the dump tool and the reader
+# name the same numbers (the K_ names below are the packer's spelling).
+from mmcf_format import (  # noqa: E402
+    K_RWKV_A1, K_RWKV_A2, K_RWKV_ATT_NORM, K_RWKV_ATT_NORM_2, K_RWKV_BIAS,
+    K_RWKV_CM_LERP, K_RWKV_G1, K_RWKV_G2, K_RWKV_LERP, K_RWKV_LN_X,
+    K_RWKV_OUT_NORM, K_RWKV_SCALE, K_RWKV_TOK_NORM, K_RWKV_V1, K_RWKV_V2,
+    K_RWKV_W1, K_RWKV_W2)
 
 DT_F32, DT_I16, DT_Q8I8, DT_Q4, DT_Q6 = 0, 1, 3, 4, 6
 T_EMB, T_EMB_SCALE, T_RMS_ATT, T_RMS_FFN, T_RMS_FINAL = 1, 2, 3, 4, 5
@@ -151,6 +159,12 @@ def check_source(cfg, hdr):
     """
     arch = (cfg.get('architectures') or [cfg.get('model_type', '?')])[0]
     kind = cfg.get('model_type', '')
+    # RWKV-7 is implemented and is not a transformer block at all (no
+    # attention, no RoPE, no KV cache, no bias-free-matvec rule), so it leaves
+    # this function before the Llama-shaped checks below can misname it.  It is
+    # a v4 container: docs/checkpoint-container.md.
+    if kind == 'rwkv7' or 'rwkv7' in arch.lower():
+        return check_source_rwkv7(cfg, hdr)
     # Name the block before the tensor-level checks: a GPT-2 checkpoint has
     # biases *and* a different block, and "it has biases" would send the reader
     # looking for a bias kernel when the real answer is that the whole block is
@@ -285,6 +299,399 @@ def check_source(cfg, hdr):
               "attention is dense, so keep SEQ <= %s"
               % (arch, cfg.get('sliding_window'), cfg.get('sliding_window')))
 
+
+# The RWKV vocabulary file the pth/HF releases ship
+# (rwkv_vocab_v20230424.txt): one entry per line as `id 'repr(token)' length`.
+# It is LF in the official HuggingFace copy and CRLF in the file inside the pip
+# `rwkv` package, which is the one models/rwkv7/g1d-hf carries; a reader that
+# only strips "\n" leaves a 0x0d on every line, the byte lengths stop matching
+# and the whole id table shifts.
+RWKV_VOCAB_NAME = 'rwkv_vocab_v20230424.txt'
+RWKV_EOT_TEXT = '<|rwkv_tokenizer_end_of_text|>'
+# The calibration stream is a chat prompt in the model's own format: the peaks
+# the rail check looks for live on real text, while three runs of vocabulary ids
+# miss them (measured 2026-11-16: sqrelu 58 there against 92 on this prompt).
+RWKV_RAIL_TEXT = ("User: Explain in two sentences why the sky is blue, then name "
+                  "one country in Europe.\n\nAssistant: <think")
+
+_RWKV_ESCAPES = {'n': 10, 'r': 13, 't': 9, '\\': 92, "'": 39, '"': 34, '0': 0,
+                 'a': 7, 'b': 8, 'f': 12, 'v': 11}
+
+
+def _unescape_rwkv(s, raw):
+    """One vocabulary entry (already decoded as UTF-8) to token bytes.
+
+    Escapes: \\xNN (a byte in a b'' entry, a code point otherwise), \\uNNNN,
+    and the C one-letter forms.  A line may also carry the character itself
+    (id 2431 is a literal inverted exclamation mark), which is why the file is
+    decoded as UTF-8 before this runs.
+    """
+    out = []
+    i, n = 0, len(s)
+    while i < n:
+        c = s[i]
+        if c != '\\':
+            out.append(c)
+            i += 1
+            continue
+        i += 1
+        if i >= n:
+            break
+        if s[i] == 'x' and i + 2 < n:
+            out.append(chr(int(s[i + 1:i + 3], 16)))
+            i += 3
+            continue
+        if s[i] == 'u' and i + 4 < n:
+            out.append(chr(int(s[i + 1:i + 5], 16)))
+            i += 5
+            continue
+        out.append(chr(_RWKV_ESCAPES.get(s[i], ord(s[i]))))
+        i += 1
+    txt = ''.join(out)
+    return bytes(ord(ch) for ch in txt) if raw else txt.encode('utf-8')
+
+
+def load_rwkv_vocab(path):
+    """{token bytes: id} and the longest entry, for the rail calibration.
+
+    Line endings are stripped as one sequence so LF and CRLF both work; the
+    stated byte length is checked against the decoded entry, which is what turns
+    a wrong line-ending strip or an escape this code does not know into an
+    error instead of a token table that is quietly off.
+    """
+    tok2idx = {}
+    maxlen = 0
+    with open(path, 'rb') as f:
+        for line in f:
+            line = line.rstrip(b'\r\n').decode('utf-8')   # LF and CRLF
+            if not line:
+                continue
+            sp = line.index(' ')
+            idx = int(line[:sp])
+            body = line[sp + 1:]
+            sp2 = body.rindex(' ')
+            entry = body[:sp2]
+            want = int(body[sp2 + 1:])
+            # Three spellings: 'x' for most entries, "x" when the token itself
+            # contains a single quote (id 40 is one), and b'\x80' for a raw
+            # byte string.
+            is_bytes = entry[:2] in ("b'", 'b"')
+            if is_bytes and entry[-1:] == entry[1:2]:
+                entry = entry[2:-1]
+            elif len(entry) >= 2 and entry[:1] == entry[-1:] and entry[:1] in ("'", '"'):
+                entry = entry[1:-1]
+            tok = _unescape_rwkv(entry, is_bytes)
+            if len(tok) != want:
+                raise SystemExit("%s: id %d decodes to %d B, the line says %d "
+                                 "(line endings or an unknown escape)"
+                                 % (path, idx, len(tok), want))
+            tok2idx[tok] = idx
+            maxlen = max(maxlen, len(tok))
+    if not tok2idx:
+        raise SystemExit("%s: empty vocabulary" % path)
+    return tok2idx, maxlen
+
+
+def encode_rwkv(tok2idx, maxlen, text):
+    """Greedy longest match over bytes, plus the added end-of-text token.
+
+    This is the packer's calibration encoder, not the engine's tokenizer (that
+    is P3 of the plan): it only has to turn the calibration prompt into the ids
+    llama.cpp would see.  The longest match is a dict probe from the longest
+    possible length down to one byte, which is the trie walk with another data
+    structure.
+    """
+    src = text.encode('utf-8') if isinstance(text, str) else text
+    ids = []
+    i = 0
+    while i < len(src):
+        m = min(maxlen, len(src) - i)
+        while m >= 1:
+            j = tok2idx.get(src[i:i + m])
+            if j is not None:
+                ids.append(j)
+                i += m
+                break
+            m -= 1
+        else:
+            raise SystemExit("no vocabulary entry covers byte %r at %d" % (src[i], i))
+    return ids
+
+
+def rwkv_rail_tokens(model_dir):
+    """The calibration stream (ids), or [] when the source has no vocabulary."""
+    path = model_dir + '/' + RWKV_VOCAB_NAME
+    if not os.path.exists(path):
+        print('note: no %s next to the source; the rail calibration falls back '
+              'to vocabulary runs only' % RWKV_VOCAB_NAME)
+        return []
+    tok2idx, maxlen = load_rwkv_vocab(path)
+    # The template's BOS is an added token: it is not in the file, and the
+    # reference tokenizer maps its text to id 0 (tokenizers_config's
+    # added_tokens_decoder).  Without it the template's BOS becomes 26 byte
+    # tokens and the calibration measures the wrong prompt.
+    head = [0] if maxlen else []
+    return head + encode_rwkv(tok2idx, maxlen, RWKV_RAIL_TEXT)
+
+def check_source_rwkv7(cfg, hdr):
+    """The RWKV-7 block, checked before a single tensor is read.
+
+    Everything here is a shape the reader would otherwise have to guess: the
+    four low ranks (llama.cpp's fallback formula is wrong for 0.4B's gate),
+    the head width the WKV state is indexed by, and the activation.  RWKV has
+    no bias inside a matmul, so the general 'no bias tensors' rule does not
+    apply -- the biases that exist are LayerNorm and the three low-rank output
+    vectors, and they travel as f32 rows.
+    """
+    arch = (cfg.get('architectures') or [cfg.get('model_type', '?')])[0]
+    act = str(cfg.get('hidden_act') or '').lower()
+    if act not in ('sqrelu',):
+        raise SystemExit("%s: hidden_act is %r; the RWKV-7 channel mix is "
+                         "relu(x)^2 (sqrelu) only." % (arch, act))
+    # A config that does not state norm_bias at all is fine (the official pth
+    # conversion writes none); one that says false is not: the container stores
+    # every LayerNorm as one w|b row.
+    if cfg.get('norm_bias') is False:
+        raise SystemExit("%s: norm_bias is false; every RWKV-7 LayerNorm has a "
+                         "bias and the container stores w and b in one row." % arch)
+    dim = int(cfg.get('hidden_size') or 0)
+    hidden = int(cfg.get('intermediate_size') or 0)
+    layers = int(cfg.get('num_hidden_layers') or 0)
+    if not (dim and hidden and layers):
+        raise SystemExit("%s: config is missing hidden_size/intermediate_size/"
+                         "num_hidden_layers" % arch)
+    head_size = int(cfg.get('head_dim') or cfg.get('head_size') or 0)
+    if not head_size:
+        raise SystemExit("%s: the config states no head_dim; the WKV state is "
+                         "indexed by it and the engine will not guess" % arch)
+    if dim % head_size:
+        raise SystemExit("%s: hidden_size %d is not a multiple of head_dim %d"
+                         % (arch, dim, head_size))
+    # num_heads in a fla-hub RWKV7 config is NOT dim/head_dim (0.1B says 32
+    # heads for a 768-wide model whose WKV head is 64 wide, i.e. 12 heads), so
+    # the head count is derived from the two numbers that matter.
+    if cfg.get('max_position_embeddings') is None:
+        print("note: %s states no max_position_embeddings; RWKV has no KV cache "
+              "and the value is only recorded as the container's seq" % arch)
+    for key in ('decay_low_rank_dim', 'a_low_rank_dim', 'v_low_rank_dim',
+                'gate_low_rank_dim'):
+        if cfg.get(key) is None:
+            raise SystemExit(
+                "%s: the config has no %s.  The low rank cannot be recovered from "
+                "the formula llama.cpp falls back to -- it gives 160 for 0.4B's "
+                "gate where the config says 128 -- so a source that does not state "
+                "it is refused." % (arch, key))
+    need = ['model.embeddings.weight', 'lm_head.weight']
+    if 'model.layers.0.pre_norm.weight' in hdr:
+        need.append('model.layers.0.pre_norm.weight')
+    for l in (0, layers - 1):
+        need += ['model.layers.%d.%s' % (l, n) for n in
+                 ('attn_norm.weight', 'ffn_norm.weight', 'attn.g_norm.weight',
+                  'attn.r_proj.weight', 'attn.k_proj.weight', 'attn.v_proj.weight',
+                  'attn.o_proj.weight', 'ffn.key.weight', 'ffn.value.weight',
+                  'attn.w_lora.lora.0.weight', 'attn.w_lora.lora.2.weight',
+                  'attn.a_lora.lora.0.weight', 'attn.a_lora.lora.2.weight',
+                  'attn.k_k', 'attn.k_a', 'attn.r_k',
+                  'attn.x_r', 'attn.x_w', 'attn.x_k', 'attn.x_v', 'attn.x_a',
+                  'ffn.x_k')]
+    missing = [n for n in need if n not in hdr]
+    if missing:
+        raise SystemExit(
+            "%s: not the fla-hub RWKV-7 tensor tree this loader maps (missing "
+            "%s%s).  It reads model.embeddings, lm_head, model.norm, "
+            "model.layers.N.{attn_norm,ffn_norm,attn.g_norm}, "
+            "model.layers.N.attn.{r,k,v,o}_proj, model.layers.N.attn.{w,a,v,g}_lora "
+            "and model.layers.N.ffn.{key,value}."
+            % (arch, ', '.join(missing[:3]), ', ...' if len(missing) > 3 else ''))
+    if cfg.get('tie_word_embeddings') is not False:
+        raise SystemExit("%s: tie_word_embeddings is not false; an RWKV-7 head is "
+                         "a separate vocab x dim matrix" % arch)
+
+
+def load_rwkv7(model_dir, seq=512):
+    """Read fla-hub RWKV-7 (Goose) safetensors into float arrays.
+
+    The names are the ones refs/llamacpp/src-b12283/conversion/rwkv.py maps
+    for Rwkv7ForCausalLM, and each tensor's role was checked against
+    llama.cpp's own conversion of this checkpoint: the GGUF's f32 norm and
+    vector tensors match these names byte for byte (mmcf_pack.py --verify
+    cannot do that for bf16 weights, so the check was a separate pass).
+
+        model.embeddings.weight            token embedding (vocab x dim)
+        lm_head.weight                     untied head (vocab x dim)
+        model.layers.0.pre_norm.{w,b}      token norm (token_embd_norm)
+        model.norm.{w,b}                   output norm (output_norm)
+        model.layers.N.attn_norm.{w,b}     LayerNorm before the time mix
+        model.layers.N.ffn_norm.{w,b}      LayerNorm before the channel mix
+        model.layers.N.attn.g_norm.{w,b}   per-head group norm (time_mix_ln)
+        model.layers.N.attn.x_{r,w,k,v,a,g}  the six token-shift lerps
+        model.layers.N.attn.{w,a,v}_lora.lora.2.bias   w0 / a0 / v0
+        model.layers.N.attn.k_k,k_a,r_k    per-channel scales (r_k is heads x 64)
+        model.layers.N.ffn.x_k             the channel-mix lerp
+        model.layers.N.attn.{r,k,v}_proj.weight   W_r / W_k / W_v (dim x dim)
+        model.layers.N.attn.o_proj.weight         W_o
+        model.layers.N.ffn.key.weight      W_cm_key (hidden x dim)
+        model.layers.N.ffn.value.weight    W_cm_value (dim x hidden)
+        model.layers.N.attn.{w,a,v,g}_lora.lora.{0,2}.weight
+                                           down (rank x dim) / up (dim x rank)
+
+    Every matrix is stored the way the checkpoint states it: rows are the
+    output rows, like every other Mat the engine reads.  The LayerNorm and
+    lerp vectors keep the HF/GGUF order so a reader can diff them against
+    llama.cpp.  Layer 0 ships no v_lora (it records v_first instead of
+    mixing it), so the value-residual branch is absent there.
+    """
+    with open(model_dir + '/config.json') as f:
+        cfg = json.load(f)
+    with open(model_dir + '/model.safetensors', 'rb') as f:
+        n = struct.unpack('<Q', f.read(8))[0]
+        hdr = json.loads(f.read(n))
+        data = f.read()
+    check_source(cfg, hdr)
+
+    def get(name, optional=False):
+        if name not in hdr:
+            if optional:
+                return None
+            raise SystemExit("%s: the checkpoint has no %s" % (model_dir, name))
+        e = hdr[name]
+        a, b = e['data_offsets']
+        if e.get('dtype') == 'BF16':
+            bits = np.frombuffer(data[a:b], dtype='<u2').astype(np.uint32) << 16
+            return bits.view(np.float32).reshape(e['shape'])
+        dt = st_dtype(e)
+        if dt is None:
+            raise SystemExit("%s: unsupported safetensors dtype %s"
+                             % (name, e.get('dtype')))
+        return np.frombuffer(data[a:b], dtype=dt).astype(np.float32).reshape(e['shape'])
+
+    emb = get('model.embeddings.weight')
+    vocab, dim = emb.shape
+    wcls = get('lm_head.weight')
+    if wcls.shape != emb.shape:
+        raise SystemExit("lm_head %s does not match the embedding %s"
+                         % (list(wcls.shape), list(emb.shape)))
+    layers = int(cfg['num_hidden_layers'])
+    hidden = int(cfg['intermediate_size'])
+    head_size = int(cfg['head_dim'])
+    heads = dim // head_size
+    ranks = dict(r_w=int(cfg['decay_low_rank_dim']), r_a=int(cfg['a_low_rank_dim']),
+                 r_v=int(cfg['v_low_rank_dim']), r_g=int(cfg['gate_low_rank_dim'] or 0))
+
+    def vec(name, n, optional=False):
+        a = get(name, optional)
+        if a is None:
+            return None
+        a = np.asarray(a, np.float32).reshape(-1)
+        if a.size != n:
+            raise SystemExit("%s is %d values, the block wants %d"
+                             % (name, a.size, n))
+        return a
+
+    def mat(name, shape):
+        a = np.asarray(get(name), np.float32)
+        if a.shape != shape:
+            raise SystemExit("%s is %s, the block wants %s"
+                             % (name, list(a.shape), list(shape)))
+        return a
+
+    # One row per layer: [w | b], which is how the container stores them.
+    def norm(name):
+        return np.concatenate([vec(name + '.weight', dim), vec(name + '.bias', dim)])
+
+    att_norm = np.stack([norm('model.layers.%d.attn_norm' % l) for l in range(layers)])
+    att_norm_2 = np.stack([norm('model.layers.%d.ffn_norm' % l) for l in range(layers)])
+    ln_x = np.stack([norm('model.layers.%d.attn.g_norm' % l) for l in range(layers)])
+    cm_lerp = np.stack([vec('model.layers.%d.ffn.x_k' % l, dim) for l in range(layers)])
+    tok_norm = None
+    if 'model.layers.0.pre_norm.weight' in hdr:
+        tok_norm = np.concatenate([vec('model.layers.0.pre_norm.weight', dim),
+                                   vec('model.layers.0.pre_norm.bias', dim)])
+    out_norm = np.concatenate([vec('model.norm.weight', dim), vec('model.norm.bias', dim)])
+    # Worst case for the head's input, from the weights alone: a LayerNorm
+    # output is bounded channel-wise by sqrt(dim)*|w_i| + |b_i| (the sum of the
+    # squared normalised values is dim, so each is at most sqrt(dim)).  It is a
+    # bound, not a measurement: reaching it needs one channel to carry all the
+    # variance.
+    ln_bound = float(np.sqrt(dim) * np.abs(out_norm[:dim]).max()
+                     + np.abs(out_norm[dim:]).max())
+
+    lerp, bias, scale = [], [], []
+    for l in range(layers):
+        p = 'model.layers.%d.attn.' % l
+        lerp.append(np.concatenate([vec(p + 'x_' + k, dim) for k in 'rwkvag']))
+        w0 = vec(p + 'w_lora.lora.2.bias', dim)
+        a0 = vec(p + 'a_lora.lora.2.bias', dim)
+        v0 = vec(p + 'v_lora.lora.2.bias', dim, optional=True)
+        if v0 is None:
+            # Layer 0 records v_first instead of mixing it: no v0 there, and
+            # the row keeps a zero so all three groups stay the same width.
+            v0 = np.zeros(dim, np.float32)
+        bias.append(np.concatenate([w0, a0, v0]))
+        scale.append(np.concatenate([vec(p + 'k_k', dim), vec(p + 'k_a', dim),
+                                     vec(p + 'r_k', dim)]))
+    lerp = np.stack(lerp)
+    bias = np.stack(bias)
+    scale = np.stack(scale)
+
+    rkv, wo, cm_key, cm_value = [], [], [], []
+    for l in range(layers):
+        rkv.append(np.concatenate([mat('model.layers.%d.attn.r_proj.weight' % l, (dim, dim)),
+                                   mat('model.layers.%d.attn.k_proj.weight' % l, (dim, dim)),
+                                   mat('model.layers.%d.attn.v_proj.weight' % l, (dim, dim))],
+                                  axis=0))
+        wo.append(mat('model.layers.%d.attn.o_proj.weight' % l, (dim, dim)))
+        cm_key.append(mat('model.layers.%d.ffn.key.weight' % l, (hidden, dim)))
+        cm_value.append(mat('model.layers.%d.ffn.value.weight' % l, (dim, hidden)))
+    rkv, wo = np.stack(rkv), np.stack(wo)
+    cm_key, cm_value = np.stack(cm_key), np.stack(cm_value)
+
+    lora = {}
+    for br, r in (('w', ranks['r_w']), ('a', ranks['r_a']),
+                  ('v', ranks['r_v']), ('g', ranks['r_g'])):
+        if not r:
+            lora[br] = None
+            continue
+        down, up = [], []
+        for l in range(layers):
+            p = 'model.layers.%d.attn.%s_lora.lora.' % (l, br)
+            d = get(p + '0.weight', optional=(br == 'v' and l == 0))
+            u = get(p + '2.weight', optional=(br == 'v' and l == 0))
+            if d is None or u is None:
+                if br != 'v' or l != 0:
+                    raise SystemExit("layer %d has half of the %s low-rank pair"
+                                     % (l, br))
+                down.append(None); up.append(None)
+                continue
+            down.append(mat(p + '0.weight', (r, dim)))
+            up.append(mat(p + '2.weight', (dim, r)))
+        lora[br] = (down, up)
+    gate = lora['g'] is not None
+    if gate:
+        # A mix of gated and ungated layers is not an RWKV-7 the runtime can
+        # express: the flag in metadata key 16 describes the whole model.
+        has = sum(1 for x in lora['g'][0] if x is not None)
+        if has != layers:
+            raise SystemExit("the gate low rank is present on %d of %d layers"
+                             % (has, layers))
+
+    return dict(arch='rwkv7', dim=dim, hidden=hidden, layers=layers,
+                heads=heads, kv=heads, vocab=vocab, seq=seq,
+                head_size=head_size, theta=10000.0, half=False, qk_norm=0,
+                rms_eps=float(cfg.get('norm_eps') or 1e-5),
+                rwkv=dict(arch=1, head_size=head_size,
+                          norm_eps=float(cfg.get('norm_eps') or 1e-5),
+                          gate=gate, **ranks),
+                emb=emb, wcls=wcls, untied=True,
+                att_norm=att_norm, att_norm_2=att_norm_2, ln_x=ln_x,
+                cm_lerp=cm_lerp, lerp=lerp, bias=bias, scale=scale,
+                tok_norm=tok_norm, out_norm=out_norm, final_ln_bound=ln_bound,
+                rkv=rkv, wo=wo, cm_key=cm_key, cm_value=cm_value, lora=lora,
+                moe=None, added_ids=[],
+                # The rail calibration's real-text stream: the vocabulary sits
+                # next to the weights in every release, and the peaks only show
+                # up on text (see RWKV_RAIL_TEXT).
+                rail_tokens=rwkv_rail_tokens(model_dir))
 
 def load_minimind(model_dir, seq=512):
     """Read a HF Llama/Qwen-shaped directory into float arrays."""
@@ -678,6 +1085,138 @@ def residual_peaks_lfm2(m, seq=8):
     return peaks
 
 
+def rail_peaks_rwkv7(m, seq=8):
+    """(residual peaks, channel-mix hidden peaks) for RWKV-7; final LN via m.
+
+    Same calibration idea as rail_peaks(): three contiguous vocabulary runs
+    of seq ids and a float32 forward, no tokenizer.  Two streams travel
+    through the engine's q16 activation format -- the residual x and the
+    channel mix's relu(x)^2 hidden, whose square is the one place RWKV
+    amplifies instead of attenuating -- so both are measured.  The WKV state
+    is measured too (m['state_peaks']) but is not a rail: it is a 64x64
+    recurrence per head that is never renormalised, and whether the Pi can
+    hold it in fixed point is docs/rwkv7-plan.zh-CN.md's S-1, decided from
+    that number.
+
+    The recurrence is the one in the official numpy forward
+    (models/rwkv7/ref/rwkv_v7_numpy.py) and in llama.cpp's wkv7 kernel: for
+    each head, row i and column j, with kk the per-head L2-normalised
+        S[i,j] = S[i,j]*w[j] - <S[i], kk> * (kk*a)[j] + v[i]*k[j]
+        out[i] = <S[i], r>
+    """
+    dim, layers, vocab = m['dim'], m['layers'], m['vocab']
+    hs = m['head_size']
+    nh = dim // hs
+    eps = float(m['rwkv']['norm_eps'])
+    emb = m['emb']
+    seq = max(1, min(seq, vocab))
+    res = [0.0] * layers
+    hid = [0.0] * layers
+    stp = [0.0] * layers
+    fin = 0.0
+
+    def ln(x, wb):
+        w, b = wb[:dim], wb[dim:]
+        mu = x.mean(-1, keepdims=True)
+        var = ((x - mu) ** 2).mean(-1, keepdims=True)
+        return (x - mu) / np.sqrt(var + eps) * w + b
+
+    def sig(x):
+        # Clipped: a decay logit far from zero overflows exp() and the warning
+        # is noise -- the value is saturated either way.
+        return 1.0 / (1.0 + np.exp(-np.clip(x, -60.0, 60.0)))
+
+    starts = [0, max(0, vocab // 2 - seq // 2), max(0, vocab - seq)]
+    streams = [list(range(st0, st0 + seq)) for st0 in starts]
+    if m.get('rail_tokens'):
+        streams.append(list(m['rail_tokens']))
+    for ids in streams:
+        x = emb[ids].astype(np.float32)
+        T = len(ids)
+        if m.get('tok_norm') is not None:
+            x = ln(x, m['tok_norm'])
+        v_first = None
+        state = np.zeros((layers, nh, hs, hs), np.float32)
+        sh_att = np.zeros(dim, np.float32)
+        sh_ffn = np.zeros(dim, np.float32)
+        for l in range(layers):
+            xn = ln(x, m['att_norm'][l])
+            # token shift: position t sees the *normalised* input of t-1
+            xprev = np.concatenate([sh_att[None], xn[:-1]], 0)
+            lp = m['lerp'][l].reshape(6, dim)                  # r,w,k,v,a,g
+            sx = xprev - xn
+            xr, xw, xk, xv, xa, xg = [xn + sx * lp[i] for i in range(6)]
+            mtx = m['rkv'][l]
+            r = xr @ mtx[0:dim].T
+            k = xk @ mtx[dim:2 * dim].T
+            v = xv @ mtx[2 * dim:3 * dim].T
+            bias = m['bias'][l].reshape(3, dim)               # w0, a0, v0
+            scale = m['scale'][l].reshape(3, dim)             # k_k, k_a, r_k
+            wd, wu = m['lora']['w']
+            w = np.exp(-sig(np.tanh(xw @ wd[l].T) @ wu[l].T + bias[0]) / np.e ** 0.5)
+            lv = m['lora']['v']
+            if v_first is None:
+                v_first = v
+            elif lv is not None and lv[0][l] is not None:
+                v = v + (v_first - v) * sig(xv @ lv[0][l].T @ lv[1][l].T + bias[2])
+            ad, au = m['lora']['a']
+            a = sig(xa @ ad[l].T @ au[l].T + bias[1])
+            lg = m['lora']['g']
+            g = None if lg is None else sig(xg @ lg[0][l].T) @ lg[1][l].T
+            kk = k * scale[0]
+            k = k + (a - 1.0) * k * scale[1]
+            kkn = kk.reshape(T, nh, hs)
+            kkn = kkn / np.maximum(np.linalg.norm(kkn, axis=2, keepdims=True), 1e-12)
+            kk = kkn.reshape(T, dim)
+            rw = r.reshape(T, nh, hs)
+            kw = k.reshape(T, nh, hs)
+            vw = v.reshape(T, nh, hs)
+            ww = w.reshape(T, nh, hs)
+            aw = kkn * a.reshape(T, nh, hs)                   # kk*a, per head
+            S = state[l]
+            out = np.empty((T, nh, hs), np.float32)
+            for t in range(T):
+                # S is (head, i, j): the row index i pairs with v and r, the
+                # column index j with w, kk and k.
+                p = (S * kkn[t][:, None, :]).sum(-1)           # <S[i], kk>, (head, i)
+                S = (S * ww[t][:, None, :]
+                     + vw[t][:, :, None] * kw[t][:, None, :]
+                     - p[:, :, None] * aw[t][:, None, :])
+                out[t] = (S * rw[t][:, None, :]).sum(-1)
+            state[l] = S
+            stp[l] = max(stp[l], float(np.abs(S).max()))
+            # per-head group norm: one mean/var over each 64-wide head (the
+            # np.var spelling takes the mean of the squares itself)
+            yy = out
+            mu = yy.mean(-1, keepdims=True)
+            var = yy.var(-1, keepdims=True)
+            yy = ((yy - mu) / np.sqrt(var + 64e-5)).reshape(T, dim)
+            rkh = (rw * kw * scale[2].reshape(nh, hs)[None]).sum(-1)   # (T, nh)
+            yy = yy * m['ln_x'][l][:dim] + m['ln_x'][l][dim:]
+            yy = yy + (rkh[:, :, None] * vw).reshape(T, dim)
+            if g is not None:
+                yy = yy * g
+            x = x + yy @ m['wo'][l].T
+            res[l] = max(res[l], float(np.abs(x).max()))
+            fn = ln(x, m['att_norm_2'][l])
+            fprev = np.concatenate([sh_ffn[None], fn[:-1]], 0)
+            xk2 = fn + (fprev - fn) * m['cm_lerp'][l]
+            h = np.maximum(xk2 @ m['cm_key'][l].T, 0.0) ** 2
+            hid[l] = max(hid[l], float(np.abs(h).max()))
+            x = x + h @ m['cm_value'][l].T
+            res[l] = max(res[l], float(np.abs(x).max()))
+            if not np.isfinite(res[l] + hid[l] + stp[l]):
+                raise SystemExit("residual calibration produced %s at layer %d; "
+                                 "the check cannot vouch for this model" % (res[l], l))
+            sh_att, sh_ffn = xn[-1], fn[-1]
+        # The head's input: the final LayerNorm, which is what the engine
+        # writes into a q16 activation (metadata key 17 covers it).
+        z = ln(x, m['out_norm'])
+        fin = max(fin, float(np.abs(z).max()))
+    m['state_peaks'] = stp
+    m['final_ln_peak'] = fin
+    return res, hid
+
 def rail_peaks(m, seq=8):
     """(residual peaks, FFN hidden peaks) from a float32 forward pass.
 
@@ -697,6 +1236,8 @@ def rail_peaks(m, seq=8):
     Returns (residual_peaks, hidden_peaks); hidden_peaks is None for a hybrid
     model (LFM2), whose conv block has no such check yet.
     """
+    if m.get('arch') == 'rwkv7':
+        return rail_peaks_rwkv7(m, seq)
     if m.get('layer_types'):
         return residual_peaks_lfm2(m, seq), None
     dim, hidden, layers = m['dim'], m['hidden'], m['layers']
@@ -827,8 +1368,12 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
     if m is None:
         with open(model_dir + '/config.json') as _f:
             _cfg = json.load(_f)
-        m = load_lfm2(model_dir, seq) if _cfg.get('model_type') == 'lfm2' \
-            else load_minimind(model_dir, seq)
+        if _cfg.get('model_type') == 'rwkv7':
+            m = load_rwkv7(model_dir, seq)
+        elif _cfg.get('model_type') == 'lfm2':
+            m = load_lfm2(model_dir, seq)
+        else:
+            m = load_minimind(model_dir, seq)
     # HF pads the embedding to a multiple of its own choosing (16408 for a
     # 16384-token tokenizer), so the *tokenizer* decides how many rows the
     # container may claim: a row the tokenizer cannot produce is dead weight,
@@ -847,6 +1392,10 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
     head_dim = dim // heads
     qk = int(m.get('qk_norm', 0))
     moe = m.get('moe')
+    # RWKV-7: a different block (docs/checkpoint-container.md, v4).  It reuses
+    # 0x10/0x11/0x12/0x15 for its four big matrices and has no w3 at all, so
+    # the container always says split_w13 and never writes a fused pair.
+    rwkv = m.get('arch') == 'rwkv7'
     # The FFN width that is written to the file is the expert width for a MoE
     # container: the dense mlp does not exist there.
     ffn_w = moe['hidden'] if moe else hidden
@@ -855,7 +1404,7 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
     # from the block, not from the dense 2*hidden > 2048 rule.  Without the
     # `moe` term a Qwen3-MoE whose expert width is <= 1024 packs split_w13 = 0
     # and the engine then refuses the file the packer just wrote.
-    split = 1 if (moe or 2 * ffn_w > 2048) else 0
+    split = 1 if (moe or rwkv or 2 * ffn_w > 2048) else 0
     meta = dict(dim=dim, hidden=hidden, layers=layers, heads=heads, kv_heads=kv,
                 vocab=vocab, seq=seq, head_dim=head_dim,
                 theta=float(m['theta']), half=bool(m['half']), qk_norm=bool(qk),
@@ -867,6 +1416,10 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
         meta['top_k'] = int(moe['top_k'])
         meta['moe_hidden'] = int(moe['hidden'])
         meta['norm_topk'] = bool(moe['norm_topk'])
+    if rwkv:
+        # Metadata key 16: arch, head width, flags, LayerNorm eps, four ranks.
+        # The container is version 4 and its rectype is v3's 64-byte one.
+        meta['rwkv'] = dict(m['rwkv'])
     # One q8 scale per matrix spends its 127 levels on the largest weight, so a
     # matrix whose rows differ by 500:1 keeps 127/500 of its detail and voids
     # most small weights to zero (void.1 layer 0: 58-66% of the FFN).  Say which
@@ -891,6 +1444,15 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
     # The expert matrices were missing from this scan, and they are the largest
     # and least uniform matrices of a q8/q4 MoE: a 2432x768 expert at one scale
     # is exactly the case --q8-row-scale exists for.
+    if rwkv:
+        # The four big RWKV matrices are (3*dim, dim) / (dim, dim) /
+        # (hidden, dim) / (dim, hidden): same question, same scan.
+        for key in ('rkv', 'wo', 'cm_key', 'cm_value'):
+            arr = m.get(key)
+            if arr is None:
+                continue
+            for l in range(len(arr)):
+                scan_skew('%s[%d]' % (key, l), arr[l])
     for key in ('expert_w1', 'expert_w3', 'expert_w2'):
         arr = m.get(key)
         if not arr:
@@ -920,6 +1482,26 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
                  for peak in hid_peaks]
             if any(k):
                 meta['hid_scale'] = k
+    if rwkv and m.get('state_peaks'):
+        # The WKV state's per-layer |max| is not a rail: it is the number that
+        # decides the Pi's state encoding (docs/rwkv7-plan.zh-CN.md, S-1).  It
+        # is recorded nowhere in the file; mmcf_pack.py prints it.
+        meta['state_peaks'] = list(m['state_peaks'])
+    if rwkv and rail_check:
+        # The head's input is the final LayerNorm's output, and it is written
+        # through the q16 activation format like any other vector: 0.1B peaks
+        # at 315.6, 2.5x the 127.996 rail.  Storing it *2^-k and multiplying
+        # every logits tile's scale by 2^k keeps the dot product in the
+        # original units, so metadata key 17 is one byte and the read side is
+        # free.  The measured peak decides k; the analytic bound
+        # (sqrt(dim)*max|w| + max|b|, i.e. one channel carrying all the
+        # variance) is reported as the worst case it cannot reach.
+        peak = float(m.get('final_ln_peak') or 0.0)
+        meta['final_ln_peak'] = peak
+        meta['final_ln_bound'] = m.get('final_ln_bound')
+        if peak > ACTIVATION_RAIL:
+            meta['logit_shift'] = min(5, max(0, int(
+                math.ceil(math.log2(peak / ACTIVATION_RAIL)))))
     T = []
 
     def f32(a):
@@ -980,12 +1562,33 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
                 er[i], es[i] = q8mat(np.asarray(m['emb'][i], np.float32))
         T.append((T_EMB, DT_Q8I8, vocab, dim, 0, er.tobytes(), 0.0))
         T.append((T_EMB_SCALE, DT_F32, vocab, 1, 0, es.tobytes(), 0.0))
-    T.append((T_RMS_ATT, DT_F32, layers, dim, 0, f32(m['rms_att']), 0.0))
-    T.append((T_RMS_FFN, DT_F32, layers, dim, 0, f32(m['rms_ffn']), 0.0))
-    T.append((T_RMS_FINAL, DT_F32, 1, dim, 0, f32(m['rms_final']), 0.0))
-    if qk:
-        T.append((T_Q_NORM, DT_F32, layers, head_dim, 0, f32(m['q_norm']), 0.0))
-        T.append((T_K_NORM, DT_F32, layers, head_dim, 0, f32(m['k_norm']), 0.0))
+    if rwkv:
+        # The f32 per-channel vectors: one record per kind, rows = layers (1
+        # for the two model-wide norms) and cols = groups * dim in the HF/GGUF
+        # order, so a reader can diff a row against llama.cpp's tensor.
+        for tid, arr, glob in ((K_RWKV_LERP, m['lerp'], False),
+                               (K_RWKV_BIAS, m['bias'], False),
+                               (K_RWKV_SCALE, m['scale'], False),
+                               (K_RWKV_ATT_NORM, m['att_norm'], False),
+                               (K_RWKV_ATT_NORM_2, m['att_norm_2'], False),
+                               (K_RWKV_LN_X, m['ln_x'], False),
+                               (K_RWKV_CM_LERP, m['cm_lerp'], False),
+                               (K_RWKV_TOK_NORM, m.get('tok_norm'), True),
+                               (K_RWKV_OUT_NORM, m['out_norm'], True)):
+            if arr is None:
+                continue
+            a = np.asarray(arr, np.float32)
+            if glob:
+                T.append((tid, DT_F32, 1, int(a.size), 0, f32(a), 0.0))
+            else:
+                T.append((tid, DT_F32, layers, int(a.size) // layers, 0, f32(a), 0.0))
+    else:
+        T.append((T_RMS_ATT, DT_F32, layers, dim, 0, f32(m['rms_att']), 0.0))
+        T.append((T_RMS_FFN, DT_F32, layers, dim, 0, f32(m['rms_ffn']), 0.0))
+        T.append((T_RMS_FINAL, DT_F32, 1, dim, 0, f32(m['rms_final']), 0.0))
+        if qk:
+            T.append((T_Q_NORM, DT_F32, layers, head_dim, 0, f32(m['q_norm']), 0.0))
+            T.append((T_K_NORM, DT_F32, layers, head_dim, 0, f32(m['k_norm']), 0.0))
 
     def mat(tid, layer, w, aux=0):
         rows, cols = int(w.shape[0]), int(w.shape[1])
@@ -1014,6 +1617,25 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
 
     ltypes = m.get('layer_types') or []
     for l in range(layers):
+        if rwkv:
+            # 0x10 holds [W_r; W_k; W_v] as one row block (the plan's rkv
+            # slot); 0x12/0x15 are the channel mix's key/value pair.  The four
+            # low-rank pairs are q8 or q4 like every other matrix, and layer 0
+            # simply has no value-residual pair to write.
+            mat(T_QKV, l, m['rkv'][l])
+            mat(T_WO, l, m['wo'][l])
+            mat(T_W1, l, m['cm_key'][l])
+            mat(T_W2, l, m['cm_value'][l])
+            for br, kd, ku in (('w', K_RWKV_W1, K_RWKV_W2),
+                               ('v', K_RWKV_V1, K_RWKV_V2),
+                               ('a', K_RWKV_A1, K_RWKV_A2),
+                               ('g', K_RWKV_G1, K_RWKV_G2)):
+                pair = m['lora'].get(br)
+                if pair is None or pair[0][l] is None:
+                    continue
+                mat(kd, l, pair[0][l])
+                mat(ku, l, pair[1][l])
+            continue
         if ltypes and ltypes[l] == 'conv':
             mat(T_CONV_IN, l, m['conv_in'][l])
             # The depthwise kernel is dim x k floats (24 KiB at most): f32, no
@@ -1063,6 +1685,14 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
                 q, sc = q8mat(np.asarray(w, np.float32))
                 T.append((T_LOGITS | (i << 8), DT_Q8I8, int(w.shape[0]), int(w.shape[1]),
                           0, q.tobytes(), float(sc)))
+    if meta.get('logit_shift'):
+        # Metadata key 17: the head's input is written *2^-k, so every logits
+        # matrix reads back *2^k.  Folding it into the per-tile scale is free
+        # on the read side (`ws` already exists) and leaves the kernel alone.
+        mult = float(1 << int(meta['logit_shift']))
+        for i, rec in enumerate(T):
+            if (rec[0] & 0xFF) == T_LOGITS and (rec[0] >> 14) == 0:
+                T[i] = rec[:6] + (float(rec[6]) * mult,) + rec[7:]
     return meta, T
 
 

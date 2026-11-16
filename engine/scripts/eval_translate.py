@@ -24,6 +24,11 @@ reason the multiple-choice battery documents: the MiniMind pair ignores English
 formatting instructions, and a per-language instruction would measure that
 preference rather than translation.
 
+Decoding is per container (--preset auto): greedy for the transformers, the
+RWKV-7 model card's recommended sampling (temp 1.0 / top_p 0.3 /
+repetition_penalty 1.2, see evalkit.RWKV_SAMPLING) for RWKV -- the same
+protocol eval_ifeval scores it with.
+
 Metrics
 -------
 * chrF -- character n-gram F-score, n = 1..6, beta = 2 (recall-weighted), mean
@@ -59,7 +64,7 @@ import subprocess
 from worker_engine import WorkerEngine
 import sys
 import time
-from evalkit import Engine, load_jsonl  # the one engine client and JSONL loader
+from evalkit import Engine, load_jsonl, is_rwkv_container, RWKV_SAMPLING  # the one engine client and JSONL loader
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 NL = chr(10)
@@ -171,6 +176,11 @@ def main(argv=None):
                                                    "eval", "translate.jsonl"))
     ap.add_argument("--out", default="/tmp/eval_translate")
     ap.add_argument("--gen", type=int, default=96)
+    ap.add_argument("--preset", default="auto", choices=["auto", "greedy", "rwkv"],
+                    help="auto: greedy for the transformer containers (the "
+                         "historical protocol), the RWKV-7 model card's sampling "
+                         "(evalkit.RWKV_SAMPLING) for an RWKV container; explicit "
+                         "--temp/--top-p/... still override for sensitivity runs")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--system", default="You are a helpful assistant.")
     ap.add_argument("--engine", default=os.path.join(ROOT, "engine", "engine_mm3"))
@@ -190,13 +200,13 @@ def main(argv=None):
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args(argv)
-    sampling = {"greedy": 1}
+    overrides = None
     if args.temp is not None:
-        sampling = {"temp": args.temp}
+        overrides = {"temp": args.temp}
         for k, v in (("top-k", args.top_k), ("top-p", args.top_p),
                      ("repeat-penalty", args.repeat_penalty)):
             if v is not None:
-                sampling[k] = v
+                overrides[k] = v
 
     items = load_jsonl(args.data, args.limit or None)
     if not items:
@@ -213,7 +223,18 @@ def main(argv=None):
         name, _, path = spec.partition("=")
         if not path or not os.path.exists(path):
             raise SystemExit("no such model: %r" % spec)
+        # Per container: the transformer rows stay greedy (translation is a
+        # deterministic task for them and the 2026-11-12 table was run that
+        # way); RWKV-7 is scored with its model card's recommended sampling,
+        # the same preset eval_ifeval uses -- greedy is not its protocol.
+        if overrides is not None:
+            sampling = dict(overrides)
+        elif args.preset == "rwkv" or (args.preset == "auto" and is_rwkv_container(path)):
+            sampling = dict(RWKV_SAMPLING)
+        else:
+            sampling = {"greedy": 1}
         print("%s== %s (%s)" % (NL, name, path), flush=True)
+        print("sampling %s  seed %d" % (sampling, args.seed), flush=True)
         if args.reuse_worker:
             eng = WorkerEngine(args.engine, path, env, args.system, sampling)
         else:

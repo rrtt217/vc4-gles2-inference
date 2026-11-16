@@ -15,6 +15,10 @@ What it covers, in one run:
   i16 chain  minimind3 -> minimind2-small -> TinyChat15M -> back
   hybrid     lfm2.5 dedup -> lfm2.5 q6 -> back   (conv path)
   mixed      minimind3.q8 -> .q4 -> minimind2.q4 -> feng.q8 -> lfm2.5.q4 -> back
+  rwkv       minimind3.q8 -> rwkv7 q8r -> rwkv7 q8 -> rwkv7 q8r -> minimind3.q8
+             (the third layer loop: WKV state built from zero on the way in,
+             the per-row scale planes appear/disappear on the family change,
+             and no RWKV state may survive the way back out)
   slash line a line that starts with "/" but is not a command is still a prompt
   worker     the protocol's {"op":"load"} line: two loads inside one worker,
              answers byte-identical to fresh workers, and a bad op is an error
@@ -124,8 +128,24 @@ def main():
              "../models/feng30m/feng.q8.mmcf",
              "../models/lfm2.5-230m/lfm2.5.q4.dedup.mmcf",
              "../models/minimind3/minimind3.q8.mmcf"]
+    # RWKV-7 (docs/rwkv7-plan.zh-CN.md, O32): the swap must rebuild the WKV
+    # state and both token-shift vectors on the way in and drop them on the way
+    # out.  The middle two hops change the q8 weight family (per-row scale
+    # planes vs one scale per matrix), which is the row-scale half of the
+    # program-cache/hash invariant; a stale Mat or a stale state would answer
+    # plausibly and differ from a fresh process, which is what this compares.
+    rwkv = ["../models/minimind3/minimind3.q8.mmcf",
+            "../models/rwkv7/packed/rwkv7-g1d-0.1b.q8r.chat.mmcf",
+            "../models/rwkv7/packed/rwkv7-g1d-0.1b.q8.chat.mmcf",
+            "../models/rwkv7/packed/rwkv7-g1d-0.1b.q8r.chat.mmcf",
+            "../models/minimind3/minimind3.q8.mmcf"]
+    chains = [("q8", q8), ("q4", q4), ("i16", i16), ("hybrid", hybrid), ("mixed", mixed)]
+    if os.path.exists(rwkv[1]):
+        chains.append(("rwkv", rwkv))
+    else:
+        print("== rwkv chain: skipped (no RWKV container under ../models/rwkv7) ==")
     fail = 0
-    for tag, seq in (("q8", q8), ("q4", q4), ("i16", i16), ("hybrid", hybrid), ("mixed", mixed)):
+    for tag, seq in chains:
         print(f"== {tag} chain: {len(seq)-1} swaps ==")
         ref = {}
         for m in seq:

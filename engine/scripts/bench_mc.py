@@ -273,6 +273,15 @@ def main(argv=None):
     ap.add_argument("--out", default="/tmp/bench_mc")
     ap.add_argument("--limit", type=int, default=0, help="score at most N items in total")
     ap.add_argument("--system", default="You are a helpful assistant.")
+    ap.add_argument("--completion", action="store_true",
+                    help="feed the prompts raw, without --chat/--system.  RWKV "
+                         "needs this: its chat template opens a think marker at "
+                         "the answer position, so the first decoded token is '>' "
+                         "and the letter logits score noise (fmt ~ 0).  In "
+                         "completion mode the same prompt's first token is the "
+                         "letter itself.  The transformer models stay in chat "
+                         "mode; the letter splice probe works in both (no "
+                         "template markers to land after in completion mode)")
     ap.add_argument("--engine", default=os.path.join(ROOT, "engine", "engine_mm3"))
     ap.add_argument("--env", action="append", default=[], metavar="K=V")
     ap.add_argument("--no-calibrate", action="store_true")
@@ -301,7 +310,8 @@ def main(argv=None):
         if not os.path.exists(path):
             raise SystemExit("no such model: %s" % path)
         print("%s== %s (%s)" % (NL, name, path), flush=True)
-        eng = Engine(args.engine, path, env, args.system)
+        # system=None is evalkit's "no --chat": the completion-mode switch.
+        eng = Engine(args.engine, path, env, None if args.completion else args.system)
         cache = os.path.join(args.out, name + ".letters.json")
         letter_ids = None
         if os.path.exists(cache):

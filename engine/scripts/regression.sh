@@ -73,6 +73,17 @@
 #                it from a known-good tree, see the MoE block below.
 #   MOE_PPL      compute the MoE container's PPL as well (=1; slow on the Pi)
 #   MOE_PPL_EXPECT expected MoE PPL; empty = print only
+#   RWKV         an RWKV-7 container (v4) to check as well; defaults to the g1d
+#                0.1B q8r chat container when it exists, RWKV= (empty) or a
+#                missing file skips it.  It gets determinism, the default-system
+#                check, the greedy prefix pin (RWKV_EXPECT) and PPL.  The reply
+#                is multi-line (g1d thinks out loud), so it is captured whole,
+#                not head -1 like the dense strings.
+#   RWKV_EXPECT  expected RWKV prefix; empty = print only
+#   RWKV_PPL_EXPECT expected RWKV PPL; empty = print only
+#   RWKV_PPL_SEQ SEQ for the RWKV PPL run (default 512, the container's own;
+#                the dense PPL_SEQ does not apply -- PPL is not comparable
+#                across SEQ)
 #   PPL_TOL      relative tolerance for both (default 0.01)
 #   PPL_FILE     corpus (default data/ppl_test.txt)
 #   PPL_SEQ      SEQ used for the ppl runs (default 768; values are not
@@ -102,6 +113,12 @@ MOE_EXPECT="${MOE_EXPECT:-}"
 MOE_ROUTES="${MOE_ROUTES:-}"
 MOE_PPL="${MOE_PPL:-0}"
 MOE_PPL_EXPECT="${MOE_PPL_EXPECT:-}"
+# ${RWKV-...} without the colon: an explicit RWKV= is a skip, not "use the
+# default".  The file check below turns a missing container into a skip too.
+RWKV="${RWKV-../models/rwkv7/packed/rwkv7-g1d-0.1b.q8r.chat.mmcf}"
+RWKV_EXPECT="${RWKV_EXPECT:-}"
+RWKV_PPL_EXPECT="${RWKV_PPL_EXPECT:-}"
+RWKV_PPL_SEQ="${RWKV_PPL_SEQ:-512}"
 PROMPT="用一句话介绍你自己。"
 PROMPT2="写一首关于春天的短诗。"
 
@@ -127,6 +144,14 @@ answer() {
 # line, so a run that does not emit EOS would otherwise fail the terminator
 # check; strip it before anything judges the text.
 text() { answer "$@" | sed -n 's/^Assistant: //p' | head -1 | sed 's/\[stopped.*//'; }
+
+# The RWKV reply spans lines (g1d answers with a leading marker line and then
+# prose, in either template mode), so keep everything from the Assistant marker
+# to the end, strip the marker on the first line and the gen-limit note wherever
+# it landed.
+rwkv_text() {
+    answer "$@" | sed -n '/^Assistant: /,$p' | sed '1s/^Assistant: //' | sed 's/\[stopped.*//'
+}
 
 # A software rasteriser invalidates every pin below it, so stop before them.
 if MODEL="$Q8" GPU_LAYER=1 KV_PACK=16 "$BIN" --prompt x --gen 1 2>&1 >/dev/null \
@@ -299,6 +324,55 @@ else
     echo "moe: skipped (set MOE=<container> to check a v3 model)"
 fi
 
+# RWKV-7: the third layer loop (docs/rwkv7-plan.zh-CN.md, P2/P4).  Same contract
+# as the dense pins -- determinism first, then the per-machine prefix, then PPL
+# -- but the reply is multi-line and cut at the gen limit mid-sentence, so the
+# dense behaviour check (Chinese sentence terminator) does not apply: non-empty
+# and no collapse is the bar.  The default-system check is the same invariant as the dense one: the
+# container's key-6 prompt and the gate's --system must render the same answer.
+r1=""
+if [ -n "$RWKV" ] && [ -f "$RWKV" ]; then
+    r1=$(rwkv_text "$RWKV" "$PROMPT" 16 "$SYS")
+    r2=$(rwkv_text "$RWKV" "$PROMPT" 16 "$SYS")
+    if [ "$r1" != "$r2" ]; then
+        echo "rwkv determinism FAIL: two runs of the same binary differ" >&2
+        echo "  run 1: $r1" >&2
+        echo "  run 2: $r2" >&2
+        exit 1
+    fi
+    echo "rwkv determinism OK"
+    rdef=$(rwkv_text "$RWKV" "$PROMPT" 16 "")
+    [ "$rdef" = "$r1" ] || {
+        echo "rwkv system prompt drift: --system '$SYS' gives '$r1'" >&2
+        echo "  but the container default gives '$rdef'" >&2
+        echo "  update the container, this gate and docs/performance.md together" >&2
+        exit 1
+    }
+    echo "rwkv default system prompt OK"
+    check_prefix rwkv "$RWKV_EXPECT" "$r1"
+    python3 - "$r1" <<'PY'
+import sys
+s = sys.argv[1]
+bad = []
+if len(s) < 6:
+    bad.append("len<6")
+for i in range(len(s) - 11):
+    w = s[i:i+4]
+    if s[i:i+12] == w * 3:
+        bad.append("repeated %r" % w)
+        break
+if bad:
+    print("rwkv behaviour FAIL: %s | %r" % (", ".join(bad), s), file=sys.stderr)
+    sys.exit(1)
+print("rwkv behaviour OK")
+PY
+elif [ -n "$RWKV" ]; then
+    echo "rwkv: skipped (no container at $RWKV)"
+    RWKV=""
+else
+    echo "rwkv: skipped (RWKV= empty)"
+fi
+
 # SEQ is pinned: the ppl path chunks the corpus per window, so the token count
 # and the value both move with SEQ and are not comparable across settings.
 # $1 model, $2 ACT8 mode.  ACT8 only rewrites the all-INT8 activation feed,
@@ -338,6 +412,15 @@ if [ "${NO_PPL:-0}" != 1 ]; then
         echo "PPL moe:      $moep"
         check_ppl "PPL moe" "$MOE_PPL_EXPECT" "$moep"
     fi
+    if [ -n "$RWKV" ]; then
+        # The RWKV container's own SEQ, not PPL_SEQ: the window protocol moves
+        # with SEQ and the two models' numbers are not comparable anyway.
+        rwkvp=$(MODEL="$RWKV" GPU_LAYER=1 KV_PACK=16 SEQ="$RWKV_PPL_SEQ" \
+            "$BIN" --ppl "$CORPUS" 2>&1 \
+            | sed -n 's/^PPL \([0-9.]*\).*/\1/p' | head -1)
+        echo "PPL rwkv:     $rwkvp"
+        check_ppl "PPL rwkv" "$RWKV_PPL_EXPECT" "$rwkvp"
+    fi
 fi
 
 if [ "$REBASE" = 1 ]; then
@@ -349,6 +432,8 @@ Q4_EXPECT='$q4'
 PPL_EXPECT='${p0:-}'
 Q4_PPL_EXPECT='${q4p:-}'
 MOE_EXPECT='${m1:-}'
+RWKV_EXPECT='${r1:-}'
+RWKV_PPL_EXPECT='${rwkvp:-}'
 EOF
 fi
 

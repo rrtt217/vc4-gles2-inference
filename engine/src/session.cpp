@@ -130,6 +130,27 @@ Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
         gpu_.reset_format_plan();
         gpu_layer_ = gpu_.gpu_layer_enabled();
         gpu_attn_ = gpu_layer_ || gpu_.gpu_attn_enabled();
+        // RWKV-7 has no attention block, no FFN gate pair and no KV cache, so
+        // none of the fused path's state applies: its layer loop is matvec +
+        // host elementwise (docs/rwkv7-plan.zh-CN.md, P2), and everything
+        // below -- the conv history, the KV caches, the rope tables, the
+        // rmsnorm weight textures, init_attention() -- would be state nothing
+        // reads.  GPU_LAYER=1 is honoured by ignoring it: forward_gpu_hidden()
+        // runs a transformer block.
+        if (m_.is_rwkv()) {
+                // gpu_attn_ = false and kv_cache_ empty also decide the disk
+                // prefix cache: prefix_cache.cpp refuses to save or load when
+                // either is unset, which is the answer the plan's O30 wants for
+                // P2 -- the state is a WKV snapshot (version 5), and that is a
+                // P6 item, not a cache with a stale shape in it.
+                gpu_layer_ = false;
+                gpu_attn_ = false;
+                // The recurrence and both token-shift vectors: zero here, and
+                // again through reset() (the REPL's /model reconstructs the
+                // session, which is what drops a previous model's state).
+                zero_rwkv_state();
+                return;
+        }
         // Both loops are correct for a hybrid model since 2026-11-12: the q8
         // conv block was reading its matvec output 256 too large (a q24 encode
         // bug in matvec_q8's I16_2 branch) and the i16 residual format was
@@ -147,19 +168,25 @@ Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
                         conv_state_[l].assign((size_t)(m_.conv_k - 1) * m_.dim, 0.0f);
             }
         }
-        if (!gpu_attn_) {
-            kv_cache_k_.resize(m_.layers, vector<float>((size_t)m_.seq * m_.kv_dim, 0));
-            kv_cache_v_.resize(m_.layers, vector<float>((size_t)m_.seq * m_.kv_dim, 0));
-        }
-        const int half = m_.head_dim / 2;
-        rope_cos_.resize((size_t)m_.seq * half);
-        rope_sin_.resize((size_t)m_.seq * half);
-        for (int p = 0; p < m_.seq; ++p) {
-            for (int i = 0; i < half; ++i) {
-                float freq = 1.0f / powf(m_.rope_theta, (2.0f * i) / m_.head_dim);
-                float a = p * freq;
-                rope_cos_[(size_t)p * half + i] = cosf(a);
-                rope_sin_[(size_t)p * half + i] = sinf(a);
+        // RWKV-7 keeps no KV cache and no RoPE: its cross-token state is the
+        // fixed-size WKV matrix plus two shift vectors (RwkvState).  Allocating
+        // seq*kv_dim KV rows and a seq*half RoPE table for it would waste RAM
+        // (and startup time) for buffers no RWKV kernel ever reads.
+        if (!m_.is_rwkv()) {
+            if (!gpu_attn_) {
+                kv_cache_k_.resize(m_.layers, vector<float>((size_t)m_.seq * m_.kv_dim, 0));
+                kv_cache_v_.resize(m_.layers, vector<float>((size_t)m_.seq * m_.kv_dim, 0));
+            }
+            const int half = m_.head_dim / 2;
+            rope_cos_.resize((size_t)m_.seq * half);
+            rope_sin_.resize((size_t)m_.seq * half);
+            for (int p = 0; p < m_.seq; ++p) {
+                for (int i = 0; i < half; ++i) {
+                    float freq = 1.0f / powf(m_.rope_theta, (2.0f * i) / m_.head_dim);
+                    float a = p * freq;
+                    rope_cos_[(size_t)p * half + i] = cosf(a);
+                    rope_sin_[(size_t)p * half + i] = sinf(a);
+                }
             }
         }
         if (gpu_layer_) {
@@ -232,6 +259,19 @@ Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
             gpu_.init_persistent(m_.dim, m_.layers, m_.rms_att, m_.rms_ffn, m_.rms_final);
     }
 
+// The block's whole history: one head_size x head_size recurrence per head per
+// layer (f32, see session.h) and the two token-shift rows per layer.  Sized from
+// the model, so the constructor and any future caller agree.
+void Session::zero_rwkv_state(){
+        if (!m_.is_rwkv()) return;
+        const size_t hs = (size_t)m_.rwkv.head_size;
+        rwkv_state_.wkv.assign((size_t)m_.layers * m_.heads * hs * hs, 0.0f);
+        rwkv_state_.shift_att.assign((size_t)m_.layers * m_.dim, 0.0f);
+        rwkv_state_.shift_ffn.assign((size_t)m_.layers * m_.dim, 0.0f);
+        rwkv_state_.v_first.assign(m_.dim, 0.0f);
+        rwkv_state_.have_v_first = false;
+}
+
 void Session::zero_conv_state(){
         if (!m_.hybrid) return;
         if (gpu_layer_) { gpu_.clear_conv_state(); return; }
@@ -251,13 +291,14 @@ static bool act_f32() {
     return on;
 }
 
-vector<float> Session::embedding(int token){
+vector<float> Session::embedding(int token, bool exact_f32){
         vector<float> x(m_.dim);
+        const bool f32 = exact_f32 || act_f32();
+        auto q = [&](float v) { return f32 ? v : quantize_act_f(v); };
         if (m_.has_i16_emb) {
             float s = m_.emb_scale[token];
             for (int i = 0; i < m_.dim; ++i)
-                x[i] = act_f32() ? (float)m_.emb_i16[(size_t)token * m_.dim + i] * s
-                                : quantize_act_f((float)m_.emb_i16[(size_t)token * m_.dim + i] * s);
+                x[i] = q((float)m_.emb_i16[(size_t)token * m_.dim + i] * s);
         } else if (m_.has_q6_emb) {
             // q6 row: 4-bit low plane, 2-bit high plane, both row-major.
             const float s = m_.emb_scale[token];
@@ -268,15 +309,15 @@ vector<float> Session::embedding(int token){
                 const int hb = (hi[i / 4] >> (2 * (i & 3))) & 3;
                 int v = lb | (hb << 4);
                 if (v >= 32) v -= 64;
-                x[i] = act_f32() ? (float)v * s : quantize_act_f((float)v * s);
+                x[i] = q((float)v * s);
             }
         } else if (m_.has_q8_emb) {
             float s = m_.emb_scale[token];
             for (int i = 0; i < m_.dim; ++i)
-                x[i] = quantize_act_f((float)m_.emb_q8[(size_t)token * m_.dim + i] * s);
+                x[i] = q((float)m_.emb_q8[(size_t)token * m_.dim + i] * s);
         } else {
             for (int i = 0; i < m_.dim; ++i)
-                x[i] = quantize_act_f(m_.emb_f32[(size_t)token * m_.dim + i]);
+                x[i] = q(m_.emb_f32[(size_t)token * m_.dim + i]);
         }
         return x;
     }
@@ -466,6 +507,332 @@ vector<float> Session::forward(int token, int pos){
         return x;
     }
 
+// ---- RWKV-7: the block's layer loop (docs/rwkv7-plan.zh-CN.md, O1-O25) ------
+//
+// A single token through one RWKV-7 (Goose) layer, transcribed from
+// engine/tools/ref_rwkv.py's Rwkv7.forward() -- the oracle this path is accepted
+// against, cos 1.00000000 against the official rwkv package on the same
+// checkpoint (docs/rwkv7-plan.zh-CN.md, section 10).  The *order* is the
+// oracle's and has to stay the oracle's: the block is a chain, so a swapped pair
+// is a different model rather than a different rounding.
+//
+// What runs where: r/k/v, the four low-rank pairs, W_o, the channel mix's key
+// and value, and the logits cross a texture (GPU::matvec); the token shift, the
+// six lerps, tanh/sigmoid/exp, the per-head L2 norm, the WKV recurrence, the
+// per-head group norm, the r_k bonus and the gating are f32 on the host.  That
+// is P2's split: the matvec family already exists (no new shader), and the
+// recurrence is the one tensor whose f32-ness is a measured requirement -- S-1
+// puts the q16 grid on the state at +0.1543 nats/token and greedy 6/8.
+static const float kRwkvDecayC = 0.60653065971263342f;  // 1/sqrt(e), rwkv7-base.cpp:69
+static const float kRwkvGroupEps = 64e-5f;              // rwkv7-base.cpp:118
+
+// 1/(1+exp(-z)) without the overflow.  g1d's decay and gate logits reach +-80,
+// where exp(-z) is not representable; the oracle suppresses the warning and
+// keeps the saturated 0/1, which is what this returns.
+static inline float rwkv_sigmoid(float z){
+    if (z >= 0.0f) return 1.0f / (1.0f + expf(-z));
+    const float e = expf(z);
+    return e / (1.0f + e);
+}
+
+vector<float> Session::rwkv_layernorm(const vector<float>& x, const float* wb, float eps){
+        const int n = (int)x.size();
+        double sum = 0.0;
+        for (float v : x) sum += v;
+        const float mu = (float)(sum / n);
+        double vs = 0.0;
+        for (float v : x) { const double d = (double)v - (double)mu; vs += d * d; }
+        const float inv = 1.0f / sqrtf((float)(vs / n) + eps);
+        vector<float> o((size_t)n);
+        for (int i = 0; i < n; ++i) o[i] = (x[i] - mu) * inv * wb[i] + wb[n + i];
+        return o;
+    }
+
+// A matvec whose input may sit past the q16 activation rail (+-127.996).  The
+// token-shift lerps do: g1d's xv reaches 225 and layers 3-9 cross the rail,
+// where the upload clamps *silently* -- that was worth cos 0.9948 against the
+// oracle until it was found.  Dividing the input by 2^k and multiplying the
+// matrix's read-back scale by 2^k is exact (both are powers of two) and leaves
+// the *output* unchanged, because the kernel computes scale*dot; it only moves
+// the input rail to 128*2^k.
+//
+// k normalises the peak into 32..63 -- the same target GPU::matvec_s aims at --
+// rather than being the smallest value that fits under the rail: both forms fix
+// the overflow, and they differ only in which quantisation of the same row the
+// kernel sees (measured: cos 0.99605 against the container-weight oracle for
+// this form, 0.99547 for the threshold form; at that level it is the grid's
+// noise floor, not a quality ranking).
+//
+// GPU::matvec_s is the opposite operation -- it scales the input *up* to buy
+// resolution, which multiplies the output before the kernel's own clamp -- so
+// it cannot be used here: this block's matvec outputs run to 90.
+vector<float> Session::rwkv_mv(const Mat& m, const vector<float>& x){
+        float mx = 0.0f;
+        for (float v : x) mx = std::max(mx, fabsf(v));
+        int e = 0;
+        frexpf(mx, &e);                  // mx = f * 2^e, f in [0.5, 1)
+        const int k = e - 6;             // put the peak in 32..63
+        if (!(mx > 0.0f) || k <= 0) return gpu_.matvec(m, x);
+        Mat ms = m;                      // a view: borrowed bytes are not copied
+        if (ms.type == WeightType::INT4) ms.q4_param_scale = ldexpf(m.q4_param_scale, k);
+        else ms.scale = ldexpf(m.scale, k);
+        const float inv = ldexpf(1.0f, -k);
+        vector<float> xs(x.size());
+        for (size_t i = 0; i < x.size(); ++i) xs[i] = x[i] * inv;
+        // No correction on the way out: the kernel's own scale uniform undoes
+        // the input scaling exactly, so the readback is already in model units.
+        return gpu_.matvec(ms, xs);
+    }
+
+vector<float> Session::forward_rwkv(int token){
+        const int dim = m_.dim, L = m_.layers, H = m_.heads, hs = m_.rwkv.head_size;
+        const float eps = m_.rwkv.norm_eps;
+        const size_t hdim = (size_t)hs * (size_t)hs;
+        // The token norm is layer 0's pre_norm, which the container carries
+        // model-wide (id 0x22): one vector, not a per-layer group.  llama.cpp
+        // reads it as token_embd_norm and the oracle applies it as layer 0's
+        // pre_norm, which is the same function at every position.
+        // The embedding stays off the q16 grid: g1d's rows peak at 0.08 and the
+        // grid's step is 1/256, so rounding here would leave two or three bits
+        // per component -- and the block's first op is a LayerNorm, which
+        // divides by the row's deviation and hands that error straight to every
+        // matvec.  Everything after the token norm is an O(1) row, so the grid
+        // there is the one A-1/K-1/Q-1 priced.
+        vector<float> x = embedding(token, true);
+        if (!m_.rwkv_tok_norm.empty()) x = rwkv_layernorm(x, m_.rwkv_tok_norm.data(), eps);
+        vector<float> sa((size_t)hs);           // <S[i], kk>, per head, reused
+        for (int l = 0; l < L; ++l) {
+            if (g_stop) return x;
+            // O1/O2/O3: att_norm, then the six token-shifted inputs.  Position
+            // t's previous input is the *normalised* row of t-1, which is why
+            // the shift state holds xn and not x.
+            vector<float> xn = rwkv_layernorm(x, m_.rwkv_att_norm.data() + (size_t)l * 2 * dim, eps);
+            float* sh = rwkv_state_.shift_att.data() + (size_t)l * dim;
+            const float* lp = m_.rwkv_lerp.data() + (size_t)l * 6 * dim;
+            vector<float> xr((size_t)dim), xw((size_t)dim), xk((size_t)dim);
+            vector<float> xv((size_t)dim), xa((size_t)dim), xg((size_t)dim);
+            for (int i = 0; i < dim; ++i) {
+                const float sx = sh[i] - xn[i];
+                xr[i] = xn[i] + sx * lp[i];
+                xw[i] = xn[i] + sx * lp[dim + i];
+                xk[i] = xn[i] + sx * lp[2 * dim + i];
+                xv[i] = xn[i] + sx * lp[3 * dim + i];
+                xa[i] = xn[i] + sx * lp[4 * dim + i];
+                xg[i] = xn[i] + sx * lp[5 * dim + i];
+            }
+            memcpy(sh, xn.data(), sizeof(float) * dim);
+            // O4-O6: the three projections.  The container stores them as one
+            // 3*dim x dim matrix under the dense qkv id; split_rwkv() cut it
+            // into the three Mats each of these needs.
+            vector<float> r = rwkv_mv(m_.rwkv_r[l], xr);
+            vector<float> k = rwkv_mv(m_.rwkv_k[l], xk);
+            vector<float> v = rwkv_mv(m_.rwkv_v[l], xv);
+            const float* w0 = m_.rwkv_bias.data() + (size_t)l * 3 * dim;
+            const float* a0 = w0 + dim;
+            const float* v0 = a0 + dim;
+            // O7: the decay branch.  w = exp(-sigmoid(tanh(xw W_w1) W_w2 + w0)
+            // / sqrt(e)) is in (0.545, 1]; it multiplies the state once per
+            // token, which is why W-1 stores 1-w rather than w.
+            vector<float> w((size_t)dim);
+            {
+                vector<float> t = rwkv_mv(m_.rwkv_w1[l], xw);
+                for (float& z : t) z = tanhf(z);
+                vector<float> u = rwkv_mv(m_.rwkv_w2[l], t);
+                for (int i = 0; i < dim; ++i)
+                    w[i] = expf(-rwkv_sigmoid(u[i] + w0[i]) * kRwkvDecayC);
+            }
+            // O8: the value residual.  Layer 0 records v_first (its v_lora is
+            // absent by construction); every later layer pulls v towards it.
+            if (l == 0) {
+                rwkv_state_.v_first = v;
+                rwkv_state_.have_v_first = true;
+            } else if (rwkv_state_.have_v_first && m_.rwkv_v1[l].rows > 0) {
+                vector<float> t = rwkv_mv(m_.rwkv_v1[l], xv);
+                vector<float> u = rwkv_mv(m_.rwkv_v2[l], t);
+                const float* vf = rwkv_state_.v_first.data();
+                for (int i = 0; i < dim; ++i)
+                    v[i] += (vf[i] - v[i]) * rwkv_sigmoid(u[i] + v0[i]);
+            }
+            // O9: ICLR's gate, sigmoid on the *up* projection (unlike O10).
+            vector<float> a((size_t)dim);
+            {
+                vector<float> t = rwkv_mv(m_.rwkv_a1[l], xa);
+                vector<float> u = rwkv_mv(m_.rwkv_a2[l], t);
+                for (int i = 0; i < dim; ++i) a[i] = rwkv_sigmoid(u[i] + a0[i]);
+            }
+            // O10: the optional time-mix gate.  sigmoid on the *down*
+            // projection, no bias, and key 16 says whether the model has one.
+            const bool have_gate = m_.rwkv.gate && l < (int)m_.rwkv_g1.size() &&
+                                   m_.rwkv_g1[l].rows > 0;
+            vector<float> g;
+            if (have_gate) {
+                vector<float> t = rwkv_mv(m_.rwkv_g1[l], xg);
+                for (float& z : t) z = rwkv_sigmoid(z);
+                g = rwkv_mv(m_.rwkv_g2[l], t);
+            }
+            // O11/O12: kk is the L2-normalised key, k the a-modulated one.
+            const float* sk = m_.rwkv_scale.data() + (size_t)l * 3 * dim;
+            const float* kk_s = sk;
+            const float* ka_s = sk + dim;
+            const float* rk_s = sk + 2 * dim;
+            vector<float> kk((size_t)dim);
+            for (int i = 0; i < dim; ++i) kk[i] = k[i] * kk_s[i];
+            for (int i = 0; i < dim; ++i) k[i] += (a[i] - 1.0f) * k[i] * ka_s[i];
+            for (int h = 0; h < H; ++h) {
+                float* z = kk.data() + (size_t)h * hs;
+                double ss = 0.0;
+                for (int i = 0; i < hs; ++i) ss += (double)z[i] * (double)z[i];
+                const float nrm = (float)sqrt(ss);
+                const float inv = 1.0f / (nrm > 1e-12f ? nrm : 1e-12f);
+                for (int i = 0; i < hs; ++i) z[i] *= inv;
+            }
+            // O13/O14: the recurrence.  Per head, with S[i][j] indexed the way
+            // the oracle and llama.cpp's wkv7 kernel index it -- the row i
+            // pairs with v and r, the column j with w, kk and k:
+            //   sa_i  = <S[i], kk>              (pre-update state)
+            //   S[i]  = S[i]*w + v_i*k + sa_i*(kk*a)
+            //   out_i = <S[i], r>
+            vector<float> y((size_t)dim);
+            {
+                float* S = rwkv_state_.wkv.data() + (size_t)l * H * hdim;
+                for (int h = 0; h < H; ++h) {
+                    float* Sh = S + (size_t)h * hdim;
+                    const float* kkh = kk.data() + (size_t)h * hs;
+                    const float* ah = a.data() + (size_t)h * hs;
+                    const float* kh = k.data() + (size_t)h * hs;
+                    const float* vh = v.data() + (size_t)h * hs;
+                    const float* wh = w.data() + (size_t)h * hs;
+                    const float* rh = r.data() + (size_t)h * hs;
+                    for (int i = 0; i < hs; ++i) {
+                        double acc = 0.0;
+                        const float* Si = Sh + (size_t)i * hs;
+                        for (int j = 0; j < hs; ++j) acc -= (double)Si[j] * (double)kkh[j];
+                        sa[i] = (float)acc;
+                    }
+                    for (int i = 0; i < hs; ++i) {
+                        float* Si = Sh + (size_t)i * hs;
+                        const float vi = vh[i], s = sa[i];
+                        for (int j = 0; j < hs; ++j)
+                            Si[j] = Si[j] * wh[j] + vi * kh[j] + s * (kkh[j] * ah[j]);
+                    }
+                    float* yh = y.data() + (size_t)h * hs;
+                    for (int i = 0; i < hs; ++i) {
+                        const float* Si = Sh + (size_t)i * hs;
+                        double acc = 0.0;
+                        for (int j = 0; j < hs; ++j) acc += (double)Si[j] * (double)rh[j];
+                        yh[i] = (float)acc;
+                    }
+                }
+            }
+            // O15: per-head group norm over the 64 channels, eps 64e-5 (the
+            // architecture's own, not key 16's), then the ln_x affine.
+            {
+                const float* lnw = m_.rwkv_ln_x.data() + (size_t)l * 2 * dim;
+                const float* lnb = lnw + dim;
+                for (int h = 0; h < H; ++h) {
+                    float* z = y.data() + (size_t)h * hs;
+                    double sum = 0.0;
+                    for (int i = 0; i < hs; ++i) sum += z[i];
+                    const float mu = (float)(sum / hs);
+                    double vs = 0.0;
+                    for (int i = 0; i < hs; ++i) { const double d = (double)z[i] - (double)mu; vs += d * d; }
+                    const float inv = 1.0f / sqrtf((float)(vs / hs) + kRwkvGroupEps);
+                    for (int i = 0; i < hs; ++i)
+                        z[i] = (z[i] - mu) * inv * lnw[(size_t)h * hs + i] + lnb[(size_t)h * hs + i];
+                }
+            }
+            // O16: the r_k bonus.  One scalar per head, sum(k*r*r_k) over the
+            // head's channels, added to every channel as v*rk.
+            for (int h = 0; h < H; ++h) {
+                double acc = 0.0;
+                for (int i = 0; i < hs; ++i) {
+                    const size_t o = (size_t)h * hs + i;
+                    acc += (double)k[o] * (double)r[o] * (double)rk_s[o];
+                }
+                const float rk = (float)acc;
+                for (int i = 0; i < hs; ++i) {
+                    const size_t o = (size_t)h * hs + i;
+                    y[o] += v[o] * rk;
+                }
+            }
+            // O17-O19: gate, W_o, and the residual on the engine's grid.
+            if (have_gate)
+                for (int i = 0; i < dim; ++i) y[i] *= g[i];
+            x = add_q16(x, rwkv_mv(m_.wo[l], y));
+            // O20-O25: the channel mix.  attn_norm_2 has its own token shift,
+            // one lerp vector, then key matvec -> relu^2 -> value matvec.
+            vector<float> xn2 = rwkv_layernorm(x, m_.rwkv_att_norm_2.data() + (size_t)l * 2 * dim, eps);
+            float* sh2 = rwkv_state_.shift_ffn.data() + (size_t)l * dim;
+            const float* cml = m_.rwkv_cm_lerp.data() + (size_t)l * dim;
+            vector<float> xk2((size_t)dim);
+            for (int i = 0; i < dim; ++i) {
+                const float sx = sh2[i] - xn2[i];
+                xk2[i] = xn2[i] + sx * cml[i];
+            }
+            memcpy(sh2, xn2.data(), sizeof(float) * dim);
+            vector<float> h = rwkv_mv(m_.w1[l], xk2);
+            // relu^2: the square is the one place the block amplifies instead
+            // of attenuating (Q-1: peak 91.95 against the q16 rail's 128).
+            float hmax = 0.0f;
+            for (float& z : h) { z = z > 0.0f ? z * z : 0.0f; hmax = std::max(hmax, z); }
+            x = add_q16(x, rwkv_mv(m_.w2[l], h));
+            // RWKV_DUMP: the peaks the block has to keep inside its rails --
+            // the recurrence's |S|max (f32 today, S-1), the residual (q16 rail
+            // 128, R-1) and the relu^2 hidden (Q-1, the tensor closest to the
+            // rail) -- plus the decay and gate extremes, which P6's GPU port
+            // needs as per-layer references.  The same numbers are in
+            // ref_rwkv.py --measure's per-layer table, so a layer that drifts
+            // says where.  P2 parked these under STAGE_DUMP; P4 gave them
+            // their own switch (docs/test-hooks.md).
+            static const bool rwkv_diag = env_set("RWKV_DUMP");
+            if (rwkv_diag) {
+                const float* S = rwkv_state_.wkv.data() + (size_t)l * H * hdim;
+                float smax = 0.0f, xmax = 0.0f, wmax = 0.0f, amax = 0.0f, gmax = 0.0f;
+                for (size_t i = 0; i < (size_t)H * hdim; ++i) smax = std::max(smax, fabsf(S[i]));
+                for (float v : x) xmax = std::max(xmax, fabsf(v));
+                for (float v : w) wmax = std::max(wmax, v);      // w in (0.545, 1]
+                for (float v : a) amax = std::max(amax, fabsf(v));
+                if (have_gate)
+                    for (float v : g) gmax = std::max(gmax, fabsf(v));
+                cerr << "RWKV l=" << l << " state_max=" << smax
+                     << " resid_max=" << xmax << " sqrelu_max=" << hmax
+                     << " w_max=" << wmax << " a_max=" << amax;
+                if (have_gate) cerr << " g_max=" << gmax;
+                cerr << "\n";
+            }
+        }
+        return x;
+    }
+
+vector<float> Session::rwkv_head_input(const vector<float>& x){
+        vector<float> xf = rwkv_layernorm(x, m_.rwkv_out_norm.data(), m_.rwkv.norm_eps);
+        // RWKV_DUMP: the final LayerNorm's peak is the number metadata key 17
+        // exists for (g1d: 315.6 = 2.5x the q16 rail); print it before the
+        // *2^-k store so a container whose k no longer fits is visible.
+        static const bool rwkv_head_diag = env_set("RWKV_DUMP");
+        if (rwkv_head_diag) {
+            float mx = 0.0f;
+            for (float v : xf) mx = std::max(mx, fabsf(v));
+            cerr << "RWKV final_ln_max=" << mx << "\n";
+        }
+        // Metadata key 17: the final LayerNorm's output reaches 315.6 on g1d --
+        // 2.5x the q16 rail -- so the container states an exponent k, the head's
+        // input is written x*2^-k, and every logits tile's scale already carries
+        // the 2^k (folded at pack time).  Applying it to the tile scale here as
+        // well would count it twice.
+        if (m_.logit_shift > 0) {
+                const float s = ldexpf(1.0f, -m_.logit_shift);
+                for (float& v : xf) v *= s;
+        }
+        return xf;
+    }
+
+vector<float> Session::step_rwkv(int token, bool want_logits){
+        vector<float> x = forward_rwkv(token);
+        if (g_stop || !want_logits) return {};
+        return gpu_.logits(m_.logits_tiles, rwkv_head_input(x));
+    }
+
 // Defined next to read_hidden() further down; the fused loop dumps through it
 // so its stages are diffable against the CPU path's float dumps.
 static vector<float> decode_act_row(const vector<uint8_t>& b, int texels, XFormat f);
@@ -603,6 +970,12 @@ GLuint Session::forward_gpu_hidden(int token, int pos, bool want_logits){
 // q4 / ACT8 / int16 / fused-w13 models keep the serial loop.
 bool Session::pair_ok() const {
         if (!gpu_layer_) return false;
+        // Two positions per layer pass is a property of the attention and FFN
+        // kernels.  An RWKV layer's two positions cannot share a pass: the WKV
+        // recurrence and both token shifts are strictly sequential, so the
+        // second position has to see the first one's state (plan O31).  A pair
+        // variant is P6's problem; the serial loop is correct today.
+        if (m_.is_rwkv()) return false;
         // The two-position prefill implements a dense transformer block: it
         // calls attention_block() for every layer, and a hybrid model's conv
         // layers carry no qkv (the LFM2-350M q8 container aborted in
@@ -711,6 +1084,10 @@ vector<float> Session::step_pair(int tok_a, int pos_a, int tok_b, int pos_b, boo
     }
 
 vector<float> Session::step(int token, int pos, bool want_logits){
+        // RWKV-7 runs its own loop.  There is no attention block to fuse and no
+        // KV row to write per position, so the position only matters to the
+        // caller's context limit; the block's history is the per-head state.
+        if (m_.is_rwkv()) return step_rwkv(token, want_logits);
         if (gpu_layer_) {
             GLuint xf = forward_gpu_hidden(token, pos, want_logits);
             if (g_stop || !want_logits) return {};
@@ -754,6 +1131,11 @@ int Session::step_greedy(int token, int pos){
     }
 
 CandidateResult Session::step_candidates(int token, int pos, int topk, float temp, float top_p){
+        if (m_.is_rwkv()) {
+                vector<float> x = forward_rwkv(token);
+                if (g_stop) return {};
+                return gpu_.logits_candidates(m_.logits_tiles, rwkv_head_input(x), topk, temp, top_p);
+        }
         if (gpu_layer_) {
             GLuint xf = forward_gpu_hidden(token, pos, true);
             if (g_stop) return {};

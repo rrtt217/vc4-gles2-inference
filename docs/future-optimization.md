@@ -250,14 +250,20 @@ Keep as an secondary experiment, not the primary chat model:
 
 ### RWKV7-G1d-0.1B
 
-Not a practical Pi Zero target now:
+**2026-11-16: an implementation goal is open** — the per-operator plan is
+[`rwkv7-plan.zh-CN.md`](rwkv7-plan.zh-CN.md) and the evaluation it builds on is
+[`rwkv7-assessment.zh-CN.md`](rwkv7-assessment.zh-CN.md).  The Pi verdict below is
+unchanged: on this board it is a 0.1B-only demo, not a replacement for the dense
+models.
 
-- Q4_K_M GGUF is about 145 MB, FP16 about 386 MB;
-- 65536 vocabulary makes logits/embeddings expensive;
+Not a practical Pi Zero target before that goal, and still the limits to beat:
+
+- Q4_K_M GGUF is about 145 MB, FP16 about 386 MB (measured 2026-11-12);
+- 65536 vocabulary makes logits/embeddings expensive (head is 34.9% of the MAC);
 - RWKV is recurrent, so prefill is serial rather than batchable;
-- a new GLES2 backend would be required.
+- a new GLES2 backend is required (that is what the goal is building).
 
-Revisit only for Pi 5, phone, or laptop.
+Revisit only for Pi 5, phone, or laptop — or through the plan above, desktop first.
 
 ## Do not retry (measured, 2026-11-03)
 
@@ -322,7 +328,7 @@ in `docs/performance.md` with the numbers.
 - adding many tools to the prompt;
 - i16 on Pi as a production path;
 - treating repetition penalties as a fix for factual errors;
-- porting RWKV/Mamba to VC4 before prefill batching and tool routing.
+- porting Mamba to VC4 (RWKV-7 has its own goal now: `docs/rwkv7-plan.zh-CN.md`).
 
 ## Benchmark protocol
 

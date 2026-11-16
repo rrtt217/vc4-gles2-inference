@@ -23,6 +23,8 @@ import zlib
 # of this file (and its output) uses them; `TEMPLATE_KINDS` here is kind -> name,
 # the reverse of the packer's name -> kind.
 from mmcf_format import (KINDS, DTYPES, SCHEMES, CAPS,  # noqa: E402
+                         PER_LAYER_KINDS, RWKV_ARCH_NAMES, RWKV_MATS,
+                         RWKV_VECTORS, parse_rwkv_meta,
                          TEMPLATE_KIND_NAMES as TEMPLATE_KINDS)
 
 
@@ -70,6 +72,7 @@ def main():
     tok_bytes = 0
     has_moe = False
     have_eps = False
+    has_rwkv = False
     tmpls = {}
     while p + 8 <= mo + ms:
         key, typ, ln = rd(raw, p, "<HHI")
@@ -99,6 +102,11 @@ def main():
         elif key == 7 and ln >= 4:
             tok_bytes, = struct.unpack_from("<i", payload)
             print(f"tokenizer   {tok_bytes} B embedded")
+        elif key == 8 and ln >= 24:
+            b, e, s, pd, u, im = struct.unpack_from("<6i", payload)
+            f = lambda v: "-" if v < 0 else str(v)
+            print(f"specials    bos {f(b)} eos {f(e)} stop {f(s)} "
+                  f"pad {f(pd)} unk {f(u)} im_start {f(im)}")
         elif key == 9 and ln >= 1:
             # the model's own chat template(s), Jinja text
             q, nvar = 1, payload[0]
@@ -131,6 +139,21 @@ def main():
             kinds = {0: "attn", 1: "conv"}
             print(f"layers      {ln} typed: "
                   + " ".join(kinds.get(b, "?%d" % b) for b in payload))
+        elif key == 17 and ln >= 1:
+            # v4: the head's input is stored *2^-k and the logits tiles read
+            # back *2^k (their scales already carry it).
+            print(f"logit scale  head input *2^-{payload[0]} "
+                  f"(logits tile scales *2^{payload[0]})")
+        elif key == 16 and ln >= 16:
+            # v4: the RWKV-7 block.  The four low ranks are printed because
+            # they cannot be re-derived from the shapes (llama.cpp's formula
+            # gives 160 for 0.4B's gate where the config says 128).
+            rk = parse_rwkv_meta(bytes(payload[:16]))
+            has_rwkv = True
+            print(f"rwkv        arch {RWKV_ARCH_NAMES.get(rk['arch'], rk['arch'])}"
+                  f"  head {rk['head_size']}  eps {rk['norm_eps']:g}"
+                  f"  ranks w {rk['r_w']} a {rk['r_a']} v {rk['r_v']} g {rk['r_g']}"
+                  f"  gate {rk['gate']}")
         elif key == 10 and ln >= 2:
             ab, ae = payload[0], payload[1]
             fmt = lambda v: "unset" if v == 255 else str(v)
@@ -185,6 +208,22 @@ def main():
         nex = sum(1 for t in rows if t[8])
         if nex:
             print(f"experts     {nex} tensor(s) carry an expert index")
+    if has_rwkv:
+        # The nine f32 vector groups and the four low-rank pairs are what a
+        # v4 file has instead of rms_att/qkv-rms norms and an FFN gate pair.
+        vecs = [t for t in rows if (t[0] & 0xFF) in RWKV_VECTORS]
+        print("rwkv vecs   %d f32 record(s): %s"
+              % (len(vecs), ", ".join("%s %dx%d" % (KINDS[t[0] & 0xFF], t[2], t[3])
+                                       for t in vecs)))
+        pairs = {}
+        for t in rows:
+            k = t[0] & 0xFF
+            if k in RWKV_MATS:
+                name, which = RWKV_MATS[k]
+                pairs.setdefault(name, [0, 0])[which] += 1
+        print("rwkv lora   " + (" ".join("%s %d/%d" % (k, v[0], v[1])
+                                          for k, v in sorted(pairs.items()))
+                                or "none"))
     print(f"tensor data {total} B in {n} tensors, {len(raw) - total - table} B of headers/padding")
     if args.tensors:
         for tid, dt, rws, cls, off, blen, crc, scale, aux in rows:
@@ -192,9 +231,10 @@ def main():
             layer = (tid >> 8) & 0x3F
             part = tid >> 14
             label = KINDS.get(kind, f"0x{kind:02x}")
-            if kind in (0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16):
-                label += f".{layer}"
-            elif kind == 0x20:
+            # A per-layer record prints its layer.  The model-wide f32
+            # vector groups (0x1A-0x1F, 0x21) and the two global norms keep
+            # layer bits 0 because there is one record for the whole model.
+            if kind in PER_LAYER_KINDS or kind == 0x20:
                 label += f".{layer}"
             if aux or (has_moe and kind in (0x12, 0x13, 0x14, 0x15)):
                 label += f".e{aux}"

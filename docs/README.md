@@ -33,7 +33,8 @@ Deep dives:
 | [translation-decision-model-fit.zh-CN.md](translation-decision-model-fit.zh-CN.md) | 20–150M translation/decision model fit, Jev-like decisions, adaptation plan (中文) |
 | [lfm2.5-230m.md](lfm2.5-230m.md) | **LFM2.5-230M, the hybrid (conv + attention) model**: containers, run commands, the quality numbers and what is still broken |
 | [lfm2.5-230m-assessment.zh-CN.md](lfm2.5-230m-assessment.zh-CN.md) | LFM2.5-230M 的打包与可行性评估：架构事实、残差/激活幅值实测、官方 GGUF 配方、工作量与风险（历史记录；实现现状见 `lfm2.5-230m.md`） |
-| [rwkv7-assessment.zh-CN.md](rwkv7-assessment.zh-CN.md) | RWKV-7（Goose）支持评估：算子清单、容器/分词器/状态差距、Pi 与 Xe 的性能内存估算、分阶段工作量与风险（评估文档，未实现） |
+| [rwkv7-assessment.zh-CN.md](rwkv7-assessment.zh-CN.md) | RWKV-7（Goose）支持评估：算子清单、容器/分词器/状态差距、Pi 与 Xe 的性能内存估算、分阶段工作量与风险（评估文档） |
+| [rwkv7-plan.zh-CN.md](rwkv7-plan.zh-CN.md) | **RWKV-7 实施计划与逐算子清单**（目标文档）：28 个算子 + 20 项配套（文本/状态/容器/验证）的数学/形状/现状/归属/阶段、数值格式决策点、验收门、任务板映射 |
 
 Working on a numerics question?  `AGENTS.md` has the "Debugging protocol"
 table that maps a question to the tool that answers it — `mmcf_dump.py`,

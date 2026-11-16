@@ -48,10 +48,15 @@ be re-packed without going back to HuggingFace:
 | `minimind3/chat_template.jinja` | MiniMind3 | upstream MiniMind3, kept with its model source |
 | `templates/chatml.jinja` | MiniMind2 / Qwen-family | written here to be byte-identical to the renderer it replaces |
 | `templates/tinybrainbot.jinja` | TinyBrainBot-100M | verbatim from the model's `tokenizer_config.json` |
+| `templates/rwkv7-g1.jinja` | RWKV-7 G1 (0.1B first) | written from the official `RWKV-v7/RWKV7-G1x-templates.txt`; emits token 0's text first and ends with `Assistant: <think` when the template asks for a generation prompt |
 
 The packer also accepts a `tokenizer_config.json` directly
 (`--chat-template models/<m>/tokenizer_config.json`), which is what most HF
-checkpoints will want.
+checkpoints will want.  RWKV-7 has no `tokenizer_config.json` in the official
+release: its template is plain text in the upstream repo, so
+`templates/rwkv7-g1.jinja` is the file to pass, with `--add-bos 0` (the text
+starts with token 0 itself).  The container's kind byte is `chatml` only as a
+fallback; metadata key 9 carries the real text and the engine prefers it.
 
 Two of the three are verified by token equality against the C++ renderer they
 replace: MiniMind3 q8 and MiniMind2 q8 produce **identical `TOKENS_OUT`** through

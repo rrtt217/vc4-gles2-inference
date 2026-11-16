@@ -50,6 +50,7 @@ exist.
 | `MMCF_DEBUG=1` | per-tensor detail while walking the container table |
 | `MOE_DUMP=1` | the route of every MoE layer/position: `MOE l=<layer> route=<expert> gate=<logits>`.  The gate values are the q16 read-back, which is what the argmax saw — compare them with `ref_forward.py --routes` rather than judging a route by the text |
 | `MOE_FIXED=<e>` | pin every MoE layer to expert `e` and skip the router matvec and its read-back.  Prices the routing: on Xe q8 29.3 ms/token against 10.5 pinned, i.e. the eight per-token syncs are most of the difference.  Output is a different model, so it is a measurement switch only |
+| `RWKV_DUMP=1` | the RWKV-7 block's per-layer peaks on stderr, one line per layer per token: `RWKV l=<layer> state_max=<|S|max> resid_max=<|x|max> sqrelu_max=<h²max> w_max=<max w> a_max=<|a|max> [g_max=<|g|max>]`, plus `RWKV final_ln_max=<peak>` once per step before the key-17 `*2^-k` store.  These are the rails the format decisions watch (S-1 state, R-1 residual, Q-1 sqrelu, key 17 final LN); compare them with `engine/tools/ref_rwkv.py --measure`'s per-layer table, which computes the same numbers in f32.  P2 parked them under `STAGE_DUMP`; since P4 they have their own switch and `STAGE_DUMP` no longer prints them |
 
 `engine/scripts/dump_stats.py` turns a `STAGE_DUMP`/`HIDDEN_DUMP` file into
 `max|x| / mean|x| / clamped-count` per row, which is how a saturating

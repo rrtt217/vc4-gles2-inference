@@ -51,6 +51,45 @@ def sampling_args(sampling):
     return out
 
 
+# The RWKV-7 0.1B model card's recommended sampling (fla-hub/rwkv7-0.1B-g1:
+# temperature 1.0, top_p 0.3, repetition_penalty 1.2, do_sample).  The repo's
+# generation_config.json carries only bos/eos, so the card is the source.  One
+# copy: eval_ifeval's PRESETS["rwkv"] and eval_translate's --preset rwkv both
+# read it, and the batteries' RWKV rows are scored with it, not greedy.
+RWKV_SAMPLING = {"temp": 1.0, "top-p": 0.3, "repeat-penalty": 1.2}
+
+
+def is_rwkv_container(path):
+    """True when the MMCF file declares the RWKV-7 block (metadata key 16).
+
+    Header and metadata TLVs only, never the tensors -- the same cheap probe
+    the REPL's /model does.  The version alone is not the answer (a future
+    block could share v4); key 16's first payload byte is the arch (1=rwkv7,
+    engine/tools/mmcf_format.py RWKV_META_FMT).  A non-container or a read
+    error is False: the batteries then keep their historical defaults.
+    """
+    import struct
+    try:
+        with open(path, "rb") as f:
+            head = f.read(40)
+            if len(head) < 40 or head[:4] != b"MMCF":
+                return False
+            ver, hsz, n, caps, mo, ms, doff, fsz = struct.unpack("<HHIIIIQQ", head[4:40])
+            if ver < 4 or ms <= 0:
+                return False
+            f.seek(mo)
+            meta = f.read(ms)
+    except OSError:
+        return False
+    i = 0
+    while i + 8 <= len(meta):
+        key, typ, ln = struct.unpack("<HHI", meta[i:i + 8])
+        if key == 16:
+            return ln >= 1 and meta[i + 8] == 1
+        i += 8 + ln
+    return False
+
+
 def read_floats(path):
     """A `LOGITS_OUT` dump: float32 values, little-endian."""
     with open(path, "rb") as f:

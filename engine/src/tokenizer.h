@@ -18,6 +18,12 @@ public:
     void set_bos(int id) { bos_id_ = id; }
     void set_qwen(bool q);
     void set_bytelevel(bool b);
+    // RWKV World vocabulary (rwkv_vocab_v20230424): greedy longest match over
+    // the entries' raw bytes, no BPE merge pass, and decode emits the entry's
+    // bytes verbatim.  Set it *after* load(), like set_qwen() -- reset()
+    // rebuilds the object and a mode set before a reload is lost.
+    void set_rwkv(bool r);
+    bool rwkv() const { return rwkv_; }
 
     vector<int> encode(const string& text, bool bos = true, bool dummy_prefix = true);
     // Encode a rendered prompt.  Special-token matching is enabled only for
@@ -37,6 +43,8 @@ public:
 private:
     void encode_into(const string& text, bool allow_specials, vector<int>& out) const;
     void bpe_merge(vector<int>& t) const;
+    // RWKV mode: longest entry that fits, at every position.
+    void encode_greedy(const string& text, vector<int>& out) const;
     vector<string> vocab_;
     vector<float> scores_;
     unordered_map<string, int> lookup_;
@@ -49,5 +57,14 @@ public:
 private:
     bool qwen_ = false;
     bool bytelevel_ = false;
+    bool rwkv_ = false;
+    // Longest entry in the blob.  Greedy matching scans downwards from
+    // min(maxlen, bytes left); taken from the entries themselves, not from the
+    // header's i32, so a stale header cannot hide a long entry.
+    size_t max_len_ = 0;
+    // Longest entry starting with each byte.  An entry that starts with
+    // another byte cannot match at this position, so this only shortens the
+    // downward scan -- it is exact, and 0 means "no entry starts here".
+    size_t first_max_[256] = {};
     int bos_id_ = 1;
 };

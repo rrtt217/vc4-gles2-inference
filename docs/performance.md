@@ -6620,3 +6620,218 @@ Do not read the 115.4 ms/token row of the AGENTS.md campaign table as this
 model: it is TinyChat15M q8.  The only earlier HEAD number for minimind3 q8 was
 the 2026-11-12 pilot's 219.1 ms/token, taken while the store was being scanned;
 today is faster than it.
+
+## 2026-11-16 — RWKV-7 P4: layer-loop verification and the R-1 residual grid (Iris Xe)
+
+Machine: laptop, Intel Iris Xe (ADL GT2), Mesa 26.2.5, `GPU_LAYER=1 KV_PACK=16`.
+Container: `models/rwkv7/packed/rwkv7-g1d-0.1b.q8r.chat.mmcf` (g1d 0.1B, q8
+per-row scale, embedded .tok + template, key 8 bos 0 / eos 261 / stop 261,
+key 17 logit_shift 2, seq 512).  The P2 serial loop, no new shader.
+
+**Layer loop faithful.**  `models/rwkv7/phase2/engine_on_container_weights.py`
+now decodes the per-row container's part-3 scale planes (the head is 43 tiles
+*plus* 43 rows×1 f32 planes; the old tile filter concatenated the planes and
+died).  It runs the f32 oracle on the container's own quantised weights, so the
+difference against the engine is the activation grid alone:
+
+| engine arm | vs oracle-on-container-weights cos (q8 per-matrix) | (q8r per-row) |
+|---|---:|---:|
+| default (q16 residual) | 0.99604774 | 0.99808681 |
+| `ACT_F32=1` (f32 residual) | 0.99742538 | **0.99893934** |
+
+Prompt: the P2 e2e prompt (system "You are a helpful assistant.", user "Hello,
+my name is", 23 ids), top-1 agrees in all four arms.  q8r + `ACT_F32` is the
+≈0.999 the plan's P4 gate asks for; what is left is the matvec's q16 input /
+I24 output grid (the oracle's matvec is f32), not the loop.  Removing the
+residual grid moves cos by +0.00085, exactly the R-1 direction.
+
+**R-1 on the gate corpus.**  `engine/data/ppl_test.txt` is 421 World-vocab
+tokens; with the `--ppl` BOS (key 8 id 0) the stream is 422 ≤ SEQ=512, so one
+warm window scores every token with full left context (`stride=256` printed,
+none needed).  The oracle side reproduces the same stream
+(`models/rwkv7/phase4/ppl_grid.py`: [0] + vocab.encode(text); the raw vocab
+file does not carry the BOS marker as one entry, so the id is prepended
+directly).  All engine arms SEQ=512, same corpus, same window:
+
+| arm | PPL | nll/token |
+|---|---:|---:|
+| oracle f32 (same stream) | 8.1014 | 2.09203 |
+| oracle resid-q16 simulation (R-1) | 8.4133 | 2.12981 |
+| engine q8r, q16 residual (default) | 9.2919 | 2.2291 |
+| engine q8r, q24 residual (key 12) | 9.2633 | 2.2261 |
+| engine q8r, `ACT_F32=1` | 8.8201 | 2.1770 |
+| engine q8 per-matrix, q16 | 12.0831 | 2.4918 |
+
+The q24 arm ran on the binary rebuilt for `RWKV_DUMP`; the q16 arm re-run on
+that binary is bit-identical (9.2919), so the dump hook is numerics-neutral.
+
+**Decision: q16 stays the RWKV default; q24 is not a quality lever here.**
+q24 is the *same* 1/256 step with 256× the range, and g1d's residual peaks at
+37.4 (packer rail check; 3.4× under the 128 rail), so the range is unused.  The
+measured q24−q16 gap (−0.0030 nats, −0.3% PPL) is tie-rounding, not resolution:
+the q24 branch rounds with `roundf` (half away from zero) and the q16 branch
+with `lrintf` (half to even), and the only off-grid input to `add_q16` is the
+exact-f32 embedding row at layer 0's first residual add — every later add is
+grid+grid.  The grid's real cost is the *step*: the oracle simulation prices it
+at +0.0378 nats/token on this corpus, and the engine's `ACT_F32` arm recovers
+−0.0521 nats (−5.1% PPL) against the q16 default.  If P6 wants that back on the
+GPU, the lever is a finer residual encoding (per-layer scale or an f32 rail),
+not key 12.  Key 12 remains the escape hatch for a model that *exceeds* the
+rail, exactly as on the transformer path.  The q24 variant is packed and kept
+for the record: `rwkv7-g1d-0.1b.q8r.q24.chat.mmcf` (same pack flags plus
+`--res q24`, 382 tensors, verify clean).
+
+Row-scale weights are worth −0.263 nats/token on this corpus (12.0831 →
+9.2919, −23% PPL): the q8r container is the right shipping default, confirming
+P2's choice with a corpus number instead of one prompt's cosine.
+
+**Xe acceptance values for the RWKV pins** (`regression.sh` reads
+`RWKV_EXPECT` / `RWKV_PPL_EXPECT` from the machine override; the gate prints
+them when unset).  Prompt "用一句话介绍你自己。", system "You are a helpful
+assistant.", `--gen 16 --greedy`, the whole multi-line reply:
+
+```sh
+RWKV_EXPECT='>
+Okay, so I need to figure out how to write a short sentence'
+RWKV_PPL_EXPECT='9.2919'   # SEQ=512 (RWKV_PPL_SEQ), data/ppl_test.txt, q8r container
+```
+
+The reply is English "thinking out loud" — g1d's own style, the template ends
+at `Assistant:` and the model opens `>\nOkay, ...`.  It is a tripwire like the
+dense strings, not a quality claim; the quality numbers are in
+[evaluation.md](evaluation.md)'s 2026-11-16 section.
+
+**Speed (context for P5/P6, not a campaign).**  The PPL run's 421 steps took
+75.7 s wall including one container load ≈ **170 ms/token** on Xe: the P2
+serial loop pays ~180 matvec read-backs per token.  The identity run (25
+prefill + 16 decode) was 10.3 s.  P6's fused loop is the fix; Pi numbers are
+P5's item.
+
+
+### Addendum (same day, later): the nothink template and the corrected pins
+
+The chat template changed after the section above was measured:
+`templates/rwkv7-g1.jinja` gained an `open_thinking` variable and the q8r
+container was repacked with it (18:38).  The default (`open_thinking` false)
+ends the prompt with an empty think block whose closing tag is left one
+character short — `Assistant: \n</think` without the final `>` — and the
+model's first generated token supplies it: every chat reply opens `>`, then
+answers directly instead of thinking out loud (the open `Assistant: <think`
+of the P2/P3 rows let it think for paragraphs).  That leading `>` is also why
+the multiple-choice battery cannot score RWKV in chat mode — see the protocol
+corrections below.  (The official fla-hub G1 template closes the tag fully,
+`</think>`; this repo's nothink branch leaves the `>` to the model.  Noted
+for P3's template owner; the numbers here are measured on the shipped file.)  P4 repacked the other two containers to
+match (`rwkv7-g1d-0.1b.q8.chat.mmcf`, `rwkv7-g1d-0.1b.q8r.q24.chat.mmcf`,
+both `--verify` clean).  The repack is **weight-neutral**: the container-weight
+oracle on the *old* P2 prompt ids reproduces cos 0.99808681 bit-for-bit against
+the repacked file, and `--ppl` (raw text, no template) is unchanged at
+**9.2919**.
+
+The identity pin moves with the template (same prompt/system/gen 16, greedy,
+deterministic across two runs).  The reply still opens `>` — g1d emits it even
+after the closed empty think block — and then answers in Chinese:
+
+```sh
+RWKV_EXPECT='>
+"我是一个AI，我的名字是‘智'
+RWKV_PPL_EXPECT='9.2919'   # unchanged; SEQ=512, data/ppl_test.txt, q8r container
+```
+
+**Layer-loop verification across positions** (engine ↔ oracle-on-container-
+weights, q8r; cos is position-dependent — the plan's §四 warns the g1d scoring
+positions are not flat, so one prompt is not the whole picture):
+
+| prompt (chat, new template) | default cos | ACT_F32=1 cos | top-1 |
+|---|---:|---:|---|
+| P2 e2e "Hello, my name is" (old 23-id render) | 0.99808681 | 0.99893934 | yes |
+| same user text, nothink render (27 ids) | 0.99762827 | 0.99783206 | yes |
+| "The capital of France is" | 0.99787658 | **0.99900299** | yes |
+| "人工智能是" | 0.99759716 | 0.99847656 | yes |
+
+Same pattern in every position: removing the residual grid lifts cos, the
+remainder is the matvec's q16 input / I24 output grid, top-1 never moves.  The
+≈0.999 the P4 gate asks for is reached with `ACT_F32` (0.99900 on the France
+prompt, 0.9978–0.9990 across the four); the layer loop is faithful.
+
+**Battery protocol corrections (user-directed, same day).**  Two changes to how
+the quality batteries score RWKV, both in `engine/scripts/`:
+
+- `bench_mc.py --completion`: the chat template puts a think marker at the
+  answer position, so the first decoded token is `>`, not a letter — the
+  chat-mode letter logits score noise (fmt ≈ 0; the invalid 100-item run is
+  kept at `models/rwkv7/phase4/eval_mc_chat_invalid/`).  In completion mode
+  (no `--chat`) the same prompt's first token is the letter itself (fmt 1.000
+  on the probe).  The transformer models stay in chat mode.
+- RWKV is scored with its **model card's recommended sampling**, not greedy:
+  temp 1.0 / top_p 0.3 / repetition_penalty 1.2 (fla-hub/rwkv7-0.1B-g1 card;
+  generation_config.json carries only bos/eos).  One copy in
+  `evalkit.RWKV_SAMPLING`; `eval_ifeval.py --preset auto` (the new default)
+  and `eval_translate.py --preset auto` pick it per container via metadata
+  key 16, and keep the historical presets for everything else.
+
+The corrected numbers are in [evaluation.md](evaluation.md)'s 2026-11-16
+section; the raw dumps in `models/rwkv7/phase4/eval_*`.
+
+
+### Addendum 2 (same day, final): the template truncation fix and the final pins
+
+The nothink branch's first edit dropped the closing tag's `>`; the second
+edit restored it but dropped the opening tag; the third (final) file renders
+**byte-identical to the official fla-hub G1 nothink prompt** — verified by hex:
+`417373697374616e743a203c7468696e6b3e0a3c2f7468696e6b3e` =
+`Assistant: \n</think>` (the repo writes the newline as the Jinja
+escape `\n`, the official file as a raw 0a; the render is the same).  The
+switch stays `open_thinking` (the official `enable_thinking` is undefined in
+the engine's Jinja context, so copying the official condition verbatim would
+always take the open-thinking branch).  All three containers were repacked
+from the final file (`--verify` clean): q8 197 tensors / q8r 382 / q8r.q24
+382.  **Weight-neutral again**: the old P2 prompt's container-weight oracle
+cos reproduces 0.99808681 bit-for-bit, and `--ppl` is still **9.2919**.
+
+With the complete empty think block the model no longer opens `>`: the first
+generated token is a newline, then the answer.  Final Xe identity pin (same
+prompt/system, `--gen 16 --greedy`, deterministic across two runs, and the
+container-default system renders identically):
+
+```sh
+RWKV_EXPECT='
+"我是一个AI，我的名字是‘智能'
+RWKV_PPL_EXPECT='9.2919'   # SEQ=512 (RWKV_PPL_SEQ), data/ppl_test.txt, q8r
+```
+
+(The pin string starts with a newline — the reply's first token.  The gate's
+`rwkv_text` keeps it; `check_prefix` is a prefix match.)
+
+The ifeval/translate rounds run before this fix (the truncated-template round
+and the earlier greedy partial) are archived under
+`models/rwkv7/phase4/eval_ifeval_truncated_tmpl/` and
+`eval_ifeval_greedy_partial/` with READMEs; they are not the model's numbers.
+The MC completion battery is template-independent (no `--chat`) and its
+100-item run is kept.  The final ifeval (rwkv preset, 2 seeds — the 2026-11-12
+table's protocol) and translate (rwkv preset) numbers are in
+[evaluation.md](evaluation.md)'s 2026-11-16 section.
+
+
+### Addendum 3 (same day, acceptance): the full gate on the final containers
+
+`scripts/regression.sh` **ACCEPT** on the final (official-nothink) q8r
+container, with the machine's pins exported: MiniMind3 q8/q4 golden strings
+unchanged (`我是一个AI助手，我的存在是为了提供帮助和信息。` /
+`我是MiniMind，一个高效的小参数AI模型，专注于`), poem behaviour OK,
+q8 PPL **270.3170** (pin), q4 PPL **326.1483** (the re-baselined pin of the
+2026-11-15 gpu.cpp split, documented above — the 330.5302 still standing in
+AGENTS.local.md is the 2026-11-13 value and needs the override update),
+ACT8=2 283.1356 / ACT8=1 273.6691 printed.  The new RWKV block: determinism
+OK, default-system OK, prefix pin OK, behaviour OK, PPL **9.2919** (pin,
+SEQ=512).  34 containers round-trip through mmcf_format (the three RWKV v4
+files included).
+
+`scripts/swap_matrix.py` **PASS**, including the new rwkv chain
+(minimind3.q8 → rwkv7 q8r → rwkv7 q8 → rwkv7 q8r → minimind3.q8): every turn
+byte-identical to a fresh process — the WKV state and both token shifts are
+built on the way in, the per-row scale planes appear/disappear with the
+family change, and nothing RWKV survives the way back out.  All five existing
+chains, the slash-line check, the twice-run determinism and the worker load
+op are unchanged and green.  `make -C engine check`: 108 passed / 0 failed.
+

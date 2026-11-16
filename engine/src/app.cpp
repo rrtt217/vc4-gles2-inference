@@ -15,6 +15,12 @@ void App::prepare_model() {
     if (getenv("Q8_PARTS"))
         model.apply_precision(getenv("Q8_LAYERS") ? getenv("Q8_LAYERS") : "", getenv("Q8_PARTS"));
     model.split_ffn(gpu.max_target_dim());
+    // RWKV-7: qkv[l] is [W_r; W_k; W_v] in one matrix, and the layer loop
+    // draws the three bands with three different inputs.  The split has to
+    // happen while the weights are still borrowed from the container mapping
+    // (release_map() drops it at the end of upload_weights()), so it runs here
+    // with the other prepare-time steps and the swap repeats it.
+    model.split_rwkv();
     model.apply_q4_fmt();          // Q4_FMT=rgba4: gate matrices as 4-bit texels
     model.apply_hidden_scale();
     if (getenv("SHADER_TIME")) fprintf(stderr, "STARTUP %7.1f ms  ffn split\n", run_time_ms());
@@ -22,11 +28,17 @@ void App::prepare_model() {
         model.quantize_q4_weights(getenv("Q4_SCOPE") ? getenv("Q4_SCOPE") : "all");
     if (!opt.tools_json.empty() && model.seq < 768) model.seq = 768;
     if ((opt.worker || !opt.build_cache_prompt.empty()) && model.seq < 1024 && !getenv("SEQ")) model.seq = 1024;
-    const int target_limit = gpu.max_target_dim();
-    if (model.seq > target_limit) {
-        cerr << "SEQ " << model.seq << " exceeds GL target limit " << target_limit
-             << "; clamping to " << target_limit << "\n";
-        model.seq = target_limit;
+    // The GL target limit bounds the *attention* score/KV textures, which are
+    // seq tall.  RWKV-7 has neither (its state is O(1): H*64*64 per layer plus two
+    // shift vectors), so it allocates no seq-sized GL target and must not be
+    // clamped here -- on VC4 that would wrongly cap its context at 2048.
+    if (!model.is_rwkv()) {
+        const int target_limit = gpu.max_target_dim();
+        if (model.seq > target_limit) {
+            cerr << "SEQ " << model.seq << " exceeds GL target limit " << target_limit
+                 << "; clamping to " << target_limit << "\n";
+            model.seq = target_limit;
+        }
     }
     if (model.seq < 16) model.seq = 16;
     if (!system_from_cli && !model.default_system.empty()) system_prompt = model.default_system;
@@ -90,6 +102,12 @@ bool App::setup_from_model() {
     eos_str = tokenizer.id_text(model.id_eos);
     tokenizer.set_qwen(opt.qwen_template || opt.minimind3_template);
     tokenizer.set_bytelevel(opt.minimind3_template);
+    // RWKV-7's World vocabulary is greedy longest match over raw bytes: no BPE
+    // merges, no <0xNN> spelling (docs/rwkv7-plan.zh-CN.md, A1-A3).  The mode
+    // belongs to the container, so it is set here where the tokenizer is built
+    // -- and this function is the one the REPL's /model calls again, which is
+    // what makes a swap out of (or into) an RWKV container set it correctly.
+    tokenizer.set_rwkv(model.is_rwkv());
     return true;
 }
 
@@ -110,7 +128,20 @@ void App::upload_weights() {
     auto add = [&](vector<Mat>& v) {
         for (auto& m : v) add_one(m);
     };
-    add(model.qkv);
+    // An RWKV-7 container's qkv is [W_r; W_k; W_v]: rwkv_r/k/v below are its
+    // three row bands, so uploading qkv as well would put the same bytes in
+    // textures twice.
+    if (!model.is_rwkv()) add(model.qkv);
+    add(model.rwkv_r);
+    add(model.rwkv_k);
+    add(model.rwkv_v);
+    // The four low-rank pairs (decay, ICLR, value-residual, gate).  Empty Mats
+    // are places the container does not use -- layer 0 has no value pair (it
+    // records v_first instead) and an ungated model has no gate.
+    add(model.rwkv_w1); add(model.rwkv_w2);
+    add(model.rwkv_v1); add(model.rwkv_v2);
+    add(model.rwkv_a1); add(model.rwkv_a2);
+    add(model.rwkv_g1); add(model.rwkv_g2);
     add(model.wo);
     add(model.conv_in_b);
     add(model.conv_in_c);

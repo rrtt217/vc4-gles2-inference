@@ -30,7 +30,13 @@ public:
 
     bool load_prefix_cache(const string& path, vector<int>& toks);
 
-    vector<float> embedding(int token);
+    // exact_f32: keep the row off the q16 activation grid.  An RWKV container's
+    // embedding peaks at 0.08, where the grid's 1/256 step is 5% of the row --
+    // and the block's first op is a LayerNorm, which divides by the row's
+    // deviation and amplifies exactly that.  The transformer CPU path has the
+    // same trap behind ACT_F32; the fused path never sees it because its
+    // texture is q16 by construction.
+    vector<float> embedding(int token, bool exact_f32 = false);
 
     vector<float> forward(int token, int pos);
 
@@ -67,6 +73,43 @@ private:
     // oldest first.  Decode reads it and then shifts in the new row.
     vector<vector<float>> conv_state_;
     vector<float> rope_cos_, rope_sin_;
+
+    // ---- RWKV-7 (P2, docs/rwkv7-plan.zh-CN.md) ----------------------------
+    // An RWKV layer has no KV cache: its whole history is one head_size x
+    // head_size recurrence per head plus the two token-shift vectors, which is
+    // why the state is a fixed-size block rather than [seq x dim].  0.1B:
+    // 12 * 12 * 64 * 64 floats = 2.36 MB.  f32 on purpose -- the plan's S-1
+    // measures the q16 grid on this state at +0.1543 nats/token and greedy
+    // 6/8, so it is the one tensor P2 must not quantise.
+    struct RwkvState {
+        vector<float> wkv;        // [layers][heads][head_size][head_size]
+        vector<float> shift_att;  // [layers][dim]: previous token's att_norm out
+        vector<float> shift_ffn;  // [layers][dim]: previous token's ffn_norm out
+        vector<float> v_first;    // [dim]: layer 0's value, mixed in from layer 1
+        bool have_v_first = false;
+    };
+    RwkvState rwkv_state_;
+
+    // One token through the block, returning the residual stream after the last
+    // layer.  The four big matvecs and the logits matvec go through the GPU;
+    // every elementwise op and the WKV recurrence run here in f32 (P2 is the
+    // correctness path -- P6 is the fused/GPU one).
+    vector<float> forward_rwkv(int token);
+    // The output LayerNorm, the metadata key 17 head-input scale and the logits
+    // matvec: one place, so step() and step_candidates() cannot disagree.
+    vector<float> rwkv_head_input(const vector<float>& x);
+    vector<float> step_rwkv(int token, bool want_logits);
+    // A matvec through the GPU, with the input normalised by a power of two so
+    // it cannot cross the q16 rail (the token-shift lerps reach 225).  The
+    // compensating factor goes into the matrix's read-back scale, *not* into
+    // the result -- GPU::matvec_s does it the other way round, which multiplies
+    // the output before the kernel's own clamp and would break this block's
+    // 90-magnitude outputs.  See the comment on the definition.
+    vector<float> rwkv_mv(const Mat& m, const vector<float>& x);
+    // LayerNorm with weight and bias, f32 statistics (O1): the mean and the
+    // biased variance over the whole row, eps from key 16.
+    static vector<float> rwkv_layernorm(const vector<float>& x, const float* wb, float eps);
+    void zero_rwkv_state();
 
     vector<float> rms_norm(const vector<float>& x, const float* w);
     // A/B probe: the GPU rmsnorm (fixed-point partial sums) instead of the

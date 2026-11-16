@@ -44,19 +44,23 @@ import subprocess
 from worker_engine import WorkerEngine
 import sys
 import time
-from evalkit import Engine, load_jsonl  # the one engine client and JSONL loader
+from evalkit import Engine, load_jsonl, is_rwkv_container, RWKV_SAMPLING  # the one engine client and JSONL loader
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 NL = chr(10)
 WORD_RE = re.compile(r"([A-Za-z0-9']+|[\u4e00-\u9fff])")
 
-# The two models' own recommended sampling settings, not one shared greedy run:
+# Each model's own recommended sampling settings, not one shared greedy run:
 # a 64M model needs a little entropy to produce anything, the QAD LFM is
-# distilled for near-greedy decoding.
+# distilled for near-greedy decoding, and RWKV-7's model card says temp 1.0 /
+# top_p 0.3 / repetition_penalty 1.2 (the one copy is evalkit.RWKV_SAMPLING,
+# with the source).  --preset auto picks per container: rwkv for an RWKV-7
+# file (metadata key 16), minimind for everything else -- the old default.
 PRESETS = {
     "minimind": {"temp": 0.85, "top-k": 50, "top-p": 0.85},
     "lfm": {"temp": 0.1, "top-k": 50, "repeat-penalty": 1.05},
     "greedy": {"greedy": 1},
+    "rwkv": dict(RWKV_SAMPLING),
 }
 
 
@@ -211,7 +215,9 @@ def main(argv=None):
     ap.add_argument("--data", default=os.path.join(ROOT, "engine", "scripts", "eval", "ifeval.jsonl"),
                     help="case file (default: engine/scripts/eval/ifeval.jsonl)")
     ap.add_argument("--out", default="/tmp/eval_ifeval")
-    ap.add_argument("--preset", default="minimind", choices=sorted(PRESETS))
+    ap.add_argument("--preset", default="auto", choices=["auto"] + sorted(PRESETS),
+                    help="auto: rwkv for an RWKV-7 container, minimind otherwise "
+                         "(the historical default); an explicit preset wins")
     ap.add_argument("--temp", type=float, default=None)
     ap.add_argument("--top-k", type=int, default=None)
     ap.add_argument("--top-p", type=float, default=None)
@@ -241,11 +247,11 @@ def main(argv=None):
     if not args.model:
         raise SystemExit("--model NAME=PATH is required (or use --selftest)")
 
-    sampling = dict(PRESETS[args.preset])
+    overrides = {}
     for k, v in (("temp", args.temp), ("top-k", args.top_k),
                  ("top-p", args.top_p), ("repeat-penalty", args.repeat_penalty)):
         if v is not None:
-            sampling[k] = v
+            overrides[k] = v
     env = {"GPU_LAYER": "1", "KV_PACK": "16"}
     for kv in args.env:
         k, _, v = kv.partition("=")
@@ -253,12 +259,19 @@ def main(argv=None):
     os.makedirs(args.out, exist_ok=True)
     print("engine   %s" % args.engine)
     print("cases    %d from %s" % (len(cases), args.data))
-    print("sampling %s  seeds %d" % (sampling, args.seeds))
     for spec in args.model:
         name, _, path = spec.partition("=")
         if not os.path.exists(path):
             raise SystemExit("no such model: %s" % path)
+        # auto is per container: an RWKV-7 file gets the model card's sampling,
+        # everything else keeps the minimind default the old rows were run with.
+        preset = args.preset
+        if preset == "auto":
+            preset = "rwkv" if is_rwkv_container(path) else "minimind"
+        sampling = dict(PRESETS[preset])
+        sampling.update(overrides)
         print("%s== %s (%s)" % (NL, name, path), flush=True)
+        print("sampling %s  seeds %d" % (sampling, args.seeds), flush=True)
         if args.reuse_worker:
             eng = WorkerEngine(args.engine, path, env, args.system, sampling)
         else:

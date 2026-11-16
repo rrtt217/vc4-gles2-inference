@@ -504,3 +504,191 @@ part(2)` - MoE experts and multi-adapter files need either an `expert` field or
 a string name table; structured (JSON) metadata, if human editing matters more
 than a dependency-free reader; and per-tensor compression, which would break
 the "borrow straight from the mapping" property that makes the loader free.
+
+## v4: RWKV-7 (version 4)
+
+Added 2026-11-16, P1 of [`rwkv7-plan.zh-CN.md`](rwkv7-plan.zh-CN.md).  An
+RWKV-7 container is **version 4**: v3's 64-byte record, one new metadata key
+(16) and 17 new tensor ids.  Dense containers stay version 2 and MoE
+containers stay version 3, so every container in `models/` is byte-identical
+to what it was; a v4 file is the only thing this section describes.
+
+### Why a version at all, and why the record did not grow
+
+A v2 or v3 file can already *carry* the numbers: an unknown key is skipped and
+an unknown tensor id is ignored.  That is exactly the trap.  A reader that
+skipped key 16 would load the tensors it knows, find no `rms_att`, and a
+reader that skipped only some ids would run a transformer block over an RWKV
+checkpoint.  The version number turns that into one line at the header
+(`mmcf: unsupported version 4`, which is what the pre-v4 engine prints) instead
+of a half-loaded model.  `Model::probe()` reads the header and the metadata
+only, so the REPL's `/model` refuses a v4 container before it releases the
+scene it is running.
+
+The record stays 64 bytes because nothing v4 adds is per-tensor: the
+architecture's hyper-parameters are model-wide (key 16) and every new kind's
+shape is already in the record's `rows`/`cols`.  A longer record would be 16
+zero bytes per tensor, and `rec_size(4) == 64` keeps one reader for all three
+layouts (`MMCF_REC_V3` covers v3 and v4).
+
+### Metadata key 16 (16 B)
+
+`<BBBBfHHHH>`: arch, head_size, flags, pad, norm_eps, r_w, r_a, r_v, r_g.
+
+| offset | size | field | notes |
+|---:|---:|---|---|
+| 0 | 1 | `arch` | `1` = RWKV-7.  A v4 file without this key is refused, and so is the key in any other version |
+| 1 | 1 | `head_size` | the WKV head width (64 in every released model).  Must equal key 1's `dim / heads`, which is how the reader checks that the two agree |
+| 2 | 1 | `flags` | bit 0 = the time-mix has the gate branch (`0x2A`/`0x2B` present).  The rest is reserved and 0 |
+| 3 | 1 | pad | 0 |
+| 4 | 4 | `norm_eps` (f32) | the LayerNorm epsilon.  The per-head group norm keeps the architecture's **64e-5** and is not a field: a model that wanted another one would be a different block |
+| 8 | 2 | `r_w` | decay low rank (0.1B: 64) |
+| 10 | 2 | `r_a` | ICLR low rank (64) |
+| 12 | 2 | `r_v` | value-residual low rank (32) |
+| 14 | 2 | `r_g` | gate low rank (128, or 0 for a model without the gate) |
+
+The four ranks are stored rather than derived because they are not derivable:
+llama.cpp's fallback formula `round(d^e * m / 32) * 32` gives **160** for
+0.4B's gate where its `config.json` says **128**, and the packer refuses a
+source that does not state them instead of guessing.
+
+### The 17 new tensor ids
+
+All of them sit in the empty slots of `kind(8) | layer(6) | part(2)`, and the
+names are llama.cpp's GGUF names so a reader can put the two side by side.
+The HF column is the source name (fla-hub naming, which the official `.pth`
+conversion reproduces: `models/rwkv7/official/pth_to_safetensors.py`).
+
+| id | name | rows x cols | dtype | HF tensor |
+|---|---|---|---|---|
+| `0x1A` | `time_mix_lerp` | `layers x 6*dim` | f32 | `attn.x_{r,w,k,v,a,g}` in that order |
+| `0x1B` | `time_mix_bias` | `layers x 3*dim` | f32 | `attn.{w,a,v}_lora.lora.2.bias` (w0, a0, v0) |
+| `0x1C` | `time_mix_scale` | `layers x 3*dim` | f32 | `attn.k_k`, `attn.k_a`, `attn.r_k` (`r_k` is `heads x 64`, flattened) |
+| `0x1D` | `att_norm` | `layers x 2*dim` | f32 | `attn_norm.{weight,bias}`: the LayerNorm before the time mix |
+| `0x1E` | `att_norm_2` | `layers x 2*dim` | f32 | `ffn_norm.{weight,bias}`: before the channel mix |
+| `0x1F` | `time_mix_ln` | `layers x 2*dim` | f32 | `attn.g_norm.{weight,bias}`: the per-head group norm |
+| `0x21` | `channel_mix_lerp` | `layers x dim` | f32 | `ffn.x_k` |
+| `0x22` | `tok_norm` | `1 x 2*dim` | f32 | `model.layers.0.pre_norm.{weight,bias}`; absent when the source has none |
+| `0x23` | `output_norm` | `1 x 2*dim` | f32 | `model.norm.{weight,bias}` |
+| `0x24`/`0x25` | `time_mix_w1`/`w2` | `r_w x dim` / `dim x r_w` | q8/q4 | `attn.w_lora.lora.{0,2}.weight` |
+| `0x26`/`0x27` | `time_mix_v1`/`v2` | `r_v x dim` / `dim x r_v` | q8/q4 | `attn.v_lora.lora.{0,2}.weight` |
+| `0x28`/`0x29` | `time_mix_a1`/`a2` | `r_a x dim` / `dim x r_a` | q8/q4 | `attn.a_lora.lora.{0,2}.weight` |
+| `0x2A`/`0x2B` | `time_mix_g1`/`g2` | `r_g x dim` / `dim x r_g` | q8/q4 | `attn.g_lora.lora.{0,2}.weight` |
+
+Three rules that are not visible from the table:
+
+- **Rows are output rows**, like every other `Mat` the engine reads: the down
+  projection is `rank x dim` and the up projection `dim x rank`, not the other
+  way round.  The vector groups keep the HF order *inside* a row, so
+  `time_mix_lerp`'s row is literally `x_r | x_w | x_k | x_v | x_a | x_g`.
+- **Layer 0 has no value-residual pair.**  It records `v_first` instead of
+  mixing it in, so `0x26`/`0x27` are absent there and present on every other
+  layer; the reader allows exactly that, and a gated model must have
+  `0x2A`/`0x2B` on every layer or on none (key 16's flag says which).
+- **`split_w13` must be 1.**  The channel mix is an ordinary key/value pair
+  and there is no fused W13 to flag, so a v4 file that says `split_w13 = 0`
+  is refused.
+
+### What v4 reuses
+
+| id | RWKV-7 use | shape |
+|---|---|---|
+| `0x10` | `[W_r; W_k; W_v]` stacked in one row block | `3*dim x dim` |
+| `0x11` | `W_o` | `dim x dim` |
+| `0x12` | `W_cm_key` | `hidden x dim` |
+| `0x15` | `W_cm_value` | `dim x hidden` |
+
+Reusing them is not cosmetic: the q4 group planes, the per-row q8 scale plane
+(`part` 1/2/3) and the upload path all key on the id, so the four largest
+matrices of an RWKV model get q8, q4 and `--q8-row-scale` without a second
+code path.  `Model` puts them in `qkv`, `wo`, `w1` and `w2` for the same
+reason (`engine/src/model.h`).
+
+### Metadata key 17: the head input's scale (added 2026-11-16, P0b)
+
+One byte, `k`.  The vector that feeds the logits matvec is the final
+LayerNorm's output, and the engine writes it through the q16 activation format
+like any other vector: grid 1/256, rail **+-127.996** (`ACT_SCALE = 256` on an
+int16).  RWKV-7 0.1B peaks at **315.6** there, 2.5x the rail, so a container
+that stored it unscaled would clamp the very input of its own head.
+
+The container states the fix instead of changing a kernel: the head input is
+written `x * 2^-k` and **every logits tile's scale already carries `2^k`**,
+so `(W/2^k-wscaled) dot (x * 2^-k)` comes out in the model's own units.  The
+packer computes `k = ceil(log2(final_ln_peak / 127.996))` from its float32
+calibration and folds `2^k` into the `scale` field of the `0x20` records - the
+bodies are bit-identical to the same pack without the key, only the scale moves
+(measured: tile 0 at 0.00501353 with `k = 2` against 0.00125338 without).
+
+Absent (or 0) means the input is written unscaled, which is every container
+packed before this key existed, so the read path is bit-identical for them.  A
+v4 file without key 17 is legal: it is what `--no-rail-check` produces, and it
+clamps at run time.
+
+The packer also prints the analytic worst case for that input, from the weights
+alone: a LayerNorm output is bounded channel-wise by `sqrt(dim)*|w_i| + |b_i|`
+(the squared normalised values sum to `dim`), i.e. 668.3 on 0.1B, which would
+want `k = 3`.  It is a bound that needs one channel to carry all the variance,
+the measured peak is what sets `k`, and the printed margin is how far a real
+prompt would have to go before the store clips.
+
+### Reader rules for v4
+
+- version 4 without key 16, key 16 in another version, an unknown `arch`, a
+  `head_size` that disagrees with `dim / heads`, a non-positive rank, key 14
+  (layer types) or key 13 (MoE) in a v4 file: refused by name.
+- The nine f32 vector groups are shape-checked against `layers`, `dim` and
+  the group count before anything reads them, and the low-rank pairs against
+  key 16's ranks.  Without that the four reused ids would load as a
+  transformer block with an RWKV head width.
+- `rms_att`/`rms_ffn`/`rms_final` are transformer tensors and are not
+  required in a v4 file (`att_norm` and friends replace them); an embedding
+  and the logits tiles still are.
+- Metadata key 17 (the head input's scale) is read into `Model::logit_shift`
+  and a value over 5 is refused; the reader does nothing else with it, because
+  the *2^k already sits in the logits tiles' scales.
+- Metadata key 11 (`rms_norm_eps`) is **not** written for a v4 container:
+  key 16 carries the LayerNorm epsilon, and key 11 keeps its own meaning
+  (the RMSNorm shader's uniform, which is not numerically neutral).
+- The tokenizer blob (`0x30`) and the chat template (key 9) are ordinary
+  keys/tensors; a v4 file may have neither (the RWKV tokenizer and template
+  are P3 of the plan) and the engine then falls back as it always did.
+- **P1 boundary**: this build reads a v4 container and refuses to run it
+  (`mmcf: ... no layer loop for the block yet`).  The block's layer loop, the
+  WKV state and the two guards (`pair_ok()`, the prefix cache) are P2;
+  deleting that one refusal is part of adding them, and the `Model` fields the
+  reader fills (`rwkv`, `rwkv_*`) are what the loop consumes.
+
+### How the mapping was verified
+
+`mmcf_pack.py --verify` compares the container against its source tensor by
+tensor, which proves the container is faithful but not that the *names* were
+understood.  The mapping was checked against llama.cpp's own conversion of the
+same official weights (`refs/llamacpp/src-b12283/conversion/rwkv.py` and
+`gguf-py/gguf/tensor_mapping.py`): every f32 tensor of
+`models/rwkv7/rwkv7-g1d-0.1b-Q5_K_M.gguf` matches its mapped HF tensor byte
+for byte - the five norm pairs, all six `time_mix_lerp` slots in order, `k_k`,
+`k_a`, `r_k`, the channel-mix lerp, `w0`/`a0` - and layer 0's missing
+`v_lora` matches llama.cpp's dummy `v0/v1/v2` (which its conversion drops
+because the official loader never uses them).
+
+### The 0.1B container (`models/rwkv7/packed/rwkv7-g1d-0.1b.q8.mmcf`)
+
+196 tensors, 191,844,864 B, version 4, ranks 64/64/32/128, gate present, `seq`
+512 (nominal: RWKV has no KV cache).  The packer's float32 calibration (three
+runs of 8 vocabulary ids plus one chat-shaped prompt encoded with the
+`rwkv_vocab_v20230424.txt` that ships next to the weights) reports:
+
+| stream | peak | engine rail | consequence |
+|---|---:|---:|---|
+| residual | 37.4 (layer 11) | 128.0 | q16 fits, no key 12 |
+| channel-mix hidden (`relu(x)^2`, the sqrelu stream) | 91.3 (layer 11) | 128.0 | 1.40x margin, no key 15 |
+| final LayerNorm output (the head's input) | 312.5 | 128.0 | **2.44x**: key 17 = 2 |
+| WKV state, per-layer max abs | 51.8 (layer 11) | not a rail | the number S-1 of the plan needs |
+
+The calibration stream is the model's own vocabulary (a chat-shaped prompt,
+`RWKV_RAIL_TEXT` in `engine/tools/mmcf_hf.py`): three runs of vocabulary ids
+find 58 instead of 91 there, because the peaks live on real text.  These are
+pack-time facts P2 starts from, not a model-quality claim: the recurrence is
+never renormalised, so its magnitude is what decides whether the Pi can hold
+the state in fixed point at all.
