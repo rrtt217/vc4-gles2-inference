@@ -6591,3 +6591,32 @@ than q8's ~190), LFM2.5-QAD q4 ~566 (-16%).  `Q4_GATE_NESTED=1` alone
 restores the full nested baseline for the A/B.  Acceptance re-run on this
 disposition: Xe regression ACCEPT (q8 PPL 270.3170, q4 326.1483, both
 pins), swap_matrix PASS; the shader hashes move only the gate entries.
+
+## 2026-11-16 — the REPL batch: answers and decode unchanged (Pi Zero)
+
+Cross-built on vlab from `4c198b3`, ARMv6/VFPv2, 1,784,640 B, sha256
+`0fd1e4e08fd46cf99be1eec92b86fd3b8b5046298941b887e524a629525d1817`, deployed as
+`bin/engine_mm3_pi` over the 2026-11-13 build, which is kept as
+`engine_mm3_pi.2026-11-16-pre-qol`.  The batch is REPL-only: multi-line editing
+with the terminal's paste frame, the `/params` knobs, `/stats`, the upload bar,
+and `/model` refusing a bad container from its metadata *before* releasing the
+current model (no capacity pre-check any more).
+
+Interleaved A/B on the idle board (`loadavg 0.46`, 1.0 GHz, `throttled=0x0`,
+36.3 C), minimind3 q8, `GPU_LAYER=1 KV_PACK=16`, `--gen 16`, greedy:
+
+| binary | decode (ms/token) |
+|---|---:|
+| `8044002` (previous, `engine_mm3_pi.2026-11-16-pre-qol`) | 185.1 / 211.4 |
+| `4c198b3` (this deploy) | 187.7 / 185.7 |
+
+The container's own seq (256) was used; `SEQ=768` gave 189.4.  That is the
+q8 ~190 the q4 disposition above already compares against, so the batch is
+timing-neutral as well as text-neutral: the q8 acceptance pin still prints
+`我是一个AI助手，没有自我意识，也没有身体，所以我无法` and all 127 shader digests
+are identical.
+
+Do not read the 115.4 ms/token row of the AGENTS.md campaign table as this
+model: it is TinyChat15M q8.  The only earlier HEAD number for minimind3 q8 was
+the 2026-11-12 pilot's 219.1 ms/token, taken while the store was being scanned;
+today is faster than it.
