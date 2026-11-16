@@ -317,6 +317,45 @@ static void test_bitcast(int dim, bool dither) {
     glDeleteProgram(p2); glDeleteTextures(1,&it);
 }
 
+// E. The matvec activation fetch: I24_1 X4Q does FOUR texture2D fetches from
+// sampler X in one fragment (I16_2's inline form does two).  wrow_probe found
+// multi-fetch from one sampler undefined on VC4 for a tall plane; this names
+// whether the I24_1 matvec (the RWKV path's act_fmt_) delivers on VC4.
+static void test_matvec(int dim, XFormat xf) {
+    const int cols = dim, rows = dim;
+    vector<int8_t> w((size_t)rows*cols);
+    for (int r = 0; r < rows; ++r) for (int c = 0; c < cols; ++c)
+        w[(size_t)r*cols+c] = (int8_t)(((r*7+c*13)%9)-4);
+    // q8 weight texture: texel (q,r) holds weights 4q..4q+3 as (w+128) bytes.
+    vector<uint8_t> wp((size_t)(cols/4)*rows*4);
+    for (int r = 0; r < rows; ++r) for (int q = 0; q < cols/4; ++q)
+        for (int j = 0; j < 4; ++j)
+            wp[((size_t)r*(cols/4)+q)*4+j] = (uint8_t)(w[(size_t)r*cols+4*q+j]+128);
+    GLuint wt = tex(cols/4, rows, wp);
+    vector<int> xraw(cols);
+    for (int c = 0; c < cols; ++c) xraw[c] = (int)((c*2654435761u)%512u)-256;
+    GLuint xt;
+    if (xf == XFormat::I24_1) xt = tex(cols, 1, q24_bytes(xraw, cols, 1));
+    else { vector<uint8_t> px((size_t)(cols/2)*4);
+        for (int c = 0; c < cols; ++c) { uint16_t u=(uint16_t)(int16_t)xraw[c];
+            px[(c/2)*4+(c%2)*2]=u>>8; px[(c/2)*4+(c%2)*2+1]=u&255; }
+        xt = tex(cols/2, 1, px); }
+    GLuint p = prog(matvec_q8(rows, cols, xf, false)); if (!p) { printf("  E link fail\n"); ++failures; return; }
+    out_begin(rows); glUseProgram(p);
+    bind(p,"W",0,wt); bind(p,"X",1,xt);
+    glUniform1f(glGetUniformLocation(p,"ws"), 1.0f);
+    tri(p);
+    vector<int> g = read_q24(rows);
+    vector<int> want(rows);
+    for (int r = 0; r < rows; ++r) {
+        float s = 0; for (int c = 0; c < cols; ++c) s += (float)w[(size_t)r*cols+c]*(float)xraw[c];
+        long q = lrintf(s); want[r] = (int)std::max(-32768L, std::min(32767L, q));
+    }
+    char nm[64]; snprintf(nm,sizeof nm,"E matvec_q8 %s %dx%d", x_format_name(xf), rows, cols);
+    report(nm, g, want, 1);
+    glDeleteProgram(p); glDeleteTextures(1,&wt); glDeleteTextures(1,&xt);
+}
+
 int main(int argc, char** argv) {
     bool want_es3 = !(argc > 1 && strcmp(argv[1], "gles2") == 0);
     if (want_es3) { setenv("MESA_GLES_VERSION_OVERRIDE", "3.0", 0);
@@ -350,6 +389,9 @@ int main(int argc, char** argv) {
     test_i24(D, false); test_i24(D, true);
     printf("\nC. shipped elementwise\n");
     test_sqrelu(D);
+    printf("\nE. matvec activation fetch (I24_1 X4Q 4-fetch vs I16_2 2-fetch)\n");
+    test_matvec(D, XFormat::I16_2);
+    test_matvec(D, XFormat::I24_1);
     if (g_es3) { printf("\nD. bit-cast f32 round trip (dither A/B)\n");
         test_bitcast(D, false); test_bitcast(D, true); }
     else printf("\nD. skipped (no ESSL 3.00)\n");
