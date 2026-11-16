@@ -188,6 +188,12 @@ binary.  They are measurement hooks, not production settings.
   methodology: it drops the four P fetches and the scale/min decode per group
   (constant scale), with wrong weights on purpose.  It measured 84 ms of the
   gate's 159 on the Pi, which is why the group plane is the next target.
+- `Q4_GATE_NESTED=1` — restore the nested group-loop form of the 4-bit FFN
+  gate (the pre-2026-11-16 default) for an interleaved A/B.  The default is
+  the flat 8-wide gate: byte-identical (probe hash matches at 304/608/1216/2048
+  rows on Xe and VC4) and ~43% faster at the engine's 1216-row chunk
+  (6.55 -> 3.74 ms/draw).  The legacy pricing arms below route to the nested
+  body too.
 - `Q4_4X4_FLAT=1`, `Q4_4X4_FLAT8=1`, `Q4_4X4_FLAT8M=1`, `Q4_4X4_FLAT8G=1`,
   `Q4_4X4_FLAT8B=1` — structure arms for the residual gap that survives
   `NOP`+`Q4_NOMIN` (all q4 metadata gone, yet ~1.5x the q8 gate).  `FLAT`/`FLAT8`

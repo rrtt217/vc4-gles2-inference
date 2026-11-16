@@ -1246,6 +1246,13 @@ static bool q4x4_flat8g(){ return getenv("Q4_4X4_FLAT8G") != nullptr; }
 // kernel bit for bit (probe hash 776b29b8).  The conditional updates are all
 // float, which the VC4 rolled-loop rule preserves.
 static bool q4x4_flat8b(){ return getenv("Q4_4X4_FLAT8B") != nullptr; }
+// Q4_GATE_NESTED=1 restores the nested group loop (the pre-2026-11-16 default)
+// for an interleaved A/B inside one binary.  The flat 8-wide gate is the
+// default: byte-identical (probe hash matches at 304/608/1216/2048 rows on both
+// Xe and VC4) and ~43% faster at the engine's 1216-row chunk (6.55 -> 3.74
+// ms/draw).  The legacy pricing arms (NOP/ONEW/ONEROW/NOOUT/NOMIN) are defined
+// on the nested body, so they route there too.
+static bool q4x4_nested(){ return getenv("Q4_GATE_NESTED") != nullptr; }
 
 static string i4_gate_flat(int rows, int cols, XFormat xf, bool inl, int hs, bool wide) {
     const string HD = hid_scale_def(hs), HM = hid_scale_mul(hs);
@@ -1449,6 +1456,11 @@ string matvec_i4_pair_swiglu_4x4(int rows, int cols, XFormat xf, bool inl, int h
     if (q4x4_flat8m()) return i4_gate_flat8m(rows, cols, xf, inl, hs);
     if (q4x4_flat8g()) return i4_gate_flat8g(rows, cols, xf, inl, hs);
     if (q4x4_flat8b()) return i4_gate_flat8b(rows, cols, xf, inl, hs);
+    // Default: the byte-identical flat 8-wide gate.  The nested form below is
+    // kept for Q4_GATE_NESTED=1 and the legacy pricing arms defined on it.
+    if (!(q4x4_nested() || q4x4_nop() || q4x4_onew() || q4x4_onerow() ||
+          q4x4_noout() || q4_nomin()))
+        return i4_gate_flat8b(rows, cols, xf, inl, hs);
     const string HD = hid_scale_def(hs), HM = hid_scale_mul(hs);
     const int texw = cols / 4;              // one 4-bit texel = four weights
     const int groups = (cols + 31) / 32;
