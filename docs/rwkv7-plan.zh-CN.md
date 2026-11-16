@@ -233,7 +233,7 @@ DE/DEA 变体（2.0/3.7GB），非标准 v7、Pi 不可行；标准 v7 翻译微
 | P2 | **完成 2026-11-16** | `forward_rwkv` 第三条层循环（CPU f32 状态 + GPU matvec），`split_rwkv` 切 rkv 三带，app 加 `set_rwkv`；桌面端到端跑通、确定性、minimind3 引脚不变、`make check` 108/0、无新 shader。详见 §十一 |
 | P3 | **完成 2026-11-16** | 引擎侧 `tokenizer.*` 贪心模式（encode/encode_parts/decode 分支 rwkv_；96 组旧路径 md5 全等；全量 65536 往返 0 漂移；模板端到端 exact）。packer 侧：`engine/tools/make_tok_rwkv.py`、`models/rwkv7/g1d.tok`（897,740 B，65536 条，maxlen 128，id0 文本；贪心编码与 oracle **逐 id 一致**）、`templates/rwkv7-g1.jinja`（官方 G1 写法，生成提示 `Assistant: <think`）、以及内嵌两者的 `models/rwkv7/packed/rwkv7-g1d-0.1b.q8.chat.mmcf`（197 张量，192,743,132 B，caps=0x1，add_bos=0）；引擎侧 `tokenizer.*` 的贪心模式由 p3-tokenizer 在做 |
 | P4 | **完成 2026-11-16** | 层循环忠实（engine↔容器权重 oracle cos≈0.999 ACT_F32）；R-1 q16 保持默认；三套 battery 最终口径入 docs/evaluation.md；RWKV_DUMP 登记；regression ACCEPT + swap_matrix rwkv 链 PASS；Xe 引脚入 AGENTS.local.md |
-| P5 | **完成 2026-11-16** | Pi Zero 跑通 0.1B q4（RC=0，生成连贯英文）；SEQ=4096 不夹取（O(1) 状态）。此前段错误实为 apply_q4_fmt 越界读空 w3 + 分块时误传完整 3072 行 w1，均已修（62895ce/cb16490），非 OOM | cm_key/value 已按 VC4 2048 行分块（split_rwkv(max_dim)，Xe 不触发、cos 不变）；ARMv6 二进制已部署。但 Pi 当前自由 CMA ~94MB（pumpkin 占用），0.1B q8r 需 ~141MB、q4（head q4）亦超自由 CMA，均上传失败段错误；需停 pumpkin 独占 CMA 再测 decode/prefill/长上下文。P6 已在 Xe 启动 |
+| P5 | **完成 2026-11-16** | Pi Zero 跑通 0.1B：**q8r 可加载且中文连贯**（"我是一名AI语言模型"），q4 亦可跑但中文退化（重复/回声）；SEQ=4096 不夹取（O(1) 状态）。此前段错误实为 apply_q4_fmt 越界读空 w3 + 分块时误传完整 3072 行 w1，均已修（62895ce/cb16490），**非 OOM/CMA**；q8r 实际能装下 | cm_key/value 已按 VC4 2048 行分块（split_rwkv(max_dim)，Xe 不触发、cos 不变）；ARMv6 二进制已部署。但 Pi 当前自由 CMA ~94MB（pumpkin 占用），0.1B q8r 需 ~141MB、q4（head q4）亦超自由 CMA，均上传失败段错误；需停 pumpkin 独占 CMA 再测 decode/prefill/长上下文。P6 已在 Xe 启动 |
 | P6 | 未开始 | GPU 逐元素核+WKV7 融合 |
 
 **P2 开工清单（P1 的交接，按代码位置）**：
