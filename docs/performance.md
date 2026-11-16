@@ -6906,3 +6906,36 @@ Value-identical on Xe (GPU PPL still 9.1850, greedy tripwire and determinism
 unchanged); `shader_hashes` re-baseline touches only the rwkv_* builders.
 Pi runtime re-test pending the lead's cross-deploy.
 
+
+### Addendum 2 (2026-11-17): the VC4 numerical fix (Pi Zero, VC4 Mesa 26.2.2)
+
+After the width fix the Pi GPU path ran but collapsed to garbage
+("HealthchoicedefaultGrounddefault..."), and the hybrid (CPU f32 WKV state)
+collapsed too — so the culprit was the elementwise chain, not the state.
+Board-level probes (engine/probes/rwkv_probe[_pi], sections A–J: 2D NPOT
+constant fetch, I24_1 render/fetch round trip, bit-cast round trip, q16 read,
+matvec/matvec_add, render→fetch glFinish A/B) all PASS in isolation; the
+per-op GPU-vs-CPU dump named the first divergence at layer 1, then the
+sqrelu of the 1536-wide chunked cm hidden: its single 1536-fragment draw
+exceeds VC4's kDrawCap=1024 and was silently dropped (target left at the
+clear color, I24 -32768).  Two fixes, both gated to needs_finish() (VC4) so
+Xe is byte-identical:
+
+1. rwkv_draw1 splits into kDrawCap-wide strips on VC4 (the sqrelu, and any
+   elementwise draw wider than the cap).  Xe drives the wide draw in one piece.
+2. the wo/cm residual add uses the CPU's two-step order on VC4 — matvec to I24
+   (rwkv_mv) then a q16 add (rwkv_res_add, new builder) — because the fused
+   matvec_add drops its dot on VC4's I24_1 chain.  Xe keeps the fused
+   matvec_add (its own rounding).
+
+Result: Pi GPU greedy is now byte-identical to Xe GPU (the canonical --gen 16
+reply, a leading newline then the echo prefix) — the garbage is gone.  Xe
+unchanged: GPU PPL 9.1850, greedy tripwire, determinism, make check 108/0,
+regression ACCEPT (CPU pins 270.3170/326.1483/9.2919).
+
+Pi speed (measured, bench TIMING, --gen 16): GPU decode ~1138 ms/token vs
+CPU ~969 ms/token — on VC4 the GPU path is draw-bound (~1879 draws/token at
+~0.6 ms/draw) and slightly slower than the CPU path; the >=3x win is
+Xe-specific (Xe ~36 vs ~119 ms/token, 3.3x, low per-draw overhead).  A Pi
+speedup would need the elementwise ops fused into the matvec kernels (fewer
+draws), which is future work.
