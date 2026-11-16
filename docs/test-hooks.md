@@ -188,12 +188,15 @@ binary.  They are measurement hooks, not production settings.
   methodology: it drops the four P fetches and the scale/min decode per group
   (constant scale), with wrong weights on purpose.  It measured 84 ms of the
   gate's 159 on the Pi, which is why the group plane is the next target.
-- `Q4_4X4_FLAT=1`, `Q4_4X4_FLAT8=1` — structure arms for the residual gap that
-  survives `NOP`+`Q4_NOMIN` (all q4 metadata gone, yet ~1.5x the q8 gate).
-  Both use the NOP constant scale and no min, wrong weights on purpose.
-  `FLAT` is q8's single 4-wide loop with 4-bit weights (no decode); `FLAT8`
-  is the current 8-wide inner body flattened into one loop.  They separate the
-  nested/wide loop shape from the 4-bit format itself (`q4mv_probe`).
+- `Q4_4X4_FLAT=1`, `Q4_4X4_FLAT8=1`, `Q4_4X4_FLAT8M=1` — structure arms for the
+  residual gap that survives `NOP`+`Q4_NOMIN` (all q4 metadata gone, yet ~1.5x
+  the q8 gate).  `FLAT`/`FLAT8` use the NOP constant scale and no min, wrong
+  weights on purpose: `FLAT` is q8's single 4-wide loop with 4-bit weights (no
+  decode), `FLAT8` is the current 8-wide inner body flattened into one loop.
+  `FLAT8M` keeps the per-group scale and min but fetches/applies them per
+  iteration in the flat 8-wide loop (the min reassociates, so it is a pricing
+  arm, not byte-identical).  They separate the nested/wide loop shape from the
+  4-bit format itself (`q4mv_probe`).
 - `Q4_FMT=rgba4` — bind every INT4 weight matrix (qkv, wo, w13 and, on the
   hybrid, the conv block's `in_proj` slices and `out_proj`) as a four-bit texel surface
   at twice the width: four weights per texel, sampled as n/15 with the 15 folded
