@@ -182,6 +182,12 @@ probes/conv_probe: probes/conv_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $
 probes/conv_probe_pi: probes/conv_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp | check-cross $(HEADERS)
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -I$(SRC) -o $@ probes/conv_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(CROSS_LDLIBS)
 
+probes/rwkv_probe: probes/rwkv_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(HEADERS)
+	$(CXX) $(ALL_CXXFLAGS) -I$(SRC) -o $@ probes/rwkv_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(LDLIBS)
+
+probes/rwkv_probe_pi: probes/rwkv_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp | check-cross $(HEADERS)
+	$(CROSS_CXX) $(CROSS_CXXFLAGS) -I$(SRC) -o $@ probes/rwkv_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(CROSS_LDLIBS)
+
 probes/wrow_probe_pi: probes/wrow_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp | check-cross $(HEADERS)
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -I$(SRC) -o $@ probes/wrow_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(CROSS_LDLIBS)
 
