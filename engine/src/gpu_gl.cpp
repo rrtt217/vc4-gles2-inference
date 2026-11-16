@@ -154,7 +154,9 @@ void GPU::init_egl(){
         // still has no MRT, no integer textures, and no fround_even), so they
         // are set here, before eglInitialize, and never overwrite a value the
         // caller picked.  Q4_SHIFT_MESA=0 skips this for an A/B.
-        if (q4_shift_wanted() && !getenv("Q4_SHIFT_NO_MESA")) {
+        // Q4_SHIFT's nibble split and RWKV_GPU's bit-cast f32 state kernels both
+        // need the ESSL 3.00 compiler, so either one requests the MESA override.
+        if ((q4_shift_wanted() || env_flag("RWKV_GPU")) && !getenv("Q4_SHIFT_NO_MESA")) {
                 setenv("MESA_GLES_VERSION_OVERRIDE", "3.0", 0);
                 setenv("MESA_GLSL_VERSION_OVERRIDE", "300", 0);
         }
@@ -189,16 +191,22 @@ void GPU::init_egl(){
             renderer_.find("swrast") != string::npos)
             fprintf(stderr, "renderer: %s -- software rasteriser: timings and machine pins "
                             "do not apply\n", renderer_.c_str());
-        if (q4_shift_wanted()) {
+        {
                 const char* glsl = (const char*)glGetString(GL_SHADING_LANGUAGE_VERSION);
-                g_q4_shift_ok = glsl && strncmp(glsl, "OpenGL ES GLSL ES 3", 19) == 0;
-                if (g_q4_shift_ok) {
-                        if (getenv("SHADER_TIME") || getenv("Q4_SHIFT_VERBOSE"))
-                                fprintf(stderr, "Q4_SHIFT: integer nibble split on %s (ESSL %s)\n",
-                                        renderer_.c_str(), glsl + 18);
-                } else
-                        fprintf(stderr, "Q4_SHIFT: %s offers %s; using the float q4 decode\n",
-                                renderer_.c_str(), glsl ? glsl : "(unknown)");
+                g_es3_ok = glsl && strncmp(glsl, "OpenGL ES GLSL ES 3", 19) == 0;
+                g_q4_shift_ok = g_es3_ok && q4_shift_wanted();
+                if (q4_shift_wanted()) {
+                        if (g_q4_shift_ok) {
+                                if (getenv("SHADER_TIME") || getenv("Q4_SHIFT_VERBOSE"))
+                                        fprintf(stderr, "Q4_SHIFT: integer nibble split on %s (ESSL %s)\n",
+                                                renderer_.c_str(), glsl + 18);
+                        } else
+                                fprintf(stderr, "Q4_SHIFT: %s offers %s; using the float q4 decode\n",
+                                        renderer_.c_str(), glsl ? glsl : "(unknown)");
+                }
+                if (env_flag("RWKV_GPU") && !g_es3_ok)
+                        fprintf(stderr, "RWKV_GPU: %s offers no ESSL 3.00; the WKV state falls back to CPU f32\n",
+                                renderer_.c_str());
         }
     }
 

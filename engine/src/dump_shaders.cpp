@@ -207,6 +207,35 @@ vector<Case> cases() {
     c.kv_vstep = false;
     add_attn(v, "attn_kv8_nostep_unpaired", c);
 
+    // --- RWKV-7 (P6): the elementwise ops and the WKV7 recurrence.  dim 768,
+    // head_size 64, 12 heads (the 0.1B g1d shape).  The residual is q16 (I16_1).
+    add(v, "rwkv_ln_stats_768_i16_1", [] { return rwkv_ln_stats(768, I16_1); });
+    add(v, "rwkv_ln_stats_p_768", [] { return rwkv_ln_stats_p(768); });
+    add(v, "rwkv_ln_norm_p_768", [] { return rwkv_ln_norm_p(768); });
+    add(v, "rwkv_first_add_768", [] { return rwkv_first_add(768); });
+    add(v, "rwkv_ln_norm_768_i16_1", [] { return rwkv_ln_norm(768, I16_1); });
+    add(v, "rwkv_gn_stats_768_64", [] { return rwkv_gn_stats(768, 64); });
+    add(v, "rwkv_gn_norm_768_64", [] { return rwkv_gn_norm(768, 64); });
+    add(v, "rwkv_lerp_768_0", [] { return rwkv_lerp(768, 0, 6); });
+    add(v, "rwkv_lerp_768_3", [] { return rwkv_lerp(768, 3, 6); });
+    add(v, "rwkv_lerp_768_cm", [] { return rwkv_lerp(768, 0, 1); });
+    add(v, "rwkv_l2_stats_768_64", [] { return rwkv_l2_stats(768, 64); });
+    add(v, "rwkv_l2_norm_768_64", [] { return rwkv_l2_norm(768, 64); });
+    add(v, "rwkv_keydelta_768", [] { return rwkv_keydelta(768); });
+    add(v, "rwkv_tanh_768", [] { return rwkv_tanh(768); });
+    add(v, "rwkv_sigmoid_768_bias16", [] { return rwkv_sigmoid(768, true, 16); });
+    add(v, "rwkv_sigmoid_768_nobias1", [] { return rwkv_sigmoid(768, false, 1); });
+    add(v, "rwkv_decay_768", [] { return rwkv_decay(768); });
+    add(v, "rwkv_vres_768", [] { return rwkv_vres(768); });
+    add(v, "rwkv_sqrelu_768", [] { return rwkv_sqrelu(768); });
+    add(v, "rwkv_mul_768", [] { return rwkv_mul(768, 1); });
+    add(v, "rwkv_mul_768_s256", [] { return rwkv_mul(768, 256); });
+    add(v, "rwkv_rk_reduce_768_64", [] { return rwkv_rk_reduce(768, 64); });
+    add(v, "rwkv_rk_add_768_64", [] { return rwkv_rk_add(768, 64); });
+    add(v, "rwkv_wkv_sa_12_64", [] { return rwkv_wkv_sa(12, 64); });
+    add(v, "rwkv_wkv_update_12_64", [] { return rwkv_wkv_update(12, 64); });
+    add(v, "rwkv_wkv_out_12_64", [] { return rwkv_wkv_out(12, 64); });
+
     return v;
 }
 

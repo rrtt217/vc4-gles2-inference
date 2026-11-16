@@ -102,3 +102,50 @@ std::string top2_packed(int rows, int chunk);
 // loops (the VC4-proven length).  Byte-identical to read-back + max_element.
 std::string top1_group(int n);
 std::string top1_final(int groups);
+
+// ---- RWKV-7 (Goose) GPU layer loop (P6, docs/rwkv7-plan.zh-CN.md) -----------
+// The elementwise ops and the WKV7 recurrence of the third layer loop.  All
+// activations are I24_1 (one value per texel, 1/256 step) except the residual
+// stream, which stays q16 (I16_1) to match the CPU add_q16 grid bit-for-bit
+// under the +-128 rail.  Constant per-channel vectors (lerp / bias / scale /
+// norm affine) are uploaded scaled by 64 so their 1/256 texel step is 1/16384
+// in model units; every reader multiplies by the literal 0.015625.
+//
+// Two tensors need a finer step than 1/256 and carry an explicit power-of-two
+// store scale instead (the plan's W-1 / K-1 / S-1 decisions):
+//   decay  stores (1-w)*256   -> w step 1/65536 (W-1: 1.5e-5)
+//   kk     stores kk*16       -> kk step 1/4096 (K-1)
+//   state  stores S*2^e_head  -> per-head exponent e_head, >=18 effective bits
+//                               (S-1: the q16/I24 1/256 grid costs +0.154 nats).
+
+std::string rwkv_ln_stats(int dim, XFormat rf);
+std::string rwkv_ln_norm(int dim, XFormat rf);
+
+// Layer 0's input is the token-normed embedding (~0.013 on g1d), far below the
+// q16 residual step (1/256 = 30% of it).  The CPU keeps it f32 until the first
+// residual add; the GPU stores it *256 in I24_1 and these read it back /256.
+std::string rwkv_ln_stats_p(int dim);
+std::string rwkv_ln_norm_p(int dim);
+std::string rwkv_first_add(int dim);
+
+std::string rwkv_gn_stats(int dim, int hs);
+std::string rwkv_gn_norm(int dim, int hs);
+std::string rwkv_lerp(int dim, int which, int nrows);
+std::string rwkv_l2_stats(int dim, int hs);
+std::string rwkv_l2_norm(int dim, int hs);
+std::string rwkv_keydelta(int dim);
+std::string rwkv_tanh(int dim);
+std::string rwkv_sigmoid(int dim, bool has_bias, int oscale);
+std::string rwkv_decay(int dim);
+std::string rwkv_vres(int dim);
+std::string rwkv_sqrelu(int dim);
+std::string rwkv_mul(int dim, int adiv);
+std::string rwkv_rk_reduce(int dim, int hs);
+std::string rwkv_rk_add(int dim, int hs);
+// WKV7 recurrence: three native-ESSL-3.00 passes over a per-head 64x64 state
+// held as bit-cast f32 in RGBA8 ping-pong textures (exact recurrence; f32 carries
+// its own exponent, so no per-head scale).  sa dots old state with kk; update
+// applies S*w + v*k + sa*(kk*a); out dots new state with r.
+std::string rwkv_wkv_sa(int heads, int hs);
+std::string rwkv_wkv_update(int heads, int hs);
+std::string rwkv_wkv_out(int heads, int hs);

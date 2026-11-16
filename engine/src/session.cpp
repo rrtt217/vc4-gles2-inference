@@ -149,6 +149,13 @@ Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
                 // again through reset() (the REPL's /model reconstructs the
                 // session, which is what drops a previous model's state).
                 zero_rwkv_state();
+                // P6: RWKV_GPU=1 selects the fused GPU layer loop.  The CPU
+                // serial path stays the default (and the numeric reference).
+                rwkv_gpu_ = env_flag("RWKV_GPU");
+                // The bit-cast f32 WKV state needs ESSL 3.00; without it (or with
+                // RWKV_WKV_CPU=1) the recurrence falls back to the host f32 state.
+                rwkv_wkv_cpu_ = env_flag("RWKV_WKV_CPU") || !gpu_es3_ok();
+                if (rwkv_gpu_) gpu_.init_rwkv(m_);
                 return;
         }
         // Both loops are correct for a hybrid model since 2026-11-12: the q8
@@ -839,8 +846,29 @@ vector<float> Session::rwkv_head_input(const vector<float>& x){
         return xf;
     }
 
+// P6: the fused GPU layer loop.  The embedding and token norm stay on the host
+// in f32 (g1d's embedding rows peak at 0.08, where the q16 grid leaves 2-3 bits
+// -- the trap the CPU path's exact_f32 embedding avoids); after the token norm
+// the row is O(1), so the q16 residual store is the grid the CPU uses too.  The
+// whole layer loop then runs on textures; only the final residual crosses back.
+vector<float> Session::forward_gpu_rwkv(int token){
+        vector<float> x = embedding(token, true);
+        if (!m_.rwkv_tok_norm.empty())
+            x = rwkv_layernorm(x, m_.rwkv_tok_norm.data(), m_.rwkv.norm_eps);
+        GLuint resid = gpu_.rwkv_upload_x0(x);
+        for (int l = 0; l < m_.layers; ++l) {
+            if (g_stop) break;
+            float* cs = rwkv_wkv_cpu_
+                ? rwkv_state_.wkv.data() + (size_t)l * m_.heads * m_.rwkv.head_size * m_.rwkv.head_size
+                : nullptr;
+            resid = gpu_.rwkv_block(l, m_, resid, cs);
+        }
+        gpu_.rwkv_flip();
+        return gpu_.rwkv_read_residual(resid);
+    }
+
 vector<float> Session::step_rwkv(int token, bool want_logits){
-        vector<float> x = forward_rwkv(token);
+        vector<float> x = rwkv_gpu_ ? forward_gpu_rwkv(token) : forward_rwkv(token);
         if (g_stop || !want_logits) return {};
         return gpu_.logits(m_.logits_tiles, rwkv_head_input(x));
     }
@@ -1144,7 +1172,7 @@ int Session::step_greedy(int token, int pos){
 
 CandidateResult Session::step_candidates(int token, int pos, int topk, float temp, float top_p){
         if (m_.is_rwkv()) {
-                vector<float> x = forward_rwkv(token);
+                vector<float> x = rwkv_gpu_ ? forward_gpu_rwkv(token) : forward_rwkv(token);
                 if (g_stop) return {};
                 return gpu_.logits_candidates(m_.logits_tiles, rwkv_head_input(x), topk, temp, top_p);
         }

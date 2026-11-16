@@ -15,6 +15,8 @@
 void gpu_set_run_t0(Clock::time_point t);
 // True when the context offers ESSL 3.00 and the q4 shift decode is enabled.
 bool gpu_q4_shift();
+// True when the context offers ESSL 3.00 (the RWKV bit-cast f32 state needs it).
+bool gpu_es3_ok();
 // Dump-only override: --dump-shaders has no context to query, and the q4
 // builders emit different text for the two decodes, so it forces both.
 void gpu_force_q4_shift(bool on);
@@ -22,6 +24,8 @@ double run_time_ms();
 int gpu_upload_textures();
 size_t gpu_scene_bytes();   // textures this scene has uploaded so far
 double gpu_upload_texture_ms();
+
+class Model;
 
 struct Candidate { float value; int token; };
 struct CandidateResult {
@@ -166,6 +170,20 @@ public:
     GLuint conv_block(const Mat& in_b, const Mat& in_c, const Mat& in_x,
                       const Mat& out_proj, GLuint xb, GLuint residual,
                       int layer, Target& out);
+
+    // RWKV-7 (Goose) fused GPU layer loop (P6, docs/rwkv7-plan.zh-CN.md).
+    // init_rwkv uploads the per-channel constant vectors (*64 into I24_1) and
+    // allocates the per-head WKV state ping-pong, the token-shift rows and the
+    // scratch targets; it also switches the format plan to I24_1 activations /
+    // q16 residual.  rwkv_block runs one whole layer on textures and returns the
+    // new residual texel row; the only host read-back is the final residual once
+    // per token.  RWKV_GPU=1 selects it (Session::forward_gpu_rwkv).
+    void init_rwkv(const Model& m);
+    GLuint rwkv_block(int layer, const Model& m, GLuint residual, float* cpu_wkv_state = nullptr);
+    void rwkv_flip() { rwkv_cur_ ^= 1; }
+    void clear_rwkv_state();
+    // Read the final q16 residual row back as floats (once per token).
+    std::vector<float> rwkv_read_residual(GLuint tex);
 
     vector<float> logits_from(const vector<Mat>& tiles, GLuint x);
 
@@ -348,6 +366,55 @@ private:
     GLuint vbo_ = 0;
     Target probe_;
     string renderer_;
+
+    // ---- RWKV-7 GPU scene (P6) -------------------------------------------
+    // Scratch targets indexed by RwkvTmp; per-layer WKV state / scale ping-pong
+    // and token-shift rows; the uploaded constant vectors.  All released by
+    // release_scene()/reset_targets() like the conv scene.
+    enum RwkvTmp { RT_XN, RT_XN2, RT_XR, RT_XW, RT_XK, RT_XV, RT_XA, RT_XG,
+        RT_R, RT_K, RT_KD, RT_V, RT_V2, RT_TW, RT_TW2, RT_TA, RT_TV, RT_TG, RT_TG2, RT_U,
+        RT_DECAY, RT_A, RT_G, RT_KK, RT_Y, RT_Y2, RT_CMH, RT_CMH2, RT_CMH3, RT_CMH4,
+        RT_LNSTAT, RT_GNSTAT, RT_L2STAT, RT_RK, RT_SA,
+        RT_RES, RT_RES2, RT_COUNT };
+    std::vector<Target> rwkv_tmp_;
+    std::vector<Target> rwkv_state_;   // [layer*2 + buf], hs x (heads*hs), bit-cast f32
+    std::vector<Target> rwkv_shift_;   // [layer*2 + (0 att, 1 ffn)], dim x 1
+    std::vector<GLuint> rwkv_const_;   // per-layer constant textures (RwkvConst)
+    Target rwkv_vfirst_;
+    // layer-0 input, *256 I24_1 (precise; the q16 grid would round it coarsely)
+    Target rwkv_x0_;
+    int rwkv_cur_ = 0;                 // state/scale ping-pong parity, flips per token
+    int rwkv_dim_ = 0, rwkv_layers_ = 0, rwkv_heads_ = 0, rwkv_hs_ = 0;
+    bool rwkv_have_vfirst_ = false;
+    float rwkv_eps_ = 1e-5f;
+    enum RwkvConst { RC_LERP, RC_W0, RC_A0, RC_V0, RC_SCALE, RC_ATTNorm,
+        RC_ATTNorm2, RC_LNX, RC_CMLERP, RC_COUNT };
+    GLuint rwkv_const(int layer, RwkvConst c) const {
+        return rwkv_const_[(size_t)layer * RC_COUNT + c];
+    }
+    Target& rwkv_tmp(RwkvTmp i) { return rwkv_tmp_[i]; }
+    // Granular passes (gpu_rwkv.cpp); each writes a pre-sized scratch target.
+    GLuint rwkv_mv(const Mat& m, GLuint x, Target& out);
+    GLuint rwkv_ln(GLuint x, GLuint wb, Target& out);
+    GLuint rwkv_ln_p(GLuint x, GLuint wb, Target& out);
+    GLuint rwkv_first_add(GLuint x0, GLuint delta, Target& out);
+    GLuint rwkv_upload_x0(const std::vector<float>& x0);
+    GLuint rwkv_gn(GLuint y, GLuint wb, Target& out);
+    GLuint rwkv_lerp(GLuint xn, GLuint sh, GLuint lp, int which, int nrows, Target& out);
+    GLuint rwkv_l2(GLuint k, GLuint sc, Target& out);
+    GLuint rwkv_keydelta(GLuint k, GLuint a, GLuint sc, Target& out);
+    GLuint rwkv_tanh(GLuint x, Target& out);
+    GLuint rwkv_sigmoid(GLuint x, GLuint bias, Target& out, int oscale);
+    GLuint rwkv_decay(GLuint u, GLuint w0, Target& out);
+    GLuint rwkv_vres(GLuint v, GLuint vf, GLuint u, GLuint v0, Target& out);
+    GLuint rwkv_sqrelu(GLuint x, Target& out);
+    GLuint rwkv_mul(GLuint a, GLuint b, Target& out, int adiv);
+    GLuint rwkv_rk(GLuint k, GLuint r, GLuint sc, GLuint v, GLuint y, Target& out);
+    GLuint rwkv_wkv(int layer, GLuint r, GLuint k, GLuint v, GLuint a, GLuint kk,
+                    GLuint decay, Target& out);
+    void rwkv_copy(GLuint src, Target& dst);
+    void rwkv_draw1(GLuint prog, int w, int h = 1);
+
 
     void init_egl();
 

@@ -128,6 +128,13 @@ void GPU::reset_targets(){
         conv_state_.clear();
         vs_targets_.clear();
         kv_cache_.clear();
+        rwkv_tmp_.clear();
+        rwkv_state_.clear();
+        rwkv_shift_.clear();
+        rwkv_vfirst_ = Target();
+        rwkv_x0_ = Target();
+        rwkv_cur_ = 0;
+        rwkv_have_vfirst_ = false;
         // target_for(rows) caches by row count and is filled lazily *during*
         // generation, so it is the one Target store that only exists after a
         // turn has run: leaving it behind made a model swap reuse deleted
@@ -158,6 +165,7 @@ void GPU::release_scene(){
         input_textures_.clear();
         input_textures2_.clear();
         conv_k_tex_.clear();
+        rwkv_const_.clear();
         rms_att_tex_.clear();
         rms_ffn_tex_.clear();
         q_norm_tex_.clear();

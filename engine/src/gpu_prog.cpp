@@ -100,6 +100,9 @@ GLuint GPU::x_prog(const string& key, const string& src){
     }
 
 bool g_q4_shift_ok = false;
+bool g_es3_ok = false;
+
+bool gpu_es3_ok(){ return g_es3_ok; }
 
 
 static string es3ify(const string& src, bool vertex){
@@ -136,7 +139,16 @@ GLuint GPU::compile_shader(GLenum type, const string& src){
 
 
 GLuint GPU::link_program(const string& fs_in){
-        const bool needs_es3 = g_q4_shift_ok && fs_in.find("&15") != string::npos;
+        // Two kernel families need the ESSL 3.00 compiler: the q4 nibble split
+        // ("&15", opt-in via Q4_SHIFT) and the RWKV bit-cast f32 state kernels
+        // (uintBitsToFloat / floatBitsToUint, opt-in via RWKV_GPU).  Both gate on
+        // the driver actually offering ES3 (g_es3_ok); the q4 one additionally on
+        // Q4_SHIFT being wanted.  es3ify adds the #version line and the vertex
+        // stage is upgraded to match.
+        const bool q4_es3 = g_q4_shift_ok && fs_in.find("&15") != string::npos;
+        const bool bc_es3 = g_es3_ok && (fs_in.find("uintBitsToFloat") != string::npos ||
+                                         fs_in.find("floatBitsToUint") != string::npos);
+        const bool needs_es3 = q4_es3 || bc_es3;
         const string fs = needs_es3 ? es3ify(fs_in, false) : fs_in;
         string vs = "attribute vec2 p; void main(){ gl_Position=vec4(p,0.,1.); }";
         // The vertex shader must match the fragment stage's language when that

@@ -28,6 +28,11 @@ void gl_state_forget_bindings();
 // unpack should be emitted inline, and whether the driver accepted ESSL 3.00.
 extern std::string g_prog_key;
 extern bool g_q4_shift_ok;
+// The driver offers ESSL 3.00 (the MESA override was requested and accepted).
+// Generalizes g_q4_shift_ok: the q4 nibble split and the RWKV bit-cast f32 state
+// kernels both need it.  g_q4_shift_ok = g_es3_ok && Q4_SHIFT wanted.
+extern bool g_es3_ok;
+bool gpu_es3_ok();
 bool q4_inline(const char* name);
 bool q4_shift_wanted();   // Q4_SHIFT: ask for ESSL 3.00 q4 kernels
 

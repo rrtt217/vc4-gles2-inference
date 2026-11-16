@@ -6835,3 +6835,57 @@ family change, and nothing RWKV survives the way back out.  All five existing
 chains, the slash-line check, the twice-run determinism and the worker load
 op are unchanged and green.  `make -C engine check`: 108 passed / 0 failed.
 
+## 2026-11-16 — RWKV-7 P6: the GPU fused layer loop (Xe, Iris Xe ADL GT2)
+
+`RWKV_GPU=1` selects RWKV-7's third layer loop on textures (the elementwise
+ops + the WKV7 recurrence); the default stays the CPU serial `forward_rwkv`.
+The WKV state is **bit-cast f32** in RGBA8 ping-pong textures (native ESSL 3.00,
+`floatBitsToUint`/`uintBitsToFloat` — the Q4_SHIFT ES3 upgrade generalized to
+also trigger on `RWKV_GPU` and on the bit-cast builtins), so the recurrence is
+exact f32 like the CPU reference; the norm statistics are f32 bit-cast too.  The
+elementwise intermediates stay I24_1; only matvec I/O and the residual keep the
+quantized grid.  Without ESSL 3.00 (or with `RWKV_WKV_CPU=1`) the recurrence
+falls back to the host f32 state.
+
+**Acceptance is PPL, not cross-path cosine/greedy** (AGENTS.md measurement
+rules: golden strings are chaotic across GPUs/reassociations; a CPU-vs-GPU
+stage delta is a lead, not a defect).  Container
+`models/rwkv7/packed/rwkv7-g1d-0.1b.q8r.chat.mmcf`, `data/ppl_test.txt`,
+SEQ=512 (stride 256, 421 tokens, 1 window):
+
+| path | PPL | nll |
+|---|---:|---:|
+| CPU (default, the pin) | **9.2919** | 2.2291 |
+| `RWKV_GPU=1` (GPU pin) | **9.1850** | 2.2176 |
+| `RWKV_GPU=1 RWKV_WKV_CPU=1` | 9.1781 | 2.2168 |
+
+The GPU PPL is the same magnitude as CPU and slightly lower; **9.1850 is the
+GPU-path pin, separate from the CPU 9.2919 — the two are not comparable.**
+The prefill logits cosine vs CPU is ~0.9988 and the greedy text diverges from
+the CPU pin (CPU `\n"我是一个AI，我的名字是‘智能` vs GPU
+`\n**用一句话介绍你自己**\n**1.` at --gen 16): this is the chaotic temp-0
+sensitivity of a 0.1B model, **not** a quality defect — the PPL裁决 above is the
+acceptance.  The GPU greedy string may be pinned as the GPU path's own tripwire;
+it differing from the CPU string is chaos, not a bug.
+
+**Decode speed** (bench protocol: discarded warm-up + 3 timed runs, median;
+canonical chat prompt, --gen 48, loadavg ~1.2 on 16 cores):
+
+| path | min ms/token | median ms/token |
+|---|---:|---:|
+| CPU | 114.5 | 119.1 |
+| `RWKV_GPU=1` | 35.5 | 36.0 |
+
+**3.3x** median speedup.  (A short --gen 32 sweep under different load read
+1.8x; the steady-state --gen 48 number is the one to cite.)
+
+**Determinism**: two `RWKV_GPU=1` runs of the same binary are byte-identical
+(TOKENS_OUT and reply text).  Behaviour: non-empty, no collapse.
+
+**Gate**: `make -C engine check` 108/0; `scripts/regression.sh` ACCEPT with
+the CPU pins unchanged (q8/q4 strings, q8 PPL 270.3170, q4 PPL 326.1483, RWKV
+CPU PPL 9.2919).  `shader_hashes.txt` re-baselined additions-only (the new
+rwkv_* builders; no existing builder text moved).  Pi verification pending
+(lead to arrange; the bit-cast kernels need the VC4 Mesa 300 es path, else the
+CPU f32 fallback).
+

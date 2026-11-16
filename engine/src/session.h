@@ -95,6 +95,11 @@ private:
     // every elementwise op and the WKV recurrence run here in f32 (P2 is the
     // correctness path -- P6 is the fused/GPU one).
     vector<float> forward_rwkv(int token);
+    // P6: the fused GPU layer loop (RWKV_GPU=1).  Elementwise ops and the WKV7
+    // recurrence run on textures; only the final residual crosses back per token.
+    vector<float> forward_gpu_rwkv(int token);
+    bool rwkv_gpu_ = false;
+    bool rwkv_wkv_cpu_ = false;   // RWKV_WKV_CPU=1: hybrid (GPU elementwise + CPU f32 WKV)
     // The output LayerNorm, the metadata key 17 head-input scale and the logits
     // matvec: one place, so step() and step_candidates() cannot disagree.
     vector<float> rwkv_head_input(const vector<float>& x);
