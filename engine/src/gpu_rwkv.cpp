@@ -541,6 +541,19 @@ GLuint GPU::rwkv_block(int l, const Model& m, GLuint resid, float* cpu_wkv_state
             Target& wo_out = (resid == rwkv_tmp(RT_RES).tex) ? rwkv_tmp(RT_RES2) : rwkv_tmp(RT_RES);
             matvec_add(m.wo[l], y, resid, wo_out, act_fmt_);
             resid = wo_out.tex;
+            if (env_set("RWKV_STAGE_DUMP") && l == 1) {
+                GLuint wp = rwkv_mv(m.wo[l], y, rwkv_tmp(RT_U));
+                sync();
+                Target& ut = rwkv_tmp(RT_U);
+                vector<uint8_t> b = read_bytes(ut, ut.w, 1);
+                auto val=[&](int i){int u=(int)b[(size_t)i*4+1]*65536+(int)b[(size_t)i*4+2]*256+(int)b[(size_t)i*4+3]-8388608;return u/256.0f;};
+                float mx=0; for(int i=0;i<ut.w;++i) mx=std::max(mx,fabsf(val(i)));
+                fprintf(stderr,"OP GPU l1 wo_pure max=%.4f first=%.4f %.4f %.4f\n",mx,val(0),val(1),val(2));
+                vector<uint8_t> rb = read_bytes(wo_out, wo_out.w, 1);
+                auto qv=[&](int i){int u=(rb[(size_t)i*4]<<8)|rb[(size_t)i*4+1];return (u>=32768?u-65536:u)/256.0f;};
+                float rmx=0; for(int i=0;i<wo_out.w;++i) rmx=std::max(rmx,fabsf(qv(i)));
+                fprintf(stderr,"OP GPU l1 resid_after_wo max=%.4f first=%.4f %.4f %.4f\n",rmx,qv(0),qv(1),qv(2));
+            }
         }
         // O20-O22: ffn norm, its token shift and the channel-mix lerp.
         GLuint xn2 = rwkv_ln(resid, rwkv_const(l, RC_ATTNorm2), rwkv_tmp(RT_XN2));
