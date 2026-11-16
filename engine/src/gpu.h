@@ -398,6 +398,7 @@ private:
     GLuint rwkv_ln(GLuint x, GLuint wb, Target& out);
     GLuint rwkv_ln_p(GLuint x, GLuint wb, Target& out);
     GLuint rwkv_first_add(GLuint x0, GLuint delta, Target& out);
+    GLuint rwkv_res_add(GLuint resid, GLuint delta, Target& out);
     GLuint rwkv_upload_x0(const std::vector<float>& x0);
     GLuint rwkv_gn(GLuint y, GLuint wb, Target& out);
     GLuint rwkv_lerp(GLuint xn, GLuint sh, GLuint lp, int which, int nrows, Target& out);

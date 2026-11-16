@@ -2003,6 +2003,20 @@ std::string rwkv_ln_norm_p(int dim) {
         "gl_FragColor=x_q24enc(((x-mean)*inv*w+b)*256.0);}";
 }
 
+// q16 residual + I24_1 delta -> q16 (the CPU add_q16 two-step: the matvec output
+// is read at I24 precision, then added to the q16 residual and re-rounded).  Used
+// instead of the fused matvec_add, whose dot VC4 drops on the RWKV I24_1 chain.
+std::string rwkv_res_add(int dim) {
+    need_dim("rwkv_res_add", dim);
+    const string D = to_string(dim);
+    return head(XFormat::I24_1) + x_residual_glsl(XFormat::I16_1) +
+        "uniform sampler2D R,D;"
+        "void main(){int i=int(gl_FragCoord.x);"
+        "float r=R1(R,i," + D + ".0);"
+        "float d=" + rd24("D", "i", D + ".0") + ";"
+        "gl_FragColor=x_st1(r+d);}";
+}
+
 std::string rwkv_first_add(int dim) {
     need_dim("rwkv_first_add", dim);
     const string D = to_string(dim);

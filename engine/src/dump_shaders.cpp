@@ -213,6 +213,7 @@ vector<Case> cases() {
     add(v, "rwkv_ln_stats_p_768", [] { return rwkv_ln_stats_p(768); });
     add(v, "rwkv_ln_norm_p_768", [] { return rwkv_ln_norm_p(768); });
     add(v, "rwkv_first_add_768", [] { return rwkv_first_add(768); });
+    add(v, "rwkv_res_add_768", [] { return rwkv_res_add(768); });
     add(v, "rwkv_ln_norm_768_i16_1", [] { return rwkv_ln_norm(768, I16_1); });
     add(v, "rwkv_gn_stats_768_64", [] { return rwkv_gn_stats(768, 64); });
     add(v, "rwkv_gn_norm_768_64", [] { return rwkv_gn_norm(768, 64); });

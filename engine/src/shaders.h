@@ -127,6 +127,7 @@ std::string rwkv_ln_norm(int dim, XFormat rf);
 std::string rwkv_ln_stats_p(int dim);
 std::string rwkv_ln_norm_p(int dim);
 std::string rwkv_first_add(int dim);
+std::string rwkv_res_add(int dim);
 
 std::string rwkv_gn_stats(int dim, int hs);
 std::string rwkv_gn_norm(int dim, int hs);

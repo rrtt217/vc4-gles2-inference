@@ -217,6 +217,17 @@ GLuint GPU::rwkv_ln_p(GLuint x, GLuint wb, Target& out){
         return out.tex;
 }
 
+GLuint GPU::rwkv_res_add(GLuint resid, GLuint delta, Target& out){
+        const int dim = rwkv_dim_;
+        if (out.tex == 0) out = make_target(dim, 1);
+        GLuint p = x_prog("rwkv_res_add_" + to_string(dim), ::rwkv_res_add(dim));
+        bind_fbo(out.fbo); use_program(p);
+        bind_tex(0, resid); set_sampler(p, "R", 0);
+        bind_tex(1, delta); set_sampler(p, "D", 1);
+        rwkv_draw1(p, dim);
+        return out.tex;
+}
+
 GLuint GPU::rwkv_first_add(GLuint x0, GLuint delta, Target& out){
         const int dim = rwkv_dim_;
         GLuint p = x_prog("rwkv_fadd_" + to_string(dim), ::rwkv_first_add(dim));
@@ -540,8 +551,8 @@ GLuint GPU::rwkv_block(int l, const Model& m, GLuint resid, float* cpu_wkv_state
             resid = rwkv_first_add(rwkv_x0_.tex, wo_t, rwkv_tmp(RT_RES));
         } else {
             Target& wo_out = (resid == rwkv_tmp(RT_RES).tex) ? rwkv_tmp(RT_RES2) : rwkv_tmp(RT_RES);
-            matvec_add(m.wo[l], y, resid, wo_out, act_fmt_);
-            resid = wo_out.tex;
+            GLuint wo_t = rwkv_mv(m.wo[l], y, rwkv_tmp(RT_U));
+            resid = rwkv_res_add(resid, wo_t, wo_out);
             if (env_set("RWKV_STAGE_DUMP") && l == 1) {
                 rwkv_mv(m.wo[l], y, rwkv_tmp(RT_U));
                 sync();
@@ -571,15 +582,16 @@ GLuint GPU::rwkv_block(int l, const Model& m, GLuint resid, float* cpu_wkv_state
             // mid != resid; the final add reuses resid's (now dead) buffer.
             Target& mid = (resid == rwkv_tmp(RT_RES).tex) ? rwkv_tmp(RT_RES2) : rwkv_tmp(RT_RES);
             Target& fin = (resid == rwkv_tmp(RT_RES).tex) ? rwkv_tmp(RT_RES) : rwkv_tmp(RT_RES2);
-            matvec_add(m.w2a[l], ha, resid, mid, act_fmt_);
-            matvec_add(m.w2b[l], hb, mid.tex, fin, act_fmt_);
-            return fin.tex;
+            GLuint ca = rwkv_mv(m.w2a[l], ha, rwkv_tmp(RT_CMH));
+            GLuint mid_r = rwkv_res_add(resid, ca, mid);
+            GLuint cb = rwkv_mv(m.w2b[l], hb, rwkv_tmp(RT_CMH3));
+            return rwkv_res_add(mid_r, cb, fin);
         }
         GLuint h = rwkv_mv(m.w1[l], xk2, rwkv_tmp(RT_CMH));
         h = rwkv_sqrelu(h, rwkv_tmp(RT_CMH2));
         Target& cm_out = (resid == rwkv_tmp(RT_RES).tex) ? rwkv_tmp(RT_RES2) : rwkv_tmp(RT_RES);
-        matvec_add(m.w2[l], h, resid, cm_out, act_fmt_);
-        return cm_out.tex;
+        GLuint cm_t = rwkv_mv(m.w2[l], h, rwkv_tmp(RT_CMH));
+        return rwkv_res_add(resid, cm_t, cm_out);
 }
 
 
