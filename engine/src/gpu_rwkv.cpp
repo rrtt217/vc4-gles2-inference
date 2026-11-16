@@ -542,7 +542,7 @@ GLuint GPU::rwkv_block(int l, const Model& m, GLuint resid, float* cpu_wkv_state
             matvec_add(m.wo[l], y, resid, wo_out, act_fmt_);
             resid = wo_out.tex;
             if (env_set("RWKV_STAGE_DUMP") && l == 1) {
-                GLuint wp = rwkv_mv(m.wo[l], y, rwkv_tmp(RT_U));
+                rwkv_mv(m.wo[l], y, rwkv_tmp(RT_U));
                 sync();
                 Target& ut = rwkv_tmp(RT_U);
                 vector<uint8_t> b = read_bytes(ut, ut.w, 1);
