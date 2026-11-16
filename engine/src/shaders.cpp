@@ -1213,9 +1213,75 @@ static bool q4x4_nop(){ return getenv("Q4_4X4_NOP") != nullptr; }
 static bool q4x4_onew(){ return getenv("Q4_4X4_ONEW") != nullptr; }
 static bool q4x4_onerow(){ return getenv("Q4_4X4_ONEROW") != nullptr; }
 static bool q4x4_noout(){ return getenv("Q4_4X4_NOOUT") != nullptr; }
+// Two structure arms for the residual gap that survives NOP+NOMIN (all q4
+// metadata gone, yet ~1.5x the q8 gate).  Static count says the metadata-free
+// q4 gate does LESS work than q8 (same 48 fetches / 128 MACs per 32 cols, but
+// zero weight-decode FMADs and cheaper coordinates), so the gap must be the
+// loop shape, not the arithmetic.  Both arms use the NOP constant scale and no
+// min, so they compare directly against NOP+NOMIN; wrong results on purpose.
+//   Q4_4X4_FLAT=1   q8's single 4-wide loop (192 iters), 4-bit weights, no
+//                   decode.  Isolates the nested/wide structure against q8.
+//   Q4_4X4_FLAT8=1  single 8-wide loop (96 iters), the current inner body
+//                   flattened.  Isolates the outer group loop from the width.
+static bool q4x4_flat(){ return getenv("Q4_4X4_FLAT") != nullptr; }
+static bool q4x4_flat8(){ return getenv("Q4_4X4_FLAT8") != nullptr; }
+
+static string i4_gate_flat(int rows, int cols, XFormat xf, bool inl, int hs, bool wide) {
+    const string HD = hid_scale_def(hs), HM = hid_scale_mul(hs);
+    const int texw = cols / 4;
+    const int axw = x_texels(cols, xf);
+    const string ROWS = to_string(rows), TEXW = to_string(texw), AXW = to_string(axw);
+    const string ITERS = to_string(wide ? cols / 8 : cols / 4);
+    // 4-wide activation decode (two I16_2 texels -> a0..a3), the q8 form.
+    const string act4 =
+        "vec4 xa=texture2D(X,vec2((float(2*q)+0.5)/" + AXW + ".0,0.5));"
+        "vec4 xb=texture2D(X,vec2((float(2*q+1)+0.5)/" + AXW + ".0,0.5));"
+        "float a0=dA(xa),a1=dB(xa),a2=dA(xb),a3=dB(xb);";
+    // 8-wide activation decode (four I16_2 texels -> xa,xb), the q4 form.
+    const string act8 = q4_act(xf, cols, inl);
+    string body;
+    if (!wide) {
+        body = act4 +
+            "vec4 w=texture2D(W1,vec2(c0,v0r));"
+            "s10+=w.x*a0+w.y*a1+w.z*a2+w.w*a3;"
+            "w=texture2D(W2,vec2(c0,v0r));"
+            "s20+=w.x*a0+w.y*a1+w.z*a2+w.w*a3;"
+            "w=texture2D(W1,vec2(c0,v1r));"
+            "s11+=w.x*a0+w.y*a1+w.z*a2+w.w*a3;"
+            "w=texture2D(W2,vec2(c0,v1r));"
+            "s21+=w.x*a0+w.y*a1+w.z*a2+w.w*a3;";
+    } else {
+        body = act8 +
+            "vec4 wt0=texture2D(W1,vec2(c0,v0r)),wt1=texture2D(W1,vec2(c1,v0r));"
+            "s10+=wt0.x*xa.x+wt0.y*xa.y+wt0.z*xa.z+wt0.w*xa.w+wt1.x*xb.x+wt1.y*xb.y+wt1.z*xb.z+wt1.w*xb.w;"
+            "vec4 wt2=texture2D(W2,vec2(c0,v0r)),wt3=texture2D(W2,vec2(c1,v0r));"
+            "s20+=wt2.x*xa.x+wt2.y*xa.y+wt2.z*xa.z+wt2.w*xa.w+wt3.x*xb.x+wt3.y*xb.y+wt3.z*xb.z+wt3.w*xb.w;"
+            "vec4 wt4=texture2D(W1,vec2(c0,v1r)),wt5=texture2D(W1,vec2(c1,v1r));"
+            "s11+=wt4.x*xa.x+wt4.y*xa.y+wt4.z*xa.z+wt4.w*xa.w+wt5.x*xb.x+wt5.y*xb.y+wt5.z*xb.z+wt5.w*xb.w;"
+            "vec4 wt6=texture2D(W2,vec2(c0,v1r)),wt7=texture2D(W2,vec2(c1,v1r));"
+            "s21+=wt6.x*xa.x+wt6.y*xa.y+wt6.z*xa.z+wt6.w*xa.w+wt7.x*xb.x+wt7.y*xb.y+wt7.z*xb.z+wt7.w*xb.w;";
+    }
+    const string coord = wide
+        ? "int c=q*8;float c0=(float(q*2)+0.5)*itw,c1=c0+itw;"
+        : "float c0=(float(q)+0.5)*itw;";
+    return q4_head(xf, inl) + HD +
+        "uniform sampler2D W1,W2,X;uniform float ps1,ps2;" + kQzSl +
+        "void main(){int t=int(gl_FragCoord.x);int r0=2*t;"
+        "int r1=min(r0+1," + to_string(rows - 1) + ");"
+        "float v0r=(float(r0)+0.5)/float(" + ROWS + "),v1r=(float(r1)+0.5)/float(" + ROWS + ");"
+        "float itw=1.0/float(" + TEXW + ");"
+        "float sa1=15.0*ps1,sa2=15.0*ps2;"
+        "float s10=0.0,s20=0.0,s11=0.0,s21=0.0;"
+        "for(int q=0;q<" + ITERS + ";q++){" + coord + body + "}"
+        "float v0=sl(qz(s10*sa1),qz(s20*sa2))" + HM + ";"
+        "float v1=(r0+1<" + ROWS + ")?sl(qz(s11*sa1),qz(s21*sa2))" + HM + ":0.0;"
+        "gl_FragColor=x_st2(v0,v1);}";
+}
 
 string matvec_i4_pair_swiglu_4x4(int rows, int cols, XFormat xf, bool inl, int hs) {
     need_shape("matvec_i4_pair_swiglu_4x4", rows, cols, 32);
+    if (q4x4_flat()) return i4_gate_flat(rows, cols, xf, inl, hs, false);
+    if (q4x4_flat8()) return i4_gate_flat(rows, cols, xf, inl, hs, true);
     const string HD = hid_scale_def(hs), HM = hid_scale_mul(hs);
     const int texw = cols / 4;              // one 4-bit texel = four weights
     const int groups = (cols + 31) / 32;
