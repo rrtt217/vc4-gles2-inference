@@ -135,23 +135,53 @@ User: /help
 | key | |
 |---|---|
 | Left / Right | move the cursor (UTF-8 aware, one character at a time) |
-| Up / Down | previous lines, up to 32 of them |
-| Home / End, Ctrl-A / Ctrl-E | start / end of line |
+| Up / Down | move inside a multi-line input; above its first line, recall the previous 32 inputs |
+| Home / End, Ctrl-A / Ctrl-E | start / end of the current line |
 | Backspace, Delete, Ctrl-D | delete backwards, forwards, forwards |
-| Ctrl-K / Ctrl-U / Ctrl-W | kill to end, kill to start, kill the word before |
+| Ctrl-K / Ctrl-U / Ctrl-W | kill to the end of the line, to its start, the word before |
 | Ctrl-L | clear the screen and redraw |
+| Enter | send the whole input |
+| Ctrl-V Enter, Alt-Enter | start a new line inside the input |
 | Ctrl-C | abandon the line, keep the session |
 | Ctrl-D on an empty line | leave |
+
+A pasted block keeps its line breaks and is sent as **one** message, not one
+message per line.  The editor has no clipboard -- the terminal owns it and sends
+its contents as input; all the engine does is ask the terminal to mark where a
+paste begins and ends (`ESC[?2004h`, answered with `ESC[200~ ... ESC[201~`) so a
+pasted newline is not mistaken for Enter.  A terminal that does not answer that
+request sends the paste as plain bytes, indistinguishable from typing, and then
+the first newline sends: use Ctrl-V Enter or Alt-Enter there.  `make check` runs
+the editor against a pty (`engine/scripts/test_lineedit.cpp`), including the
+pasted-block and wrapped-line cursor cases.
 
 `/clear` forgets the conversation, `/exit` leaves, `/help` lists them.  When
 stdin is a pipe (`echo "hi" | engine_mm3 --chat`) the editor is bypassed and the
 old `getline` behaviour is used, so scripts and the worker protocol are
 unaffected.
 
+`/params` prints the sampling knobs, and the bare form of any of the knob
+commands prints the same line.  `/temp F` (0 = greedy), `/topp F`, `/topk N`
+(0 = off), `/greedy on|off`, `/seed N`, `/gen N` and `/penalty R` (1 = off) each
+change one knob and echo the result.  A change takes effect on the **next** turn:
+the REPL reads stdin only between turns, so nothing typed while the model is
+decoding can reach the sampler.  `/stats` prints the live container (path, shape,
+template, rms eps), the context usage, available memory and the SoC temperature
+when the board has one -- not CmaFree, which is not the budget a GL scene gets.  After each turn a one-line summary goes to stderr at a terminal --
+`[8 tok  108.1 tok/s  0.55 s prefill  ctx 39/256]` -- and loading a container
+draws one bar there (`[upload  45% ############------------   27.1/  60.9 MB]`),
+both off when stderr is not a terminal and the bar also off under `SHADER_TIME`,
+whose `STARTUP` lines are grep targets.
+
 `/model PATH` loads another container without rebuilding the GL context, which
 is the expensive part: on the Pi Zero the context costs 4.23 s and the 13
 program links 1.89 s per process, against 6.12 s to read a container and 2.99 s
-to upload it (`docs/performance.md`, "Where the first token goes").  Weights,
+to upload it (`docs/performance.md`, "Where the first token goes").  A path that
+is unreadable, not a container, or not a chat model is refused **before** the
+current model is released -- the header and the metadata are enough to decide that
+-- so a typo costs nothing.  There is no capacity pre-check: the kernel's free-CMA
+figure is not what a new scene can actually get, and desktop kernels have none, so
+a container that does not fit is discovered by the upload rather than guessed at.  Weights,
 tokenizer, chat template and the session's targets are replaced; the compiled
 programs stay.  The conversation is dropped, because the previous model's
 history and template mean nothing to the new one.  Any precision and any template

@@ -27,6 +27,18 @@ struct Chat {
     std::vector<int> cli_cache_tokens;   // what --prefix-cache loaded
     std::string tools_array;         // the normalised tool list the CLI passed
 
+    // Slash commands that change a sampling knob or report state.  A knob takes
+    // effect on the next turn: the REPL reads stdin only between turns, so nothing
+    // typed while the model is decoding can reach the sampler.
+    bool apply_param(const std::string& line);   // true = the line was a command
+    void print_params() const;
+    void print_stats() const;
+    // One line after each turn, on stderr and only at a terminal, so a redirected
+    // stdout stays the conversation.
+    void print_status() const;
+    // Filled by TurnTiming, which is the only code that sees interrupted turns.
+    TurnReport last_turn;
+
     void load_cli_cache();
     bool is_bos_token(int id);
     bool is_stop_token(int id);

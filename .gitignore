@@ -32,6 +32,7 @@ __pycache__/
 /engine/engine
 /engine/engine_mm3
 /engine/engine_mm3_pi
+/engine/test_lineedit
 
 # Probe binaries are build outputs; track the sources only.  A hand-written
 # list of probe names is how probes/packunpack_probe got committed (5 times):

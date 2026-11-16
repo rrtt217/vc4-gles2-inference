@@ -100,34 +100,57 @@ void App::upload_weights() {
     // model's value: invisible when reloading the same file, wrong for any
     // other container.
     gpu.set_rms_eps(model.rms_eps, model.rms_eps_stated);
-for (auto& m : model.qkv) gpu.upload(m);
-for (auto& m : model.wo) gpu.upload(m);
-for (auto& m : model.conv_in_b) if (m.rows) gpu.upload(m);
-for (auto& m : model.conv_in_c) if (m.rows) gpu.upload(m);
-for (auto& m : model.conv_in_x) if (m.rows) gpu.upload(m);
-for (auto& m : model.conv_out) if (m.rows) gpu.upload(m);
-for (auto& m : model.w13) gpu.upload(m);
-for (auto& m : model.w1) gpu.upload(m);
-for (auto& m : model.w3) gpu.upload(m);
-for (auto& m : model.w2) gpu.upload(m);
-for (auto& m : model.w1a) gpu.upload(m);
-for (auto& m : model.w1b) gpu.upload(m);
-for (auto& m : model.w3a) gpu.upload(m);
-for (auto& m : model.w3b) gpu.upload(m);
-for (auto& m : model.w2a) gpu.upload(m);
-for (auto& m : model.w2b) gpu.upload(m);
-for (auto& m : model.router) gpu.upload(m);
-for (auto& layer : model.moe) {
-    for (auto& e : layer) {
-        // A MoeExpert holds the whole FFN or its two chunks, never both:
-        // the unused Mats are empty and must not reach make_texture.
-        Mat* mats[] = {&e.w1, &e.w3, &e.w2, &e.w1a, &e.w1b,
-                       &e.w3a, &e.w3b, &e.w2a, &e.w2b};
-        for (Mat* m : mats) if (m->rows > 0) gpu.upload(*m);
+    // One list of everything that reaches a texture.  It exists so the progress
+    // bar can know the total before the first texture does, and so a new tensor
+    // group cannot be uploaded but forgotten in the count.  Empty Mats are the
+    // precision a chunked or dense model does not use; the MoE branch has always
+    // skipped them and now every branch does.
+    vector<Mat*> mats;
+    auto add_one = [&](Mat& m) { if (m.rows > 0) mats.push_back(&m); };
+    auto add = [&](vector<Mat>& v) {
+        for (auto& m : v) add_one(m);
+    };
+    add(model.qkv);
+    add(model.wo);
+    add(model.conv_in_b);
+    add(model.conv_in_c);
+    add(model.conv_in_x);
+    add(model.conv_out);
+    add(model.w13);
+    add(model.w1);
+    add(model.w3);
+    add(model.w2);
+    add(model.w1a);
+    add(model.w1b);
+    add(model.w3a);
+    add(model.w3b);
+    add(model.w2a);
+    add(model.w2b);
+    add(model.router);
+    for (auto& layer : model.moe) {
+        for (auto& e : layer) {
+            // A MoeExpert holds the whole FFN or its two chunks, never both.
+            add_one(e.w1); add_one(e.w3); add_one(e.w2);
+            add_one(e.w1a); add_one(e.w3a); add_one(e.w2a);
+            add_one(e.w1b); add_one(e.w3b); add_one(e.w2b);
+        }
     }
-}
-for (auto& m : model.logits_tiles) gpu.upload(m);
-model.release_map();
+    add(model.logits_tiles);
+    uint64_t total = 0;
+    for (const Mat* m : mats) total += mat_bytes(*m);
+    // With MODEL_BORROW (the default) the weights are still in the checkpoint
+    // mapping, so this loop is where the container is actually *read*: the pages
+    // fault as their bytes reach a texture.  On the Pi that is 6.12 s of SD card
+    // against 2.99 s of texture time, which is why the bar spans this phase.
+    g_progress.begin("upload", total);
+    uint64_t done = 0;
+    for (Mat* m : mats) {
+        gpu.upload(*m);
+        done += mat_bytes(*m);
+        g_progress.set(done);
+    }
+    g_progress.end();
+    model.release_map();
 }
 
 bool App::load_prefix_cache_any(const string& path, vector<int>& toks, Session& session) {

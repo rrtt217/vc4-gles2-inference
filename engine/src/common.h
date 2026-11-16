@@ -77,6 +77,20 @@ struct Mat {
     bool fmt4 = false;
 };
 
+// The bytes a matrix's weights occupy, for accounting (the upload progress bar
+// and the scene ledger).  Nibbles are stored packed; a q4 matrix also carries one
+// int16 scale and minimum per group.
+inline size_t mat_bytes(const Mat& m) {
+    const size_t n = (size_t)m.rows * (size_t)m.cols;
+    switch (m.type) {
+        case WeightType::INT16: return n * 2;
+        case WeightType::INT4: return n / 2 + (size_t)m.rows * (size_t)m.groups * 2 * sizeof(int16_t);
+        case WeightType::INT6: return n;   // two planes of one byte each; only the tied head
+        case WeightType::INT8:
+        default: return n;
+    }
+}
+
 struct Target {
     GLuint tex = 0, fbo = 0;
     int w = 0, h = 0;
@@ -93,11 +107,22 @@ double elapsed_ms(Clock::time_point a, Clock::time_point b);
 // silent in every case that mattered.  A destructor runs on all of them; `cut`
 // names the reason when the turn did not finish on its own, so a short `gen=`
 // is never ambiguous.
+// What the REPL's one-line status shows after a turn.  TurnTiming's destructor is
+// the only code that sees every exit, so it copies the numbers here rather than
+// letting the caller re-derive them (and miss the interrupted turns).
+struct TurnReport {
+        double prefill_s = 0;
+        double decode_ms_per_token = 0;
+        int generated = 0;
+        const char* cut = nullptr;   // nullptr = the turn ended on its own
+};
+
 struct TurnTiming {
         Clock::time_point start = Clock::now();
         Clock::time_point decode_start {};
         int generated = 0;
         bool decoding = false;
+        TurnReport* out = nullptr;   // optional: set `out->...` at the end
         const char* cut = nullptr;
 
         void begin_decode() {
@@ -105,13 +130,19 @@ struct TurnTiming {
                 decoding = true;
         }
         ~TurnTiming() {
-                const char* on = getenv("TIMING");
-                if (!on || !*on) return;
                 const auto now = Clock::now();
                 const double prefill = elapsed_ms(start, decoding ? decode_start : now) / 1000.0;
                 const double avg = (decoding && generated)
                                        ? elapsed_ms(decode_start, now) / generated
                                        : 0.0;
+                if (out) {
+                        out->prefill_s = prefill;
+                        out->decode_ms_per_token = avg;
+                        out->generated = generated;
+                        out->cut = cut;
+                }
+                const char* on = getenv("TIMING");
+                if (!on || !*on) return;
                 cerr << "TIMING prefill=" << prefill << "s decode_avg=" << avg
                      << "ms/token gen=" << generated;
                 if (cut) cerr << " cut=" << cut;
@@ -141,6 +172,27 @@ std::string dump_escape(const std::string& t);
 
 // A field out of /proc/meminfo by name prefix (CmaFree, MemFree); -1 if absent.
 long long proc_meminfo_kb(const char* key);
+
+// A one-line progress bar on stderr for the two phases a start actually spends
+// time in: reading the container and uploading its weights.  Off unless stderr is
+// a terminal, so a pipe, the worker protocol and the regression scripts never see
+// a '\r' or half a line -- and off when SHADER_TIME is set, whose STARTUP lines
+// are grep targets.  One global rather than a parameter because Model::load() and
+// App::upload_weights() sit three call layers below main.
+class Progress {
+public:
+        void begin(const char* what, uint64_t total);
+        void set(uint64_t done);
+        void end();
+        ~Progress() { end(); }
+        bool active() const { return on_; }
+private:
+        bool on_ = false;
+        const char* what_ = "";
+        uint64_t total_ = 0;
+        Clock::time_point last_ {};
+};
+extern Progress g_progress;
 
 // Environment switches, read one way.  The engine has 93 of them and 206 call
 // sites, and 21 of those read the same variable twice

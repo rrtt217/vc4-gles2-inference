@@ -26,7 +26,7 @@ static const char* kUsage =
     "  --system TEXT         system prompt (default: the container's)\n"
     "  --gen N              tokens to generate (default 8, 128 with --chat)\n"
     "  --greedy             argmax instead of sampling\n"
-    "  --temp F --topp F     sampling knobs (default 1.0 / 0.9)\n"
+    "  --temp F --topp F     sampling knobs (default 1.0 / 0.9; temp 0 = greedy)\n"
     "  --top-k N            keep only the N most likely tokens (0 = off)\n"
     "  --top-k-candidates   with --top-k, read back only the candidates instead\n"
     "                       of the full logits (approximate; falls back when it\n"
@@ -131,6 +131,12 @@ bool parse_args(int argc, char** argv, Options& opt, bool& quiet, int& exit_code
             exit_code = 2; return false;
         }
     }
+
+    // A zero temperature means greedy.  The sampler defines it that way too
+    // (`sampling.cpp`, `keep_distribution`), but saying it here also switches the
+    // fast path on: before this, `--temp 0` divided by zero, every probability came
+    // out NaN and the draw returned the *least* likely token -- silently.
+    if (opt.temp <= 0.0f) opt.greedy = true;
 
     return true;
 }

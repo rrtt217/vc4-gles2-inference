@@ -174,7 +174,16 @@ of context and 1.89 s of program links per process, against 6.12 s of container
 read and 2.99 s of upload, so this is the one expensive part that survives).
 What it replaces: weights, tokenizer, chat template, session targets, the
 conversation.  What it refuses: a container that does not advertise chat support
-when `--chat` is in effect (same policy as startup).  It originally also refused
+when `--chat` is in effect (same policy as startup).  Both refusals happen
+*before* `release_scene()`, because a container's capability bits live in its
+metadata: `Model::probe()` reads the header and the metadata only, so a typo, a
+non-container or a completion model costs the session nothing.
+
+**There is no capacity pre-check, deliberately.**  `CmaFree` is not the budget a
+new GL scene gets -- it is often less than what the driver can find -- and a
+desktop kernel has no CMA at all, so the old `st_size + 48 MB` heuristic refused
+swaps that would have worked.  A container that does not fit is discovered by the
+upload, which fails there.  The command originally also refused
 a precision change (q8 <-> q4) because that produced repetitive garbage; the
 cause was the missing `prepare_model()` below, and a quantisation change is now
 bit-identical too (`scripts/swap_matrix.py`, "mixed" chain).
@@ -433,7 +442,8 @@ These were paid for; do not relearn them.
 - **KV cache**: Pi and laptop caches are not byte-identical. Build disk cache
   on the target machine.
 - **CMA**: `CmaFree` is actual occupancy; reducing `cma`/`gpu_mem` does not
-  create free CMA.
+  create free CMA.  It is *not* a budget for a new scene either -- a swap has no
+  capacity pre-check (see "Switching models without restarting the engine").
 - **Prefix cache** header flags include pack mode and `KV_SCALE`; loading with
   another `KV_PACK` or scale must be rejected.
 - **FFN**: hidden 2432 is split into 1216-wide chunks because VC4 FBO width is

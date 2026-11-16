@@ -124,6 +124,13 @@ public:
     int id_bos = 1, id_eos = 2, id_stop = -1, id_pad = -1, id_unk = -1, id_im_start = -1;
     // (these defaults reproduce the historical 1 = BOS, 2 = EOS behaviour)
     bool load(const string& path);
+    // Header and metadata only, for a caller that has to decide whether a
+    // container is usable *before* releasing the model it is already running
+    // (the REPL's /model).  The tensors are never touched: no map is kept, the
+    // borrowed tokenizer blob is cleared before the unmap, and the prepare-time
+    // refusals in split_ffn() cannot fire.  A file that is not a container this
+    // build can read comes back false, with the reader's own message on stderr.
+    bool probe(const string& path);
     // MMCF v2 container (docs/checkpoint-container.md).
     // The MMCF reader in three steps (2026-11-14, P2-1 of the 2026-11-13 audit):
     // `parse_header` validates the 64-byte header and keeps the derived offsets in

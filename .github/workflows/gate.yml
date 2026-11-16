@@ -50,6 +50,11 @@ jobs:
       - name: container layout round trip + C++ constants
         run: python3 engine/scripts/test_mmcf_format.py
 
+      # The line editor's cursor arithmetic, its paste handling, and the editor
+      # itself driven through a pty: no GPU, no model, no tty of the runner's.
+      - name: line editor layout and pty run
+        run: make -C engine test_lineedit && ./engine/test_lineedit
+
       - name: server self-test (stub worker, no engine needed)
         run: python3 server/selftest.py
 

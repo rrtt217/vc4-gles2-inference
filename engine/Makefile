@@ -26,7 +26,7 @@ GPULIB := $(wildcard $(SRC)/gpu*.cpp) $(SRC)/shaders.cpp $(SRC)/shaders_attn.cpp
 CORE := $(SRC)/engine.cpp $(SRC)/common.cpp $(SRC)/xformat.cpp \
         $(SRC)/shaders.cpp $(SRC)/shaders_attn.cpp $(SRC)/dump_shaders.cpp \
         $(wildcard $(SRC)/gpu*.cpp) \
-        $(SRC)/tokenizer.cpp $(SRC)/model.cpp $(SRC)/session.cpp $(SRC)/prefix_cache.cpp $(SRC)/lineedit.cpp \
+        $(SRC)/tokenizer.cpp $(SRC)/model.cpp $(SRC)/session.cpp $(SRC)/prefix_cache.cpp $(SRC)/lineedit.cpp $(SRC)/lineedit_layout.cpp \
         $(SRC)/sampling.cpp $(SRC)/tools.cpp $(SRC)/ppl.cpp $(SRC)/cli.cpp $(SRC)/chat_format.cpp $(SRC)/prefix_build.cpp $(SRC)/app.cpp $(SRC)/worker.cpp $(SRC)/chat.cpp $(SRC)/chattmpl.cpp $(JINJA)
 HEADERS := $(wildcard $(SRC)/*.h)
 # third_party is -isystem: it is vendored code (llama.cpp's Jinja engine) and its
@@ -205,13 +205,14 @@ probes/load_probe_pi: probes/load_probe.cpp | check-cross
 
 # The half of the gate that needs no GPU and no model: what a contributor can run
 # before pushing, and what .github/workflows/gate.yml runs on every push.
-check: warncheck
+check: warncheck test_lineedit
 	sh scripts/docs_check.sh
 	sh scripts/shader_hashes.sh
 	sh scripts/check_q16_decode.sh
 	sh scripts/check_draw_cap.sh
 	sh scripts/check_target_reset.sh
 	python3 scripts/test_mmcf_format.py
+	./test_lineedit
 	python3 ../server/selftest.py
 
 # Warnings from src/ are a defect: -Wall -Wextra is on by default and this makes a
@@ -229,8 +230,15 @@ warncheck:
 	n=$$(grep -c 'warning:' $$log || true); echo "warncheck: 0 warnings from src/ ($${n:-0} from vendored third_party/ only)"; \
 	rm -f $$log
 
+# The line editor's layout arithmetic, its paste sanitiser, and the editor itself
+# driven through a pty: no GPU, no model, no terminal.  It is part of `check`
+# because where the cursor lands is arithmetic no build warning can catch -- the
+# old relative `ESC[nD` move was wrong on every wrapped line and looked fine.
+test_lineedit: scripts/test_lineedit.cpp $(SRC)/lineedit.cpp $(SRC)/lineedit_layout.cpp $(HEADERS)
+	$(CXX) $(ALL_CXXFLAGS) $(INCS) -o $@ scripts/test_lineedit.cpp $(SRC)/lineedit.cpp $(SRC)/lineedit_layout.cpp -lutil -pthread
+
 clean:
-	rm -f engine engine_mm3 engine_mm3_pi
+	rm -f engine engine_mm3 engine_mm3_pi test_lineedit
 	rm -f probes/vc4_probe probes/vc4_ffn_probe probes/vc4_topk_probe probes/load_probe_pi
 	rm -f probes/matvec_probe probes/texsize_probe probes/q4fmt_probe_pi probes/glsl_probe_pi probes/q4mv_probe_pi probes/draw_probe_pi probes/packunpack_probe probes/packunpack_probe_pi probes/logits_grid_probe probes/wrow_probe probes/wrow_probe_pi probes/conv_probe probes/conv_probe_pi \
 	rm -f probes/q4mv_probe probes/progbinary_probe_pi probes/ffn2_probe_pi probes/rgba4444_probe probes/rgba4444_probe_pi

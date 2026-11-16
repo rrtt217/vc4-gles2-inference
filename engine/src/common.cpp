@@ -1,10 +1,14 @@
 #include "common.h"
 
+#include <unistd.h>
 #include <csignal>
+#include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <sstream>
 
 volatile sig_atomic_t g_stop = 0;
+Progress g_progress;
 
 static void on_stop_signal(int) { g_stop = 1; }
 
@@ -79,3 +83,41 @@ long long proc_meminfo_kb(const char* key) {
     return -1;
 }
 
+
+// ---------------------------------------------------------------------------
+// Progress: one line, on stderr, only for a human at a terminal.  The bar is
+// drawn at most ten times a second; on the Pi a container read is 6 s of SD card
+// and a redraw per record would cost more than the load.
+// ---------------------------------------------------------------------------
+void Progress::begin(const char* what, uint64_t total) {
+        end();
+        if (total == 0 || !isatty(STDERR_FILENO)) return;
+        if (getenv("SHADER_TIME")) return;   // those STARTUP lines are grep targets
+        on_ = true;
+        what_ = what;
+        total_ = total;
+        last_ = Clock::now() - chrono::milliseconds(500);
+        set(0);
+}
+
+void Progress::set(uint64_t done) {
+        if (!on_) return;
+        const auto now = Clock::now();
+        const bool last = done >= total_;
+        if (!last && elapsed_ms(last_, now) < 100.0) return;
+        last_ = now;
+        double pct = 100.0 * (double)done / (double)total_;
+        if (pct > 100.0) pct = 100.0;
+        char bar[25];
+        const int filled = (int)(pct / 100.0 * 24.0 + 0.5);
+        for (int i = 0; i < 24; ++i) bar[i] = i < filled ? '#' : '-';
+        bar[24] = 0;
+        fprintf(stderr, "\r[%-6s %3.0f%% %s %6.1f/%6.1f MB\x1b[K", what_, pct, bar,
+                (double)done / (1024.0 * 1024.0), (double)total_ / (1024.0 * 1024.0));
+}
+
+void Progress::end() {
+        if (!on_) return;
+        fprintf(stderr, "\r\x1b[K");
+        on_ = false;
+}

@@ -77,6 +77,38 @@ bool Model::load(const string& path){
     return ok;
 }
 
+bool Model::probe(const string& path){
+    const int fd = open(path.c_str(), O_RDONLY);
+    if (fd < 0) return false;
+    struct stat st {};
+    if (fstat(fd, &st) != 0 || st.st_size < 4) {
+        close(fd);
+        return false;
+    }
+    void* base = mmap(nullptr, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (base == MAP_FAILED) return false;
+    source_size = (uint64_t)st.st_size;
+    source_mtime = (uint64_t)st.st_mtime;
+    fbase_ = (const uint8_t*)base;
+    fsize_ = (size_t)st.st_size;
+    fpos_ = 0;
+    // No MADV_WILLNEED: a probe reads the metadata block, not the tensors, and a
+    // container that is about to be refused must not cost an SD card read first.
+    uint32_t magic = 0;
+    memcpy(&magic, fbase_, 4);
+    const bool ok = magic == 0x46434D4DU && parse_header() && parse_metadata();
+    fbase_ = nullptr;
+    fsize_ = fpos_ = 0;
+    // parse_metadata() points tok_blob into this mapping.  It is about to go, and
+    // a live Model holding a pointer into an unmapped range is the exact hazard
+    // load() documents; nothing a probe is asked for reads the blob.
+    tok_blob = nullptr;
+    tok_blob_bytes = 0;
+    munmap(base, (size_t)st.st_size);
+    return ok;
+}
+
 Model::~Model(){
     if (map_) munmap(map_, map_size_);
     map_ = nullptr; map_size_ = 0;

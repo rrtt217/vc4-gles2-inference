@@ -68,6 +68,20 @@ struct KeptDistribution {
 
 KeptDistribution keep_distribution(const vector<float>& logits, float temp, float top_p,
                                    int top_k) {
+    // A zero temperature is greedy, not a division by zero.  The worker treats
+    // temp <= 0 that way (`greedy_req`), the CLI does too, and the definition
+    // belongs here because this is where all three paths meet: dividing by zero
+    // produced NaN probabilities and a draw that returned the *least* likely
+    // token, with nothing printed.
+    if (temp <= 0.0f) {
+        KeptDistribution d;
+        int best = 0;
+        for (size_t i = 1; i < logits.size(); ++i)
+            if (logits[i] > logits[(size_t)best]) best = (int)i;
+        d.p.push_back({1.0f, best});
+        d.c = 1.0f;
+        return d;
+    }
     vector<pair<float, int>> p(logits.size());
     float mx = -1e30f;
     for (size_t i = 0; i < logits.size(); ++i) mx = max(mx, logits[i] / temp);
@@ -149,6 +163,12 @@ int argmax_token(const vector<float>& logits) {
 
 int sample_candidate_result(const CandidateResult& r, float temp, float top_p, int top_k, mt19937& rng) {
     if (r.cand.empty()) return 2;
+    if (temp <= 0.0f) {          // zero temperature is greedy here too
+        int best = 0;
+        for (size_t i = 1; i < r.cand.size(); ++i)
+            if (r.cand[i].value > r.cand[(size_t)best].value) best = (int)i;
+        return r.cand[(size_t)best].token;
+    }
     vector<Candidate> cand = r.cand;
     if (r.strict) {
         for (auto& c : cand) c.value = expf(c.value / temp - r.logsumexp);

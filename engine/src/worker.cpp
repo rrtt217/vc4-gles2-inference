@@ -152,8 +152,10 @@ int run_worker(App& app, Session& session, bool enc_bos, bool chat_dump) {
                                     ? (string) op.at("model") : string();
             if (want.empty()) { emit_error("load: no model path"); continue; }
             // Same sequence as the REPL's /model and as startup, in the same
-            // order: release the scene (CMA), read, prepare (FFN split and
-            // hidden scale -- the Mats), template/tokenizer, upload, session.
+            // order: release the scene, read, prepare (FFN split and hidden
+            // scale -- the Mats), template/tokenizer, upload, session.  No
+            // capacity pre-check: the kernel's free-CMA figure is not the budget
+            // a new scene gets (see the REPL's /model).
             const auto t_load = Clock::now();
             app.gpu.release_scene();
             app.model.reset();

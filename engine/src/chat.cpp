@@ -2,8 +2,13 @@
 
 #include "chat.h"
 
+#include <unistd.h>
 #include <algorithm>
+#include <cerrno>
+#include <climits>
+#include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <sys/stat.h>
 #include <fstream>
@@ -18,6 +23,51 @@
 #include "sampling.h"
 #include "tools.h"
 
+namespace {
+
+// Strict numeric parsing for the slash commands: "1.0x" is a typo, not 1.0, and
+// silently accepting it is how a knob looks set and is not.
+bool parse_float(const string& s, float& out) {
+    if (s.empty()) return false;
+    errno = 0;
+    char* end = nullptr;
+    const double v = strtod(s.c_str(), &end);
+    if (errno != 0 || end == s.c_str() || *end != '\0') return false;
+    out = (float)v;
+    return true;
+}
+
+bool parse_int(const string& s, int& out) {
+    if (s.empty()) return false;
+    errno = 0;
+    char* end = nullptr;
+    const long v = strtol(s.c_str(), &end, 10);
+    if (errno != 0 || end == s.c_str() || *end != '\0' || v < INT_MIN || v > INT_MAX) return false;
+    out = (int)v;
+    return true;
+}
+
+// One formatter for a knob, so /params and the echo after a change agree, and
+// 0.90 prints as 0.9 instead of a width the terminal has to truncate.
+string fmt(const char* f, ...) {
+    char b[512];
+    va_list ap;
+    va_start(ap, f);
+    vsnprintf(b, sizeof b, f, ap);
+    va_end(ap);
+    return b;
+}
+
+string num(float v) {
+    char b[32];
+    snprintf(b, sizeof b, "%.2f", (double)v);
+    string s(b);
+    while (s.size() > 1 && s.back() == '0') s.pop_back();
+    if (!s.empty() && s.back() == '.') s.pop_back();
+    return s;
+}
+
+}  // namespace
 
 Chat::Chat(App& a, Session& s, bool eb, bool dump, bool q)
     : app(a), session(s), enc_bos(eb), chat_dump(dump), quiet(q), rng(app.opt.seed) {
@@ -82,6 +132,7 @@ void Chat::mask_markers(std::vector<float>& logits) {
 
 void Chat::run_turn(const std::string& user, bool first, int pos, std::vector<ChatMsg>* hist) {
     TurnTiming tt;
+    tt.out = &last_turn;   // the REPL's status line, interrupted turns included
     string text;
     vector<PromptPart> parts;
     if (app.chat_tmpl) {
@@ -319,6 +370,7 @@ void Chat::run_tool_turn(const std::string& user, bool first, std::vector<ChatMs
 
     for (int round = 0; round < 3; ++round) {
         TurnTiming tt;   // one line per model turn, interrupted or not
+        tt.out = &last_turn;
         vector<PromptPart> parts;
         if (app.chat_tmpl)
             parts = app.chat_tmpl->render(msgs, tools_array, /*add_generation_prompt=*/true,
@@ -478,6 +530,130 @@ void Chat::run_tool_turn(const std::string& user, bool first, std::vector<ChatMs
     }
 }
 
+bool Chat::apply_param(const std::string& line) {
+    // A multi-line input is a message, never a command: the first line of a pasted
+    // block can easily start with "/temp".
+    if (line.find('\n') != string::npos) return false;
+    const size_t sp = line.find(' ');
+    const string name = line.substr(0, sp == string::npos ? line.size() : sp);
+    const string arg = sp == string::npos ? string() : line.substr(sp + 1);
+
+    if (name != "/params" && name != "/temp" && name != "/topp" && name != "/topk" &&
+        name != "/gen" && name != "/seed" && name != "/greedy" && name != "/penalty")
+        return false;
+    // The bare form of any of these prints the state; "/params" exists as the one
+    // name that says so, and it was the name left out of this list once already.
+    if (name == "/params" || arg.empty()) { print_params(); return true; }
+
+    auto bad = [&](const char* what) {
+        cerr << what << "\n";
+        print_params();
+        return true;
+    };
+    if (name == "/temp") {
+        float v = 0;
+        if (!parse_float(arg, v) || v < 0.0f || v > 5.0f) return bad("/temp takes 0..5 (0 = greedy)");
+        // Temperature 0 *is* greedy everywhere in this engine (the sampler defines
+        // it that way, see sampling.cpp), and saying it here also picks the fast
+        // greedy path.  A non-zero temperature turns sampling back on.
+        app.opt.temp = v;
+        app.opt.greedy = (v == 0.0f);
+    } else if (name == "/topp") {
+        float v = 0;
+        if (!parse_float(arg, v) || !(v > 0.0f) || v > 1.0f) return bad("/topp takes (0, 1]");
+        app.opt.top_p = v;
+    } else if (name == "/topk") {
+        int v = 0;
+        if (!parse_int(arg, v) || v < 0) return bad("/topk takes N >= 0 (0 = off)");
+        app.opt.top_k = v;
+        if (v == 0) app.opt.top_k_candidates = false;   // there is nothing to keep
+    } else if (name == "/gen") {
+        int v = 0;
+        if (!parse_int(arg, v) || v < 0 || v > 4096) return bad("/gen takes 0..4096");
+        app.opt.gen = v;
+    } else if (name == "/seed") {
+        int v = 0;
+        if (!parse_int(arg, v)) return bad("/seed takes an integer");
+        app.opt.seed = (uint32_t)v;
+        rng.seed(app.opt.seed);      // the next turn draws from the new stream
+    } else if (name == "/greedy") {
+        if (arg == "on") app.opt.greedy = true;
+        else if (arg == "off") app.opt.greedy = false;
+        else return bad("/greedy takes on or off");
+    } else {                          // /penalty
+        float v = 0;
+        if (!parse_float(arg, v) || v < 0.0f || v > 10.0f)
+            return bad("/penalty takes 0..10 for the repetition penalty (1 = off)");
+        g_sampling.repetition_penalty = v;
+    }
+    print_params();
+    return true;
+}
+
+void Chat::print_params() const {
+    const Options& o = app.opt;
+    cout << "sampling: " << (o.greedy ? "greedy" : "sampled")
+         << "  temp " << num(o.temp) << "  top_p " << num(o.top_p)
+         << "  top_k " << o.top_k << "  seed " << o.seed << "  gen " << o.gen << "\n";
+    if (sampling_penalties_active())
+        cout << "penalties: repeat " << num(g_sampling.repetition_penalty)
+             << "  frequency " << num(g_sampling.frequency_penalty)
+             << "  presence " << num(g_sampling.presence_penalty)
+             << "  min_p " << num(g_sampling.min_p)
+             << "  no_repeat_ngram " << g_sampling.no_repeat_ngram << "\n";
+    cout << flush;
+}
+
+void Chat::print_stats() const {
+    const Model& m = app.model;
+    cout << fmt("model    %s  %.1f MB\n", app.opt.model_path.c_str(),
+                (double)m.source_size / (1024.0 * 1024.0));
+    cout << fmt("shape    dim %d  hidden %d  layers %d  heads %d/%d  vocab %d  seq %d\n",
+                m.dim, m.hidden, m.layers, m.heads, m.kv_heads, m.vocab, m.seq);
+    string ffn = fmt("%d wide", m.ffn_width());
+    if (m.is_moe()) ffn += fmt("  (MoE, %d experts, top-%d)", m.experts, m.top_k);
+    if (m.hybrid) ffn += fmt("  (hybrid, %d conv layers)", m.n_conv_layers());
+    cout << "ffn      " << ffn << "\n";
+    cout << fmt("template %s (kind %d)  chat template %zu B  bos %d  eos %d  stop %d\n",
+                m.template_name.empty() ? "(unnamed)" : m.template_name.c_str(),
+                m.template_kind, m.chat_template.size(), m.id_bos, m.id_eos, m.id_stop);
+    cout << fmt("rms eps  %g (%s)\n", (double)m.rms_eps,
+                m.rms_eps_stated ? "from the container" : "compiled literal");
+    // MemAvailable, not CmaFree: the kernel's free-CMA figure is not the budget a
+    // GL scene gets (it is often smaller), and a desktop kernel has none at all, so
+    // it answered a question nobody could act on.  The scene's own ledger is
+    // GPU_MEM's job.
+    const long long avail_kb = proc_meminfo_kb("MemAvailable");
+    const long long total_kb = proc_meminfo_kb("MemTotal");
+    if (avail_kb >= 0 && total_kb > 0)
+        cout << fmt("memory   %lld of %lld MB available\n", avail_kb >> 10, total_kb >> 10);
+    long milli = 0;
+    {
+        ifstream t("/sys/class/thermal/thermal_zone0/temp");
+        t >> milli;
+    }
+    if (milli > 0) cout << fmt("soc      %.1f C\n", milli / 1000.0);
+    const int used = (int)kv_tokens.size();
+    cout << fmt("context  %d / %d tokens (%d%%)\n", used, m.seq,
+                m.seq > 0 ? (int)(100.0 * used / m.seq) : 0);
+    if (!cli_cache_tokens.empty())
+        cout << fmt("cache    %zu tokens loaded from --prefix-cache\n", cli_cache_tokens.size());
+    cout << flush;
+}
+
+void Chat::print_status() const {
+    // Ambient, not an answer: stderr, and only for a human at a terminal, so a
+    // redirected stdout is exactly the conversation.
+    if (quiet || !isatty(STDERR_FILENO)) return;
+    fprintf(stderr, "[%d tok", last_turn.generated);
+    if (last_turn.decode_ms_per_token > 0)
+        fprintf(stderr, "  %.1f tok/s", 1000.0 / last_turn.decode_ms_per_token);
+    if (last_turn.prefill_s > 0) fprintf(stderr, "  %.2f s prefill", last_turn.prefill_s);
+    fprintf(stderr, "  ctx %zu/%d", kv_tokens.size(), app.model.seq);
+    if (last_turn.cut) fprintf(stderr, "  cut %s", last_turn.cut);
+    fprintf(stderr, "]\n");
+}
+
 int Chat::repl() {
 
     if (!app.opt.prompt_set) app.opt.prompt.clear();
@@ -507,48 +683,49 @@ int Chat::repl() {
                 cout << "[conversation cleared]\n";
                 continue;
             }
-            if (line.rfind("/model ", 0) == 0) {
+            if (line == "/stats") { print_stats(); continue; }
+            if (apply_param(line)) continue;
+            // A slash command is one line: a pasted multi-line block that happens
+            // to start with "/model " is a message, not a path with newlines in it.
+            if (line.find('\n') == string::npos && line.rfind("/model ", 0) == 0) {
                 const string path = line.substr(7);
                 const auto t_swap = Clock::now();
-                  // A swap has to fit: the new container's textures and its KV cache
-                  // arrive *after* the old scene is released, and on the Pi Zero the CMA
-                  // is the limit.  Refuse here, while the current model still works,
-                  // instead of running out mid-upload -- that path exits the process and
-                  // the session is gone (measured 2026-11-15: minimind3 q8 at SEQ=768 ->
-                  // lfm2.5 qad q4 failed on texture 314 of 314 with CmaFree 2 MB; a fresh
-                  // process loads the same container in 38 s).
-                  struct stat st {};
-                  if (stat(path.c_str(), &st) != 0) {
-                      cerr << "/model: cannot read " << path << "\n";
-                      continue;
-                  }
-                  // Only a machine whose GL memory *is* CMA can answer this: desktop kernels
-                  // report CmaTotal 0 and the heuristic would refuse every swap.
-                  const long long cma_total = proc_meminfo_kb("CmaTotal");
-                  const long long cma = proc_meminfo_kb("CmaFree");
-                  const long long after = cma + (long long) gpu_scene_bytes();
-                  const long long need = (long long) st.st_size + (48LL << 20);   // + KV and targets
-                  if (cma_total > (64LL << 10) && cma >= 0 && after < need) {
-                      fprintf(stderr, "/model: %s needs about %lld MB of CMA (container plus KV "
-                              "heuristic) and releasing the current model would leave %lld MB; "
-                              "keeping it.  Start a new process with the new container.\n",
-                              path.c_str(), need >> 20, after >> 20);
-                      continue;
-                  }
+                // There is deliberately no capacity pre-check here.  The free CMA the
+                // kernel reports is not the budget a new scene actually gets -- it is
+                // often less than what the driver can find -- and a desktop kernel has
+                // no CMA at all, so the old `st_size + 48 MB` heuristic refused swaps
+                // that would have worked and could not answer on a laptop.  A container
+                // that does not fit now fails in the upload, which is where the truth
+                // is; there is nothing to guess.
+                //
+                // What *is* decidable before releasing anything is whether the
+                // container is usable at all, because the capability bits live in the
+                // metadata.  The old code released the scene first and then refused
+                // (stories15M advertises capabilities 0, and its refusal *left* the
+                // process with no model); the probe reads the header and the metadata
+                // and never the tensors, so a refusal costs nothing and keeps the
+                // session.
+                struct stat st {};
+                if (stat(path.c_str(), &st) != 0) {
+                    cerr << "/model: cannot read " << path << "\n";
+                    continue;
+                }
+                Model probe;
+                if (!probe.probe(path)) {
+                    cerr << "/model: not a container this build can read: " << path
+                         << "  (engine/tools/mmcf_dump.py explains a file)\n";
+                    continue;
+                }
+                if (app.opt.chat && probe.have_capabilities && !(probe.capabilities & 1)) {
+                    cerr << "/model: this checkpoint does not advertise chat support "
+                            "(capabilities 0x" << std::hex << probe.capabilities << std::dec
+                         << "); keeping the current model\n";
+                    continue;
+                }
                 app.gpu.release_scene();
                 app.model.reset();
                 if (!app.model.load(path)) { cerr << "no model loaded; leaving\n"; return 1; }
-                // The startup path refuses a container that does not
-                // advertise chat support while --chat is in effect; a swap
-                // must apply the same rule instead of quietly running it
-                // (stories15M's capabilities are 0, and it happily answered
-                // through the built-in [INST] wrapper before this guard).
-                if (app.model.have_capabilities && app.opt.chat && !(app.model.capabilities & 1)) {
-                    cerr << "/model: this checkpoint does not advertise chat support "
-                            "(capabilities 0x" << std::hex << app.model.capabilities << std::dec
-                         << "); leaving\n";
-                    return 2;
-                }
+                app.opt.model_path = path;    // /stats reports the live container
                 app.prepare_model();          // FFN split, hidden scale, seq clamp
                 if (!app.setup_from_model()) return 2;
                 app.upload_weights();
@@ -564,15 +741,24 @@ int Chat::repl() {
             if (line == "/help") {
                 cout << "/clear  forget the conversation so far\n"
                         "/model PATH  load another container, keeping the GPU context\n"
+                        "/stats  the container, the context and the memory state\n"
+                        "/params  sampling knobs; the bare form of any of these prints them\n"
+                        "        /temp F [0 = greedy] /topp F /topk N /greedy on|off\n"
+                        "        /seed N /gen N /penalty R [1 = off]\n"
                         "/exit   leave\n"
                         "/help   this list\n"
-                        "anything else is sent to the model; arrows edit, Up/Down recall,\n"
-                        "Ctrl-Left/Right (or Alt-b/f) move by word.\n";
+                        "anything else is sent to the model; arrows edit, Ctrl-Left/Right\n"
+                        "(or Alt-b/f) move by word.\n"
+                        "Enter sends.  Ctrl-V Enter or Alt-Enter starts a new line, and\n"
+                        "pasted text keeps its line breaks, so a pasted block is one\n"
+                        "message.  Up/Down move inside such a block; above its first\n"
+                        "line they recall earlier inputs.\n";
                 continue;
             }
             if (app.opt.tools_json.empty()) run_turn(line, first, 0, app.chat_tmpl ? &history : nullptr);
             else run_tool_turn(line, first, app.chat_tmpl ? &history : nullptr);
             first = false;
+            print_status();
             if (g_stop) {
                 cout << "\n[interrupted]\n";
                 g_stop = 0;
@@ -627,6 +813,7 @@ auto prefill_once = [&]() {
     return lg;
 };
 TurnTiming tt;
+tt.out = &last_turn;
 auto start = Clock::now();
 if (getenv("SHADER_TIME")) fprintf(stderr, "STARTUP %7.1f ms  first step\n", run_time_ms());
 logits = prefill_once();
