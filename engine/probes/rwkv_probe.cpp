@@ -547,14 +547,14 @@ static void test_render_matvec_add(int dim, bool finish, bool wrow) {
     const int cols = dim, rows = dim;
     vector<int8_t> w((size_t)rows*cols);
     for (int r = 0; r < rows; ++r) for (int c = 0; c < cols; ++c)
-        w[(size_t)r*cols+c] = (int8_t)(((r*7+c*13)%9)-4);
+        w[(size_t)r*cols+c] = (int8_t)(((r*7+c*13)%256)-128);   // full q8 range (engine-like)
     vector<uint8_t> wp((size_t)(cols/4)*rows*4);
     for (int r = 0; r < rows; ++r) for (int q = 0; q < cols/4; ++q)
         for (int j = 0; j < 4; ++j)
             wp[((size_t)r*(cols/4)+q)*4+j] = (uint8_t)(w[(size_t)r*cols+4*q+j]+128);
     GLuint wt = tex(cols/4, rows, wp);
     vector<int> xraw(cols);
-    for (int c = 0; c < cols; ++c) xraw[c] = (int)((c*2654435761u)%512u)-256;
+    for (int c = 0; c < cols; ++c) xraw[c] = (int)((c*2654435761u)%104u)-14;  // small (gate_out-like)
     GLuint tA; GLuint fA = mkfbo(cols, tA);
     string fs1 = string("precision highp float;\n") + x_glsl(XFormat::I24_1) +
         "uniform sampler2D S;void main(){int i=int(gl_FragCoord.x);"
