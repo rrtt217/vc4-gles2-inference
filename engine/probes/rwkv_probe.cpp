@@ -540,6 +540,60 @@ static void test_render_matvec(int dim, bool finish) {
     glDeleteFramebuffers(1,&fA); glDeleteTextures(1,&tA); glDeleteTextures(1,&wt); glDeleteTextures(1,&src);
 }
 
+// J. render activation -> matvec_add (I24_1 X + q16 R + wrow): the exact engine
+// wo/cm pattern.  wo_pure (matvec_q8) is nonzero but matvec_add output == residual
+// (dot dropped) on VC4.  A/B glFinish.
+static void test_render_matvec_add(int dim, bool finish, bool wrow) {
+    const int cols = dim, rows = dim;
+    vector<int8_t> w((size_t)rows*cols);
+    for (int r = 0; r < rows; ++r) for (int c = 0; c < cols; ++c)
+        w[(size_t)r*cols+c] = (int8_t)(((r*7+c*13)%9)-4);
+    vector<uint8_t> wp((size_t)(cols/4)*rows*4);
+    for (int r = 0; r < rows; ++r) for (int q = 0; q < cols/4; ++q)
+        for (int j = 0; j < 4; ++j)
+            wp[((size_t)r*(cols/4)+q)*4+j] = (uint8_t)(w[(size_t)r*cols+4*q+j]+128);
+    GLuint wt = tex(cols/4, rows, wp);
+    vector<int> xraw(cols);
+    for (int c = 0; c < cols; ++c) xraw[c] = (int)((c*2654435761u)%512u)-256;
+    GLuint tA; GLuint fA = mkfbo(cols, tA);
+    string fs1 = string("precision highp float;\n") + x_glsl(XFormat::I24_1) +
+        "uniform sampler2D S;void main(){int i=int(gl_FragCoord.x);"
+        "gl_FragColor=texture2D(S,vec2((float(i)+0.5)/" + std::to_string(cols) + ".0,0.5));}";
+    GLuint src = tex(cols, 1, q24_bytes(xraw, cols, 1));
+    GLuint p1 = prog(fs1);
+    glBindFramebuffer(GL_FRAMEBUFFER, fA); glViewport(0,0,cols,1);
+    glUseProgram(p1); bind(p1,"S",0,src); tri(p1);
+    if (finish) { glFlush(); glFinish(); }
+    vector<int> resq(rows);
+    for (int r = 0; r < rows; ++r) resq[r] = (int)((r*40503u)%4096u)-2048;
+    vector<uint8_t> rp((size_t)rows*4);
+    for (int r = 0; r < rows; ++r) { uint16_t u=(uint16_t)(int16_t)resq[r];
+        rp[r*4]=u>>8; rp[r*4+1]=u&255; rp[r*4+2]=0; rp[r*4+3]=255; }
+    GLuint rt = tex(rows, 1, rp);
+    GLuint st = 0;
+    if (wrow) { int np=(rows+1)/2; vector<uint8_t> sp((size_t)np*4);
+        for (int t=0;t<np;++t){uint16_t u=65535; sp[t*4]=u>>8;sp[t*4+1]=u&255;sp[t*4+2]=u>>8;sp[t*4+3]=u&255;}
+        st = tex(1, np, sp); }
+    GLuint p2 = prog(matvec_q8_add(rows, cols, XFormat::I24_1, XFormat::I16_1, wrow));
+    out_begin(rows); glUseProgram(p2);
+    bind(p2,"W",0,wt); bind(p2,"X",1,tA); bind(p2,"R",2,rt);
+    glUniform1f(glGetUniformLocation(p2,"ws"),1.0f);
+    if (wrow) bind(p2,"WS",3,st);
+    tri(p2);
+    const uint8_t* g = out_end();
+    vector<int> gv(rows), want(rows);
+    for (int r = 0; r < rows; ++r) {
+        int u=(g[r*4]<<8)|g[r*4+1]; gv[r]=u>=32768?u-65536:u;
+        float s=0; for(int c=0;c<cols;++c) s+=(float)w[(size_t)r*cols+c]*(float)xraw[c];
+        long q=lrintf(s+resq[r]); want[r]=(int)std::max(-32768L,std::min(32767L,q));
+    }
+    char nm[64]; snprintf(nm,sizeof nm,"J render->matvec_add wrow%d fin%d",wrow,finish);
+    report(nm, gv, want, 1);
+    glDeleteProgram(p1); glDeleteProgram(p2);
+    glDeleteFramebuffers(1,&fA); glDeleteTextures(1,&tA); glDeleteTextures(1,&wt);
+    glDeleteTextures(1,&src); glDeleteTextures(1,&rt); if(st)glDeleteTextures(1,&st);
+}
+
 int main(int argc, char** argv) {
     bool want_es3 = !(argc > 1 && strcmp(argv[1], "gles2") == 0);
     if (want_es3) { setenv("MESA_GLES_VERSION_OVERRIDE", "3.0", 0);
@@ -592,6 +646,11 @@ int main(int argc, char** argv) {
     printf("\nI. render->matvec I24_1 4-fetch (glFinish A/B)\n");
     test_render_matvec(D, false);
     test_render_matvec(D, true);
+    printf("\nJ. render->matvec_add (glFinish A/B, wrow)\n");
+    test_render_matvec_add(D, false, false);
+    test_render_matvec_add(D, true, false);
+    test_render_matvec_add(D, false, true);
+    test_render_matvec_add(D, true, true);
     if (g_es3) { printf("\nD. bit-cast f32 round trip (dither A/B)\n");
         test_bitcast(D, false); test_bitcast(D, true); }
     else printf("\nD. skipped (no ESSL 3.00)\n");
