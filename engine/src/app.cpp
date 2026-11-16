@@ -148,9 +148,10 @@ void App::upload_weights() {
     add(model.conv_in_x);
     add(model.conv_out);
     add(model.w13);
-    add(model.w1);
+    // RWKV chunked (VC4) draws the cm halves, not the full 3072-row key/value;
+    // uploading the full w1/w2 too would exceed the 2048-row texture limit.
+    if (!model.is_rwkv() || !model.ffn_chunked) { add(model.w1); add(model.w2); }
     add(model.w3);
-    add(model.w2);
     add(model.w1a);
     add(model.w1b);
     add(model.w3a);
