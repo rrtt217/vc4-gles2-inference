@@ -460,6 +460,9 @@ int main(int argc, char** argv) {
     test_i24(D, false); test_i24(D, true);
     printf("\nC. shipped elementwise\n");
     test_sqrelu(D);
+    test_sqrelu(1024);
+    test_sqrelu(1025);
+    test_sqrelu(1536);   // the Pi chunked cm hidden width (> kDrawCap 1024)
     printf("\nE. matvec activation fetch (I24_1 X4Q 4-fetch vs I16_2 2-fetch)\n");
     test_matvec(D, XFormat::I16_2);
     test_matvec(D, XFormat::I24_1);
