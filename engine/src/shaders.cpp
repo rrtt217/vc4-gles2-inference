@@ -1232,6 +1232,12 @@ static bool q4x4_flat8(){ return getenv("Q4_4X4_FLAT8") != nullptr; }
 // min application reassociates the sum, so this is a pricing arm, not yet
 // byte-identical.
 static bool q4x4_flat8m(){ return getenv("Q4_4X4_FLAT8M") != nullptr; }
+// FLAT8G: flat 8-wide loop, per-group scale/min fetched and decoded ONCE per
+// group via a conditional (q%4==0), then applied per iteration.  Prices the
+// flat loop with 24x (not 96x) metadata work.  The conditional updates float
+// scales, which the VC4 rolled-loop rule says survive (it is int index updates
+// that are lost).  Min still reassociates -> pricing arm, not byte-identical.
+static bool q4x4_flat8g(){ return getenv("Q4_4X4_FLAT8G") != nullptr; }
 
 static string i4_gate_flat(int rows, int cols, XFormat xf, bool inl, int hs, bool wide) {
     const string HD = hid_scale_def(hs), HM = hid_scale_mul(hs);
@@ -1329,11 +1335,59 @@ static string i4_gate_flat8m(int rows, int cols, XFormat xf, bool inl, int hs) {
         "gl_FragColor=x_st2(v0,v1);}";
 }
 
+static string i4_gate_flat8g(int rows, int cols, XFormat xf, bool inl, int hs) {
+    const string HD = hid_scale_def(hs), HM = hid_scale_mul(hs);
+    const int texw = cols / 4;
+    const int groups = (cols + 31) / 32;
+    const string ROWS = to_string(rows), TEXW = to_string(texw),
+                 GROUPS = to_string(groups), ITERS = to_string(cols / 8);
+    const string act8 = q4_act(xf, cols, inl);
+    const auto dot = [](const char* wt0, const char* wt1) {
+        return string(wt0) + ".x*xa.x+" + wt0 + ".y*xa.y+" + wt0 + ".z*xa.z+" + wt0 + ".w*xa.w+"
+             + wt1 + ".x*xb.x+" + wt1 + ".y*xb.y+" + wt1 + ".z*xb.z+" + wt1 + ".w*xb.w";
+    };
+    return q4_head(xf, inl) + HD +
+        "uniform sampler2D W1,W2,P1,P2,X;uniform float ps1,ps2;" + kQzSl +
+        "void main(){int t=int(gl_FragCoord.x);int r0=2*t;"
+        "int r1=min(r0+1," + to_string(rows - 1) + ");"
+        "float v0r=(float(r0)+0.5)/float(" + ROWS + "),v1r=(float(r1)+0.5)/float(" + ROWS + ");"
+        "float itw=1.0/float(" + TEXW + ");"
+        "float u1s=65280.0*15.0*ps1,v1s=255.0*15.0*ps1;"
+        "float u2s=65280.0*15.0*ps2,v2s=255.0*15.0*ps2;"
+        "float sa1=0.0,ma1=0.0,sa2=0.0,ma2=0.0,sb1=0.0,mb1=0.0,sb2=0.0,mb2=0.0;"
+        "float s10=0.0,s20=0.0,s11=0.0,s21=0.0;"
+        "for(int q=0;q<" + ITERS + ";q++){"
+        "int g=q/4;"
+        "if(q-g*4==0){"
+        "float gp=(float(g)+0.5)/float(" + GROUPS + ");"
+        "vec4 q1=texture2D(P1,vec2(gp,v0r)),q2=texture2D(P2,vec2(gp,v0r));"
+        "vec4 p1=texture2D(P1,vec2(gp,v1r)),p2=texture2D(P2,vec2(gp,v1r));"
+        "sa1=q1.r*u1s+q1.g*v1s;sa2=q2.r*u2s+q2.g*v2s;"
+        "sb1=p1.r*u1s+p1.g*v1s;sb2=p2.r*u2s+p2.g*v2s;"
+        "ma1=x_i16raw(q1.ba)*ps1;ma2=x_i16raw(q2.ba)*ps2;"
+        "mb1=x_i16raw(p1.ba)*ps1;mb2=x_i16raw(p2.ba)*ps2;}"
+        "int c=q*8;" + act8 +
+        "float as=xa.x+xa.y+xa.z+xa.w+xb.x+xb.y+xb.z+xb.w;"
+        "float c0=(float(q*2)+0.5)*itw,c1=c0+itw;"
+        "vec4 wt0=texture2D(W1,vec2(c0,v0r)),wt1=texture2D(W1,vec2(c1,v0r));"
+        "s10+=sa1*(" + dot("wt0", "wt1") + ")+ma1*as;"
+        "vec4 wt2=texture2D(W2,vec2(c0,v0r)),wt3=texture2D(W2,vec2(c1,v0r));"
+        "s20+=sa2*(" + dot("wt2", "wt3") + ")+ma2*as;"
+        "vec4 wt4=texture2D(W1,vec2(c0,v1r)),wt5=texture2D(W1,vec2(c1,v1r));"
+        "s11+=sb1*(" + dot("wt4", "wt5") + ")+mb1*as;"
+        "vec4 wt6=texture2D(W2,vec2(c0,v1r)),wt7=texture2D(W2,vec2(c1,v1r));"
+        "s21+=sb2*(" + dot("wt6", "wt7") + ")+mb2*as;}"
+        "float v0=sl(qz(s10),qz(s20))" + HM + ";"
+        "float v1=(r0+1<" + ROWS + ")?sl(qz(s11),qz(s21))" + HM + ":0.0;"
+        "gl_FragColor=x_st2(v0,v1);}";
+}
+
 string matvec_i4_pair_swiglu_4x4(int rows, int cols, XFormat xf, bool inl, int hs) {
     need_shape("matvec_i4_pair_swiglu_4x4", rows, cols, 32);
     if (q4x4_flat()) return i4_gate_flat(rows, cols, xf, inl, hs, false);
     if (q4x4_flat8()) return i4_gate_flat(rows, cols, xf, inl, hs, true);
     if (q4x4_flat8m()) return i4_gate_flat8m(rows, cols, xf, inl, hs);
+    if (q4x4_flat8g()) return i4_gate_flat8g(rows, cols, xf, inl, hs);
     const string HD = hid_scale_def(hs), HM = hid_scale_mul(hs);
     const int texw = cols / 4;              // one 4-bit texel = four weights
     const int groups = (cols + 31) / 32;
