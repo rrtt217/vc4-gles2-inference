@@ -148,12 +148,17 @@ std::vector<float> GPU::rwkv_read_residual(GLuint tex){
 // One full-target draw of an already-bound program (viewport w x h).
 void GPU::rwkv_draw1(GLuint prog, int w, int h){
         setup_attrib(prog);
-        // Split into kDrawCap-wide strips: VC4 silently drops a single draw wider
-        // than the cap (the sqrelu of a 1536-wide chunked cm hidden left its
-        // target at the clear color).  gl_FragCoord.x is absolute, so the shader
-        // is unchanged across strips.
-        for (int x0 = 0; x0 < w; x0 += kDrawCap) {
-            glViewport(x0, 0, std::min(kDrawCap, w - x0), h);
+        if (needs_finish()) {
+            // VC4 silently drops a single draw wider than kDrawCap (the sqrelu of
+            // a 1536-wide chunked cm hidden left its target at the clear color).
+            // Split into strips; gl_FragCoord.x is absolute, so the shader is
+            // unchanged.  Xe drives the wide draw in one piece (its own rounding).
+            for (int x0 = 0; x0 < w; x0 += kDrawCap) {
+                glViewport(x0, 0, std::min(kDrawCap, w - x0), h);
+                glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+            }
+        } else {
+            glViewport(0, 0, w, h);
             glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         }
 }
@@ -418,25 +423,8 @@ GLuint GPU::rwkv_wkv(int layer, GLuint r, GLuint k, GLuint v, GLuint a, GLuint k
 }
 
 GLuint GPU::rwkv_block(int l, const Model& m, GLuint resid, float* cpu_wkv_state){
-        if (env_set("RWKV_FORCE_REBIND")) gl_state_forget_bindings();
         const bool have_gate = m.rwkv.gate && l < (int)m.rwkv_g1.size() && m.rwkv_g1[l].rows > 0;
         const GLuint lp = rwkv_const(l, RC_LERP), sc = rwkv_const(l, RC_SCALE);
-        auto D = [&](const char* nm, RwkvTmp idx, float div) {
-            if (!env_set("RWKV_STAGE_DUMP") || l > 1) return;
-            sync(); Target& t = rwkv_tmp(idx);
-            vector<uint8_t> b = read_bytes(t, t.w, 1);
-            auto val=[&](int i){int u=(int)b[(size_t)i*4+1]*65536+(int)b[(size_t)i*4+2]*256+(int)b[(size_t)i*4+3]-8388608;return (u/256.0f)/div;};
-            float mx=0; for(int i=0;i<t.w;++i) mx=std::max(mx,fabsf(val(i)));
-            fprintf(stderr,"OP GPU l%d %s max=%.4f first=%.4f %.4f %.4f\n",l,nm,mx,val(0),val(1),val(2));
-        };
-        auto DQ = [&](const char* nm, RwkvTmp idx) {
-            if (!env_set("RWKV_STAGE_DUMP") || l > 1) return;
-            sync(); Target& t = rwkv_tmp(idx);
-            vector<uint8_t> b = read_bytes(t, t.w, 1);
-            auto val=[&](int i){int u=(b[(size_t)i*4]<<8)|b[(size_t)i*4+1];return (u>=32768?u-65536:u)/256.0f;};
-            float mx=0; for(int i=0;i<t.w;++i) mx=std::max(mx,fabsf(val(i)));
-            fprintf(stderr,"OPQ GPU l%d %s max=%.4f first=%.4f %.4f %.4f\n",l,nm,mx,val(0),val(1),val(2));
-        };
         // O1-O3: att_norm, then the six token-shifted inputs; shift := xn.
         GLuint xn = (l == 0) ? rwkv_ln_p(resid, rwkv_const(l, RC_ATTNorm), rwkv_tmp(RT_XN))
                              : rwkv_ln(resid, rwkv_const(l, RC_ATTNorm), rwkv_tmp(RT_XN));
@@ -447,20 +435,17 @@ GLuint GPU::rwkv_block(int l, const Model& m, GLuint resid, float* cpu_wkv_state
         GLuint xv = rwkv_lerp(xn, shA.tex, lp, 3, 6, rwkv_tmp(RT_XV));
         GLuint xa = rwkv_lerp(xn, shA.tex, lp, 4, 6, rwkv_tmp(RT_XA));
         GLuint xg = rwkv_lerp(xn, shA.tex, lp, 5, 6, rwkv_tmp(RT_XG));
-        D("xn", RT_XN, 256); D("xr", RT_XR, 1);
         rwkv_copy(xn, shA);
         // O4-O6: the three projections.
         GLuint r = rwkv_mv(m.rwkv_r[l], xr, rwkv_tmp(RT_R));
         GLuint k = rwkv_mv(m.rwkv_k[l], xk, rwkv_tmp(RT_K));
         GLuint v = rwkv_mv(m.rwkv_v[l], xv, rwkv_tmp(RT_V));
         RwkvTmp vidx = RT_V;
-        D("r", RT_R, 1); D("k", RT_K, 1); D("v", RT_V, 1);
         // O7: decay branch (tanh on the down projection, then exp/sigmoid).
         GLuint t = rwkv_mv(m.rwkv_w1[l], xw, rwkv_tmp(RT_TW));
         t = rwkv_tanh(t, rwkv_tmp(RT_TW2));
         GLuint u = rwkv_mv(m.rwkv_w2[l], t, rwkv_tmp(RT_U));
         GLuint decay = rwkv_decay(u, rwkv_const(l, RC_W0), rwkv_tmp(RT_DECAY));
-        D("onemw", RT_DECAY, 256);
         // O8: value residual (layer 0 records v_first).
         if (l == 0) {
             rwkv_copy(v, rwkv_vfirst_);
@@ -471,12 +456,10 @@ GLuint GPU::rwkv_block(int l, const Model& m, GLuint resid, float* cpu_wkv_state
             v = rwkv_vres(v, rwkv_vfirst_.tex, u, rwkv_const(l, RC_V0), rwkv_tmp(RT_V2));
             vidx = RT_V2;
         }
-        D("vpost", vidx, 1);
         // O9: ICLR gate a = sigmoid(a2(a1(xa)) + a0).
         t = rwkv_mv(m.rwkv_a1[l], xa, rwkv_tmp(RT_TA));
         u = rwkv_mv(m.rwkv_a2[l], t, rwkv_tmp(RT_U));
         GLuint a = rwkv_sigmoid(u, rwkv_const(l, RC_A0), rwkv_tmp(RT_A), 16);
-        D("a", RT_A, 16);
         // O10: optional time-mix gate g = g2(sigmoid(g1(xg))).
         GLuint g = 0;
         if (have_gate) {
@@ -487,7 +470,6 @@ GLuint GPU::rwkv_block(int l, const Model& m, GLuint resid, float* cpu_wkv_state
         // O11/O12: kk = l2norm(k*k_k) (*16 store), k' = k + (a-1)*k*k_a.
         GLuint kk = rwkv_l2(k, sc, rwkv_tmp(RT_KK));
         GLuint kd = rwkv_keydelta(k, a, sc, rwkv_tmp(RT_KD));
-        D("kk", RT_KK, 16); D("kd", RT_KD, 1);
         // O13/O14: the recurrence.
         GLuint y;
         if (cpu_wkv_state) {
@@ -549,74 +531,64 @@ GLuint GPU::rwkv_block(int l, const Model& m, GLuint resid, float* cpu_wkv_state
         } else {
             y = rwkv_wkv(l, r, kd, v, a, kk, decay, rwkv_tmp(RT_Y));
         }
-        D("wkv", RT_Y, 16);
         // O15: per-head group norm + ln_x affine.
         y = rwkv_gn(y, rwkv_const(l, RC_LNX), rwkv_tmp(RT_Y2));
-        D("gn", RT_Y2, 256);
         // O16: r_k bonus (uses the delta key).
         y = rwkv_rk(kd, r, sc, v, y, rwkv_tmp(RT_Y));
-        D("rk", RT_Y, 256);
         // O17: gate.
         if (have_gate) y = rwkv_mul(y, g, rwkv_tmp(RT_Y2), 256);
-        D("gate", have_gate ? RT_Y2 : RT_Y, 1);
-        // O18/O19: W_o + residual (fused q16 add, matches the CPU grid).
+        // O18/O19: W_o + residual.  Two-step (matvec to I24, then q16 add) like
+        // the CPU's read-back + add_q16; the fused matvec_add drops its dot on
+        // VC4's I24_1 chain, and the split keeps the add's input fetch ordered.
         if (l == 0) {
             GLuint wo_t = rwkv_mv(m.wo[l], y, rwkv_tmp(RT_U));
-            D("wo_t", RT_U, 1);
             resid = rwkv_first_add(rwkv_x0_.tex, wo_t, rwkv_tmp(RT_RES));
-            DQ("resid_after_wo", RT_RES);
         } else {
             Target& wo_out = (resid == rwkv_tmp(RT_RES).tex) ? rwkv_tmp(RT_RES2) : rwkv_tmp(RT_RES);
-            GLuint wo_t = rwkv_mv(m.wo[l], y, rwkv_tmp(RT_U));
-            resid = rwkv_res_add(resid, wo_t, wo_out);
-            if (env_set("RWKV_STAGE_DUMP") && l == 1) {
-                rwkv_mv(m.wo[l], y, rwkv_tmp(RT_U));
-                sync();
-                Target& ut = rwkv_tmp(RT_U);
-                vector<uint8_t> b = read_bytes(ut, ut.w, 1);
-                auto val=[&](int i){int u=(int)b[(size_t)i*4+1]*65536+(int)b[(size_t)i*4+2]*256+(int)b[(size_t)i*4+3]-8388608;return u/256.0f;};
-                float mx=0; for(int i=0;i<ut.w;++i) mx=std::max(mx,fabsf(val(i)));
-                fprintf(stderr,"OP GPU l1 wo_pure max=%.4f first=%.4f %.4f %.4f\n",mx,val(0),val(1),val(2));
-                vector<uint8_t> rb = read_bytes(wo_out, wo_out.w, 1);
-                auto qv=[&](int i){int u=(rb[(size_t)i*4]<<8)|rb[(size_t)i*4+1];return (u>=32768?u-65536:u)/256.0f;};
-                float rmx=0; for(int i=0;i<wo_out.w;++i) rmx=std::max(rmx,fabsf(qv(i)));
-                fprintf(stderr,"OP GPU l1 resid_after_wo max=%.4f first=%.4f %.4f %.4f\n",rmx,qv(0),qv(1),qv(2));
+            if (needs_finish()) {
+                // VC4: the fused matvec_add drops its dot on the I24_1 chain;
+                // split into matvec + q16 add (the CPU's two-rounding order).
+                GLuint wo_t = rwkv_mv(m.wo[l], y, rwkv_tmp(RT_U));
+                resid = rwkv_res_add(resid, wo_t, wo_out);
+            } else {
+                matvec_add(m.wo[l], y, resid, wo_out, act_fmt_);
+                resid = wo_out.tex;
             }
         }
         // O20-O22: ffn norm, its token shift and the channel-mix lerp.
         GLuint xn2 = rwkv_ln(resid, rwkv_const(l, RC_ATTNorm2), rwkv_tmp(RT_XN2));
         Target& shF = rwkv_shift_[(size_t)l * 2 + 1];
         GLuint xk2 = rwkv_lerp(xn2, shF.tex, rwkv_const(l, RC_CMLERP), 0, 1, rwkv_tmp(RT_XR));
-        D("xn2", RT_XN2, 256); D("xk2", RT_XR, 1);
         rwkv_copy(xn2, shF);
         // O23-O25: key matvec -> relu^2 -> value matvec + residual.  The key is
         // chunked on VC4 (split_rwkv); the two halves recombine at the value add.
         if (m.ffn_chunked) {
             GLuint ha = rwkv_mv(m.w1a[l], xk2, rwkv_tmp(RT_CMH));
-            D("cmkey_a", RT_CMH, 1);
             ha = rwkv_sqrelu(ha, rwkv_tmp(RT_CMH2));
-            D("sqrelu_a", RT_CMH2, 1);
             GLuint hb = rwkv_mv(m.w1b[l], xk2, rwkv_tmp(RT_CMH3));
-            D("cmkey_b", RT_CMH3, 1);
             hb = rwkv_sqrelu(hb, rwkv_tmp(RT_CMH4));
-            D("sqrelu_b", RT_CMH4, 1);
             // mid != resid; the final add reuses resid's (now dead) buffer.
             Target& mid = (resid == rwkv_tmp(RT_RES).tex) ? rwkv_tmp(RT_RES2) : rwkv_tmp(RT_RES);
             Target& fin = (resid == rwkv_tmp(RT_RES).tex) ? rwkv_tmp(RT_RES) : rwkv_tmp(RT_RES2);
-            GLuint ca = rwkv_mv(m.w2a[l], ha, rwkv_tmp(RT_U));
-            D("cmt_a", RT_U, 1);
-            GLuint mid_r = rwkv_res_add(resid, ca, mid);
-            GLuint cb = rwkv_mv(m.w2b[l], hb, rwkv_tmp(RT_U));
-            D("cmt_b", RT_U, 1);
-            GLuint fr = rwkv_res_add(mid_r, cb, fin);
-            DQ("resid_final", (fin.tex == rwkv_tmp(RT_RES).tex) ? RT_RES : RT_RES2);
-            return fr;
+            if (needs_finish()) {
+                GLuint ca = rwkv_mv(m.w2a[l], ha, rwkv_tmp(RT_U));
+                GLuint mid_r = rwkv_res_add(resid, ca, mid);
+                GLuint cb = rwkv_mv(m.w2b[l], hb, rwkv_tmp(RT_U));
+                return rwkv_res_add(mid_r, cb, fin);
+            }
+            matvec_add(m.w2a[l], ha, resid, mid, act_fmt_);
+            matvec_add(m.w2b[l], hb, mid.tex, fin, act_fmt_);
+            return fin.tex;
         }
         GLuint h = rwkv_mv(m.w1[l], xk2, rwkv_tmp(RT_CMH));
         h = rwkv_sqrelu(h, rwkv_tmp(RT_CMH2));
         Target& cm_out = (resid == rwkv_tmp(RT_RES).tex) ? rwkv_tmp(RT_RES2) : rwkv_tmp(RT_RES);
-        GLuint cm_t = rwkv_mv(m.w2[l], h, rwkv_tmp(RT_U));
-        return rwkv_res_add(resid, cm_t, cm_out);
+        if (needs_finish()) {
+            GLuint cm_t = rwkv_mv(m.w2[l], h, rwkv_tmp(RT_U));
+            return rwkv_res_add(resid, cm_t, cm_out);
+        }
+        matvec_add(m.w2[l], h, resid, cm_out, act_fmt_);
+        return cm_out.tex;
 }
 
 

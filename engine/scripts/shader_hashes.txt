@@ -132,6 +132,7 @@ d307b6b66a223ae6    2918 rwkv_lerp_768_3
 b25a2154c3a3d220    3252 rwkv_ln_stats_p_768
 1896da0ea8101e99    2763 rwkv_mul_768
 72957e1751960cea    2774 rwkv_mul_768_s256
+5b14b95eb009da3d    2980 rwkv_res_add_768
 27fbf5e929377945    2879 rwkv_rk_add_768_64
 2e6e27a42f27cf0b    2915 rwkv_rk_reduce_768_64
 a77857966fde2ba4    2913 rwkv_sigmoid_768_bias16
