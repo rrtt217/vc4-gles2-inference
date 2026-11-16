@@ -407,6 +407,7 @@ GLuint GPU::rwkv_wkv(int layer, GLuint r, GLuint k, GLuint v, GLuint a, GLuint k
             glViewport(0, y0, hs, std::min(rps, ROWS - y0));
             glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         }
+        if (needs_finish()) { glFlush(); glFinish(); }
         // out: dot the updated state with r.
         GLuint po = x_prog("rwkv_wkv_out_" + shape, ::rwkv_wkv_out(H, hs));
         bind_fbo(out.fbo); use_program(po);
