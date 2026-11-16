@@ -6939,3 +6939,17 @@ CPU ~969 ms/token — on VC4 the GPU path is draw-bound (~1879 draws/token at
 Xe-specific (Xe ~36 vs ~119 ms/token, 3.3x, low per-draw overhead).  A Pi
 speedup would need the elementwise ops fused into the matvec kernels (fewer
 draws), which is future work.
+
+Pi GPU PPL (SEQ=512, ppl_test.txt, 421 tokens, 1 window): **9.4464** (nll
+2.2456).  Higher than Xe GPU's 9.1850 — the VC4 two-step residual add and the
+strip-split sqrelu round differently from Xe's fused path, and VC4's q8 matvec
+decode differs from Xe's.  The greedy reply is byte-identical to Xe GPU and
+coherent (no collapse); PPL is the same magnitude as the CPU path.  Pi CPU PPL
+re-measure in progress for the cross-path comparison.
+
+Pi CPU PPL (same corpus/SEQ): **9.2990** (nll 2.2299) — essentially the Xe CPU
+9.2919 (PPL is stable across GPUs even though greedy strings are chaotic).  Pi
+GPU 9.4464 vs Pi CPU 9.2990: same magnitude, the VC4 two-step residual add and
+strip-split sqrelu round slightly differently from the fused Xe path.  The GPU
+path is numerically合格 on Pi (coherent greedy, PPL within ~0.15 of CPU); the
+acceptance is PPL, not cross-path greedy byte-match (AGENTS.md).
