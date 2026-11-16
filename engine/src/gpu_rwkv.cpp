@@ -148,8 +148,14 @@ std::vector<float> GPU::rwkv_read_residual(GLuint tex){
 // One full-target draw of an already-bound program (viewport w x h).
 void GPU::rwkv_draw1(GLuint prog, int w, int h){
         setup_attrib(prog);
-        glViewport(0, 0, w, h);
-        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+        // Split into kDrawCap-wide strips: VC4 silently drops a single draw wider
+        // than the cap (the sqrelu of a 1536-wide chunked cm hidden left its
+        // target at the clear color).  gl_FragCoord.x is absolute, so the shader
+        // is unchanged across strips.
+        for (int x0 = 0; x0 < w; x0 += kDrawCap) {
+            glViewport(x0, 0, std::min(kDrawCap, w - x0), h);
+            glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+        }
         // VC4's tile pipeline does not order a later texture sample after this
         // FBO render without a finish (the engine's needs_finish() paths do this;
         // Xe orders it implicitly).  Without it the next pass fetches stale bytes.
