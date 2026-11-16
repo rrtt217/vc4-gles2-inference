@@ -401,6 +401,7 @@ GLuint GPU::rwkv_wkv(int layer, GLuint r, GLuint k, GLuint v, GLuint a, GLuint k
 }
 
 GLuint GPU::rwkv_block(int l, const Model& m, GLuint resid, float* cpu_wkv_state){
+        if (env_set("RWKV_FORCE_REBIND")) gl_state_forget_bindings();
         const bool have_gate = m.rwkv.gate && l < (int)m.rwkv_g1.size() && m.rwkv_g1[l].rows > 0;
         const GLuint lp = rwkv_const(l, RC_LERP), sc = rwkv_const(l, RC_SCALE);
         auto D = [&](const char* nm, RwkvTmp idx, float div) {
