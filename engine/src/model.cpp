@@ -229,6 +229,13 @@ void Model::split_rwkv(int max_dim){
                 rwkv_k[l] = slice_rows(qkv[l], dim, 2 * dim);
                 rwkv_v[l] = slice_rows(qkv[l], 2 * dim, 3 * dim);
         }
+        // apply_q4_fmt() indexes w3[l] / w3a[l] / w3b[l] whenever w1 / w1a are
+        // sized (it assumes the dense swiglu triple).  RWKV has no w3 gate, so
+        // give it empty Mats of the right length: want() skips rows==0, but the
+        // indexing itself must be in bounds or the chunked path segfaults.
+        w3.assign(layers, Mat());
+        w3a.assign(layers, Mat());
+        w3b.assign(layers, Mat());
         // Channel-mix key is hidden x dim; on VC4 a 3072-row texture is illegal.
         // Chunk it (and the value's columns) like the dense FFN so each upload
         // stays <= max_dim.  Xe (16384) never chunks.

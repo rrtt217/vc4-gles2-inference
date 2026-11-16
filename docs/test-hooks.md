@@ -383,3 +383,6 @@ path on one.
 `REPETITION_PENALTY`, `FREQUENCY_PENALTY`, `PRESENCE_PENALTY`,
 `NO_REPEAT_NGRAM` and `MIN_P` mirror the CLI flags of the same name; the flags
 win, and the worker protocol sets them per request.
+
+- `RWKV_CHUNK_TEST=1`：在桌面（GL 上限 16384）强制 RWKV channel-mix 按 2048 行分块，
+  复现/验证 VC4 的分块路径（Pi 天然触发）。只影响 split_rwkv 的 max_dim。
