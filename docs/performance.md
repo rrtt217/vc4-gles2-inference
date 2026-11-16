@@ -6889,3 +6889,20 @@ rwkv_* builders; no existing builder text moved).  Pi verification pending
 (lead to arrange; the bit-cast kernels need the VC4 Mesa 300 es path, else the
 CPU f32 fallback).
 
+### Addendum (same day): VC4 texture-width portability fix
+
+Pi Zero (VC4, GL_MAX_TEXTURE_SIZE=2048) hit `texture upload failed: RGBA8
+4608x1 (0x501=GL_INVALID_VALUE)` on the GPU path: `init_rwkv` uploaded the
+per-layer constant vectors as **1D** q24 textures, and `RC_LERP`=6*dim=4608
+(and `RC_SCALE`=3*dim=2304) exceed 2048.  Xe's 16384 limit hid it; the CPU
+path never uploads these vectors (reads f32 directly), so it never triggered.
+Fix: the multi-row constants are now **2D dim x rows** textures (lerp 768x6,
+scale 768x3, the norm affines 768x2), so the width is always dim=768<=2048;
+the sampling shaders (`rwkv_lerp`'s L, `rwkv_l2_*`/`rwkv_keydelta`/`rwkv_rk_reduce`'s
+SC, the norm affines' W) read texel (i, row) instead of a flat offset.  bias
+stays split into dim-wide w0/a0/v0 rows; cm_lerp is one dim-wide row.  A
+`dim > max_target_dim_` guard now fails loudly instead of a silent 0x501.
+Value-identical on Xe (GPU PPL still 9.1850, greedy tripwire and determinism
+unchanged); `shader_hashes` re-baseline touches only the rwkv_* builders.
+Pi runtime re-test pending the lead's cross-deploy.
+

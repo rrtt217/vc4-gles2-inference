@@ -1930,6 +1930,16 @@ const string kBC =
 string rd24es(const char* tex, const string& idx, const string& W) {
     return string("x_q24(texture(") + tex + ",vec2((float(" + idx + ")+0.5)/" + W + ",0.5)))";
 }
+// 2D constant-vector read: texel (idx, row) of a dim x rows texture (the wide
+// constants are 2D so the width stays dim <= VC4's 2048; see init_rwkv).
+string rd24_2d(const char* tex, const string& idx, const string& row, const string& W, const string& H) {
+    return string("x_q24(texture2D(") + tex + ",vec2((float(" + idx + ")+0.5)/" + W +
+           ",(float(" + row + ")+0.5)/" + H + ")))";
+}
+string rd24es_2d(const char* tex, const string& idx, const string& row, const string& W, const string& H) {
+    return string("x_q24(texture(") + tex + ",vec2((float(" + idx + ")+0.5)/" + W +
+           ",(float(" + row + ")+0.5)/" + H + ")))";
+}
 string wkv_uv(const string& j, const string& row, const string& HS, const string& ROWS) {
     return "vec2((float(" + j + ")+0.5)/" + HS + ".0,(float(" + row + ")+0.5)/" + ROWS + ".0)";
 }
@@ -1955,15 +1965,15 @@ std::string rwkv_ln_stats(int dim, XFormat rf) {
 
 std::string rwkv_ln_norm(int dim, XFormat rf) {
     need_dim("rwkv_ln_norm", dim);
-    const string D = to_string(dim), RW = to_string(x_texels(dim, rf)), D2 = to_string(2 * dim);
+    const string D = to_string(dim), RW = to_string(x_texels(dim, rf));
     return rwkv_head() + kBC + kRwkvRS +
         "uniform sampler2D X,S,W;"
         "void main(){int i=int(gl_FragCoord.x);"
         "float mean=bcRd(S,vec2(0.25,0.5));"
         "float inv=bcRd(S,vec2(0.75,0.5));"
         "float x=x_i16(texture(X,vec2((float(i)+0.5)/" + RW + ".0,0.5)).rg);"
-        "float w=" + rd24es("W", "i", D2 + ".0") + "*RS;"
-        "float b=" + rd24es("W", "i+" + D, D2 + ".0") + "*RS;"
+        "float w=" + rd24es_2d("W", "i", "0", D + ".0", "2.0") + "*RS;"
+        "float b=" + rd24es_2d("W", "i", "1", D + ".0", "2.0") + "*RS;"
         "gl_FragColor=x_q24enc(((x-mean)*inv*w+b)*256.0);}";
 }
 
@@ -1981,15 +1991,15 @@ std::string rwkv_ln_stats_p(int dim) {
 
 std::string rwkv_ln_norm_p(int dim) {
     need_dim("rwkv_ln_norm_p", dim);
-    const string D = to_string(dim), D2 = to_string(2 * dim);
+    const string D = to_string(dim);
     return rwkv_head() + kBC + kRwkvRS +
         "uniform sampler2D X,S,W;"
         "void main(){int i=int(gl_FragCoord.x);"
         "float mean=bcRd(S,vec2(0.25,0.5));"
         "float inv=bcRd(S,vec2(0.75,0.5));"
         "float x=" + rd24es("X", "i", D + ".0") + "*0.00390625;"
-        "float w=" + rd24es("W", "i", D2 + ".0") + "*RS;"
-        "float b=" + rd24es("W", "i+" + D, D2 + ".0") + "*RS;"
+        "float w=" + rd24es_2d("W", "i", "0", D + ".0", "2.0") + "*RS;"
+        "float b=" + rd24es_2d("W", "i", "1", D + ".0", "2.0") + "*RS;"
         "gl_FragColor=x_q24enc(((x-mean)*inv*w+b)*256.0);}";
 }
 
@@ -2022,61 +2032,61 @@ std::string rwkv_gn_stats(int dim, int hs) {
 
 std::string rwkv_gn_norm(int dim, int hs) {
     need_dim("rwkv_gn_norm", dim);
-    const string D = to_string(dim), HS = to_string(hs), H = to_string(dim / hs), D2 = to_string(2 * dim);
+    const string D = to_string(dim), HS = to_string(hs), H = to_string(dim / hs);
     return rwkv_head() + kBC + kRwkvRS +
         "uniform sampler2D Y,S,W;"
         "void main(){int i=int(gl_FragCoord.x);int h=i/" + HS + ";"
         "float mean=bcRd(S,vec2((float(h)+0.5)/" + H + ".0,0.25));"
         "float inv=bcRd(S,vec2((float(h)+0.5)/" + H + ".0,0.75));"
         "float y=" + rd24es("Y", "i", D + ".0") + "*0.0625;"
-        "float w=" + rd24es("W", "i", D2 + ".0") + "*RS;"
-        "float b=" + rd24es("W", "i+" + D, D2 + ".0") + "*RS;"
+        "float w=" + rd24es_2d("W", "i", "0", D + ".0", "2.0") + "*RS;"
+        "float b=" + rd24es_2d("W", "i", "1", D + ".0", "2.0") + "*RS;"
         "gl_FragColor=x_q24enc(((y-mean)*inv*w+b)*256.0);}";
 }
 
 std::string rwkv_lerp(int dim, int which, int nrows) {
     need_dim("rwkv_lerp", dim);
-    const string D = to_string(dim), DL = to_string(nrows * dim), OFF = to_string(which * dim);
+    const string D = to_string(dim), NR = to_string(nrows), WH = to_string(which);
     return rwkv_head() + kRwkvRS +
         "uniform sampler2D XN,SH,L;"
         "void main(){int i=int(gl_FragCoord.x);"
         "float x=" + rd24("XN", "i", D + ".0") + "*0.00390625;"
         "float sh=" + rd24("SH", "i", D + ".0") + "*0.00390625;"
-        "float lp=" + rd24("L", OFF + "+i", DL + ".0") + "*RS;"
+        "float lp=" + rd24_2d("L", "i", WH, D + ".0", NR + ".0") + "*RS;"
         "gl_FragColor=x_q24enc(x+(sh-x)*lp);}";
 }
 
 std::string rwkv_l2_stats(int dim, int hs) {
     need_dim("rwkv_l2_stats", dim);
-    const string D = to_string(dim), HS = to_string(hs), D3 = to_string(3 * dim);
+    const string D = to_string(dim), HS = to_string(hs);
     return rwkv_head() + kRwkvRS +
         "uniform sampler2D K,SC;"
         "void main(){int h=int(gl_FragCoord.x);float ss=0.0;"
         "for(int i=0;i<" + HS + ";i++){int o=h*" + HS + "+i;"
-        "float z=" + rd24("K", "o", D + ".0") + "*" + rd24("SC", "o", D3 + ".0") + "*RS;ss+=z*z;}"
+        "float z=" + rd24("K", "o", D + ".0") + "*" + rd24_2d("SC", "o", "0", D + ".0", "3.0") + "*RS;ss+=z*z;}"
         "gl_FragColor=x_q24enc(sqrt(ss));}";
 }
 
 std::string rwkv_l2_norm(int dim, int hs) {
     need_dim("rwkv_l2_norm", dim);
-    const string D = to_string(dim), HS = to_string(hs), H = to_string(dim / hs), D3 = to_string(3 * dim);
+    const string D = to_string(dim), HS = to_string(hs), H = to_string(dim / hs);
     return rwkv_head() + kRwkvRS +
         "uniform sampler2D K,SC,N;"
         "void main(){int i=int(gl_FragCoord.x);int h=i/" + HS + ";"
-        "float z=" + rd24("K", "i", D + ".0") + "*" + rd24("SC", "i", D3 + ".0") + "*RS;"
+        "float z=" + rd24("K", "i", D + ".0") + "*" + rd24_2d("SC", "i", "0", D + ".0", "3.0") + "*RS;"
         "float nrm=x_q24(texture2D(N,vec2((float(h)+0.5)/" + H + ".0,0.5)));"
         "gl_FragColor=x_q24enc((z/max(nrm,1e-12))*16.0);}";
 }
 
 std::string rwkv_keydelta(int dim) {
     need_dim("rwkv_keydelta", dim);
-    const string D = to_string(dim), D3 = to_string(3 * dim);
+    const string D = to_string(dim);
     return rwkv_head() + kRwkvRS +
         "uniform sampler2D K,A,SC;"
         "void main(){int i=int(gl_FragCoord.x);"
         "float k=" + rd24("K", "i", D + ".0") + ";"
         "float a=" + rd24("A", "i", D + ".0") + "*0.0625;"
-        "float ka=" + rd24("SC", "i+" + D, D3 + ".0") + "*RS;"
+        "float ka=" + rd24_2d("SC", "i", "1", D + ".0", "3.0") + "*RS;"
         "gl_FragColor=x_q24enc(k*(1.0+(a-1.0)*ka));}";
 }
 
@@ -2153,13 +2163,13 @@ std::string rwkv_mul(int dim, int adiv) {
 
 std::string rwkv_rk_reduce(int dim, int hs) {
     need_dim("rwkv_rk_reduce", dim);
-    const string D = to_string(dim), HS = to_string(hs), D3 = to_string(3 * dim);
+    const string D = to_string(dim), HS = to_string(hs);
     return rwkv_head() + kRwkvRS +
         "uniform sampler2D K,R,SC;"
         "void main(){int h=int(gl_FragCoord.x);float acc=0.0;"
         "for(int i=0;i<" + HS + ";i++){int o=h*" + HS + "+i;"
         "acc+=" + rd24("K", "o", D + ".0") + "*" + rd24("R", "o", D + ".0") + "*"
-        + rd24("SC", "o+2*" + D, D3 + ".0") + "*RS;}"
+        + rd24_2d("SC", "o", "2", D + ".0", "3.0") + "*RS;}"
         "gl_FragColor=x_q24enc(acc);}";
 }
 

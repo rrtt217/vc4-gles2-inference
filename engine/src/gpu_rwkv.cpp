@@ -73,24 +73,46 @@ void GPU::init_rwkv(const Model& m){
         hidden_in_ = make_texture(x_texels(dim, res_fmt_), 1, nullptr);
         clear_rwkv_state();
 
-        // Per-layer constant vectors.  bias is split into its w0/a0/v0 rows so
-        // the decay/sigmoid/vres passes each read a dim-wide texture at i.
+        // Per-layer constant vectors, *64 into I24_1.  The multi-row ones
+        // (lerp 6, scale 3, the norm affines 2) are 2D dim x rows textures so the
+        // WIDTH is always dim: a flat 6*dim=4608-wide 1D texture exceeds VC4's
+        // GL_MAX_TEXTURE_SIZE=2048 and glTexImage2D fails GL_INVALID_VALUE there
+        // (Xe's 16384 hid it).  bias is split into its w0/a0/v0 dim-wide rows;
+        // cm_lerp is one dim-wide row (the lerp kernel reads it as rows=1).
+        if (dim > max_target_dim_) {
+            cerr << "RWKV GPU: dim " << dim << " exceeds the GL target limit "
+                 << max_target_dim_ << "; the fused path needs dim <= that\n";
+            exit(1);
+        }
         auto up = [&](const float* p, int n) {
             vector<float> s(p, p + n);
             for (float& v : s) v *= 64.0f;
             return make_q24_texture(s, 256.0f);
         };
+        auto up2 = [&](const float* p, int rows) {
+            vector<uint8_t> data((size_t)dim * rows * 4);
+            for (int r = 0; r < rows; ++r)
+                for (int i = 0; i < dim; ++i) {
+                    long q = lrintf(p[(size_t)r * dim + i] * 64.0f * 256.0f) + 8388608;
+                    if (q < 0) q = 0;
+                    if (q > 16777215) q = 16777215;
+                    const size_t o = ((size_t)r * dim + i) * 4;
+                    data[o] = 0; data[o+1] = (uint8_t)(q >> 16);
+                    data[o+2] = (uint8_t)(q >> 8); data[o+3] = (uint8_t)q;
+                }
+            return make_texture(dim, rows, data.data());
+        };
         rwkv_const_.assign((size_t)L * RC_COUNT, 0);
         for (int l = 0; l < L; ++l) {
             const size_t b6 = (size_t)l * 6 * dim, b3 = (size_t)l * 3 * dim, b2 = (size_t)l * 2 * dim;
-            rwkv_const_[(size_t)l * RC_COUNT + RC_LERP]     = up(m.rwkv_lerp.data() + b6, 6 * dim);
+            rwkv_const_[(size_t)l * RC_COUNT + RC_LERP]     = up2(m.rwkv_lerp.data() + b6, 6);
             rwkv_const_[(size_t)l * RC_COUNT + RC_W0]       = up(m.rwkv_bias.data() + b3, dim);
             rwkv_const_[(size_t)l * RC_COUNT + RC_A0]       = up(m.rwkv_bias.data() + b3 + dim, dim);
             rwkv_const_[(size_t)l * RC_COUNT + RC_V0]       = up(m.rwkv_bias.data() + b3 + 2 * dim, dim);
-            rwkv_const_[(size_t)l * RC_COUNT + RC_SCALE]    = up(m.rwkv_scale.data() + b3, 3 * dim);
-            rwkv_const_[(size_t)l * RC_COUNT + RC_ATTNorm]  = up(m.rwkv_att_norm.data() + b2, 2 * dim);
-            rwkv_const_[(size_t)l * RC_COUNT + RC_ATTNorm2] = up(m.rwkv_att_norm_2.data() + b2, 2 * dim);
-            rwkv_const_[(size_t)l * RC_COUNT + RC_LNX]      = up(m.rwkv_ln_x.data() + b2, 2 * dim);
+            rwkv_const_[(size_t)l * RC_COUNT + RC_SCALE]    = up2(m.rwkv_scale.data() + b3, 3);
+            rwkv_const_[(size_t)l * RC_COUNT + RC_ATTNorm]  = up2(m.rwkv_att_norm.data() + b2, 2);
+            rwkv_const_[(size_t)l * RC_COUNT + RC_ATTNorm2] = up2(m.rwkv_att_norm_2.data() + b2, 2);
+            rwkv_const_[(size_t)l * RC_COUNT + RC_LNX]      = up2(m.rwkv_ln_x.data() + b2, 2);
             rwkv_const_[(size_t)l * RC_COUNT + RC_CMLERP]   = up(m.rwkv_cm_lerp.data() + (size_t)l * dim, dim);
         }
 }
