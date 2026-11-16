@@ -150,6 +150,10 @@ void GPU::rwkv_draw1(GLuint prog, int w, int h){
         setup_attrib(prog);
         glViewport(0, 0, w, h);
         glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+        // VC4's tile pipeline does not order a later texture sample after this
+        // FBO render without a finish (the engine's needs_finish() paths do this;
+        // Xe orders it implicitly).  Without it the next pass fetches stale bytes.
+        if (needs_finish()) { glFlush(); glFinish(); }
 }
 
 // A matvec into a pre-sized scratch target (no read-back).  Unlike matvec_to it
@@ -159,6 +163,7 @@ void GPU::rwkv_draw1(GLuint prog, int w, int h){
 GLuint GPU::rwkv_mv(const Mat& m, GLuint x, Target& out){
         if (out.tex == 0) out = make_target(m.rows, 1);
         draw(m, x, out, 0);
+        if (needs_finish()) { glFlush(); glFinish(); }
         return out.tex;
 }
 
