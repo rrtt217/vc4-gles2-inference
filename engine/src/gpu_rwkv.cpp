@@ -582,15 +582,15 @@ GLuint GPU::rwkv_block(int l, const Model& m, GLuint resid, float* cpu_wkv_state
             // mid != resid; the final add reuses resid's (now dead) buffer.
             Target& mid = (resid == rwkv_tmp(RT_RES).tex) ? rwkv_tmp(RT_RES2) : rwkv_tmp(RT_RES);
             Target& fin = (resid == rwkv_tmp(RT_RES).tex) ? rwkv_tmp(RT_RES) : rwkv_tmp(RT_RES2);
-            GLuint ca = rwkv_mv(m.w2a[l], ha, rwkv_tmp(RT_CMH));
+            GLuint ca = rwkv_mv(m.w2a[l], ha, rwkv_tmp(RT_U));
             GLuint mid_r = rwkv_res_add(resid, ca, mid);
-            GLuint cb = rwkv_mv(m.w2b[l], hb, rwkv_tmp(RT_CMH3));
+            GLuint cb = rwkv_mv(m.w2b[l], hb, rwkv_tmp(RT_U));
             return rwkv_res_add(mid_r, cb, fin);
         }
         GLuint h = rwkv_mv(m.w1[l], xk2, rwkv_tmp(RT_CMH));
         h = rwkv_sqrelu(h, rwkv_tmp(RT_CMH2));
         Target& cm_out = (resid == rwkv_tmp(RT_RES).tex) ? rwkv_tmp(RT_RES2) : rwkv_tmp(RT_RES);
-        GLuint cm_t = rwkv_mv(m.w2[l], h, rwkv_tmp(RT_CMH));
+        GLuint cm_t = rwkv_mv(m.w2[l], h, rwkv_tmp(RT_U));
         return rwkv_res_add(resid, cm_t, cm_out);
 }
 
