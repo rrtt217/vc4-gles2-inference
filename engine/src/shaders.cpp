@@ -1253,12 +1253,16 @@ static bool q4x4_flat8b(){ return getenv("Q4_4X4_FLAT8B") != nullptr; }
 // ms/draw).  The legacy pricing arms (NOP/ONEW/ONEROW/NOOUT/NOMIN) are defined
 // on the nested body, so they route there too.
 static bool q4x4_nested(){ return getenv("Q4_GATE_NESTED") != nullptr; }
-// Same flat-loop rewrite for the qkv and w2/wo 4-bit kernels (still nested
-// after the gate landed).  Q4_QKV_NESTED=1 / Q4_W2_NESTED=1 restore each
-// nested form for the A/B; the flat form is byte-identical (same per-group
-// operation order via conditional float updates).
-static bool q4qkv_nested(){ return getenv("Q4_QKV_NESTED") != nullptr; }
-static bool q4w2_nested(){ return getenv("Q4_W2_NESTED") != nullptr; }
+// The flat-loop rewrite HELPED the gate (a pair kernel: 8 weight fetches and
+// four accumulators per inner iteration) but HURT the single-row qkv and
+// w2/wo kernels (2 fetches, one accumulator): measured on the Pi Zero
+// 2026-11-16, all-flat 197.5 ms/token against gate-only-flat 185.0 and
+// all-nested 227.3 -- the qkv/w2 flat form is ~12.5 ms/token slower than
+// nested, so those two stay nested by default.  Q4_QKV_FLAT=1 / Q4_W2_FLAT=1
+// opt into the flat forms (kept as the measurement arms that produced the
+// negative result); the gate's Q4_GATE_NESTED=1 is unchanged.
+static bool q4qkv_flat(){ return getenv("Q4_QKV_FLAT") != nullptr; }
+static bool q4w2_flat(){ return getenv("Q4_W2_FLAT") != nullptr; }
 
 static string i4_gate_flat(int rows, int cols, XFormat xf, bool inl, int hs, bool wide) {
     const string HD = hid_scale_def(hs), HM = hid_scale_mul(hs);
@@ -1569,7 +1573,7 @@ static string i4_qkv_flat(int rows, int cols, XFormat xf, bool inl) {
 
 string matvec_i4_4x4(int rows, int cols, XFormat xf, bool inl) {
     need_shape("matvec_i4_4x4", rows, cols, 32);
-    if (!q4qkv_nested() && !q4_nomin()) return i4_qkv_flat(rows, cols, xf, inl);
+    if (q4qkv_flat() && !q4_nomin()) return i4_qkv_flat(rows, cols, xf, inl);
     const int texw = cols / 4;
     const int groups = (cols + 31) / 32;
     const string ROWS = to_string(rows), GROUPS = to_string(groups), TEXW = to_string(texw);
@@ -1629,7 +1633,7 @@ static string i4_w2_flat(int rows, int cols, XFormat xf, XFormat rf) {
 
 string matvec_i4_add_4x4(int rows, int cols, XFormat xf, XFormat rf) {
     need_shape("matvec_i4_add_4x4", rows, cols, 32);
-    if (!q4w2_nested() && !q4_nomin()) return i4_w2_flat(rows, cols, xf, rf);
+    if (q4w2_flat() && !q4_nomin()) return i4_w2_flat(rows, cols, xf, rf);
     const int texw = cols / 4;
     const int groups = (cols + 31) / 32;
     const int axw = x_texels(cols, xf);

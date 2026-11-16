@@ -6536,3 +6536,58 @@ body they are defined on.  The qkv (`matvec_i4_4x4`) and w2/wo
 (`matvec_i4_add_4x4`) 4-bit kernels are still nested — the same flat-loop
 rewrite applies to them (qkv ~14%, w2 ~23% of the token), the obvious next
 step.
+
+## 2026-11-16, later — the flat rewrite does NOT extend to qkv/w2: the single-row kernels stay nested
+
+The gate entry above called the qkv/w2 flat rewrite "the obvious next
+step".  It was built, verified byte-identical, and measured — and it is a
+net loss.  This entry corrects that expectation.
+
+**What was built.**  `i4_qkv_flat` and `i4_w2_flat`: the same flat 8-wide
+loop with the nested kernel's exact per-group order (d/xsum reset at
+`q%4==0`, flush `s+=sc*d+mn*xsum` at `q%4==3`, conditional float updates).
+The qkv keeps the inline dA/dB decode; the w2/wo keeps its generic `X4Q`
+decode and residual add.  Byte-identity held everywhere it was checked:
+Xe q4 and LFM2.5 q4 greedy text + TOKENS identical with the flat forms on
+and off, and the board agreed (q4 and LFM2.5-QAD).
+
+**The clean three-arm A/B (Pi Zero, MiniMind3 q4, discarded warm-up, four
+interleaved rounds 15 s apart, `--gen 16` greedy, load 0.6-0.9; round 1
+dropped as cold).**  Arms: *nested* = all three `Q4_*_NESTED` switches (the
+then-defaults), *gateonly* = gate flat + qkv/w2 nested, *allflat* = all
+three flat.
+
+| round | nested | gateonly | allflat |
+|---|---:|---:|---:|
+| 2 | 227.3 | 185.2 | 197.0 |
+| 3 | 225.8 | 184.6 | 197.5 |
+| 4 | 228.1 | 185.0 | 197.8 |
+| median | **227.3** | **185.0** | **197.5** |
+
+**The qkv/w2 flat form costs ~12.5 ms/token** (197.5 allflat vs 185.0
+gateonly): it erodes a third of the gate's 41 ms win.  The hybrid agrees
+in sign and magnitude: gate-only flat measured 566 ms/token above, the
+all-flat binary 622-632 (its conv matrices go through the same qkv/w2
+kernels), against 674-701 all-nested.
+
+**Why the gate won and these lost.**  The gate is a *pair* kernel: two
+rows per fragment, eight weight fetches and four accumulators per inner
+iteration — enough independent work per iteration that the flat loop's
+pipelining pays and the nested loop's rolled scheduling hurts.  qkv/w2
+are *single-row* kernels: two weight fetches, one accumulator per inner
+iteration.  There the nested loop schedules fine, and the flat form's
+per-iteration group conditional (`q-g*4==0` / `==3`), resets and flushes
+are pure overhead.  The lesson is not "flat beats nested" but "the gate's
+nested loop was scheduling badly because of its wide body"; the rewrite
+is shape-specific.
+
+**Disposition.**  qkv (`matvec_i4_4x4`) and w2/wo (`matvec_i4_add_4x4`)
+keep the nested form as the default.  The flat forms stay as opt-in
+measurement arms (`Q4_QKV_FLAT=1`, `Q4_W2_FLAT=1`), byte-identical, the
+record of this negative result — the same treatment as `Q4_MV4`.  The
+shipped q4 default is therefore **gate flat + qkv/w2 nested**: MiniMind3
+q4 **185.0 ms/token** (-18% against the 227.3 all-nested baseline, faster
+than q8's ~190), LFM2.5-QAD q4 ~566 (-16%).  `Q4_GATE_NESTED=1` alone
+restores the full nested baseline for the A/B.  Acceptance re-run on this
+disposition: Xe regression ACCEPT (q8 PPL 270.3170, q4 326.1483, both
+pins), swap_matrix PASS; the shader hashes move only the gate entries.
