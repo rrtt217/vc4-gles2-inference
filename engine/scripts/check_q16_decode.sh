@@ -39,9 +39,17 @@ sites=$(printf '%s\n' "$dump" | grep -c '65280\.0')
 # Per line: as many rail folds as decodes.  Counting per *line* rather than per
 # file is what makes the pair/quad decoders work (two values, two folds on one
 # line); comparing the counts is what catches a decode whose fold was dropped.
+# The q4 group scale is the one UNSIGNED reconstruction: `65280.0*15.0*ps` builds
+# a positive scale constant (the 15 folds the n/15 texel into the group scale),
+# so it carries no negative rail and needs no fold.  Strip that spelling before
+# counting, or the 4x4 kernels (whose scale is unsigned by design) fail here.
 report=$(printf '%s\n' "$dump" | awk '
-  { d = gsub(/65280\.0/, "&"); f = gsub(/>=32767\.5/, "&") + gsub(/>=32768\.0/, "&")
-    sites += d; f1 += gsub(/>=32767\.5/, "&"); f2 += gsub(/>=32768\.0/, "&")
+  { line = $0
+    gsub(/65280\.0\*15\.0/, "Q4USCALE", line)
+    d = gsub(/65280\.0/, "&", line)
+    f1c = gsub(/>=32767\.5/, "&", line); f2c = gsub(/>=32768\.0/, "&", line)
+    f = f1c + f2c
+    sites += d; f1 += f1c; f2 += f2c
     if (d > f) { bad = bad "  " d " decode(s), " f " fold(s): " substr($0, 1, 110) "\n" } }
   END { printf "%d %d %d", sites, f1, f2
         if (bad != "") { printf "\n%s", bad > "/dev/stderr"; exit 1 } }')
