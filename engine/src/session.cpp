@@ -610,6 +610,11 @@ vector<float> Session::forward_rwkv(int token){
         vector<float> sa((size_t)hs);           // <S[i], kk>, per head, reused
         for (int l = 0; l < L; ++l) {
             if (g_stop) return x;
+            auto CD = [&](const char* nm, const vector<float>& v) {
+                if (!env_set("RWKV_STAGE_DUMP") || l != 1) return;
+                float mx=0; for(float z:v) mx=std::max(mx,fabsf(z));
+                fprintf(stderr,"OP CPU l1 %s max=%.4f first=%.4f %.4f %.4f\n",nm,mx,v[0],v[1],v[2]);
+            };
             // O1/O2/O3: att_norm, then the six token-shifted inputs.  Position
             // t's previous input is the *normalised* row of t-1, which is why
             // the shift state holds xn and not x.
@@ -628,12 +633,14 @@ vector<float> Session::forward_rwkv(int token){
                 xg[i] = xn[i] + sx * lp[5 * dim + i];
             }
             memcpy(sh, xn.data(), sizeof(float) * dim);
+            CD("xn", xn); CD("xr", xr);
             // O4-O6: the three projections.  The container stores them as one
             // 3*dim x dim matrix under the dense qkv id; split_rwkv() cut it
             // into the three Mats each of these needs.
             vector<float> r = rwkv_mv(m_.rwkv_r[l], xr);
             vector<float> k = rwkv_mv(m_.rwkv_k[l], xk);
             vector<float> v = rwkv_mv(m_.rwkv_v[l], xv);
+            CD("r", r); CD("k", k); CD("v", v);
             const float* w0 = m_.rwkv_bias.data() + (size_t)l * 3 * dim;
             const float* a0 = w0 + dim;
             const float* v0 = a0 + dim;
@@ -648,6 +655,7 @@ vector<float> Session::forward_rwkv(int token){
                 for (int i = 0; i < dim; ++i)
                     w[i] = expf(-rwkv_sigmoid(u[i] + w0[i]) * kRwkvDecayC);
             }
+            CD("w", w);
             // O8: the value residual.  Layer 0 records v_first (its v_lora is
             // absent by construction); every later layer pulls v towards it.
             if (l == 0) {
@@ -660,6 +668,7 @@ vector<float> Session::forward_rwkv(int token){
                 for (int i = 0; i < dim; ++i)
                     v[i] += (vf[i] - v[i]) * rwkv_sigmoid(u[i] + v0[i]);
             }
+            CD("vpost", v);
             // O9: ICLR's gate, sigmoid on the *up* projection (unlike O10).
             vector<float> a((size_t)dim);
             {
@@ -667,6 +676,7 @@ vector<float> Session::forward_rwkv(int token){
                 vector<float> u = rwkv_mv(m_.rwkv_a2[l], t);
                 for (int i = 0; i < dim; ++i) a[i] = rwkv_sigmoid(u[i] + a0[i]);
             }
+            CD("a", a);
             // O10: the optional time-mix gate.  sigmoid on the *down*
             // projection, no bias, and key 16 says whether the model has one.
             const bool have_gate = m_.rwkv.gate && l < (int)m_.rwkv_g1.size() &&
@@ -693,6 +703,7 @@ vector<float> Session::forward_rwkv(int token){
                 const float inv = 1.0f / (nrm > 1e-12f ? nrm : 1e-12f);
                 for (int i = 0; i < hs; ++i) z[i] *= inv;
             }
+            CD("kk", kk); CD("kd", k);
             // O13/O14: the recurrence.  Per head, with S[i][j] indexed the way
             // the oracle and llama.cpp's wkv7 kernel index it -- the row i
             // pairs with v and r, the column j with w, kk and k:
@@ -731,6 +742,7 @@ vector<float> Session::forward_rwkv(int token){
                     }
                 }
             }
+            CD("wkv", y);
             // O15: per-head group norm over the 64 channels, eps 64e-5 (the
             // architecture's own, not key 16's), then the ln_x affine.
             {
@@ -748,6 +760,7 @@ vector<float> Session::forward_rwkv(int token){
                         z[i] = (z[i] - mu) * inv * lnw[(size_t)h * hs + i] + lnb[(size_t)h * hs + i];
                 }
             }
+            CD("gn", y);
             // O16: the r_k bonus.  One scalar per head, sum(k*r*r_k) over the
             // head's channels, added to every channel as v*rk.
             for (int h = 0; h < H; ++h) {
@@ -762,9 +775,11 @@ vector<float> Session::forward_rwkv(int token){
                     y[o] += v[o] * rk;
                 }
             }
+            CD("rk", y);
             // O17-O19: gate, W_o, and the residual on the engine's grid.
             if (have_gate)
                 for (int i = 0; i < dim; ++i) y[i] *= g[i];
+            CD("gate", y);
             x = add_q16(x, rwkv_mv(m_.wo[l], y));
             // O20-O25: the channel mix.  attn_norm_2 has its own token shift,
             // one lerp vector, then key matvec -> relu^2 -> value matvec.

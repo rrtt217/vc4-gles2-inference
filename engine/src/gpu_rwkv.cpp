@@ -403,6 +403,14 @@ GLuint GPU::rwkv_wkv(int layer, GLuint r, GLuint k, GLuint v, GLuint a, GLuint k
 GLuint GPU::rwkv_block(int l, const Model& m, GLuint resid, float* cpu_wkv_state){
         const bool have_gate = m.rwkv.gate && l < (int)m.rwkv_g1.size() && m.rwkv_g1[l].rows > 0;
         const GLuint lp = rwkv_const(l, RC_LERP), sc = rwkv_const(l, RC_SCALE);
+        auto D = [&](const char* nm, RwkvTmp idx, float div) {
+            if (!env_set("RWKV_STAGE_DUMP") || l != 1) return;
+            sync(); Target& t = rwkv_tmp(idx);
+            vector<uint8_t> b = read_bytes(t, t.w, 1);
+            auto val=[&](int i){int u=(int)b[(size_t)i*4+1]*65536+(int)b[(size_t)i*4+2]*256+(int)b[(size_t)i*4+3]-8388608;return (u/256.0f)/div;};
+            float mx=0; for(int i=0;i<t.w;++i) mx=std::max(mx,fabsf(val(i)));
+            fprintf(stderr,"OP GPU l1 %s max=%.4f first=%.4f %.4f %.4f\n",nm,mx,val(0),val(1),val(2));
+        };
         // O1-O3: att_norm, then the six token-shifted inputs; shift := xn.
         GLuint xn = (l == 0) ? rwkv_ln_p(resid, rwkv_const(l, RC_ATTNorm), rwkv_tmp(RT_XN))
                              : rwkv_ln(resid, rwkv_const(l, RC_ATTNorm), rwkv_tmp(RT_XN));
@@ -413,17 +421,20 @@ GLuint GPU::rwkv_block(int l, const Model& m, GLuint resid, float* cpu_wkv_state
         GLuint xv = rwkv_lerp(xn, shA.tex, lp, 3, 6, rwkv_tmp(RT_XV));
         GLuint xa = rwkv_lerp(xn, shA.tex, lp, 4, 6, rwkv_tmp(RT_XA));
         GLuint xg = rwkv_lerp(xn, shA.tex, lp, 5, 6, rwkv_tmp(RT_XG));
+        D("xn", RT_XN, 256); D("xr", RT_XR, 1);
         rwkv_copy(xn, shA);
         // O4-O6: the three projections.
         GLuint r = rwkv_mv(m.rwkv_r[l], xr, rwkv_tmp(RT_R));
         GLuint k = rwkv_mv(m.rwkv_k[l], xk, rwkv_tmp(RT_K));
         GLuint v = rwkv_mv(m.rwkv_v[l], xv, rwkv_tmp(RT_V));
         RwkvTmp vidx = RT_V;
+        D("r", RT_R, 1); D("k", RT_K, 1); D("v", RT_V, 1);
         // O7: decay branch (tanh on the down projection, then exp/sigmoid).
         GLuint t = rwkv_mv(m.rwkv_w1[l], xw, rwkv_tmp(RT_TW));
         t = rwkv_tanh(t, rwkv_tmp(RT_TW2));
         GLuint u = rwkv_mv(m.rwkv_w2[l], t, rwkv_tmp(RT_U));
         GLuint decay = rwkv_decay(u, rwkv_const(l, RC_W0), rwkv_tmp(RT_DECAY));
+        D("onemw", RT_DECAY, 256);
         // O8: value residual (layer 0 records v_first).
         if (l == 0) {
             rwkv_copy(v, rwkv_vfirst_);
@@ -434,10 +445,12 @@ GLuint GPU::rwkv_block(int l, const Model& m, GLuint resid, float* cpu_wkv_state
             v = rwkv_vres(v, rwkv_vfirst_.tex, u, rwkv_const(l, RC_V0), rwkv_tmp(RT_V2));
             vidx = RT_V2;
         }
+        D("vpost", vidx, 1);
         // O9: ICLR gate a = sigmoid(a2(a1(xa)) + a0).
         t = rwkv_mv(m.rwkv_a1[l], xa, rwkv_tmp(RT_TA));
         u = rwkv_mv(m.rwkv_a2[l], t, rwkv_tmp(RT_U));
         GLuint a = rwkv_sigmoid(u, rwkv_const(l, RC_A0), rwkv_tmp(RT_A), 16);
+        D("a", RT_A, 16);
         // O10: optional time-mix gate g = g2(sigmoid(g1(xg))).
         GLuint g = 0;
         if (have_gate) {
@@ -448,6 +461,7 @@ GLuint GPU::rwkv_block(int l, const Model& m, GLuint resid, float* cpu_wkv_state
         // O11/O12: kk = l2norm(k*k_k) (*16 store), k' = k + (a-1)*k*k_a.
         GLuint kk = rwkv_l2(k, sc, rwkv_tmp(RT_KK));
         GLuint kd = rwkv_keydelta(k, a, sc, rwkv_tmp(RT_KD));
+        D("kk", RT_KK, 16); D("kd", RT_KD, 1);
         // O13/O14: the recurrence.
         GLuint y;
         if (cpu_wkv_state) {
@@ -509,12 +523,16 @@ GLuint GPU::rwkv_block(int l, const Model& m, GLuint resid, float* cpu_wkv_state
         } else {
             y = rwkv_wkv(l, r, kd, v, a, kk, decay, rwkv_tmp(RT_Y));
         }
+        D("wkv", RT_Y, 16);
         // O15: per-head group norm + ln_x affine.
         y = rwkv_gn(y, rwkv_const(l, RC_LNX), rwkv_tmp(RT_Y2));
+        D("gn", RT_Y2, 256);
         // O16: r_k bonus (uses the delta key).
         y = rwkv_rk(kd, r, sc, v, y, rwkv_tmp(RT_Y));
+        D("rk", RT_Y, 256);
         // O17: gate.
         if (have_gate) y = rwkv_mul(y, g, rwkv_tmp(RT_Y2), 256);
+        D("gate", have_gate ? RT_Y2 : RT_Y, 1);
         // O18/O19: W_o + residual (fused q16 add, matches the CPU grid).
         if (l == 0) {
             GLuint wo_t = rwkv_mv(m.wo[l], y, rwkv_tmp(RT_U));
