@@ -156,3 +156,16 @@ reachable through `packHalf2x16`; it is not.
   avoid runtime breaks: out-of-range elements are sentinel texels, not a
   `break`.  Xe compiles all of these forms correctly, so only a board run
   catches this.
+- **Flattening a nested group loop is shape-specific, not a free win.**
+  Measured 2026-11-16 (`docs/performance.md`): rewriting the q4 FFN *gate*
+  from a nested group loop to a flat 8-wide loop (per-group state via
+  conditional float updates) was byte-identical and **-43%** — the gate is a
+  *pair* kernel, eight weight fetches and four accumulators per inner
+  iteration, enough independent work that the flat loop pipelines and the
+  rolled nested loop schedules badly.  The same rewrite on the *single-row*
+  qkv and w2/wo kernels (two fetches, one accumulator per inner iteration)
+  was byte-identical but **~12.5 ms/token slower**: there the nested loop
+  already schedules fine and the flat form's per-group conditionals, resets
+  and flushes are pure overhead.  Before flattening another kernel, check
+  how much independent work its inner body carries; the gate's win came from
+  its wide body, not from "flat beats nested".
