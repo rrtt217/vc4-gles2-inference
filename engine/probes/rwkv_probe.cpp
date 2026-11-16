@@ -426,6 +426,31 @@ static void test_render_fetch(int dim, bool finish) {
     glDeleteFramebuffers(1,&fA); glDeleteTextures(1,&tA);
 }
 
+// G. q16 I16_1 residual read: the RWKV LayerNorm stats/norm read the q16 residual
+// via ES3 texture().rg (x_i16); the matvec family reads it via GLES2 texture2D
+// (R1Q).  Layer 0 (ln_p, I24_1 input) matches CPU on VC4 but layer 1 (ln, q16
+// input) diverges -- name whether the ES3 q16 fetch differs from GLES2.
+static void test_q16_read(int dim, bool es3) {
+    vector<int> q(dim);
+    for (int i = 0; i < dim; ++i) q[i] = (int)((i*2654435761u)%65536u)-32768;
+    vector<uint8_t> px((size_t)dim*4);
+    for (int i = 0; i < dim; ++i) { uint16_t u=(uint16_t)(int16_t)q[i];
+        px[i*4]=u>>8; px[i*4+1]=u&255; px[i*4+2]=0; px[i*4+3]=255; }
+    GLuint qt = tex(dim, 1, px);
+    string texfn = es3 ? "texture" : "texture2D";
+    string fs = string("precision highp float;\n") + x_glsl(XFormat::I16_1) +
+        "uniform sampler2D X;void main(){int i=int(gl_FragCoord.x);"
+        "float v=x_i16(" + texfn + "(X,vec2((float(i)+0.5)/" + std::to_string(dim) + ".0,0.5)).rg);"
+        "gl_FragColor=x_q24enc(v);}";
+    GLuint p = prog(fs, es3); if (!p) { printf("  G link fail\n"); ++failures; return; }
+    out_begin(dim); glUseProgram(p); bind(p,"X",0,qt); tri(p);
+    vector<int> g = read_q24(dim);
+    vector<int> want(dim); for (int i=0;i<dim;++i) want[i]=q[i]; // value=q/256, re-encoded raw=q
+    char nm[64]; snprintf(nm,sizeof nm,"G q16 read %s", es3?"ES3 texture()":"GLES2 texture2D");
+    report(nm, g, want, 0);
+    glDeleteProgram(p); glDeleteTextures(1,&qt);
+}
+
 int main(int argc, char** argv) {
     bool want_es3 = !(argc > 1 && strcmp(argv[1], "gles2") == 0);
     if (want_es3) { setenv("MESA_GLES_VERSION_OVERRIDE", "3.0", 0);
@@ -469,6 +494,9 @@ int main(int argc, char** argv) {
     printf("\nF. render->fetch chain (glFinish A/B)\n");
     test_render_fetch(D, false);
     test_render_fetch(D, true);
+    printf("\nG. q16 I16_1 residual read (ES3 vs GLES2)\n");
+    test_q16_read(D, false);
+    test_q16_read(D, true);
     if (g_es3) { printf("\nD. bit-cast f32 round trip (dither A/B)\n");
         test_bitcast(D, false); test_bitcast(D, true); }
     else printf("\nD. skipped (no ESSL 3.00)\n");
