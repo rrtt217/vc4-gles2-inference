@@ -451,6 +451,57 @@ static void test_q16_read(int dim, bool es3) {
     glDeleteProgram(p); glDeleteTextures(1,&qt);
 }
 
+// H. matvec_q8_add: I24_1 activation + q16 residual (the RWKV wo/cm add).  The
+// engine's layer-1 gate output matches CPU but the residual add contributes ~0 on
+// VC4 -- name whether matvec_add (vs plain matvec_q8) delivers, wrow off and on.
+static void test_matvec_add(int dim, bool wrow) {
+    const int cols = dim, rows = dim;
+    vector<int8_t> w((size_t)rows*cols);
+    for (int r = 0; r < rows; ++r) for (int c = 0; c < cols; ++c)
+        w[(size_t)r*cols+c] = (int8_t)(((r*7+c*13)%9)-4);
+    vector<uint8_t> wp((size_t)(cols/4)*rows*4);
+    for (int r = 0; r < rows; ++r) for (int q = 0; q < cols/4; ++q)
+        for (int j = 0; j < 4; ++j)
+            wp[((size_t)r*(cols/4)+q)*4+j] = (uint8_t)(w[(size_t)r*cols+4*q+j]+128);
+    GLuint wt = tex(cols/4, rows, wp);
+    vector<int> xraw(cols);
+    for (int c = 0; c < cols; ++c) xraw[c] = (int)((c*2654435761u)%512u)-256;
+    GLuint xt = tex(cols, 1, q24_bytes(xraw, cols, 1));
+    vector<int> resq(rows);
+    for (int r = 0; r < rows; ++r) resq[r] = (int)((r*40503u)%4096u)-2048;
+    vector<uint8_t> rp((size_t)rows*4);
+    for (int r = 0; r < rows; ++r) { uint16_t u=(uint16_t)(int16_t)resq[r];
+        rp[r*4]=u>>8; rp[r*4+1]=u&255; rp[r*4+2]=0; rp[r*4+3]=255; }
+    GLuint rt = tex(rows, 1, rp);
+    // per-row scale plane (paired texels): row scale = 1.0 -> 65536 raw, /65536*ws
+    GLuint st = 0;
+    if (wrow) {
+        int np = (rows+1)/2; vector<uint8_t> sp((size_t)np*4);
+        for (int t = 0; t < np; ++t) { uint16_t u=65535; // ~1.0*65536 clipped
+            sp[t*4]=u>>8; sp[t*4+1]=u&255; sp[t*4+2]=u>>8; sp[t*4+3]=u&255; }
+        st = tex(1, np, sp);
+    }
+    GLuint p = prog(matvec_q8_add(rows, cols, XFormat::I24_1, XFormat::I16_1, wrow));
+    if (!p) { printf("  H link fail\n"); ++failures; return; }
+    out_begin(rows); glUseProgram(p);
+    bind(p,"W",0,wt); bind(p,"X",1,xt); bind(p,"R",2,rt);
+    glUniform1f(glGetUniformLocation(p,"ws"), 1.0f);
+    if (wrow) bind(p,"WS",3,st);
+    tri(p);
+    // output is q16 (I16_1): read .rg
+    const uint8_t* g = out_end();
+    vector<int> gv(rows), want(rows);
+    for (int r = 0; r < rows; ++r) {
+        int u = (g[r*4]<<8)|g[r*4+1]; gv[r] = u>=32768?u-65536:u;
+        float s = 0; for (int c = 0; c < cols; ++c) s += (float)w[(size_t)r*cols+c]*(float)xraw[c];
+        long q = lrintf(s + resq[r]); want[r] = (int)std::max(-32768L, std::min(32767L, q));
+    }
+    char nm[64]; snprintf(nm,sizeof nm,"H matvec_add i24 wrow%d",wrow);
+    report(nm, gv, want, 1);
+    glDeleteProgram(p); glDeleteTextures(1,&wt); glDeleteTextures(1,&xt); glDeleteTextures(1,&rt);
+    if (st) glDeleteTextures(1,&st);
+}
+
 int main(int argc, char** argv) {
     bool want_es3 = !(argc > 1 && strcmp(argv[1], "gles2") == 0);
     if (want_es3) { setenv("MESA_GLES_VERSION_OVERRIDE", "3.0", 0);
@@ -497,6 +548,9 @@ int main(int argc, char** argv) {
     printf("\nG. q16 I16_1 residual read (ES3 vs GLES2)\n");
     test_q16_read(D, false);
     test_q16_read(D, true);
+    printf("\nH. matvec_add I24_1 + q16 residual (wrow off/on)\n");
+    test_matvec_add(D, false);
+    test_matvec_add(D, true);
     if (g_es3) { printf("\nD. bit-cast f32 round trip (dither A/B)\n");
         test_bitcast(D, false); test_bitcast(D, true); }
     else printf("\nD. skipped (no ESSL 3.00)\n");
