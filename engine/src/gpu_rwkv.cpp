@@ -422,7 +422,7 @@ GLuint GPU::rwkv_block(int l, const Model& m, GLuint resid, float* cpu_wkv_state
         const bool have_gate = m.rwkv.gate && l < (int)m.rwkv_g1.size() && m.rwkv_g1[l].rows > 0;
         const GLuint lp = rwkv_const(l, RC_LERP), sc = rwkv_const(l, RC_SCALE);
         auto D = [&](const char* nm, RwkvTmp idx, float div) {
-            if (!env_set("RWKV_STAGE_DUMP") || l != 1) return;
+            if (!env_set("RWKV_STAGE_DUMP") || l > 1) return;
             sync(); Target& t = rwkv_tmp(idx);
             vector<uint8_t> b = read_bytes(t, t.w, 1);
             auto val=[&](int i){int u=(int)b[(size_t)i*4+1]*65536+(int)b[(size_t)i*4+2]*256+(int)b[(size_t)i*4+3]-8388608;return (u/256.0f)/div;};
@@ -577,18 +577,22 @@ GLuint GPU::rwkv_block(int l, const Model& m, GLuint resid, float* cpu_wkv_state
         GLuint xn2 = rwkv_ln(resid, rwkv_const(l, RC_ATTNorm2), rwkv_tmp(RT_XN2));
         Target& shF = rwkv_shift_[(size_t)l * 2 + 1];
         GLuint xk2 = rwkv_lerp(xn2, shF.tex, rwkv_const(l, RC_CMLERP), 0, 1, rwkv_tmp(RT_XR));
+        D("xn2", RT_XN2, 256); D("xk2", RT_XR, 1);
         rwkv_copy(xn2, shF);
         // O23-O25: key matvec -> relu^2 -> value matvec + residual.  The key is
         // chunked on VC4 (split_rwkv); the two halves recombine at the value add.
         if (m.ffn_chunked) {
             GLuint ha = rwkv_mv(m.w1a[l], xk2, rwkv_tmp(RT_CMH));
+            D("cmkey_a", RT_CMH, 1);
             ha = rwkv_sqrelu(ha, rwkv_tmp(RT_CMH2));
+            D("sqrelu_a", RT_CMH2, 1);
             GLuint hb = rwkv_mv(m.w1b[l], xk2, rwkv_tmp(RT_CMH3));
             hb = rwkv_sqrelu(hb, rwkv_tmp(RT_CMH4));
             // mid != resid; the final add reuses resid's (now dead) buffer.
             Target& mid = (resid == rwkv_tmp(RT_RES).tex) ? rwkv_tmp(RT_RES2) : rwkv_tmp(RT_RES);
             Target& fin = (resid == rwkv_tmp(RT_RES).tex) ? rwkv_tmp(RT_RES) : rwkv_tmp(RT_RES2);
             GLuint ca = rwkv_mv(m.w2a[l], ha, rwkv_tmp(RT_U));
+            D("cmt_a", RT_U, 1);
             GLuint mid_r = rwkv_res_add(resid, ca, mid);
             GLuint cb = rwkv_mv(m.w2b[l], hb, rwkv_tmp(RT_U));
             return rwkv_res_add(mid_r, cb, fin);
