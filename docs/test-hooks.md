@@ -131,6 +131,21 @@ binary.  They are measurement hooks, not production settings.
 - `READBACK_TIME=1` — print the per-token logits finish/read-back timing:
   `finish` and `readback` separately on the full-read-back path, and one lap
   per reduction stage on the greedy fast path.  Diagnostic only.
+- `RWKV_GROUP=0|1|2|3|4` — the serial RWKV path's matvec grouping (P7, A2/A3).
+  `1` (default) draws a group of independent matvecs into the rows of one target
+  and reads the block back once; `0` is the pre-P7 path verbatim (one read-back
+  per matrix), which makes it the reference arm for a same-binary A/B; `2` reads
+  the block at the target's *full* width instead of the group's own, and `3`
+  reads one row per matrix (no sync win) — the two read-back arms of the VC4
+  bisect for the +0.0006 nats/token drift the board saw on 2026-11-17; `4`
+  groups only runs of equal-row matrices, which is the safe arm if the
+  unequal-width draws are what VC4 dislikes.  Same numbers on Xe in all five.
+- `RWKV_GROUP_CHECK=1` — with the grouping on, recompute every grouped matvec
+  with `rwkv_mv()` in the same process and print the first 12 members that
+  differ (`member rows cols ndiff/n maxdiff first`).  It turns "the board drifts
+  by 0.0006 nats" into "member 2 of the down group is off by one q16 step from
+  index 40", which is what named the read-back rather than the arithmetic.
+  Diagnostic only: the extra matvec and read-back erase the saving.
 - `RMS_SPLIT=1`, `RMS_FUSED=1` — force the split or fused rmsnorm reduce.  VC4
   defaults to fused (it drops one draw per norm); other drivers default to
   split, where 32 extra fetches per fragment can cost more than the draw.

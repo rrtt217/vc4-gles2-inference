@@ -118,6 +118,9 @@ private:
     // groups per layer, each with its own input lengths).
     vector<vector<float>> rwkv_mv_group(const vector<const Mat*>& ms,
                                         const vector<const vector<float>*>& xs, int slot0);
+    vector<vector<float>> rwkv_mv_group_impl(const vector<const Mat*>& ms,
+                                             const vector<const vector<float>*>& xs,
+                                             int slot0, int mode);
     // LayerNorm with weight and bias, f32 statistics (O1): the mean and the
     // biased variance over the whole row, eps from key 16.
     static vector<float> rwkv_layernorm(const vector<float>& x, const float* wb, float eps);

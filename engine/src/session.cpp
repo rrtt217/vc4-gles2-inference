@@ -596,9 +596,9 @@ vector<float> Session::rwkv_mv(const Mat& m, const vector<float>& x){
 // same Mat view with the scale folded in, the same draw and the same decode.
 // What changes is only the number of host syncs -- one per group instead of one
 // per matrix -- because on this path the read-back, not the draw, is the cost.
-vector<vector<float>> Session::rwkv_mv_group(const vector<const Mat*>& ms,
-                                             const vector<const vector<float>*>& xs,
-                                             int slot0){
+vector<vector<float>> Session::rwkv_mv_group_impl(const vector<const Mat*>& ms,
+                                                  const vector<const vector<float>*>& xs,
+                                                  int slot0, int mode){
         vector<Mat> views(ms.size());
         vector<vector<float>> scaled(ms.size());
         vector<GPU::MvRow> rows(ms.size());
@@ -623,7 +623,61 @@ vector<vector<float>> Session::rwkv_mv_group(const vector<const Mat*>& ms,
                 for (size_t j = 0; j < x.size(); ++j) scaled[i][j] = x[j] * inv;
                 rows[i].x = &scaled[i];
         }
-        return gpu_.matvec_rows(rows, slot0);
+        const int read_mode = (mode == 2) ? 1 : (mode == 3 ? 2 : 0);
+        vector<vector<float>> out = gpu_.matvec_rows(rows, slot0, read_mode);
+        // RWKV_GROUP_CHECK: the grouped result against the pre-P7 path, in the
+        // same process and the same run.  A read-back quirk shows up here with
+        // the member, the index and the magnitude, which is what a drift that
+        // only VC4 has needs in order to be named rather than bisected.
+        if (env_flag("RWKV_GROUP_CHECK")) {
+                static int nmis = 0, nprinted = 0;
+                for (size_t i = 0; i < ms.size(); ++i) {
+                        const vector<float> one = rwkv_mv(*ms[i], *xs[i]);
+                        int ndiff = 0, first = -1;
+                        float mx = 0.0f;
+                        for (size_t j = 0; j < one.size() && j < out[i].size(); ++j) {
+                                const float d = fabsf(one[j] - out[i][j]);
+                                if (d > 0.0f) { if (first < 0) first = (int)j; ++ndiff; mx = std::max(mx, d); }
+                        }
+                        if (ndiff) {
+                                ++nmis;
+                                if (nprinted++ < 12)
+                                        fprintf(stderr, "RWKV_GROUP_CHECK member=%zu rows=%d cols=%d ndiff=%d/%d maxdiff=%g first=%d (call %d)\n",
+                                                i, ms[i]->rows, ms[i]->cols, ndiff, (int)one.size(),
+                                                (double)mx, first, nmis);
+                        }
+                }
+        }
+        return out;
+}
+
+vector<vector<float>> Session::rwkv_mv_group(const vector<const Mat*>& ms,
+                                             const vector<const vector<float>*>& xs,
+                                             int slot0){
+        // RWKV_GROUP (docs/test-hooks.md): 1 groups the whole call, 4 groups
+        // only the runs whose matrices share a row count (the VC4-safe arm if
+        // the unequal-width draws turn out to be the problem), 0 is the pre-P7
+        // path verbatim, 2 and 3 are the read-back bisect.
+        static const int mode = env_int("RWKV_GROUP", 1);
+        if (mode == 0) {
+                vector<vector<float>> out(ms.size());
+                for (size_t i = 0; i < ms.size(); ++i) out[i] = rwkv_mv(*ms[i], *xs[i]);
+                return out;
+        }
+        if (mode == 4) {
+                vector<vector<float>> out(ms.size());
+                for (size_t i = 0; i < ms.size();) {
+                        size_t j = i + 1;
+                        while (j < ms.size() && ms[j]->rows == ms[i]->rows) ++j;
+                        vector<const Mat*> gm(ms.begin() + (long)i, ms.begin() + (long)j);
+                        vector<const vector<float>*> gx(xs.begin() + (long)i, xs.begin() + (long)j);
+                        vector<vector<float>> part = rwkv_mv_group_impl(gm, gx, slot0 + (int)i, 1);
+                        for (size_t k = 0; k < part.size(); ++k) out[i + k] = std::move(part[k]);
+                        i = j;
+                }
+                return out;
+        }
+        return rwkv_mv_group_impl(ms, xs, slot0, mode);
 }
 
 vector<float> Session::forward_rwkv(int token){

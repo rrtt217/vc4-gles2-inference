@@ -192,7 +192,10 @@ public:
     // rows[i].x is uploaded to its own staging texture (slot i), so several
     // inputs of the same length cannot overwrite each other.
     struct MvRow { const Mat* m; const vector<float>* x; };
-    vector<vector<float>> matvec_rows(const vector<MvRow>& rows, int slot0 = 0);
+    // read_mode is the VC4 bisect (RWKV_GROUP): 0 = read the block at the
+    // group own width, 1 = read it at the target full width, 2 = one read
+    // per matrix row (no sync win; isolates the multi-row read).
+    vector<vector<float>> matvec_rows(const vector<MvRow>& rows, int slot0 = 0, int read_mode = 0);
     GLuint rwkv_upload_slot(const vector<float>& x, int slot);
     void rwkv_flip() { rwkv_cur_ ^= 1; }
     void clear_rwkv_state();
@@ -554,4 +557,6 @@ private:
     void draw(const Mat& m, GLuint x, Target& t, int row = 0);
 
     vector<int32_t> read_i32(Target& t, int w, int h);
+    // One row of it, starting at y (the group bisect per-row arm).
+    vector<int32_t> read_i32_rows(Target& t, int w, int y, int h);
 };

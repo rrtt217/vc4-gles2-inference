@@ -149,7 +149,7 @@ GLuint GPU::rwkv_upload_slot(const vector<float>& x, int slot){
         return t;
 }
 
-vector<vector<float>> GPU::matvec_rows(const vector<MvRow>& rows, int slot0){
+vector<vector<float>> GPU::matvec_rows(const vector<MvRow>& rows, int slot0, int read_mode){
         vector<vector<float>> out(rows.size());
         if (rows.empty()) return out;
         int w = 0;
@@ -165,12 +165,31 @@ vector<vector<float>> GPU::matvec_rows(const vector<MvRow>& rows, int slot0){
                 draw(*rows[i].m, xt, t, (int)i);
         }
         if (needs_finish()) { glFlush(); glFinish(); }
-        vector<int32_t> raw = read_i32(t, w, (int)rows.size());
+        // The block read is the one thing this path does that the pre-P7 path
+        // never did: a sub-rectangle of a wider target (the downs group reads
+        // 128 of 768 columns) and, for the wide groups, more than one row.  The
+        // logits pass has always read a multi-row block at the target's full
+        // width, so read_mode 1 is the shape with prior art on VC4; read_mode 2
+        // drops to one read per row and gives up the sync win on purpose.
+        int stride = w;
+        vector<int32_t> raw;
+        if (read_mode == 2) {
+                raw.assign((size_t)w * rows.size(), 0);
+                for (size_t i = 0; i < rows.size(); ++i) {
+                        vector<int32_t> r = read_i32_rows(t, w, (int)i, 1);
+                        for (int j = 0; j < w; ++j) raw[(size_t)i * (size_t)w + (size_t)j] = r[(size_t)j];
+                }
+        } else if (read_mode == 1) {
+                stride = t.w;
+                raw = read_i32(t, t.w, (int)rows.size());
+        } else {
+                raw = read_i32(t, w, (int)rows.size());
+        }
         for (size_t i = 0; i < rows.size(); ++i) {
                 const int n = rows[i].m->rows;
                 out[i].resize((size_t)n);
                 for (int j = 0; j < n; ++j) {
-                        int v = raw[(size_t)i * (size_t)w + (size_t)j];
+                        int v = raw[(size_t)i * (size_t)stride + (size_t)j];
                         if (v >= 32768) v -= 65536;
                         out[i][(size_t)j] = (float)v / ACT_SCALE;
                 }

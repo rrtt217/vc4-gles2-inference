@@ -275,6 +275,21 @@ void GPU::draw(const Mat& m, GLuint x, Target& t, int row ){
         }
     }
 
+vector<int32_t> GPU::read_i32_rows(Target& t, int w, int y, int h){
+        bind_fbo(t.fbo);
+        glViewport(0, 0, t.w, t.h);
+        vector<uint8_t> b((size_t)w * h * 4);
+        note_sync();
+        glReadPixels(0, y, w, h, GL_RGBA, GL_UNSIGNED_BYTE, b.data());
+        vector<int32_t> out((size_t)w * h);
+        for (int i = 0; i < w * h; ++i) {
+                const int j = i * 4;
+                int64_t v = (int64_t)b[j] * 16777216 + (int64_t)b[j + 1] * 65536 +
+                            (int64_t)b[j + 2] * 256 + b[j + 3] - 8388608;
+                out[(size_t)i] = (int32_t)v;
+        }
+        return out;
+}
 vector<int32_t> GPU::read_i32(Target& t, int w, int h){
         bind_fbo(t.fbo);
         glViewport(0, 0, t.w, t.h);
