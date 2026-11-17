@@ -74,15 +74,19 @@ static std::string fragment_src() {
     char defs[256];
     snprintf(defs, sizeof(defs),
              "#version 300 es\nprecision highp float;\n"
-             "#define N %d\n#define W1 (1.0-%g)\n", N, (double)S);
+             "#define N %d\n#define W1 (1.0-%g)\n"
+             "#define MAT0 1.0\n#define MAT1 16.0\n#define MAT2 256.0\n"
+             "#define MAT3 1024.0\n#define MAT4 2300.0\n", N, (double)S);
     return std::string(defs) +
         "uniform sampler2D T;\n"
-        "uniform float mags[5];\n"
         "out vec4 fragColor;\n"
         // one fetch per term: r = x sign, g = w is 1 (255) or 1-2^-20 (0)
         "void main(){\n"
         "  int shape=int(gl_FragCoord.x);\n"
-        "  float M=mags[int(gl_FragCoord.y)];\n"
+        "  int row=int(gl_FragCoord.y);\n"
+        // No uniform array indexing here: VC4 returns 0 for it (measured), so
+        // the magnitude is a compile-time constant per row.
+        "  float M=(row==0)?MAT0:(row==1)?MAT1:(row==2)?MAT2:(row==3)?MAT3:MAT4;\n"
         "  float s=0.0;\n"
         "  if(shape==0){\n"
         "    for(int i=0;i<N;i++){vec4 c=texture(T,vec2((float(i)+0.5)/float(N),0.5));"
@@ -198,7 +202,6 @@ int main() {
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, tex);
     glUniform1i(glGetUniformLocation(prog, "T"), 0);
-    glUniform1fv(glGetUniformLocation(prog, "mags"), NMAG, MAGS);
     glDrawArrays(GL_TRIANGLES, 0, 3);
     glFinish();
 
