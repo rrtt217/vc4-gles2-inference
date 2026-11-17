@@ -212,7 +212,7 @@ def summarize(rows):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--model", action="append", default=[], metavar="NAME=PATH")
-    ap.add_argument("--data", default=os.path.join(ROOT, "engine", "scripts", "eval", "ifeval.jsonl"),
+    ap.add_argument("--data", default=os.path.join(ROOT, "engine", "eval", "data", "ifeval.jsonl"),
                     help="case file (default: engine/eval/data/ifeval.jsonl)")
     ap.add_argument("--out", default="/tmp/eval_ifeval")
     ap.add_argument("--preset", default="auto", choices=["auto"] + sorted(PRESETS),

@@ -589,3 +589,111 @@ turn as `<user>...</user>`; and the multiple-choice battery still needs
 `--completion` because the template puts a think marker at the answer
 position.  Raw matrix (50 runs) and the per-prompt side-by-side against the
 0.1B: `models/rwkv7/phase2-gen/SUMMARY.md`.
+
+## 2026-11-17 — MNN-Pocket-0.3B (Qwen3 dense 0.36B): both containers, all three batteries
+
+Machine: laptop, Intel Iris Xe (ADL GT2), Mesa 26.2.5, `GPU_LAYER=1 SEQ=512
+KV=q16 KV_GRID=512 RES=f32 ACT=f32` — the best fixed-grid configuration from
+the fidelity campaign (`performance.md`, same date).  Two containers of the
+same shape, 198,007,797 B each:
+
+| | container | sha256 (first 16) | source |
+|---|---|---|---|
+| **qat** | `models/pocket-qat/pocket-qat.q4q24.dedup.q6.mmcf` | `b164eee8b19e4db9` | the GGUF `Q4_1` QAT upload, dequantized to F16 and repacked (`models/pocket-qat/gguf_q4_to_hf.py`) |
+| **bf16** | `models/pocket-0.3b/pocket-0.3b.q4q24.dedup.q6.mmcf` | `d2a977003aab2501` | the BF16 release, quantized here |
+
+The engine's fidelity against a float32 numpy forward is 0.9552 cosine (qat,
+f32 streams + KV f32) and 0.9415 with q16 streams — measured, not asserted, and
+in `performance.md`.  **The two containers are different checkpoints**, not two
+packagings of one: their weights are 0.9955 cosine apart and their logits against
+the BF16 reference only 0.9261, which is why they are measured separately below.
+
+### Multiple choice (100 items, one deterministic run each)
+
+| Model | acc | acc_cal | fmt | p_gold | null (acc) | zh | en |
+|---|---:|---:|---:|---:|---|---:|---:|
+| **pocket qat** | **0.480** | **0.480** | 0.710 | 0.479 | 0.255 ± 0.037 | 0.46 | 0.50 |
+| pocket bf16 | 0.450 | 0.400 | 0.740 | 0.443 | 0.254 ± 0.034 | 0.44 | 0.46 |
+
+Reading it:
+
+* **0.480 is 6.0 sigma over the null** and the highest in this document (LFM2.5's
+  0.380 is 3.4 sigma).  It is also the first model here whose `acc_cal` does not
+  move: calibration subtracts the letter logits of the same prompt with no
+  question, and for MiniMind3 that *raises* accuracy (0.220 -> 0.320) because its
+  letter prior was working against it.  Pocket's prior (A 57, B 1, C 20, D 22)
+  costs it nothing.
+* **The QAT file is the better checkpoint**, by 3 points raw and 8 calibrated:
+  bf16 falls to 0.400 once the prior is removed, qat stays at 0.480.  This
+  settles what the packaging campaign could not: the QAT upload is not merely a
+  differently-produced file, it is the better model.
+* **Chinese and English are balanced** (0.46 / 0.50) — the only row in this
+  document that is.  LFM2.5 is 0.28 / 0.48, MiniMind3 0.16 / 0.28.
+* `fmt 0.710` is the ceiling caveat: 29 items had a non-letter full-vocabulary
+  argmax and are scored wrong, so 0.48 is a floor (0.48/0.71 among the formatted
+  ones).  Pocket follows the letter format less often than LFM2.5 (0.88) and is
+  much more accurate: its weak half is instruction following, not knowledge.
+* By category: science 0.652 (n=23), common_sense 0.647 (17), geography 0.500
+  (12), history 0.500 (12), language 0.500 (6), **math 0.263 (19)**, `chinese`
+  questions 0.250 (8), logic 0.000 (3, too small to read).  **Math is identical
+  in both containers (0.263)**, so the arithmetic weakness is the model, not the
+  quantisation — and it is the same weakness the board showed in a hand probe
+  (`84 * 3 = ` -> `54.` on the Pi, `84 * 3 = 252.` on the Xe), i.e. two
+  independent paths agreeing.
+
+### Instruction following (24 cases, 3 seeds = 72 attempts, preset greedy)
+
+| Model | pass | hard pass | zh | en | most-failed checks (over 72 attempts) |
+|---|---:|---:|---:|---:|---|
+| **pocket qat** | **0.792** | **0.792** | 0.700 | 0.857 | bullets 3, cjk_ratio_min 3, max_words 3, min_words 3, regex 3 |
+| LFM2.5-230M QAD q4 (2026-11-12 rows, 2 seeds) | 0.562 | 0.542 | 0.45 | 0.64 | json_valid+json_keys 6+6, max_words 6, max_chars 4 |
+
+* **The first model in this document that passes the JSON cases.**  Every other
+  row's top failure is `json_valid+json_keys 6+6` — the document says "JSON is
+  the universal failure" — and pocket's failure list contains no `json_*` at all.
+* `hard pass == pass`: it either satisfies the instruction completely or not at
+  all, which is a different profile from a model that half-complies.
+* Chinese 0.700 against LFM2.5's 0.45, English 0.857 against 0.64.
+* Protocol difference: 3 seeds here (72 attempts) against 2 (48) for the rows
+  above, so the *rates* compare and the failure counts do not.
+
+### Translation (30 cases, greedy, chrF)
+
+| Model | chrF | zh→en | en→zh | copies source | len | ms |
+|---|---:|---:|---:|---:|---:|---:|
+| pocket qat | 0.366 | **0.504** | 0.228 | 0.12 | 1.12 | 4483 |
+| pocket bf16 | **0.383** | 0.480 | 0.286 | 0.07 | 1.12 | 5260 |
+| LFM2.5-230M QAD q4 (2026-11-12) | 0.328 | 0.368 | 0.287 | 3/30 | 1.0 | — |
+
+* Total is a wash against LFM2.5, but the **shape is different and consistent
+  with everything else here**: pocket reads Chinese well (zh→en 0.50 against
+  0.37) and writes it worse (en→zh 0.23 against 0.29).  Its Chinese *input* is
+  its strength, its Chinese *output* is its weakness — the same direction as the
+  MC (zh 0.46) and ifeval (zh 0.70) rows, which are comprehension-heavy.
+* On this battery the BF16 container edges ahead (0.383 against 0.366), the one
+  place it does.  One battery, 30 cases: not enough to overturn the MC margin.
+* `copies source 0.12` / `len 1.12`: it occasionally repeats the source instead
+  of translating, and runs slightly long; the 2026-11-12 rows carry the
+  comparison for those columns.
+
+### What the three rows say together
+
+Pocket is the strongest 0.36B-class model in this document on knowledge and
+instruction following, and the first that is usable in Chinese at this size
+without a translation penalty.  Its weak spot is arithmetic, identical in both
+containers, and its Chinese *generation* lags its Chinese *comprehension*.  The
+QAT container is the one to ship: better on MC (+8 calibrated points) and on
+ifeval, with the translate difference inside one battery's noise.
+
+Reproduce (paths absolute — the batteries spawn a tokenizer probe whose cwd is
+not `engine/`):
+
+```bash
+cd engine
+M=$(readlink -f ../models/pocket-qat/pocket-qat.q4q24.dedup.q6.mmcf)
+E='--env GPU_LAYER=1 --env SEQ=512 --env KV=q16 --env KV_GRID=512 --env RES=f32 --env ACT=f32'
+python3 eval/bench_mc.py --model qat=$M --data eval/data/mc_en.jsonl \
+    --data eval/data/mc_zh.jsonl $E --out /tmp/pocket_mc
+python3 eval/eval_ifeval.py  --model qat=$M --preset greedy $E --out /tmp/pocket_if
+python3 eval/eval_translate.py --model qat=$M --preset greedy $E --out /tmp/pocket_tr
+```

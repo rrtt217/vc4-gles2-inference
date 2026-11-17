@@ -195,8 +195,12 @@ change, because for well-scaled activations it is a no-op.
 Liquid AI ships one official MT fine-tune in this family: **LFM2-350M-ENJP-MT**
 (EN <-> JA, bi-directional, 16 layers = 10 conv + 6 attention, FFN 4608,
 vocab 64400, license lfm1.0).  There is no translation-tuned LFM2.5-230M -- the
-230M fine-tunes on the Hub are abliterated / thinking / ECE / audio / Chinese
-continued-pretraining variants.  The 350M model is the closest thing, so it was
+230M fine-tunes on the Hub are community re-tunes (heretic/abliterated, ECE,
+agent, and quantisations of the official weights), plus a Chinese
+continued-pretraining variant.  **There is no 230M thinking checkpoint**: the
+Hub's LFM2.5 thinking model is 1.2B (`LiquidAI/LFM2.5-1.2B-Thinking`, checked
+against the Hub API on 2026-11-17), so `--thinking` has nothing to switch on at
+this size.  The 350M model is the closest thing, so it was
 packed and run to answer two questions: does a real MT fine-tune work on this
 engine, and what does it cost.
 
@@ -353,7 +357,7 @@ are described in [`deterministic-tools.md`](deterministic-tools.md).
 | 3 | **tokenizer splits digit runs differently** from llama.cpp (`6789` → `6`+`789` here, `678`+`9` there, because `tokenizer.ggml.pre = lfm2` means the llama-3 pre-tokenizer with `\p{N}{1,3}`); prose is identical (334/335 ids on the PPL corpus), 5 of 20 probe strings differ | not fixed; matters for arithmetic prompts |
 | 4 | **the fused path's I16_2 targets have no per-tensor scale** (`matvec_s` is serial-only), so the board's fused quality is 3.7% behind its own serial path | next step |
 | 5 | ~~`--ppl` degrades window by window~~ — **was our metric, not the engine**: a window that starts mid-text is cold and costs ~1.8 nats/token (f32 3.80 against 5.61 on the same text), and llama.cpp's chunked number is a full-context estimate.  `--ppl` now warms each window up (`PPL_STRIDE=0` for the old behaviour) | fixed 2026-11-12 in `--ppl`; correction and numbers in `performance.md` |
-| 6 | **`--thinking` is plumbed but unobserved** — the model did not emit `<think>` in three probes; an unclosed `<think>` is kept as text | plumbed only |
+| 6 | **`--thinking` is plumbed but unobserved** — the model did not emit `<think>` in three probes; an unclosed `<think>` is kept as text.  **Why (2026-11-17):** no 230M thinking checkpoint exists (the Hub's is 1.2B), and neither vendor template opens the block — a thinking checkpoint emits `<think>` itself as its first tokens.  `--thinking` prefils a block this checkpoint was never trained to fill, and the engine also wires it to the vendor's *different* `preserve_thinking` variable (`chattmpl.cpp:66`), so the flag means two things at once | plumbed; needs the 1.2B-Thinking container to test |
 | 7 | ~~q8 LFM2 containers die in `matvec_q8_pair_logits: rows=0 cols=0`~~ — the **pair prefill called `attention_block` for conv layers**, which carry no qkv.  `pair_ok()` now refuses a hybrid model (there is no conv pair kernel), so a hybrid model always prefills through the serial loop; the q8 container itself is correct there | fixed 2026-11-12 |
 | 8 | ~~the fused layer loop (`GPU_LAYER=1`) was wrong for hybrid q8 and i16~~ — two independent bugs, both fixed 2026-11-12.  **(a) i16**: `res_pack_` was decided from `wo[0]`, and a hybrid model's layer 0 is a conv layer with an empty `wo` whose type defaults to INT8, so the i16 container got the packed I16_2 residual while its i16 add kernels wrote one q16 per texel -- every hidden state read back as 0.996 constants.  **(b) q8**: `matvec_q8`'s I16_2 fast path encoded its result as unsigned-then-biased (+65536 for a negative sum before adding 2^23), so **every negative matvec output came back 256 too large**; the conv block is the only user of that non-pair q8 path, which is why dense q8 models never showed it.  Evidence per stage: conv `gated` 55.98/127.99 against the CPU reference 0.07; after the fix it matches to the last q16 step.  Both hybrid containers now run either loop; the shader-hash file was re-baselined for the one changed program (`matvec_q8_6400x768_i16_2`, 839 -> 748 B) and the dense PPL pins did not move | fixed 2026-11-12 |
 

@@ -172,8 +172,8 @@ def summarize(name, rows):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--model", action="append", required=True, metavar="NAME=PATH")
-    ap.add_argument("--data", default=os.path.join(ROOT, "engine", "scripts",
-                                                   "eval", "translate.jsonl"))
+    ap.add_argument("--data", default=os.path.join(ROOT, "engine", "eval",
+                                                   "data", "translate.jsonl"))
     ap.add_argument("--out", default="/tmp/eval_translate")
     ap.add_argument("--gen", type=int, default=96)
     ap.add_argument("--preset", default="auto", choices=["auto", "greedy", "rwkv"],
