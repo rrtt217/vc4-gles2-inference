@@ -71,12 +71,16 @@ void GPU::init_rwkv(const Model& m){
         mk(RT_L2STAT, H); mk(RT_RK, H); mk(RT_SA, H * hs);
 
         rwkv_state_.assign((size_t)L * 2, Target());
-        rwkv_shift_.assign((size_t)L * 2, Target());
+        // Two token-shift textures per layer and kind: slot 0 is the one the
+        // copy form uses (RWKV_SHIFT_PP off, the default), and the pair is the
+        // ping-pong that lets the norm write the shift directly (docs/test-hooks).
+        rwkv_shift_.assign((size_t)L * 4, Target());
         for (int l = 0; l < L; ++l) {
             for (int b = 0; b < 2; ++b)
                 rwkv_state_[(size_t)l * 2 + b] = make_target(hs, H * hs);
-            rwkv_shift_[(size_t)l * 2 + 0] = make_target(dim, 1);
-            rwkv_shift_[(size_t)l * 2 + 1] = make_target(dim, 1);
+            for (int k = 0; k < 2; ++k)
+                for (int p = 0; p < 2; ++p)
+                    rwkv_shift_[(size_t)l * 4 + (size_t)k * 2 + (size_t)p] = make_target(dim, 1);
         }
         rwkv_vfirst_ = make_target(dim, 1);
         rwkv_x0_ = make_target(dim, 1);
@@ -154,6 +158,15 @@ double g_stage_ms[RS_COUNT];
 double g_stage_tot[RS_COUNT];
 Clock::time_point g_lap_t;
 bool g_lap_on = false;
+
+// RWKV_SHIFT_PP=1 (docs/test-hooks.md): the two token-shift copies a layer
+// become a ping-pong on the token parity, so the norm writes the shift
+// directly.  Byte-identical to the copy form; it exists because the copies are
+// two of the layer's draws and a known draw count is what prices a draw.
+bool rwkv_shift_pp(){
+        static const bool on = env_flag("RWKV_SHIFT_PP");
+        return on;
+}
 
 void lap(int stage){
         if (!g_lap_on) return;
@@ -655,17 +668,34 @@ GLuint GPU::rwkv_block(int l, const Model& m, GLuint resid, float* cpu_wkv_state
         const bool have_gate = m.rwkv.gate && l < (int)m.rwkv_g1.size() && m.rwkv_g1[l].rows > 0;
         const GLuint lp = rwkv_const(l, RC_LERP), sc = rwkv_const(l, RC_SCALE);
         // O1-O3: att_norm, then the six token-shifted inputs; shift := xn.
-        GLuint xn = (l == 0) ? rwkv_ln_p(resid, rwkv_const(l, RC_ATTNorm), rwkv_tmp(RT_XN))
-                             : rwkv_ln(resid, rwkv_const(l, RC_ATTNorm), rwkv_tmp(RT_XN));
+        //
+        // The shift is a per-layer *state* (the previous token's normalised
+        // row), so the copy form renders xn and then copies it into the layer's
+        // one shift texture -- a whole extra draw per shift, twice a layer.
+        // RWKV_SHIFT_PP=1 (docs/test-hooks.md) alternates two shift textures on
+        // the token parity rwkv_cur_ instead: the norm writes this token's
+        // texture and the lerp reads the other one, which is byte for byte what
+        // the copy would have left there, so the numbers do not move and the
+        // copy draws go away.  With the switch off every index below is slot 0,
+        // i.e. exactly the old behaviour.
+        const bool pp = rwkv_shift_pp();
+        const int par = pp ? rwkv_cur_ : 0;
+        const int ppar = pp ? (rwkv_cur_ ^ 1) : 0;
+        auto sh = [&](int kind, int parity) -> Target& {
+                return rwkv_shift_[(size_t)l * 4 + (size_t)kind * 2 + (size_t)parity];
+        };
+        Target& shA = sh(0, ppar);              // previous token's xn (the lerp's SH)
+        Target& xnT = pp ? sh(0, par) : rwkv_tmp(RT_XN);
+        GLuint xn = (l == 0) ? rwkv_ln_p(resid, rwkv_const(l, RC_ATTNorm), xnT)
+                             : rwkv_ln(resid, rwkv_const(l, RC_ATTNorm), xnT);
         lap(RS_LN);
-        Target& shA = rwkv_shift_[(size_t)l * 2 + 0];
         GLuint xr = rwkv_lerp(xn, shA.tex, lp, 0, 6, rwkv_tmp(RT_XR));
         GLuint xw = rwkv_lerp(xn, shA.tex, lp, 1, 6, rwkv_tmp(RT_XW));
         GLuint xk = rwkv_lerp(xn, shA.tex, lp, 2, 6, rwkv_tmp(RT_XK));
         GLuint xv = rwkv_lerp(xn, shA.tex, lp, 3, 6, rwkv_tmp(RT_XV));
         GLuint xa = rwkv_lerp(xn, shA.tex, lp, 4, 6, rwkv_tmp(RT_XA));
         GLuint xg = rwkv_lerp(xn, shA.tex, lp, 5, 6, rwkv_tmp(RT_XG));
-        rwkv_copy(xn, shA);
+        if (!pp) rwkv_copy(xn, shA);
         lap(RS_LERP);
         // O4-O6: the three projections.
         GLuint r = rwkv_mv(m.rwkv_r[l], xr, rwkv_tmp(RT_R));
@@ -794,10 +824,11 @@ GLuint GPU::rwkv_block(int l, const Model& m, GLuint resid, float* cpu_wkv_state
         }
         lap(RS_MV);
         // O20-O22: ffn norm, its token shift and the channel-mix lerp.
-        GLuint xn2 = rwkv_ln(resid, rwkv_const(l, RC_ATTNorm2), rwkv_tmp(RT_XN2));
-        Target& shF = rwkv_shift_[(size_t)l * 2 + 1];
+        Target& shF = sh(1, ppar);              // previous token's xn2 (the lerp's SH)
+        Target& xn2T = pp ? sh(1, par) : rwkv_tmp(RT_XN2);
+        GLuint xn2 = rwkv_ln(resid, rwkv_const(l, RC_ATTNorm2), xn2T);
         GLuint xk2 = rwkv_lerp(xn2, shF.tex, rwkv_const(l, RC_CMLERP), 0, 1, rwkv_tmp(RT_XR));
-        rwkv_copy(xn2, shF);
+        if (!pp) rwkv_copy(xn2, shF);
         cm_lap(CMP_PRE);
         // O23-O25: key matvec -> relu^2 -> value matvec + residual.  The key is
         // chunked on VC4 (split_rwkv); the two halves recombine at the value add.
