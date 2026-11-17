@@ -257,6 +257,10 @@ void Chat::run_turn(const std::string& user, bool first, int pos, std::vector<Ch
     }
     if (g_stop) { tt.cut = "prefill"; app.gpu.sync(); return; }
     tt.begin_decode();
+    // DRAWCOUNT / SYNCCOUNT count the decode loop only: the prompt's draws are a
+    // prompt-specific extra, and a per-token figure that includes them moves with
+    // the prompt rather than with the kernel (docs/test-hooks.md).
+    const long draw0 = app.gpu.draws(), sync0 = app.gpu.syncs();
     int generated = 0;
     if (!cand_mode && getenv("LOGITS_OUT")) {
         ofstream f(getenv("LOGITS_OUT"), ios::binary);
@@ -328,6 +332,8 @@ void Chat::run_turn(const std::string& user, bool first, int pos, std::vector<Ch
         ofstream f(getenv("TOKENS_OUT"), ios::binary);
         for (int t : tokens) f.write((char*)&t, 4);
     }
+    last_turn.draws_decode = app.gpu.draws() - draw0;
+    last_turn.syncs_decode = app.gpu.syncs() - sync0;
     if (g_stop) app.gpu.sync();
 }
 
@@ -641,6 +647,21 @@ void Chat::print_stats() const {
     cout << flush;
 }
 
+// DRAWCOUNT / SYNCCOUNT: what a decoded token costs in launches instead of in
+// milliseconds, which is the quantity the RWKV fusion work moves -- that path is
+// launch/sync-bound, not MAC-bound (docs/rwkv7-plan.zh-CN.md, P6).  Decode only:
+// the prompt's launches are a prompt-specific extra, so the turn records the
+// delta around its decode loop (TurnReport::draws_decode).
+static void print_launch_counts(const TurnReport& turn) {
+    if (turn.generated <= 0) return;
+    if (getenv("DRAWCOUNT"))
+        cout << "draws " << turn.draws_decode << " decode, "
+             << (double)turn.draws_decode / turn.generated << " per token\n";
+    if (getenv("SYNCCOUNT"))
+        cout << "syncs " << turn.syncs_decode << " decode, "
+             << (double)turn.syncs_decode / turn.generated << " per token\n";
+}
+
 void Chat::print_status() const {
     // Ambient, not an answer: stderr, and only for a human at a terminal, so a
     // redirected stdout is exactly the conversation.
@@ -660,6 +681,7 @@ int Chat::repl() {
     if (!app.opt.prompt.empty()) {
         if (app.opt.tools_json.empty()) run_turn(app.opt.prompt, true, 0);
         else run_tool_turn(app.opt.prompt, true);
+        print_launch_counts(last_turn);
     } else {
         bool first = true;
         int cancels = 0;
@@ -759,6 +781,7 @@ int Chat::repl() {
             else run_tool_turn(line, first, app.chat_tmpl ? &history : nullptr);
             first = false;
             print_status();
+            print_launch_counts(last_turn);
             if (g_stop) {
                 cout << "\n[interrupted]\n";
                 g_stop = 0;
@@ -835,6 +858,7 @@ if (!cand_mode && getenv("LOGITS_OUT")) {
     f.write((char*)logits.data(), logits.size() * 4);
 }
 tt.begin_decode();
+const long cdraw0 = app.gpu.draws(), csync0 = app.gpu.syncs();
 int generated = 0;
 double decode_ms = 0;
 vector<int> recent;
@@ -894,6 +918,8 @@ if (getenv("TOKENS_OUT")) {
     ofstream f(getenv("TOKENS_OUT"), ios::binary);
     for (int t : tokens) f.write((char*)&t, 4);
 }
+last_turn.draws_decode = app.gpu.draws() - cdraw0;
+last_turn.syncs_decode = app.gpu.syncs() - csync0;
 if (g_stop) { tt.cut = "decode"; app.gpu.sync(); cout << "[interrupted]\n"; return 0; }
 // A completion model that never emits its end token looks like "it will not
 // stop"; say which limit ended it so that is diagnosable from the output.
@@ -904,9 +930,6 @@ if (!quiet && !ended_on_eos && generated >= app.opt.gen)
                     "emit its end token (eos %d, stop %d); raise --gen or press "
                     "Ctrl-C]\n", generated, app.model.id_eos, app.model.id_stop);
 if (generated) cout << "decode avg " << decode_ms / generated << " ms/token\n";
-if (getenv("DRAWCOUNT") && generated) {
-    cout << "draws " << app.gpu.draws() << " total, "
-         << (double)app.gpu.draws() / generated << " per token\n";
-}
+print_launch_counts(last_turn);
 return 0;
 }

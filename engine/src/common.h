@@ -115,6 +115,12 @@ struct TurnReport {
         double decode_ms_per_token = 0;
         int generated = 0;
         const char* cut = nullptr;   // nullptr = the turn ended on its own
+        // The decode loop's own launch counters (DRAWCOUNT / SYNCCOUNT): the
+        // prefill's draws are a prompt-specific extra, so a draws-per-token
+        // figure has to start after the last prompt token.  See
+        // docs/test-hooks.md.
+        long draws_decode = 0;
+        long syncs_decode = 0;
 };
 
 struct TurnTiming {

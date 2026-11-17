@@ -42,6 +42,10 @@ class GPU {
     friend class Session;
 public:
     long draws() const { return draws_; }
+    // Host<->GPU synchronisations: every glFinish plus every glReadPixels on the
+    // hot path (SYNCCOUNT prints them; docs/test-hooks.md).  A draw is cheap to
+    // issue and a sync is not, so the two are counted separately.
+    long syncs() const { return syncs_; }
     GPU();
     ~GPU();
 
@@ -300,6 +304,8 @@ private:
     GLint uloc(GLuint prog, const char* name);
     void draw_tri();
     long draws_ = 0;
+    long syncs_ = 0;
+    void note_sync() { ++syncs_; }
     GLint aloc(GLuint prog, const char* name);
     void bind_tex(int unit, GLuint tex);
     void bind_fbo(GLuint fbo);

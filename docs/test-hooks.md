@@ -75,7 +75,15 @@ without moving the gate:
   The w2 halves cannot be replayed in place: `w2b` writes the texture `w2a`
   reads as its residual, so a replay after the fact doubles it — each replay
   goes to its own scratch target instead.
-- `DRAWCOUNT=1` — print draws per generated token.
+- `DRAWCOUNT=1` — print draws per decoded token.
+- `SYNCCOUNT=1` — print host↔GPU synchronisations per decoded token: every
+  `glFinish` plus every `glReadPixels` on the read-back path (the matvec
+  target, the logits target, `read_bytes`).  Both counters are **decode only**
+  — the turn records the delta around its decode loop, so the prompt's launches
+  do not move a per-token figure — and they are the meters the RWKV work is
+  judged by, because that path is launch/sync-bound rather than MAC-bound
+  (`docs/rwkv7-plan.zh-CN.md` §九, P6).  One token on the CPU path is ~230
+  draws / ~167 syncs; the fused GPU path is ~1150 draws / ~3 syncs (Xe).
 - `LAYER_PROFILE=1` — per-pass marks.  The `glFinish` in the lap also retires
   the draw issued before it, so use the replay probes to price a pass; keep
   `LAYER_PROFILE` for finding *which* pass moved.

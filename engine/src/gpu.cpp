@@ -50,7 +50,7 @@ bool GPU::gpu_layer_enabled() const{
         return env_flag("GPU_LAYER");
     }
 
-void GPU::sync(){ glFinish(); }
+void GPU::sync(){ note_sync(); glFinish(); }
 
 void GPU::forget_state(){ gl_state_forget_bindings(); }
 

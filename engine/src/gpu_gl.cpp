@@ -27,6 +27,7 @@ vector<float> GPU::read_logits_full(const vector<Mat>& tiles){
             const int w = logits_target_.w;
             bind_fbo(logits_target_.fbo);
             vector<uint8_t> b((size_t)w * rows * 4);
+            note_sync();
             glReadPixels(0, 0, w, rows, GL_RGBA, GL_UNSIGNED_BYTE, b.data());
             for (int i = 0; i < rows; ++i) {
                 const int n = tiles[i].rows;
@@ -55,6 +56,7 @@ vector<uint8_t> GPU::read_bytes(Target& t, int w, int h){
         bind_fbo(t.fbo);
         glViewport(0, 0, t.w, t.h);
         vector<uint8_t> b((size_t)w * h * 4);
+        note_sync();
         glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, b.data());
         return b;
     }
@@ -277,6 +279,7 @@ vector<int32_t> GPU::read_i32(Target& t, int w, int h){
         bind_fbo(t.fbo);
         glViewport(0, 0, t.w, t.h);
         vector<uint8_t> b((size_t)w * h * 4);
+        note_sync();
         glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, b.data());
         vector<int32_t> out((size_t)w * h);
         for (int i = 0; i < w * h; ++i) {
