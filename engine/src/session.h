@@ -54,6 +54,17 @@ public:
     int step_greedy(int token, int pos);
     bool greedy_fast_ok() const;
 
+    // P1 (task-13): RWKV-7 chunked prefill.  A prompt is run one *layer* pass at
+    // a time over a batch of tokens: the projections (r/k/v, the four low-rank
+    // pairs, W_o, the channel-mix key and value) are drawn once per weight for
+    // the whole batch, while the elementwise chain and the WKV7 recurrence stay
+    // per token and in token order, which is what makes the state this leaves
+    // behind identical to the serial loop's.  Off by default (RWKV_PREFILL=1);
+    // RWKV_PREFILL_N sets the batch size, so the two paths A/B in one binary.
+    bool prefill_batch_ok() const;
+    vector<float> prefill_batch(const vector<int>& toks, bool want_logits);
+    int prefill_batch_size() const;
+
     // Prefill batching (WORKLOG 7c): run one layer pass for two consecutive
     // positions.  Returns B logits when want_logits; a pair never contains the
     // last prompt token, whose logits are the only ones the caller needs.
@@ -95,6 +106,11 @@ private:
     // every elementwise op and the WKV recurrence run here in f32 (P2 is the
     // correctness path -- P6 is the fused/GPU one).
     vector<float> forward_rwkv(int token);
+    // P1 (task-13): the same block for N tokens, projection-batched.  Returns
+    // the residual stream after the last layer for every token, in the order the
+    // tokens were given (the k-grouping inside GPU::matvec_batch_group is
+    // internal and is undone before it returns).
+    vector<vector<float>> forward_rwkv_batch(const vector<int>& toks);
     // P6: the fused GPU layer loop (RWKV_GPU=1).  Elementwise ops and the WKV7
     // recurrence run on textures; only the final residual crosses back per token.
     vector<float> forward_gpu_rwkv(int token);

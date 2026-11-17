@@ -701,11 +701,11 @@ vector<float> Session::forward_rwkv(int token){
         vector<float> x = embedding(token, true);
         if (!m_.rwkv_tok_norm.empty()) x = rwkv_layernorm(x, m_.rwkv_tok_norm.data(), eps);
         vector<float> sa((size_t)hs);           // <S[i], kk>, per head, reused
-        // RWKV_PROFILE (docs/test-hooks.md): read-only.  The matvec three GL
-        // steps come from GPU counters (upload/draw/read-back); elem is the
-        // layer wall time minus those, i.e. the host side of the block.  On a
+        // RWKV_PROFILE (docs/test-hooks.md): read-only.  The matvec's three GL
+        // steps come from GPU's counters (upload/draw/read-back); `elem` is the
+        // layer's wall time minus those, i.e. the host side of the block.  On a
         // needs_finish() driver the upload finishes inside its own step, so the
-        // read-back is what carries the GPU matvec work.
+        // read-back is what carries the GPU's matvec work.
         static const bool prof = env_set("RWKV_PROFILE");
         double t_up = 0.0, t_draw = 0.0, t_read = 0.0, t_tot = 0.0;
         for (int l = 0; l < L; ++l) {
@@ -964,6 +964,339 @@ vector<float> Session::forward_rwkv(int token){
                             "mv_read=%.2f elem=%.2f\n", t_tot, t_up, t_draw, t_read,
                     t_tot - t_up - t_draw - t_read);
         return x;
+    }
+
+// ---- RWKV-7 chunked prefill (P1, task-13) ----------------------------------
+//
+// The serial loop above walks one token through all L layers, so every
+// projection is drawn and read back once per token: on Xe that is ~170 host
+// syncs and on the board ~170 uploads per token, and a 512-token prompt is
+// minutes.  Nothing in a projection depends on the previous token, so the *same*
+// block can be evaluated one layer at a time for a batch of tokens: one draw per
+// weight for the whole batch (GPU::matvec_batch_group) and one read-back.
+//
+// What stays serial, and must: the token shift (a running state per layer), the
+// WKV7 recurrence and everything elementwise (tanh/sigmoid/exp, the L2 and group
+// norms, the r_k bonus, relu^2, the residual adds).  The plan's split -- the
+// recurrence is 1.1-2.0% of the MACs -- is why this is where the work goes.
+//
+// The numbers are the serial loop's, bit for bit: the batch kernel is
+// matvec_q8's text with the input row substituted, and each input keeps its own
+// 2^k normalisation (the rows are grouped by k inside matvec_batch_group, one
+// draw per group, exactly the uniform the serial path binds).  So the layer
+// arithmetic below is transcribed from forward_rwkv unchanged, and the state
+// this leaves behind (WKV, both shift vectors, v_first) is the serial loop's.
+vector<vector<float>> Session::forward_rwkv_batch(const vector<int>& toks){
+        const int N = (int)toks.size();
+        const int dim = m_.dim, L = m_.layers, H = m_.heads, hs = m_.rwkv.head_size;
+        const float eps = m_.rwkv.norm_eps;
+        const size_t hdim = (size_t)hs * (size_t)hs;
+        // O1/O2 pre-roll: the embedding stays off the q16 grid (see forward_rwkv)
+        // and layer 0's pre_norm is applied here, once per token.
+        vector<vector<float>> x(N);
+        for (int t = 0; t < N; ++t) {
+                x[t] = embedding(toks[t], true);
+                if (!m_.rwkv_tok_norm.empty())
+                        x[t] = rwkv_layernorm(x[t], m_.rwkv_tok_norm.data(), eps);
+        }
+        // O8's cross-layer state is per *token*: layer 0 records v_first for the
+        // token it is running and every later layer of that same token reads it.
+        // One vector for the batch would mix in another token (and after the
+        // batch the last token's value is what a decode continues from).
+        vector<vector<float>> vfirst(N);
+        vector<float> sa((size_t)hs);
+        for (int l = 0; l < L; ++l) {
+            if (g_stop) break;
+            const float* w0 = m_.rwkv_bias.data() + (size_t)l * 3 * dim;
+            const float* a0 = w0 + dim;
+            const float* v0 = a0 + dim;
+            const bool have_gate = m_.rwkv.gate && l < (int)m_.rwkv_g1.size() &&
+                                   m_.rwkv_g1[l].rows > 0;
+            const bool have_vres = l > 0 && rwkv_state_.have_v_first &&
+                                   m_.rwkv_v1[l].rows > 0;
+            // O1-O3, per token and in token order (the shift is a running state)
+            vector<vector<float>> xr(N), xw(N), xk(N), xv(N), xa(N), xg(N);
+            vector<const vector<float>*> pxr(N), pxw(N), pxk(N), pxv(N), pxa(N), pxg(N);
+            for (int t = 0; t < N; ++t) {
+                vector<float> xn = rwkv_layernorm(x[t], m_.rwkv_att_norm.data() + (size_t)l * 2 * dim, eps);
+                float* sh = rwkv_state_.shift_att.data() + (size_t)l * dim;
+                const float* lp = m_.rwkv_lerp.data() + (size_t)l * 6 * dim;
+                xr[t].resize((size_t)dim); xw[t].resize((size_t)dim); xk[t].resize((size_t)dim);
+                xv[t].resize((size_t)dim); xa[t].resize((size_t)dim); xg[t].resize((size_t)dim);
+                for (int i = 0; i < dim; ++i) {
+                    const float sx = sh[i] - xn[i];
+                    xr[t][i] = xn[i] + sx * lp[i];
+                    xw[t][i] = xn[i] + sx * lp[dim + i];
+                    xk[t][i] = xn[i] + sx * lp[2 * dim + i];
+                    xv[t][i] = xn[i] + sx * lp[3 * dim + i];
+                    xa[t][i] = xn[i] + sx * lp[4 * dim + i];
+                    xg[t][i] = xn[i] + sx * lp[5 * dim + i];
+                }
+                memcpy(sh, xn.data(), sizeof(float) * dim);
+                pxr[t] = &xr[t]; pxw[t] = &xw[t]; pxk[t] = &xk[t];
+                pxv[t] = &xv[t]; pxa[t] = &xa[t]; pxg[t] = &xg[t];
+            }
+            // O4-O6: r/k/v, one draw per projection for the whole batch.
+            const GPU::MvBatch rkv[3] = {{&m_.rwkv_r[l], &pxr},
+                                         {&m_.rwkv_k[l], &pxk},
+                                         {&m_.rwkv_v[l], &pxv}};
+            vector<vector<vector<float>>> rkv_out =
+                gpu_.matvec_batch_group(vector<GPU::MvBatch>(rkv, rkv + 3));
+            vector<vector<float>> r = std::move(rkv_out[0]), k = std::move(rkv_out[1]);
+            vector<vector<float>> v = std::move(rkv_out[2]);
+            // O7-O10: the four low-rank down projections, one read-back.
+            vector<GPU::MvBatch> dg;
+            vector<const vector<float>*> ptw, ptv, pta, ptg;
+            dg.push_back({&m_.rwkv_w1[l], &pxw});
+            if (have_vres) dg.push_back({&m_.rwkv_v1[l], &pxv});
+            dg.push_back({&m_.rwkv_a1[l], &pxa});
+            if (have_gate) dg.push_back({&m_.rwkv_g1[l], &pxg});
+            vector<vector<vector<float>>> down = gpu_.matvec_batch_group(dg);
+            size_t bi = 0;
+            vector<vector<float>> tw = std::move(down[bi++]);          // w down: tanh
+            vector<vector<float>> tv;
+            if (have_vres) tv = std::move(down[bi++]);                 // v down: pass-through
+            vector<vector<float>> ta = std::move(down[bi++]);          // a down: pass-through
+            vector<vector<float>> tg;
+            if (have_gate) tg = std::move(down[bi++]);                 // g down: sigmoid
+            for (int t = 0; t < N; ++t) {
+                for (float& z : tw[t]) z = tanhf(z);
+                if (have_gate)
+                    for (float& z : tg[t]) z = rwkv_sigmoid(z);
+            }
+            ptw.resize(N); ptv.resize(N); pta.resize(N); ptg.resize(N);
+            for (int t = 0; t < N; ++t) {
+                ptw[t] = &tw[t]; pta[t] = &ta[t];
+                if (have_vres) ptv[t] = &tv[t];
+                if (have_gate) ptg[t] = &tg[t];
+            }
+            // O7-O10 up projections, one read-back.
+            vector<GPU::MvBatch> ug;
+            ug.push_back({&m_.rwkv_w2[l], &ptw});
+            if (have_vres) ug.push_back({&m_.rwkv_v2[l], &ptv});
+            ug.push_back({&m_.rwkv_a2[l], &pta});
+            if (have_gate) ug.push_back({&m_.rwkv_g2[l], &ptg});
+            vector<vector<vector<float>>> up = gpu_.matvec_batch_group(ug);
+            size_t ui = 0;
+            vector<vector<float>> uu = std::move(up[ui++]);            // decay logits
+            vector<vector<float>> uv;
+            if (have_vres) uv = std::move(up[ui++]);                   // vres logits
+            vector<vector<float>> ua = std::move(up[ui++]);            // ICLR logits
+            vector<vector<float>> gg;
+            if (have_gate) gg = std::move(up[ui++]);
+            // O7-O19, per token: the decay, the value residual, the ICLR gate,
+            // the key norm and delta, the recurrence, the group norm, the r_k
+            // bonus, the gate and W_o's input row.
+            vector<vector<float>> y(N);
+            vector<const vector<float>*> py(N);
+            float hmax = 0.0f, smax = 0.0f, xmax = 0.0f, wmax = 0.0f, amax = 0.0f, gmax = 0.0f;
+            static const bool rwkv_diag = env_set("RWKV_DUMP");
+            for (int t = 0; t < N; ++t) {
+                vector<float> w((size_t)dim);
+                for (int i = 0; i < dim; ++i)
+                    w[i] = expf(-rwkv_sigmoid(uu[t][i] + w0[i]) * kRwkvDecayC);
+                if (l == 0) {
+                    vfirst[t] = v[t];
+                } else if (have_vres) {
+                    const float* vf = vfirst[t].data();
+                    for (int i = 0; i < dim; ++i)
+                        v[t][i] += (vf[i] - v[t][i]) * rwkv_sigmoid(uv[t][i] + v0[i]);
+                }
+                vector<float> a((size_t)dim);
+                for (int i = 0; i < dim; ++i) a[i] = rwkv_sigmoid(ua[t][i] + a0[i]);
+                const float* sk = m_.rwkv_scale.data() + (size_t)l * 3 * dim;
+                const float* kk_s = sk;
+                const float* ka_s = sk + dim;
+                const float* rk_s = sk + 2 * dim;
+                vector<float> kk((size_t)dim);
+                for (int i = 0; i < dim; ++i) kk[i] = k[t][i] * kk_s[i];
+                for (int i = 0; i < dim; ++i) k[t][i] += (a[i] - 1.0f) * k[t][i] * ka_s[i];
+                for (int h = 0; h < H; ++h) {
+                    float* z = kk.data() + (size_t)h * hs;
+                    double ss = 0.0;
+                    for (int i = 0; i < hs; ++i) ss += (double)z[i] * (double)z[i];
+                    const float nrm = (float)sqrt(ss);
+                    const float inv = 1.0f / (nrm > 1e-12f ? nrm : 1e-12f);
+                    for (int i = 0; i < hs; ++i) z[i] *= inv;
+                }
+                vector<float> yt((size_t)dim);
+                {
+                    float* S = rwkv_state_.wkv.data() + (size_t)l * H * hdim;
+                    for (int h = 0; h < H; ++h) {
+                        float* Sh = S + (size_t)h * hdim;
+                        const float* kkh = kk.data() + (size_t)h * hs;
+                        const float* ah = a.data() + (size_t)h * hs;
+                        const float* kh = k[t].data() + (size_t)h * hs;
+                        const float* vh = v[t].data() + (size_t)h * hs;
+                        const float* wh = w.data() + (size_t)h * hs;
+                        const float* rh = r[t].data() + (size_t)h * hs;
+                        for (int i = 0; i < hs; ++i) {
+                            double acc = 0.0;
+                            const float* Si = Sh + (size_t)i * hs;
+                            for (int j = 0; j < hs; ++j) acc -= (double)Si[j] * (double)kkh[j];
+                            sa[i] = (float)acc;
+                        }
+                        for (int i = 0; i < hs; ++i) {
+                            float* Si = Sh + (size_t)i * hs;
+                            const float vi = vh[i], s = sa[i];
+                            for (int j = 0; j < hs; ++j)
+                                Si[j] = Si[j] * wh[j] + vi * kh[j] + s * (kkh[j] * ah[j]);
+                        }
+                        float* yh = yt.data() + (size_t)h * hs;
+                        for (int i = 0; i < hs; ++i) {
+                            const float* Si = Sh + (size_t)i * hs;
+                            double acc = 0.0;
+                            for (int j = 0; j < hs; ++j) acc += (double)Si[j] * (double)rh[j];
+                            yh[i] = (float)acc;
+                        }
+                    }
+                }
+                {
+                    const float* lnw = m_.rwkv_ln_x.data() + (size_t)l * 2 * dim;
+                    const float* lnb = lnw + dim;
+                    for (int h = 0; h < H; ++h) {
+                        float* z = yt.data() + (size_t)h * hs;
+                        double sum = 0.0;
+                        for (int i = 0; i < hs; ++i) sum += z[i];
+                        const float mu = (float)(sum / hs);
+                        double vs = 0.0;
+                        for (int i = 0; i < hs; ++i) { const double d = (double)z[i] - (double)mu; vs += d * d; }
+                        const float inv = 1.0f / sqrtf((float)(vs / hs) + kRwkvGroupEps);
+                        for (int i = 0; i < hs; ++i)
+                            z[i] = (z[i] - mu) * inv * lnw[(size_t)h * hs + i] + lnb[(size_t)h * hs + i];
+                    }
+                }
+                for (int h = 0; h < H; ++h) {
+                    double acc = 0.0;
+                    for (int i = 0; i < hs; ++i) {
+                        const size_t o = (size_t)h * hs + i;
+                        acc += (double)k[t][o] * (double)r[t][o] * (double)rk_s[o];
+                    }
+                    const float rk = (float)acc;
+                    for (int i = 0; i < hs; ++i) {
+                        const size_t o = (size_t)h * hs + i;
+                        yt[o] += v[t][o] * rk;
+                    }
+                }
+                if (have_gate)
+                    for (int i = 0; i < dim; ++i) yt[i] *= gg[t][i];
+                y[t] = std::move(yt);
+                py[t] = &y[t];
+                if (rwkv_diag) {
+                    const float* S = rwkv_state_.wkv.data() + (size_t)l * H * hdim;
+                    for (size_t i = 0; i < (size_t)H * hdim; ++i) smax = std::max(smax, fabsf(S[i]));
+                    for (float z : x[t]) xmax = std::max(xmax, fabsf(z));
+                    for (float z : w) wmax = std::max(wmax, z);
+                    for (float z : a) amax = std::max(amax, fabsf(z));
+                    if (have_gate) for (float z : gg[t]) gmax = std::max(gmax, fabsf(z));
+                }
+            }
+            // O18-O19: W_o for the whole batch, then the residual on the q16 grid.
+            const GPU::MvBatch wo[1] = {{&m_.wo[l], &py}};
+            vector<vector<vector<float>>> wo_out =
+                gpu_.matvec_batch_group(vector<GPU::MvBatch>(wo, wo + 1));
+            for (int t = 0; t < N; ++t) x[t] = add_q16(x[t], wo_out[0][t]);
+            // O20-O25: the channel mix, per-token norm and lerp, batched key.
+            vector<vector<float>> xk2(N);
+            vector<const vector<float>*> pxk2(N);
+            for (int t = 0; t < N; ++t) {
+                vector<float> xn2 = rwkv_layernorm(x[t], m_.rwkv_att_norm_2.data() + (size_t)l * 2 * dim, eps);
+                float* sh2 = rwkv_state_.shift_ffn.data() + (size_t)l * dim;
+                const float* cml = m_.rwkv_cm_lerp.data() + (size_t)l * dim;
+                xk2[t].resize((size_t)dim);
+                for (int i = 0; i < dim; ++i) {
+                    const float sx = sh2[i] - xn2[i];
+                    xk2[t][i] = xn2[i] + sx * cml[i];
+                }
+                memcpy(sh2, xn2.data(), sizeof(float) * dim);
+                pxk2[t] = &xk2[t];
+            }
+            vector<vector<float>> cm_out(N);
+            if (m_.ffn_chunked) {
+                // VC4: the key is split so each weight texture is <= 2048 rows;
+                // the two relu^2 halves are recombined by the value halves, on
+                // the q16 grid (add_q16), exactly as the serial loop does.
+                const GPU::MvBatch ka[1] = {{&m_.w1a[l], &pxk2}};
+                const GPU::MvBatch kb[1] = {{&m_.w1b[l], &pxk2}};
+                vector<vector<vector<float>>> ha = gpu_.matvec_batch_group(vector<GPU::MvBatch>(ka, ka + 1));
+                vector<vector<vector<float>>> hb = gpu_.matvec_batch_group(vector<GPU::MvBatch>(kb, kb + 1));
+                vector<const vector<float>*> pha(N), phb(N);
+                for (int t = 0; t < N; ++t) {
+                    for (float& z : ha[0][t]) { z = z > 0.0f ? z * z : 0.0f; hmax = std::max(hmax, z); }
+                    for (float& z : hb[0][t]) { z = z > 0.0f ? z * z : 0.0f; hmax = std::max(hmax, z); }
+                    pha[t] = &ha[0][t];
+                    phb[t] = &hb[0][t];
+                }
+                const GPU::MvBatch va[1] = {{&m_.w2a[l], &pha}};
+                const GPU::MvBatch vb[1] = {{&m_.w2b[l], &phb}};
+                vector<vector<vector<float>>> ca = gpu_.matvec_batch_group(vector<GPU::MvBatch>(va, va + 1));
+                vector<vector<vector<float>>> cb = gpu_.matvec_batch_group(vector<GPU::MvBatch>(vb, vb + 1));
+                for (int t = 0; t < N; ++t) cm_out[t] = add_q16(ca[0][t], cb[0][t]);
+            } else {
+                const GPU::MvBatch kk1[1] = {{&m_.w1[l], &pxk2}};
+                vector<vector<vector<float>>> h = gpu_.matvec_batch_group(vector<GPU::MvBatch>(kk1, kk1 + 1));
+                vector<const vector<float>*> ph(N);
+                for (int t = 0; t < N; ++t) {
+                    for (float& z : h[0][t]) { z = z > 0.0f ? z * z : 0.0f; hmax = std::max(hmax, z); }
+                    ph[t] = &h[0][t];
+                }
+                const GPU::MvBatch w2g[1] = {{&m_.w2[l], &ph}};
+                cm_out = gpu_.matvec_batch_group(vector<GPU::MvBatch>(w2g, w2g + 1))[0];
+            }
+            for (int t = 0; t < N; ++t) x[t] = add_q16(x[t], cm_out[t]);
+            rwkv_state_.have_v_first = l == 0 ? true : rwkv_state_.have_v_first;
+            if (rwkv_diag)
+                cerr << "RWKV l=" << l << " n=" << N << " state_max=" << smax
+                     << " resid_max=" << xmax << " sqrelu_max=" << hmax
+                     << " w_max=" << wmax << " a_max=" << amax;
+            if (rwkv_diag && have_gate) cerr << " g_max=" << gmax;
+            if (rwkv_diag) cerr << "\n";
+        }
+        // The state the next decode continues from is the last token's.
+        if (!vfirst.empty() && rwkv_state_.have_v_first) rwkv_state_.v_first = vfirst.back();
+        return x;
+    }
+
+bool Session::prefill_batch_ok() const {
+        static const bool on = env_flag("RWKV_PREFILL");
+        if (!on || !m_.is_rwkv()) return false;
+        // The batched kernel is the q8 one (matvec_q8_batch): a q4/i16
+        // container keeps the serial prefill rather than answering from a
+        // kernel that cannot decode its weights.
+        if (rwkv_gpu_) return false;   // the fused loop is one draw per op; no batch kernel
+        const auto q8 = [](const vector<Mat>& v) {
+            for (const Mat& m : v) if (m.rows > 0 && m.type != WeightType::INT8) return false;
+            return true;
+        };
+        if (!q8(m_.rwkv_r) || !q8(m_.rwkv_k) || !q8(m_.rwkv_v) || !q8(m_.wo)) return false;
+        if (!q8(m_.rwkv_w1) || !q8(m_.rwkv_w2) || !q8(m_.rwkv_a1) || !q8(m_.rwkv_a2)) return false;
+        if (!q8(m_.rwkv_v1) || !q8(m_.rwkv_v2) || !q8(m_.rwkv_g1) || !q8(m_.rwkv_g2)) return false;
+        if (m_.ffn_chunked && (!q8(m_.w1a) || !q8(m_.w1b) || !q8(m_.w2a) || !q8(m_.w2b))) return false;
+        return true;
+    }
+
+int Session::prefill_batch_size() const {
+        static const int n = env_int("RWKV_PREFILL_N", 16);
+        // Clamped so the staging block (groups * n texture rows, groups <= 4)
+        // stays inside the driver's target limit on every machine: VC4's is
+        // 2048 rows, and the widest group is the four low-rank downs.
+        if (n < 1) return 16;
+        return n > 128 ? 128 : n;
+    }
+
+// One prefill call: the batch through the block, and the last token's logits
+// when the prompt ends here (the caller's only consumer).  A batch that does not
+// contain the last prompt token returns no logits, exactly like step(...,
+// false), so the caller's loop and the LOGITS_OUT dump are unchanged.
+vector<float> Session::prefill_batch(const vector<int>& toks, bool want_logits){
+        if (toks.empty()) return {};
+        if (!prefill_batch_ok()) {
+                for (size_t i = 0; i < toks.size(); ++i) step(toks[i], (int)i, false);
+                return {};
+        }
+        vector<vector<float>> x = forward_rwkv_batch(toks);
+        if (g_stop || !want_logits || x.empty()) return {};
+        return gpu_.logits(m_.logits_tiles, rwkv_head_input(x.back()));
     }
 
 vector<float> Session::rwkv_head_input(const vector<float>& x){

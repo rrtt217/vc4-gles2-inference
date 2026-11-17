@@ -351,6 +351,77 @@ string matvec_q8(int rows, int cols, XFormat xf, bool wrow) {
         "gl_FragColor=x_i24encq(s*" + SC + ");}";
 }
 
+// The batched matvec: one draw for N inputs (RWKV-7 chunked prefill, P1).
+//
+// The single-token kernels read texel row 0 of X because their staging texture
+// is one row tall.  A chunked prefill uploads N inputs as N rows of one texture
+// and takes its row from gl_FragCoord.y; the viewport's y offset is absolute
+// (docs/engine-internals.md, "pixel centers"), so no extra uniform is needed.
+// Everything else is matvec_q8's text: the same weight fetch, the same
+// activation decode, the same loop order, the same q24 encode and the same
+// scale uniform.  Fragment (r, b) therefore computes exactly what matvec_q8
+// computes for row r of input b, bit for bit -- the host keeps the per-input
+// 2^k normalisation (Session::rwkv_mv's rule) and folds 2^k into the matrix
+// scale of its k group, so each draw sees one k and the arithmetic is the
+// single-token path's.
+//
+// The texture height is the uniform `xh` rather than a literal so one program
+// serves every batch size (a literal would link a program per N); sampling is
+// GL_NEAREST at a pixel center, so the row select cannot be off by a texel.
+string matvec_q8_batch(int rows, int cols, XFormat xf, bool wrow) {
+    need_shape("matvec_q8_batch", rows, cols, 4);
+    const string ROWS = to_string(rows), COLS4 = to_string(cols / 4);
+    const string WD = wrow ? wrow_scale(rows) : "";
+    const string SC = wrow ? "wsr(r)" : "ws";
+    // The batch row this fragment belongs to, in [0,1) texel space.  The X
+    // texture's width is a *uniform* (xw): one call packs rows of different
+    // lengths into one texture (the ups are 64/64/32/128 wide), so a literal
+    // divisor would scale each row's texels by the wrong stride and read the
+    // neighbouring row's data.  Sampling is nearest at a pixel center, so the
+    // row and column select are exact -- the same texels a one-row texture
+    // would hand matvec_q8.
+    const string AY = "int b=int(gl_FragCoord.y);float ay=(float(b)+0.5)/xh;";
+    const string WROW =
+        "vec4 c=texture2D(W,vec2((float(q)+0.5)/float(" + COLS4 + "),"
+        "(float(r)+0.5)/float(" + ROWS + ")));"
+        "vec4 w=c*255.0-128.0;";
+    if (xf == XFormat::I16_2) {
+        // matvec_q8's I16_2 fast path verbatim (two fetches, dA/dB inline); the
+        // only edits are the row coordinate and the encode's local name for the
+        // blue channel, which the batch index b occupies here.
+        return "precision highp float;uniform sampler2D W,X;uniform float ws;"
+               "uniform float xh;uniform float xw;" + WD +
+               kDec16A + kDec16B +
+               "void main(){int r=int(gl_FragCoord.x);" + AY + "float s=0.0;"
+               "for(int q=0;q<" + COLS4 + ";q++){" + WROW +
+               "vec4 xa=texture2D(X,vec2((float(2*q)+0.5)/xw,ay));"
+               "vec4 xb=texture2D(X,vec2((float(2*q+1)+0.5)/xw,ay));"
+               "s+=w.x*dA(xa)+w.y*dB(xa)+w.z*dA(xb)+w.w*dB(xb);}"
+               "float v=clamp(floor(s*" + SC + "+0.5),-32768.0,32767.0)+8388608.0;"
+               "float g=floor(v/65536.0);"
+               "float bl=floor(v/256.0)-g*256.0;"
+               "float a=v-g*65536.0-bl*256.0;"
+               "gl_FragColor=vec4(0.0,g/255.0,bl/255.0,a/255.0);}";
+    }
+    // The other layouts keep the generic X4Q decode matvec_q8 uses, with the row
+    // substituted: one fetch per value (I24_1, I16_1) or per four (I8_4).
+    auto fetch = [&](const string& i) -> string {
+        if (xf == XFormat::I24_1)
+            return "x_q24raw(texture2D(X,vec2((float(" + i + ")+0.5)/xw,ay)))";
+        if (xf == XFormat::I16_1)
+            return "x_i16raw(texture2D(X,vec2((float(" + i + ")+0.5)/xw,ay)).rg)";
+        return "((texture2D(X,vec2((float((" + i + ")/4)+0.5)/xw,ay))*255.0-128.0)*16.0)";
+    };
+    return head(xf) + q24_helpers() +
+        "uniform sampler2D W,X;uniform float ws;uniform float xh;uniform float xw;" + WD +
+        "void main(){int r=int(gl_FragCoord.x);" + AY + "float s=0.0;"
+        "for(int q=0;q<" + COLS4 + ";q++){" + WROW +
+        "vec4 x=vec4(" + fetch("q*4") + "," + fetch("q*4+1") + ","
+        + fetch("q*4+2") + "," + fetch("q*4+3") + ");"
+        "s+=w.x*x.x+w.y*x.y+w.z*x.z+w.w*x.w;}"
+        "gl_FragColor=x_i24encq(s*" + SC + ");}";
+}
+
 string matvec_q8_pair(int rows, int cols, XFormat xf, bool wrow) {
     need_shape("matvec_q8_pair", rows, cols, 4);
     const int axw = x_texels(cols, xf);

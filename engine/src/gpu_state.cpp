@@ -134,6 +134,8 @@ void GPU::reset_targets(){
         rwkv_vfirst_ = Target();
         rwkv_x0_ = Target();
         rwkv_mvrows_ = Target();
+        rwkv_batch_in_ = Target();
+        rwkv_batch_out_ = Target();
         rwkv_cur_ = 0;
         rwkv_have_vfirst_ = false;
         // target_for(rows) caches by row count and is filled lazily *during*

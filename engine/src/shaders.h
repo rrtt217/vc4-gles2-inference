@@ -29,6 +29,10 @@ std::string att_defs(const AttnConfig& c);
 std::string att_helpers();
 
 std::string matvec_q8(int rows, int cols, XFormat xf, bool wrow = false);
+// One draw for a whole batch of matvec inputs (RWKV-7 chunked prefill, P1):
+// matvec_q8's text with the input row taken from gl_FragCoord.y, so fragment
+// (row r, batch b) is matvec_q8's result for row r of input b.
+std::string matvec_q8_batch(int rows, int cols, XFormat xf, bool wrow = false);
 std::string matvec_q8_pair(int rows, int cols, XFormat xf, bool wrow = false);
 std::string matvec_q8_pair_swiglu(int rows, int cols, XFormat xf, bool inl = true, bool wrow = false, int hs = 0);
 std::string matvec_q8_gate2(int rows, int cols);

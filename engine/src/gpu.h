@@ -192,19 +192,33 @@ public:
     // rows[i].x is uploaded to its own staging texture (slot i), so several
     // inputs of the same length cannot overwrite each other.
     struct MvRow { const Mat* m; const vector<float>* x; };
-    // read_mode is the VC4 bisect (RWKV_GROUP): 0 = read the block at the
-    // group own width, 1 = read it at the target full width, 2 = one read
+    // `read_mode` is the VC4 bisect (RWKV_GROUP): 0 = read the block at the
+    // group's own width, 1 = read it at the target's full width, 2 = one read
     // per matrix row (no sync win; isolates the multi-row read).
     vector<vector<float>> matvec_rows(const vector<MvRow>& rows, int slot0 = 0, int read_mode = 0);
+    // P1 (task-13): a *batched* matvec -- one draw per matrix for a whole group
+    // of inputs, instead of one draw per input.  xs holds N input rows; they are
+    // uploaded as N rows of one staging texture and the kernel takes its input
+    // row from gl_FragCoord.y (matvec_q8_batch), so fragment (row r, input b)
+    // is matvec_q8's result for row r of input b.  Each input keeps its own 2^k
+    // normalisation: rows are grouped by k, each group is one draw with the
+    // matrix scale folded exactly as rwkv_mv() folds it, so every output row is
+    // bit-identical to rwkv_mv() on that input.  One read-back per call.
+    struct MvBatch { const Mat* m; const vector<const vector<float>*>* xs; };
+    vector<vector<vector<float>>> matvec_batch_group(const vector<MvBatch>& groups);
+    // The batch's staging texture (in_w x groups*N) and its read-back block
+    // (max rows x groups*N); both grow monotonically, like rwkv_mvrows_.
+    Target rwkv_batch_in_;
+    Target rwkv_batch_out_;
     GLuint rwkv_upload_slot(const vector<float>& x, int slot);
-    // RWKV_PROFILE (docs/test-hooks.md): where a serial-path token time goes.
+    // RWKV_PROFILE (docs/test-hooks.md): where a serial-path token's time goes.
     // Wall time around the three GL steps of a matvec, filled only when the
     // switch is on.  On a needs_finish() driver the upload finishes inside its
     // own step, so the read-back is what carries the GPU work.
     struct RwkvProf { double upload_ms = 0, draw_ms = 0, read_ms = 0; };
     RwkvProf rwkv_prof;
     bool rwkv_prof_on() const;   // RWKV_PROFILE, read once
-    // The fused loop per-stage totals, printed once per token (RWKV_PROFILE).
+    // The fused loop's per-stage totals, printed once per token (RWKV_PROFILE).
     void rwkv_prof_fused_summary();
     void rwkv_flip() { rwkv_cur_ ^= 1; }
     void clear_rwkv_state();
@@ -262,6 +276,7 @@ private:
     AttnConfig att_cfg() const;
     GLuint x_prog(const string& key, const string& src);
     GLuint x_q8(int rows, int cols, bool wrow = false);
+    GLuint x_q8_batch(int rows, int cols, bool wrow);
     GLuint x_q6(int rows, int cols, bool wrow = false);
     GLuint x_q8_pair(int rows, int cols, bool wrow = false);
     GLuint x_q8_pair_swiglu(int rows, int cols, bool wrow = false, int hs = 0);
@@ -566,6 +581,6 @@ private:
     void draw(const Mat& m, GLuint x, Target& t, int row = 0);
 
     vector<int32_t> read_i32(Target& t, int w, int h);
-    // One row of it, starting at y (the group bisect per-row arm).
+    // One row of it, starting at `y` (the group bisect's per-row arm).
     vector<int32_t> read_i32_rows(Target& t, int w, int y, int h);
 };
