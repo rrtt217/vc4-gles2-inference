@@ -55,7 +55,7 @@ cd engine
 make engine_mm3
 
 MODEL=../models/minimind3/minimind3.q8.mmcf \
-GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
+GPU_LAYER=1 KV=q16 ./engine_mm3 --chat \
   --prompt "用一句话介绍你自己。" --gen 64 --greedy
 ```
 
@@ -73,7 +73,7 @@ make -B armv6
 ```bash
 cd engine
 MODEL=../models/minimind3/minimind3.q8.mmcf \
-GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
+GPU_LAYER=1 KV=q16 ./engine_mm3 --chat \
   --prompt "用一句话介绍你自己。" --gen 64 --greedy
 ```
 
@@ -88,7 +88,7 @@ python3 engine/tools/mmcf_pack.py --in models/minimind3 --quant q4 --seq 512 \
 
 cd engine
 MODEL=../models/minimind3/minimind3.q4.mmcf \
-GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
+GPU_LAYER=1 KV=q16 ./engine_mm3 --chat \
   --prompt "用一句话介绍你自己。" --gen 64 --greedy
 ```
 
@@ -136,7 +136,7 @@ python3 server.py --seq 768 --kv-pack 16 \
 | stories15M q8 | 24 MB | ~116 ms/token | TinyStories 补全，连贯 |
 | stories260K | 1 MB | 板上没有 | 下限探针；prefill 5.4 s |
 
-Pi 一列是 2026-11-13 在 HEAD `71cb1e0` 上的测试（`GPU_LAYER=1 KV_PACK=16`、
+Pi 一列是 2026-11-13 在 HEAD `71cb1e0` 上的测试（`GPU_LAYER=1 KV=q16`、
 greedy、`--gen 16`，先丢弃一次预热、再 3 次计时取中位数），只含 decode。
 标"未重测"/"板上没有"的行沿用
 [performance.md](docs/performance.md) 里带日期的最后数据，协议、prefill 范围和

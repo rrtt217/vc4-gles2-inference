@@ -126,7 +126,7 @@ belong in `AGENTS.local.md` (DSH) or `AGENTS.override.md` (Hermes/VLAB).
 ### Pi Zero reference (measured, not a target)
 
 **The current reference is the 2026-11-13 campaign on HEAD `71cb1e0`**: Pi Zero,
-`GPU_LAYER=1 KV_PACK=16`, greedy, `--gen 16`, and per model a discarded warm-up
+`GPU_LAYER=1 KV=q16`, greedy, `--gen 16`, and per model a discarded warm-up
 followed by three timed runs (median).  Decode only; prefill is prompt-specific
 and moves with the board's SD card and background load.  The protocol, the
 prefill ranges and the rows that were not re-measured are in
@@ -174,62 +174,30 @@ of context and 1.89 s of program links per process, against 6.12 s of container
 read and 2.99 s of upload, so this is the one expensive part that survives).
 What it replaces: weights, tokenizer, chat template, session targets, the
 conversation.  What it refuses: a container that does not advertise chat support
-when `--chat` is in effect (same policy as startup).  Both refusals happen
-*before* `release_scene()`, because a container's capability bits live in its
-metadata: `Model::probe()` reads the header and the metadata only, so a typo, a
-non-container or a completion model costs the session nothing.
+when `--chat` is in effect (same policy as startup), and it refuses *before*
+releasing anything — `Model::probe()` reads the header and the metadata only, so
+a typo, a non-container or a completion model costs the session nothing.
+
+Three rules, all of them paid for (the evidence is in
+[`docs/swap-drift.md`](docs/swap-drift.md)):
+
+- **The swap repeats every post-load step.**  `prepare_model()` (FFN split,
+  hidden scale, quantisation) runs before the upload, for a swap and for
+  startup, because the step slices Mats.  Skipping it still answers, with the
+  whole-width FFN and no hidden scale.
+- **A program key is not a program text.**  `x_prog(key, src)` caches by kernel
+  name, so the cache validates the shader *hash* on every hit
+  (`prog_key_hash_`); otherwise the second model runs the first model's kernels.
+- **Everything the GPU owns is released *and* reset**, and
+  `scripts/check_target_reset.sh` fails the gate if a `Target` member is added
+  without a line in `reset_targets()`.
 
 **There is no capacity pre-check, deliberately.**  `CmaFree` is not the budget a
-new GL scene gets -- it is often less than what the driver can find -- and a
-desktop kernel has no CMA at all, so the old `st_size + 48 MB` heuristic refused
-swaps that would have worked.  A container that does not fit is discovered by the
-upload, which fails there.  The command originally also refused
-a precision change (q8 <-> q4) because that produced repetitive garbage; the
-cause was the missing `prepare_model()` below, and a quantisation change is now
-bit-identical too (`scripts/swap_matrix.py`, "mixed" chain).
-
-Two invariants it depends on, both paid for:
-
-- **A program key is not a program text.**  `GPU::x_prog(key, src)` caches by
-  key, and the builders name programs by kernel, not by shape: the same key
-  yields different GLSL for another model (head width, qk-norm presence,
-  activation format).  The cache therefore validates the shader *hash* on every
-  hit (`prog_key_hash_`); without that, the second model silently ran the
-  first model's attention kernels.
-- **Everything the GPU owns must be released and reset**, not left to the
-  context teardown: `GPU::release_scene()` deletes the textures/FBOs,
-  `reset_targets()` zeroes the scratch targets (including the lazily filled
-  `target_for()` map), the per-layer handle vectors and the activation caches
-  are cleared, and `scripts/check_target_reset.sh` fails the gate if a `Target`
-  member is ever added without being cleared.
-
-The acceptance is `scripts/swap_matrix.py`: every turn of a swap chain has to be
-byte-identical to a fresh process on the same container, over three template
-kinds, both precisions and a round trip.  A single golden string would not catch
-a wrong program or a stale target -- some models answer correctly anyway.
-
-**A third invariant, found the hard way: the swap must repeat every post-load
-model step.**  `main` used to do more to the model than read it: `split_ffn()`
-decided the FFN kernel width (minimind3 runs two 1216-wide chunks, not one
-2432-wide pass), `apply_hidden_scale()` applied metadata key 15, and
-`apply_precision()` / `quantize_q4_weights()` rewrite Mats.  A swap that skipped
-them still answered, but with the *whole-width* FFN and no hidden scale: logits
-moved by one unit in the last q16 place on the dense models (cosine 0.9998,
-enough to flip a greedy answer on minimind3.i16) and by a lot more on the hybrid
-(cosine 0.96, both lfm2.5 containers).  These now live in one `prepare_model()`
-that startup and the swap both call, before the upload -- the step slices Mats,
-so it has to run first.  `scripts/swap_matrix.py` carries an i16 chain and a
-hybrid chain for exactly this reason: a dense-only matrix passed with the bug
-present.
-
-How the drift was found, in case the next one looks like it: two *fresh*
-processes are bit-identical, so it was the reload; the emitted GLSL was identical
-across reloads (26 program keys, no key with two texts), so it was not the
-program cache; zeroing the new targets and the staging textures changed nothing;
-the first divergence was layer 0's FFN output.  `SHADER_SRC=` prints the GLSL of
-every program as it is used, and the two requests' key sets differed
-(`xq8p2a_768_1216` against `xq8p2a_768_2432`) -- that is what named the missing
-`split_ffn()`.  A stage dump shows where, `SHADER_SRC=` shows which kernel.
+new GL scene gets — it is often less than what the driver can find — and a
+desktop kernel has no CMA at all, so a size heuristic refused swaps that would
+have worked.  A container that does not fit fails in the upload, which is where
+the truth is.  The acceptance is `scripts/swap_matrix.py` (three template kinds,
+both precisions, a round trip, an i16 and a hybrid chain; needs the GPU).
 
 ## The container is the only format
 
@@ -304,7 +272,7 @@ q8:
 
 ```bash
 MODEL=../models/minimind3/minimind3.q8.mmcf \
-GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
+GPU_LAYER=1 KV=q16 ./engine_mm3 --chat \
   --system "You are a helpful assistant." \
   --prompt "用一句话介绍你自己。" --gen 16 --greedy
 ```
@@ -313,7 +281,7 @@ Offline q4 (do not set `Q4_WEIGHTS`):
 
 ```bash
 MODEL=../models/minimind3/minimind3.q4.mmcf \
-GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
+GPU_LAYER=1 KV=q16 ./engine_mm3 --chat \
   --system "You are a helpful assistant." \
   --prompt "用一句话介绍你自己。" --gen 16 --greedy
 ```
@@ -486,6 +454,24 @@ Update the document that owns the fact:
 | a command a human will copy | the README for that component **and** this file |
 | a GPU or format change | `docs/engine-internals.md`, `docs/engine-layout.md` |
 
+**A document records the present, or it records the past — never both.**  Three
+tiers, and a sentence belongs to exactly one of them:
+
+| Tier | Answers | Lives in | May contain |
+|---|---|---|---|
+| state | what is true now | the READMEs, `docs/*.md` (except the log), `--help`, `--dump-switches` | commands in the canonical spelling, no dates, no "used to" |
+| evidence | why it is this way, and not the other way | one paragraph next to the thing it protects, dated, linking to the log | the *one* measurement that prevents a wrong decision |
+| history | what was tried, measured, abandoned | `docs/performance.md` (append-only) and the commit message | everything else |
+
+The test for a sentence: delete it — does someone make a wrong decision
+tomorrow?  No → it is history.  Yes → keep it as one dated line with a link.
+`engine/scripts/check_docs_style.py` is the mechanical half: a **command** in a
+state document uses the axis spelling (`KV=q16`, not `KV_PACK=16` — the alias
+still works, but the document is the teaching copy), and a **four-decimal
+number** in a state document sits under a dated heading or in a dated paragraph,
+because PPL is re-baselined deliberately and the current pins are in the
+machine's override, not in prose.  It is step 0 of the gate.
+
 A command in a document that no longer runs is a bug in the document, not a
 detail.  `engine/scripts/docs_check.sh` is the mechanical half of that rule; it
 is step 0 of `scripts/regression.sh`, and it runs in under a second: it compares
@@ -517,9 +503,10 @@ The engine is split into `engine/src/` modules; see `docs/engine-layout.md`.
 Shader text belongs in `shaders.cpp` / `shaders_attn.cpp`, and activation
 layout knowledge belongs in `xformat.h/.cpp`.  Environment switches are read
 through `env_set` / `env_flag` / `env_int` / `env_double` (`common.h`), not by
-calling `getenv` twice in one expression (`getenv(X) ? atoi(getenv(X)) : d` was
-21 of the 206 sites on 2026-11-14); `env_flag` means "set and not 0", which is
-the convention `docs/test-hooks.md` documents.  Every one of them has a row in
+calling `getenv` twice in one expression (`getenv(X) ? atoi(getenv(X)) : d` is
+both slow in a per-layer loop and the shape where the two reads can disagree);
+`env_flag` means "set and not 0", which is the convention `docs/test-hooks.md`
+documents.  Every one of them has a row in
 `engine/src/switches.cpp` — that table is the inventory, the place a rename is
 declared and the place a probe is given an owner — and a switch read through the
 registry's own `sw_enum`/`sw_str` accessors is seen by the same checks. Do not reintroduce per-shader

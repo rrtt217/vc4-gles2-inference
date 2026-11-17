@@ -65,7 +65,7 @@ cd engine
 make engine_mm3
 
 MODEL=../models/minimind3/minimind3.q8.mmcf \
-GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
+GPU_LAYER=1 KV=q16 ./engine_mm3 --chat \
   --prompt "用一句话介绍你自己。" --gen 64 --greedy
 ```
 
@@ -83,7 +83,7 @@ Run:
 ```bash
 cd engine
 MODEL=../models/minimind3/minimind3.q8.mmcf \
-GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
+GPU_LAYER=1 KV=q16 ./engine_mm3 --chat \
   --prompt "用一句话介绍你自己。" --gen 64 --greedy
 ```
 
@@ -98,7 +98,7 @@ python3 engine/tools/mmcf_pack.py --in models/minimind3 --quant q4 --seq 512 \
 
 cd engine
 MODEL=../models/minimind3/minimind3.q4.mmcf \
-GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
+GPU_LAYER=1 KV=q16 ./engine_mm3 --chat \
   --prompt "用一句话介绍你自己。" --gen 64 --greedy
 ```
 
@@ -149,7 +149,7 @@ next to it in `models/` as a re-pack source.
 | stories260K | 1 MB | not on the board | floor probe; prefill 5.4 s |
 
 The Pi column is the 2026-11-13 campaign on HEAD `71cb1e0` (`GPU_LAYER=1
-KV_PACK=16`, greedy, `--gen 16`, a discarded warm-up plus three timed runs,
+KV=q16`, greedy, `--gen 16`, a discarded warm-up plus three timed runs,
 median), decode only.  Rows marked "not re-measured" / "not on the board" keep
 their last number in [performance.md](docs/performance.md), which also has the
 protocol, the prefill ranges and the q16-decode switch.  Prefill moves with the

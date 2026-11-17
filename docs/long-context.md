@@ -27,7 +27,7 @@ So the score buffer already allows 4096; the KV cache is what stops us at 2048,
 and it stops us by its *height*, because the sequence is laid out along rows and
 the KV vector along columns.
 
-Widths for the models here (`att_kv_width` = `kv_dim` at `KV_PACK=16`):
+Widths for the models here (`att_kv_width` = `kv_dim` at `KV=q16`):
 
 | model | kv_dim | positions per row if the sequence went along the width |
 |---|---:|---|
@@ -39,8 +39,8 @@ Widths for the models here (`att_kv_width` = `kv_dim` at `KV_PACK=16`):
 cache, but the session used to allocate one for every layer.  At SEQ 2048 those
 8 dead entries were 33.5 MB of CMA and the board failed at SEQ 1280 with
 `FBO incomplete`; `init_attention()` now takes the layer types and skips them,
-which puts 2048 back within reach at `KV_PACK=16` (measured, see
-`docs/performance.md`).  `KV_PACK=8` fits too but costs fused PPL 126.89 ->
+which puts 2048 back within reach at `KV=q16` (measured 2026-11-13, see
+`docs/performance.md`).  `KV=q8` fits too but costs fused PPL 126.89 ->
 194.07, so it is not needed for context any more.
 
 ## 2. Why "just split the rows" is not a one-liner

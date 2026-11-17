@@ -4,7 +4,8 @@ Status: **implemented, and it is the only format**.  `engine/tools/mmcf_pack.py`
 converts q8, q4 and i16 checkpoints, `Model::load_mmcf()` loads them, and since
 `fcc4095` the engine has no other reader — `Model::load()` refuses anything that
 is not `"MMCF"` and names the packer in the message.  All three precisions print
-the same greedy text and the same PPL as their legacy source on Xe:
+the same greedy text and the same PPL as their legacy source (measured
+2026-11-14 on Xe, `docs/performance.md`):
 
 | model | legacy | `.mmcf` |
 |---|---:|---:|
@@ -237,8 +238,8 @@ divided the vocabulary into four even tiles.
 
 The stride is a convention, not an algorithm requirement: repacking MiniMind3 q8
 at 1024 rows (7 tiles instead of 5) gave the same greedy text and PPL 270.5287
-against 270.3170 - the 0.08% is the per-tile q8 scale, since each tile
-quantises its own rows.  Changing it therefore costs a repack of every model
+against 270.3170 (2026-11-08, Xe; `docs/vc4-1536-repro.md`) - the 0.08% is the
+per-tile q8 scale, since each tile quantises its own rows.  Changing it therefore costs a repack of every model
 and two more logits draws per token, and the unpacked logits target is
 `LOGITS_GRID` texels wide, so it must stay within the driver's texture/FBO
 limit (2048 on VC4).

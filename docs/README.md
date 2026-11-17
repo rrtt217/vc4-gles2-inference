@@ -21,6 +21,7 @@ Deep dives:
 | [cross-build.md](cross-build.md) | **how to build for the Pi Zero**: the ARMv6 toolchain and sysroot recipe, why a missing `-B` fails silently, and how the build verifies the artifact |
 | [quantization.md](quantization.md) | q4/q6 experiments, offline Q4M1, packed KV, quality caveats |
 | [performance.md](performance.md) | Pi/laptop timing tables, the chronological lab notebook, regression baselines |
+| [swap-drift.md](swap-drift.md) | `/model` has been wrong twice: what a swap owns, and the order of evidence that found it |
 | [long-context.md](long-context.md) | why the Pi stops at 2048 tokens, and what passing it would cost |
 | [vc4-glsl-costs.md](vc4-glsl-costs.md) | what each GLSL function costs on VC4, read from Mesa 26.2.2 — and the six that abort the process |
 | [test-hooks.md](test-hooks.md) | environment switches: probes, dumps, A/B hooks |

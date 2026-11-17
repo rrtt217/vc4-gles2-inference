@@ -189,7 +189,7 @@ Ruled out by measurement, each one a single change:
 | no qk-norm | reference then says `st`, not `Introdu` |
 | `eps 1e-6` | reference still says `I` |
 | `eps 1e-6` **in the engine** (key 11, repacked) | engine reports `rmsnorm eps: 1e-06 (container-stated)` and its logits are **bit-identical** to the 1e-5 run: the sum of squares is computed in fixed point, so a 1e-5-vs-1e-6 epsilon is below its resolution |
-| the epsilon as a *uniform* instead of a literal | moves MiniMind3's PPL 270.3170 -> 269.9303 with the same numeric value, so the shader keeps the literal unless the container states an epsilon |
+| the epsilon as a *uniform* instead of a literal | moves MiniMind3's PPL 270.3170 -> 269.9303 (2026-11-14, Xe; `docs/performance.md`) with the same numeric value, so the shader keeps the literal unless the container states an epsilon |
 
 So the divergence is inside the engine's maths for this checkpoint shape, and
 none of the config fields above explains it.
@@ -323,8 +323,8 @@ format's arithmetic.
 `supra2.q8q24.mmcf` (126 MB, q8 weights, q24 residual) runs on the board -
 8 tokens take 74 s including startup, ~1.7 s/token - but the text degenerates
 into a repetition loop ("reporting reporting worse worse worse ...").  The
-format is not the cause: forcing `RES_FMT=i16_1` on the same container
-degenerates just as badly, and `KV_PACK=24` does not help either.
+format is not the cause: forcing `RES=i16_1` on the same container
+degenerates just as badly, and `KV=i24` does not help either.
 
 The logits say what is happening.  Same prompt, same container:
 

@@ -172,7 +172,7 @@ that it can sit in the same run as the other two.
 ## Results
 
 Machine: laptop, Intel Iris Xe (ADL GT2), Mesa 26.2.5, `GPU_LAYER=1
-KV_PACK=16`, 2026-11-12.  Containers: `minimind3.q8.mmcf`,
+KV=q16`, 2026-11-12.  Containers: `minimind3.q8.mmcf`,
 `minimind3-moe.q8.mmcf`, `lfm2.5.qad.q4.mmcf` (QAD, the vendor's
 quantization-aware-distilled q4).  System prompt: `You are a helpful
 assistant.`
@@ -370,7 +370,7 @@ after editing, `--selftest` must report zero mismatches.
 ## 2026-11-16 — RWKV-7 0.1B (q8r): a third architecture in the same batteries
 
 Machine: laptop, Intel Iris Xe (ADL GT2), Mesa 26.2.5, `GPU_LAYER=1
-KV_PACK=16`.  Container: `models/rwkv7/packed/rwkv7-g1d-0.1b.q8r.chat.mmcf`
+KV=q16`.  Container: `models/rwkv7/packed/rwkv7-g1d-0.1b.q8r.chat.mmcf`
 (the official BlinkDL g1d 0.1B checkpoint, q8 with one scale per output row,
 MMCF v4, embedded World-vocab tokenizer and the official G1 **nothink** chat
 template, key 8 bos 0 / eos 261 / stop 261, key 17 logit_shift 2, seq 512).
@@ -516,7 +516,8 @@ quoted below the old table (dense 0.085, MoE 0.130, LFM 0.335).
 * **The language split is consistent**: English-centric knowledge (MC en
   0.32 > zh 0.16) with Chinese instruction format following better than
   English (ifeval zh 0.40 > en 0.14).  Read the two batteries together.
-* **Perplexity context** (gate corpus, SEQ=512 warm window): engine q8r
+* **Perplexity context** (gate corpus, SEQ=512 warm window, measured
+  2026-11-16 on Xe, `docs/performance.md`): engine q8r
   9.2919 against the f32 oracle's 8.1014 on the same token stream; per-row
   scales are worth −23% PPL over per-matrix (12.0831), and the q16 residual
   grid costs ~0.05 nats/token (the R-1 study in performance.md decided q16
@@ -556,7 +557,7 @@ the 0.4B (`rwkv7-g1d-0.4b-20260210-ctx8192`, 450.8M parameters, 24x1024,
 FFN 4096, ranks 64/64/32/128, a bf16 checkpoint).  Container
 `models/rwkv7/packed/rwkv7-g1d-0.4b.q8r.chat.mmcf` (454,949,100 B, MMCF v4,
 key 16 ranks with the gate flag, key 17 logit_shift 2), on Xe with
-`GPU_LAYER=1 KV_PACK=16` and `SEQ=512`.
+`GPU_LAYER=1 KV=q16` and `SEQ=512`.
 
 **Three tiers, do not mix them:**
 

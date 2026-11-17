@@ -69,9 +69,9 @@ use the q16-domain variants `X1Q/X2Q/X4Q` and `R1Q` so the inner loop does not
 pay a divide per activation. The residual stream has its own `R1/R2/R1Q`
 macros and is never assumed to have the activation layout.
 
-This is the fix for the previous ACT8 failures: adding a format changes
-`xformat.cpp`, not seven shader strings. `ACT8=1` selects `I8_4` for all
-matvec inputs, `ACT8=2` only for the FFN hidden state; both are opt-in.
+This is the fix for the previous 8-bit-activation failures: adding a format
+changes `xformat.cpp`, not seven shader strings. `ACT=i8` selects `I8_4` for all
+matvec inputs, `FFN_HID=i8` only for the FFN hidden state; both are opt-in.
 
 The prompt is a separate matter from the activation layouts: `chattmpl.cpp`
 renders the template and hands back `PromptPart`s that carry an `is_input`
@@ -164,7 +164,7 @@ A change to GPU state, X formats or shader text must preserve:
 
 Then `engine/scripts/regression.sh`, which is the gate — determinism, a second
 prompt's behaviour, the per-machine pins, and PPL.  Only after those pass should
-`ACT8` or performance numbers be compared.
+`ACT=i8` or performance numbers be compared.
 
 When the change touches a builder at all, run `engine/scripts/shader_hashes.sh`
 first: it is seconds, it needs no GPU, and it says whether the emitted text moved

@@ -66,7 +66,7 @@ The system turn is still this process's policy: Chatbox's runtime metadata
 is stripped and the neutral default is filled in when the client sends none.
 
 > The server's KV layout is not the CLI's. `server.py` leaves `KV_PACK` unset
-> (24-bit) unless you pass `--kv-pack 16`; the CLI gates use `KV_PACK=16`.  On
+> (24-bit) unless you pass `--kv-pack 16`; the CLI gates use `KV=q16`.  On
 > MiniMind3 q8 the packed and unpacked grids give different first tokens
 > (`我是一个AI助手，…` vs `我是MiniMind，…`), so pass `--kv-pack 16` when you
 > want the server to reproduce the CLI string.

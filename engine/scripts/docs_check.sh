@@ -76,6 +76,10 @@ for flag in --template; do
     fi
 done
 
+# 4b. the style rules: canonical spellings in commands, dated measurements in a
+# state document (see the header of scripts/check_docs_style.py)
+if ! python3 scripts/check_docs_style.py $VERBOSE; then fail=1; fi
+
 # 5. links, the index and the doc->source direction
 if ! python3 scripts/check_docs_links.py; then fail=1; fi
 

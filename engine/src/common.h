@@ -200,11 +200,12 @@ private:
 };
 extern Progress g_progress;
 
-// Environment switches, read one way.  The engine has 93 of them and 206 call
-// sites, and 21 of those read the same variable twice
-// (`getenv(X) ? atoi(getenv(X)) : d`), which is both slow in a per-layer loop and
-// the shape where the two reads could in principle disagree.  New code uses these;
-// the remaining one-shot reads are converted as they are touched.
+// Environment switches, read one way.  Reading the same variable twice in one
+// expression (`getenv(X) ? atoi(getenv(X)) : d`) is both slow in a per-layer loop
+// and the shape where the two reads could in principle disagree; 21 sites did
+// that when these helpers landed.  New code uses these.  Every switch has a row
+// in switches.cpp, which is the inventory (a count here would be a promise
+// nobody can keep -- `./engine_mm3 --dump-switches` prints the current one).
 //
 // `env_flag` is "set and not 0", which is the convention every switch follows
 // (docs/test-hooks.md); `env_set` is only set-ness, for switches that take a value

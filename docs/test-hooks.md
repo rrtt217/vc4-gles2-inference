@@ -383,7 +383,7 @@ conclusion from its output.
   maximum at every level, which is `std::max_element`'s tie rule, so the
   winner is byte-identical to the read-back.  Only greedy turns without
   penalties, marker masks, `LOGITS_OUT` or logprobs take it; the unpacked
-  logits layout (i16 weights, `ACT8`) always keeps the read-back.
+  logits layout (i16 weights, `ACT=i8`) always keeps the read-back.
 
 - `ARGMAX_DUMP=1` — with the greedy fast path, print the chunk winners, the
   per-tile winners and the CPU argmax of the same logits, so a wrong winner
@@ -470,7 +470,8 @@ conclusion from its output.
   the kernels cost before `6234328`.  It reconstructs every value with the
   texture sample's small VC4 error, so the board's PPL pins move with it
   (MiniMind3 q8 271.2855, q4 325.3751, LFM2 warm 29.1588; TinyBrainBot q4
-  against Xe: cosine 0.9983, mean of five prompts).  `Q16_DECODE=exact`
+  against Xe: cosine 0.9983, mean of five prompts — board, 2026-11-13,
+  `docs/performance.md`).  `Q16_DECODE=exact`
   restores `6234328`'s integer decode (`float(int(c*255+0.5))`, bit-identical
   to floor for these positive arguments): MiniMind3 q8 271.6420 and the older
   pinned strings, at the cost of the board's i16 model (326.8 against 216.0
@@ -511,8 +512,8 @@ conclusion from its output.
   MNN-Pocket: cosine 0.9415 with the q16 streams against 0.9552 with f32 ones
   (float32 numpy reference, same q4 container).
 
-- `FFN_HID=i16|i8` — the FFN hidden stream's width alone (`ACT8=2` set only
-  this; `ACT8=1` set this *and* `ACT`).  q8 weights only.
+- `FFN_HID=i16|i8` — the FFN hidden stream's width alone (the legacy `ACT8=2`
+  set only this; the legacy `ACT8=1` set this *and* `ACT`).  q8 weights only.
 
 - `ACT_CPU=q16|f32` — the CPU layer loop's activation grid, a *placement*
   question next to the two above (was `ACT_F32=1`; that spelling meant "on" for
@@ -634,9 +635,9 @@ conclusion from its output.
   `log2(sum)*2048` in the same q16 slot and costs one `exp2` in `att_v`; the
   relative step is then 0.03% for any sum from 1 to `SEQ`, where the linear
   grid's 1/32 is 2% of a peaked softmax's sum.  **The accurate one is not the
-  better model, and the default is the linear grid**: MiniMind3 at `SEQ=768` on
-  Xe, q8 PPL 270.3170 (linear) against 274.4160 (log2) and q4 326.1483 against
-  323.8378 — the two containers disagree in sign, so this is not a quality
+  better model, and the default is the linear grid** (2026-11-17, MiniMind3 at
+  `SEQ=768` on Xe): q8 PPL 270.3170 (linear) against 274.4160 (log2) and q4
+  326.1483 against 323.8378 — the two containers disagree in sign, so this is not a quality
   lever, it redistributes a sub-0.1% per-head gain.  `ATT_DUMP` +
   `check_att.py` reads either (the checker decodes `2**(ssum/2048)`).
   With `KV=q16` the packed layout is two int16 per RGBA8 texel (width 384) and

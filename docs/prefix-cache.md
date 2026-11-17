@@ -104,13 +104,13 @@ invalidates the cache.
 
 ### Packed KV
 
-The layout is chosen by `KV_PACK` in the engine's environment; the server's
+The layout is chosen by `KV` in the engine's environment; the server's
 `--kv-pack` flag only sets that variable for the worker it spawns.
 
 ```text
-KV_PACK=0    24-bit, one value per RGBA8 texel, width 768
-KV_PACK=16   two int16 per texel, width 384, scale 2048
-KV_PACK=8    four int8 per texel, width 192, scale 16
+KV=i24    24-bit, one value per RGBA8 texel, width 768
+KV=q16   two int16 per texel, width 384, scale 2048
+KV=q8    four int8 per texel, width 192, scale 16
 ```
 
 Local Xe validation:
@@ -132,11 +132,11 @@ acceptable as a default**:
 q16 first-step logits: cosine ~0.9998, MAE ~0.05, max ~0.30.  Use q16 if
 reducing KV memory; q8 needs per-head/block scales or better calibration.
 
-The `MMKV1` header (version 2) binds the model metadata, `KV_PACK` mode,
-`KV_SCALE`, `qk_norm`, `rope_half`, and the activation format (`ACT8`).  A
-cache built with `ACT8=1` is rejected by a non-ACT8 process and vice versa,
-and a cache written at a different `KV_SCALE` is rejected with a
-`PREFIX_CACHE KV_SCALE mismatch` line; rebuild on the target machine after
+The `MMKV1` header (version 2) binds the model metadata, the `KV` value,
+`KV_GRID`, `qk_norm`, `rope_half`, and the activation format (`ACT`).  A
+cache built with `ACT=i8` is rejected by a q16-stream process and vice versa,
+and a cache written at a different `KV_GRID` is rejected with a
+`PREFIX_CACHE KV_GRID mismatch` line; rebuild on the target machine after
 changing any of those flags.  Header version 1 files (written before
 2026-11-04, when the scale was not recorded) fail the version check, so an
 existing cache has to be rebuilt once.  The 2026-11-02 switch to
@@ -153,8 +153,8 @@ python3 build_prefix_cache.py build \
 python3 server.py --seq 768 --kv-pack 16 --prefix-cache pfx_tools_pi768.kv
 ```
 
-The cache header records the packing mode and the `KV_SCALE` grid; loading
-with a different `--kv-pack` or `KV_SCALE` is rejected.
+The cache header records the packing mode and the `KV_GRID` grid; loading
+with a different `--kv-pack` or `KV_GRID` is rejected.
 
 ## Version 4: the hybrid conv history (2026-11-11)
 

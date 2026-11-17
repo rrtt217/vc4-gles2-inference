@@ -78,7 +78,7 @@ MiniMind3 q8，GPU 层 + packed KV：
 
 ```bash
 MODEL=../models/minimind3/minimind3.q8.mmcf \
-GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
+GPU_LAYER=1 KV=q16 ./engine_mm3 --chat \
   --prompt "请写一段关于春天的短文。" --gen 64 --greedy
 ```
 
@@ -86,7 +86,7 @@ MiniMind3 离线 q4（45 MB，推荐的 q4 路径）：
 
 ```bash
 MODEL=../models/minimind3/minimind3.q4.mmcf \
-GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
+GPU_LAYER=1 KV=q16 ./engine_mm3 --chat \
   --prompt "用一句话介绍你自己。" --gen 64 --greedy
 ```
 
@@ -98,7 +98,7 @@ MiniMind3-MoE（4 experts、top-1、容器 v3）——q4 的 131 MB 是 Pi Zero 
 
 ```bash
 MODEL=../models/minimind3-moe/minimind3-moe.q4.mmcf \
-GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
+GPU_LAYER=1 KV=q16 ./engine_mm3 --chat \
   --system "You are a helpful assistant." \
   --prompt "用一句话介绍你自己。" --gen 24 --greedy
 ```
@@ -115,7 +115,7 @@ MiniMind2 使用 Qwen ChatML 模板（容器里的 template kind 1）。源 `Q8M
 
 ```bash
 MODEL=../models/llama2c/minimind2-small.q8.mmcf \
-GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
+GPU_LAYER=1 KV=q16 ./engine_mm3 --chat \
   --prompt "用一句话介绍你自己。" --gen 24 --greedy
 ```
 
@@ -167,7 +167,7 @@ TinyChat15M 是 llama-2 chat 格式的 15M 模型，不是补全模型：容器�
 
 ```bash
 MODEL=../models/llama2c/stories42M.q8.mmcf \
-GPU_LAYER=1 KV_PACK=16 ./engine_mm3 \
+GPU_LAYER=1 KV=q16 ./engine_mm3 \
   --prompt "Once upon a time" --gen 64 --greedy
 ```
 
@@ -272,16 +272,16 @@ FFN hidden 2432 超过 VC4 2048 像素 FBO 限制。
 | `SEQ` | KV cache 长度；配置 tools 时自动到 768 |
 | `GPU_ATTN=1` | GPU RoPE + KV cache + attention |
 | `GPU_LAYER=1` | hidden、attention、RMSNorm、FFN 全在 GPU |
-| `KV_PACK=16` | packed q16 KV（每个 texel 两个 int16） |
-| `KV_PACK=8` | packed q8 KV；质量不适合默认 |
-| `KV_SCALE` | KV fixed-point scale |
+| `KV=q16` | packed q16 KV（每个 texel 两个 int16；hybrid 默认） |
+| `KV=q8` | packed q8 KV；质量不适合默认 |
+| `KV_GRID` | KV 定点 scale |
 | `Q4_WEIGHTS=1` | 运行时 q4 转换（实验） |
 | `KEEP_CPU_WEIGHTS=1` | 上传后保留 CPU 权重（调试） |
 | `TIMING=1` | 打印 prefill/decode 时间 |
 | `LAYER_PROFILE=1` | 逐层时间 |
 | `TOPK_FAST=1` | 近似 candidate 路径；需配合 `--top-k-candidates` |
-| `RES_PACK=0` | 关闭默认的 packed residual（q8/q4） |
-| `ACT8=1/2` | int8 activation 实验，需 q8 权重，默认关闭 |
+| `RES=i16_1` | 非 packed 的 q16 residual 流（q8/q4 默认打包） |
+| `ACT=i8` / `FFN_HID=i8` | int8 activation 实验，需 q8 权重，默认关闭 |
 
 完整列表见 [测试开关](../docs/test-hooks.md)，包括 dump 和探针开关
 （`STAGE_DUMP`、`RAW_DUMP`、`QKV_DUMP`、`ATT_DUMP`、`ATTN_DUP`、
@@ -299,10 +299,10 @@ teacher-forced 困惑度是量化格式的质量闸门：
 
 ```bash
 MODEL=../models/minimind3/minimind3.q8.mmcf \
-GPU_LAYER=1 KV_PACK=16 ./engine_mm3  --ppl data/ppl_test.txt
+GPU_LAYER=1 KV=q16 ./engine_mm3  --ppl data/ppl_test.txt
 ```
 
-比较格式时用同一个语料；`ACT8=1` 和 `ACT8=2` 并非在所有语料上都安全。
+比较格式时用同一个语料；`ACT=i8` 和 `FFN_HID=i8` 并非在所有语料上都安全。
 
 语料长于 `SEQ` 时分窗口打分：每个窗口喂 `SEQ` 个 token，只计最后 `SEQ/2`
 个（输出里的 `stride=`；`PPL_STRIDE=n` 可改）。热身不是可选的：起点落在正文

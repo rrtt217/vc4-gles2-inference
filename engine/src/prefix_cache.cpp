@@ -166,7 +166,7 @@ bool Session::load_prefix_cache(const string& path, vector<int>& toks){
                       (gpu_.act_fmt_ == XFormat::I8_4 ? 16u : 0u) |
                       (m_.hybrid ? 32u : 0u))) return false;
         if (memcmp(&kscale, &gpu_.att_kv_scale_, sizeof(float)) != 0) {
-            cerr << "PREFIX_CACHE KV_SCALE mismatch: cache " << kscale
+            cerr << "PREFIX_CACHE KV_GRID mismatch: cache " << kscale
                  << ", process " << gpu_.att_kv_scale_ << endl;
             return false;
         }

@@ -416,7 +416,7 @@ kernel, but the fetch and decode counts per element are already at 2 and 2 after
 the hoist, so the win is in code reuse, not in throughput.
 
 **4. int8 activations (quality risk, ~1.6x on every matvec).** Implemented as
-`X8_4` and exposed by `ACT8=1` (all matvec inputs) / `ACT8=2` (FFN hidden only).
+`X8_4` and exposed by `ACT=i8` (all matvec inputs) / `FFN_HID=i8` (FFN hidden only).
 The `--ppl` harness exists; greedy text can stay identical while PPL moves, so
 both must be checked.  Keep it opt-in unless a corpus-wide quality run says
 otherwise.
@@ -456,6 +456,6 @@ qkv 2 (driver strip), rope/scores/stats/v/wo/qrot 6, plus 15 outside the layer
 loop.
 
 The compute term is dominated by reading the whole 66 MB q8 weight set once per
-token, so the other lever is activation precision: ACT8=2 (-6%) and the paired
+token, so the other lever is activation precision: `FFN_HID=i8` (-6%) and the paired
 row kernels stay available behind their env switches and are worth re-measuring
 once the draw count is lower.

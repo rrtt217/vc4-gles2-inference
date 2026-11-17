@@ -85,7 +85,7 @@ MiniMind3 q8, GPU layers and packed KV:
 
 ```bash
 MODEL=../models/minimind3/minimind3.q8.mmcf \
-GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
+GPU_LAYER=1 KV=q16 ./engine_mm3 --chat \
   --prompt "请写一段关于春天的短文。" --gen 64 --greedy
 ```
 
@@ -93,7 +93,7 @@ MiniMind3 offline q4 (45 MB, recommended q4 path):
 
 ```bash
 MODEL=../models/minimind3/minimind3.q4.mmcf \
-GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
+GPU_LAYER=1 KV=q16 ./engine_mm3 --chat \
   --prompt "用一句话介绍你自己。" --gen 64 --greedy
 ```
 
@@ -106,7 +106,7 @@ route read-back:
 
 ```bash
 MODEL=../models/minimind3-moe/minimind3-moe.q4.mmcf \
-GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
+GPU_LAYER=1 KV=q16 ./engine_mm3 --chat \
   --system "You are a helpful assistant." \
   --prompt "用一句话介绍你自己。" --gen 24 --greedy
 ```
@@ -123,7 +123,7 @@ for.
 
 ```bash
 MODEL=../models/supra2-medium/medium.q8.q24.mmcf \
-GPU_LAYER=1 KV_PACK=16 SEQ=512 ./engine_mm3 --chat --gen 64 --greedy
+GPU_LAYER=1 KV=q16 SEQ=512 ./engine_mm3 --chat --gen 64 --greedy
 ```
 
 ```
@@ -249,7 +249,7 @@ environment override is involved:
 
 ```bash
 MODEL=../models/llama2c/minimind2-small.q8.mmcf \
-GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
+GPU_LAYER=1 KV=q16 ./engine_mm3 --chat \
   --prompt "用一句话介绍你自己。" --gen 24 --greedy
 ```
 
@@ -257,7 +257,7 @@ Q4 is a memory mode and is noticeably weaker on identity questions:
 
 ```bash
 MODEL=../models/llama2c/minimind2-small.q4.mmcf \
-GPU_LAYER=1 KV_PACK=16 ./engine_mm3 --chat \
+GPU_LAYER=1 KV=q16 ./engine_mm3 --chat \
   --prompt "用一句话介绍你自己。" --gen 24 --greedy
 ```
 
@@ -277,7 +277,7 @@ no `--chat`:
 
 ```bash
 MODEL=../models/llama2c/stories42M.q8.mmcf \
-GPU_LAYER=1 KV_PACK=16 ./engine_mm3 \
+GPU_LAYER=1 KV=q16 ./engine_mm3 \
   --prompt "Once upon a time" --gen 64 --greedy
 ```
 
@@ -307,7 +307,7 @@ GPU_LAYER=1 ./engine_mm3 --chat \
 `GPU_LAYER=1` puts the conv block on the GPU, because it selects the fused layer
 loop and a conv layer takes its GPU branch there; the serial `GPU_LAYER=0` loop
 runs the conv on the CPU, which is the reference path (the fused path is 4%
-worse in perplexity and 3x faster).  `KV_PACK=16` is the hybrid default — the
+worse in perplexity and 3x faster).  `KV=q16` is the hybrid default — the
 24-bit KV layout is wrong for this model's shape.  Perplexity, timings, the
 template/tool checks and the list of open defects are in
 [docs/lfm2.5-230m.md](../docs/lfm2.5-230m.md).
@@ -449,17 +449,17 @@ model; tool calls are much more reliable.
 | `SEQ` | KV cache length; tools auto-raise to 768 |
 | `GPU_ATTN=1` | GPU RoPE + KV cache + attention |
 | `GPU_LAYER=1` | hidden state, attention, RMSNorm, FFN on GPU |
-| `KV_PACK=16` | packed q16 KV (two int16 per texel) |
-| `KV_PACK=8` | packed q8 KV; quality is not default-safe |
-| `KV_SCALE` | KV fixed-point scale |
+| `KV=q16` | packed q16 KV (two int16 per texel; the hybrid default) |
+| `KV=q8` | packed q8 KV; quality is not default-safe |
+| `KV_GRID` | the fixed-point KV scale |
 | `Q4_WEIGHTS=1` | runtime q4 conversion (experiments only) |
 | `KEEP_CPU_WEIGHTS=1` | keep CPU weights after upload (debug) |
 | `TIMING=1` | print prefill/decode timing |
 | `LAYER_PROFILE=1` | per-layer timing |
 | `TOPK_FAST=1` | approximate candidate path; needs `--top-k-candidates` |
-| `RES_PACK=0` | disable the default packed residual stream (q8/q4) |
-| `ACT8=2` | FFN hidden state in I8_4, q8 weights only; opt-in |
-| `ACT8=1` | all matvec inputs in I8_4, q8 weights only; opt-in |
+| `RES=i16_1` | the unpacked q16 residual stream (q8/q4 pack by default) |
+| `FFN_HID=i8` | FFN hidden state in I8_4, q8 weights only; opt-in |
+| `ACT=i8` | all matvec inputs in I8_4, q8 weights only; opt-in |
 
 See [test hooks](../docs/test-hooks.md) for the full list, including the dump
 and probe switches (`STAGE_DUMP`, `RAW_DUMP`, `QKV_DUMP`, `ATT_DUMP`,
@@ -479,10 +479,10 @@ Teacher-forced perplexity is the quality gate for lossy activation formats:
 
 ```bash
 MODEL=../models/minimind3/minimind3.q8.mmcf \
-GPU_LAYER=1 KV_PACK=16 ./engine_mm3  --ppl data/ppl_test.txt
+GPU_LAYER=1 KV=q16 ./engine_mm3  --ppl data/ppl_test.txt
 ```
 
-Use the same corpus when comparing formats; `ACT8=1` and `ACT8=2` are not
+Use the same corpus when comparing formats; `ACT=i8` and `FFN_HID=i8` are not
 default-safe on every corpus.
 
 A corpus longer than `SEQ` is scored in windows: each window feeds `SEQ` tokens

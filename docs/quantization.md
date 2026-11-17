@@ -127,7 +127,7 @@ python3 engine/tools/mmcf_pack.py --in models/minimind3/minimind3.q4 \
   --name minimind3 --template minimind3 --chat --verify
 
 MODEL=../models/minimind3/minimind3.q4.mmcf \
-  KV_PACK=16 GPU_LAYER=1 ./engine_mm3 ...
+  KV=q16 GPU_LAYER=1 ./engine_mm3 ...
 ```
 
 Local size/speed:

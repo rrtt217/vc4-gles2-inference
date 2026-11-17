@@ -76,7 +76,7 @@ MODEL=../models/lfm2.5-230m/qad/lfm2.5.qad.q4.mmcf SEQ=512 GPU_LAYER=0 \
   ./engine_mm3 --prompt "The capital of France is" --gen 24 --greedy
 
 # Pi Zero (runtime dir, no checkout): SEQ=256 fits the CMA
-MODEL=models/lfm2.5-230m/lfm2.5.qad.q4.mmcf SEQ=256 KV_PACK=16 \
+MODEL=models/lfm2.5-230m/lfm2.5.qad.q4.mmcf SEQ=256 KV=q16 \
 GPU_LAYER=1 ./bin/engine_mm3_pi --chat \
   --system "You are a helpful assistant trained by Liquid AI." \
   --prompt "What is the capital of France?" --gen 32 --greedy
@@ -89,7 +89,7 @@ GPU_LAYER=1 ./bin/engine_mm3_pi --chat \
   separate conv switch** — `CONV_GPU` was documented here and read by nothing;
   a 2026-11-13 audit found it in no source file, no git history and no built
   binary, so a command carrying it behaves exactly like `GPU_LAYER=1` alone.
-* `KV_PACK=16` is the hybrid default.  The 24-bit KV layout is **wrong for this
+* `KV=q16` is the hybrid default.  The 24-bit KV layout is **wrong for this
   shape** (kv_dim 512, head_dim 64) and the fused path answers garbage with it.
 * Sampling: the model card and the probe agree on low temperature.  `--temp 0.1
   --top-k 50 --repeat-penalty 1.05` answered the factual prompts correctly where
@@ -132,8 +132,9 @@ Board (Pi Zero, `SEQ=256`, QAD q4, 24 tokens, greedy):
 | 用一句话介绍你自己。 | "我是一个AI助手，帮助您理解和交流。" |
 | 17\*23 with the `calculate_math` tool | **"Answer: 391"** |
 
-Board PPL at `SEQ=256`, same corpus (two windows, not comparable with the
-`SEQ=512` rows above).  The two rows this page used to carry -- fused **45.52**,
+Board PPL at `SEQ=256` — measured 2026-11-12/13, the rows themselves are in
+[`performance.md`](performance.md) — same corpus (two windows, not comparable
+with the `SEQ=512` rows above).  The two rows this page used to carry -- fused **45.52**,
 serial **43.91** -- are *cold-window* sums, the only protocol the board binary
 had; both protocols now exist, and the cold one still prints them on the board
 bit for bit (`43.9130` and `45.5248`), so the new build did not move that
@@ -235,8 +236,8 @@ The engine needed one capacity change: the FFN is split into exactly **two**
 chunks, and the guard was a literal 4096.  The real ceiling is 2x the driver's
 GL target width, so `Model::split_ffn` now takes `gpu.max_target_dim()`:
 unchanged on VC4 (2048 -> 4096), and on Xe the 4608 hidden runs as two
-2304-wide chunks.  `scripts/regression.sh` still ACCEPTs (PPL 270.3170, same
-pinned strings) -- the change only relaxes a refusal.
+2304-wide chunks.  `scripts/regression.sh` still ACCEPTs with the gate's pins
+unchanged (`docs/performance.md`) -- the change only relaxes a refusal.
 
 Numbers, 9 short sentences (5 ja->en, 4 en->ja; greedy; chrF against one
 reference translation, the same metric as [evaluation.md](evaluation.md)):
@@ -263,7 +264,7 @@ Nine sentences is a coarse probe (a single sentence moves the mean by up to
 0.491 against q4 0.46-0.56) and **the loop matters** (i16 serial 0.630 against
 fused 0.491; the q4 serial/fused spread is inside the noise).
 
-Timing (Xe, `SEQ=512 GPU_LAYER=1 KV_PACK=16`, q4): prefill 1.79 s for a
+Timing (Xe, `SEQ=512 GPU_LAYER=1 KV=q16`, q4; 2026-11-13): prefill 1.79 s for a
 ~60-token prompt, decode **33.2 ms/token** (about 30 tok/s).  On the Pi this
 would be ~1.3-1.5 s/token, i.e. not interactive.
 
@@ -362,13 +363,13 @@ are described in [`deterministic-tools.md`](deterministic-tools.md).
 cd engine
 # the number that decides: PPL with the BOS; `windows=1` when the corpus is shorter than SEQ
 MODEL=../models/lfm2.5-230m/qad/lfm2.5.qad.q4.mmcf SEQ=512 GPU_LAYER=0 \
-  ./engine_mm3 --ppl data/ppl_test.txt          # "PPL 18.7251 ... windows=1"
+  ./engine_mm3 --ppl data/ppl_test.txt          # "PPL <n> ... windows=1"
 # per-token NLL, for "is the gap a few catastrophes or a uniform offset"
 MODEL=... SEQ=512 GPU_LAYER=0 PPL_DUMP=/tmp/nll.txt ./engine_mm3 --ppl ...
 # a file longer than SEQ is scored window by window: `stride=` (default SEQ/2)
 # says how many tokens of each window are scored after the warm-up prefix.
 # PPL_STRIDE=0 restores the pre-2026-11-12 cold windows; never compare the two.
-MODEL=... SEQ=512 GPU_LAYER=0 ./engine_mm3 --ppl /tmp/long.md   # "PPL 130.2420 ... windows=4 span=512 stride=256"
+MODEL=... SEQ=512 GPU_LAYER=0 ./engine_mm3 --ppl /tmp/long.md   # "PPL <n> ... windows=4 span=512 stride=256"
 
 # the float32 reference, from the same safetensors
 python3 models/lfm2.5-230m/probe_logits.py --ids "1 6 24131 708 ..." --top 8
@@ -383,7 +384,7 @@ refs/llamacpp/bin/b12283-cpu/llama-perplexity \
 ```
 
 For a byte-level bisect of *where* the engine diverges from the reference:
-`STAGE_DUMP=1 HIDDEN_DUMP=1 DUMP_F32=1` (plus `ACT_F32=1` to take the fixed-point
+`STAGE_DUMP=1 HIDDEN_DUMP=1 DUMP_F32=1` (plus `ACT_CPU=f32` to take the fixed-point
 stores out of the picture) gives one row per layer, position and stage, which is
 how the conv-gate problem was localised; on the GPU side the fused path has
 `CONV_DEBUG=1` instead.  [`test-hooks.md`](test-hooks.md) lists every switch, and
