@@ -1294,6 +1294,40 @@ vector<float> Session::prefill_batch(const vector<int>& toks, bool want_logits){
                 for (size_t i = 0; i < toks.size(); ++i) step(toks[i], (int)i, false);
                 return {};
         }
+        // The one-time guard: one real projection through both paths before any
+        // token is committed.  RWKV_PREFILL defaults off, but a machine where the
+        // batched kernel is wrong (the VC4 tall-draw question, or a driver whose
+        // 2^k fold differs) would answer with wrong numbers the moment someone
+        // sets it -- so the kernel has to prove itself on this machine first, and
+        // a refusal costs the serial path rather than the numbers.
+        if (rwkv_batch_state_ == 0) {
+                vector<float> probe = embedding(toks[0], true);
+                if (!m_.rwkv_tok_norm.empty())
+                        probe = rwkv_layernorm(probe, m_.rwkv_tok_norm.data(), m_.rwkv.norm_eps);
+                const vector<float> one = rwkv_mv(m_.rwkv_r[0], probe);
+                const vector<const vector<float>*> in(1, &probe);
+                const GPU::MvBatch g[1] = {{&m_.rwkv_r[0], &in}};
+                const vector<vector<vector<float>>> bat =
+                        gpu_.matvec_batch_group(vector<GPU::MvBatch>(g, g + 1));
+                int ndiff = 0;
+                float mxd = 0.0f;
+                if (!bat.empty() && !bat[0].empty())
+                        for (size_t j = 0; j < one.size() && j < bat[0][0].size(); ++j) {
+                                const float d = fabsf(one[j] - bat[0][0][j]);
+                                if (d > 0.0f) { ++ndiff; mxd = std::max(mxd, d); }
+                        }
+                else
+                        ndiff = (int)one.size();
+                rwkv_batch_state_ = ndiff ? -1 : 1;
+                if (ndiff)
+                        cerr << "RWKV_PREFILL: the batched matvec does not reproduce the serial one on "
+                             << "this machine (" << ndiff << "/" << one.size() << " rows differ, max|d| "
+                             << mxd << "); the serial prefill is used\n";
+        }
+        if (rwkv_batch_state_ < 0) {
+                for (size_t i = 0; i < toks.size(); ++i) step(toks[i], (int)i, false);
+                return {};
+        }
         vector<vector<float>> x = forward_rwkv_batch(toks);
         if (g_stop || !want_logits || x.empty()) return {};
         return gpu_.logits(m_.logits_tiles, rwkv_head_input(x.back()));

@@ -7294,3 +7294,31 @@ commit:
   widest input is `dim/2` texels, so 0.1B needs 384x64 — inside VC4's 2048.
 
 Pi numbers are pending; this section gets them when they land.
+### The board's first attempt failed numerically (3fd8b21, before the fix)
+
+The Pi Zero ran the A/B on the first integrated commit (`3fd8b21`, 0.1B q8r,
+SEQ=512, ~90-token prompt): prefill **90.69 s -> 39.26 s (2.3x)** and the logits
+**wrong** — max|d| 46.96, mean|d| 16.76, all 65536 dimensions over one q16 LSB,
+top-1 moving from 11 to 8321.  Serial-vs-batched determinism held, so it was a
+deterministic row-mapping defect, not a race.
+
+The cause is defect 2 above: on the board the block sizes also change between
+calls (the four low-rank downs are 4 rows deep, the channel mix is 1), and the
+first block sizes the staging texture at 4 rows, so the *downs* call was already
+reading `(b+0.5)/4*64` instead of row `b`.  Xe reproduced it the moment the check
+ran on a prompt long enough to have more than one block-size change (12
+mismatching matvecs on the 0.1B), which is why every earlier Xe check — short
+prompts, one block size — came out clean and the board found it first.
+
+`0a8b271` fixes it (`xh` is the texture's height, `xw` is already its width) and
+adds the one-time guard: when a session first batches, one real projection goes
+through both paths, and a mismatch on that machine falls back to the serial
+prefill with a line saying so.  On Xe the logits are byte-identical again at
+n=1/4/16/64 on 100-, 445- and 512-token prompts and on the 0.4B container.
+
+**The board's number for the fixed commit is not measured yet.**  What the board
+has shown is that a 2.3x prefill win is available there even with the strip policy
+that keeps the serial draw count (the batched path is read-back-bound, which is
+what the P7 profile said: `mv_read` is ~90% of a serial token), so the fixed
+commit is expected to land at or above 2.3x.  The Pi rows stay pending — the
+project stopped before that run.

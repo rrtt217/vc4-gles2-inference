@@ -64,6 +64,12 @@ public:
     bool prefill_batch_ok() const;
     vector<float> prefill_batch(const vector<int>& toks, bool want_logits);
     int prefill_batch_size() const;
+    // 0 = the batched kernel has not been checked on this machine yet, 1 = it
+    // reproduces the serial matvec bit for bit, -1 = it does not, so every later
+    // prompt takes the serial path.  One real matvec, once per session: a driver
+    // whose batched draws or 2^k fold this path got wrong must not answer, and
+    // "default off" is not a guard for someone who turns it on.
+    int rwkv_batch_state_ = 0;
 
     // Prefill batching (WORKLOG 7c): run one layer pass for two consecutive
     // positions.  Returns B logits when want_logits; a pair never contains the
