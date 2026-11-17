@@ -7616,3 +7616,28 @@ above prices and fixes the smaller half.  The next change is to promote it to a
 single `EXP=drv|poly` axis covering the SiLU kernels as well, on the same
 evidence: 1.5e-06 on the board against the driver's 4.6e-05, for +0.4-1.8%
 decode.
+
+### `EXP=poly` across every exponential: +1.5% decode, and pocket still loops
+
+The axis was promoted from the attention to every shader-side `exp` (five SiLU
+sites, the RWKV sigmoid, the attention weights).  Board, same binary:
+
+| | decode (ms/token) | text |
+|---|---:|---|
+| `EXP=drv` | 1608.7 | `杭州是中国中国中国…` |
+| `EXP=poly` | 1632.1 | `杭州是中国中国共产党党的党的…` |
+
+**+1.5%**, consistent with the part-measurement above, and the degeneration is
+unchanged.  So of the four things the per-layer dump left open, three are now
+measured and excluded (format rails, summation order, exponential precision) and
+the fourth -- the residual path's own arithmetic at 2300 magnitudes -- has no
+single site left to fix: `matvec_i4_add`, `matvec_i4` and (since `c9c7853`)
+`matvec_i4_pair` all sum in the shape the probe calls driver-identical.
+
+What that means for the container: **greedy decoding of pocket on the board is
+not reproducible**, and no switch in this tree makes it so.  Sampling with a
+repetition penalty is the usable mode (`--temp 0.7 --topp 0.9 --top-k 64
+--repeat-penalty 1.1`), and the Pi numbers for quality should come from the eval
+batteries at `--limit`, not from a greedy string.  On Xe the same container is
+fine; the divergence is the board's arithmetic plus this model's activation
+magnitudes, accumulated over 28 layers.

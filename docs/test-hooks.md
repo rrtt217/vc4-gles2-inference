@@ -61,6 +61,7 @@ same table with what *this* environment resolved to).
 | `ACT_CPU` <br><sub>`ACT_F32`</sub> | `q16\|f32` | the CPU layer loop's activation grid (ACT_F32 meant f32, whatever its value) |
 | `FFN_HID` | `i16\|i8\|f32` | the FFN hidden stream's format: q16 (default), i8, or f32 past the q16 rail |
 | `Q16_DECODE` | value | the q16 decode: fast classifies the -32768 rail at 32767.5, exact is integer |
+| `EXP` <br><sub>`ATT_EXP`</sub> | `drv\|poly` | every exponential the shaders emit: drv (default) or a portable polynomial; VC4's SFU exp is 20x Xe's error |
 | `QKV_PAIR` | `=1` | two qkv rows per fragment (int8 only, default on); QKV_PAIR=0 disables |
 
 ### The attention block's fixed-point
@@ -70,7 +71,6 @@ same table with what *this* environment resolved to).
 | `ATT_SCORE_GRID` <br><sub>`ATT_SCALE`</sub> | N | score/(max) grid: round(score*N), so +-32768/N range and 1/N step (1024) |
 | `ATT_SUM` | `linear\|log2` | the sum's domain: linear grid (default) or log2(sum)*2048 — a trade, see the doc |
 | `ATT_SUM_GRID` <br><sub>`ATT_SUM_SCALE`</sub> | N | the linear sum grid in the same (max,sum) texel (32 = step 1/32) |
-| `ATT_EXP` | `drv\|poly` | the weight's exponential: drv (default) or a portable polynomial; VC4's exp is 20x Xe's error |
 
 ### The KV cache
 
