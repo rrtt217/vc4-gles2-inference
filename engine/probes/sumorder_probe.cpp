@@ -48,7 +48,7 @@
 #include "egl_surfaceless.h"
 
 static const int N = 1024;                          // terms per dot product
-static const int NSHAPE = 4, NMAG = 5;
+static const int NSHAPE = 6, NMAG = 5;
 static const float MAGS[NMAG] = {1.0f, 16.0f, 256.0f, 1024.0f, 2300.0f};
 static const float S = 9.5367431640625e-07f;        // 2^-20, exact
 
@@ -109,6 +109,32 @@ static std::string fragment_src() {
         "          float m=((c.r>0.5)?M:-M)*((c.g>0.5)?1.0:W1);"
         "          if(lane==0)d0+=m;else if(lane==1)d1+=m;else if(lane==2)d2+=m;else d3+=m;}}"
         "      s+=(d0+d2)+(d1+d3);}\n"
+        "  } else if(shape==3){\n"
+        // two accumulators, each fed by a 2-wide tree -- the cheapest shape that
+        // still has a lane structure, and the one this probe exists to price
+        "    float a=0.0,b=0.0;"
+        "    for(int g=0;g<N;g+=8){float t0,t1,t2,t3;"
+        "      for(int q=0;q<4;q++){int i=g+q*2;"
+        "        vec4 c=texture(T,vec2((float(i)+0.5)/float(N),0.5));"
+        "        vec4 d=texture(T,vec2((float(i+1)+0.5)/float(N),0.5));"
+        "        float m0=((c.r>0.5)?M:-M)*((c.g>0.5)?1.0:W1);"
+        "        float m1=((d.r>0.5)?M:-M)*((d.g>0.5)?1.0:W1);"
+        "        float t=m0+m1;"
+        "        if(q==0)t0=t;else if(q==1)t1=t;else if(q==2)t2=t;else t3=t;}"
+        "      a+=(t0+t1);b+=(t2+t3);}"
+        "    s=a+b;\n"
+        "  } else if(shape==4){\n"
+        // one accumulator, 8-wide pairwise tree per group: no lane survives
+        // across groups, so no accumulator ever holds a same-sign run
+        "    for(int g=0;g<N;g+=8){float t0,t1,t2,t3;"
+        "      for(int q=0;q<4;q++){int i=g+q*2;"
+        "        vec4 c=texture(T,vec2((float(i)+0.5)/float(N),0.5));"
+        "        vec4 d=texture(T,vec2((float(i+1)+0.5)/float(N),0.5));"
+        "        float m0=((c.r>0.5)?M:-M)*((c.g>0.5)?1.0:W1);"
+        "        float m1=((d.r>0.5)?M:-M)*((d.g>0.5)?1.0:W1);"
+        "        float t=m0+m1;"
+        "        if(q==0)t0=t;else if(q==1)t1=t;else if(q==2)t2=t;else t3=t;}"
+        "      s+=(t0+t1)+(t2+t3);}\n"
         "  } else {\n"
         "    for(int g=0;g<N;g+=8){float d0=0.0,d1=0.0,d2=0.0,d3=0.0;"
         "      for(int q=0;q<2;q++){"
@@ -217,7 +243,7 @@ int main() {
         return f;
     };
 
-    const char* names[NSHAPE] = {"ltr", "ltr8", "engine4", "pairwise"};
+    const char* names[NSHAPE] = {"ltr", "ltr8", "engine4", "two-tree", "tree8", "pairwise"};
     // Host references, same terms and magnitudes, f32 and f64.
     printf("\n%-6s %-9s %14s %14s %10s %10s %10s\n", "M", "shape", "exact",
            "gpu", "err/exact", "gpu-host", "host/exact");
