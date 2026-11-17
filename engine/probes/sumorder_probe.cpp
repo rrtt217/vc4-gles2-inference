@@ -243,6 +243,64 @@ int main() {
         return f;
     };
 
+    // ---- exp() precision: att_v evaluates exp(score*SCSI - mx) per position,
+    // so a relative difference here is a multiplicative weight error on every
+    // value in the sum, 28 times a token.  Range: the attention's exponent runs
+    // from 0 down to about -30; below -87 the term underflows f32 and
+    // contributes nothing, so the wider range would measure denormals.
+    {
+        const int NX = 64;
+        std::string fs_src =
+            "#version 300 es\nprecision highp float;\n"
+            "uniform sampler2D T;out vec4 fragColor;\n"
+            "void main(){int i=int(gl_FragCoord.x);"
+            "float x=-30.0*(float(i)+0.5)/float(64);"
+            "float v=exp(x);"
+            "uint u=floatBitsToUint(v);"
+            "fragColor=vec4(float(u>>24),float((u>>16)&255u),float((u>>8)&255u),"
+            "float(u&255u))/255.0;}\n";
+        GLuint fs2 = compile(GL_FRAGMENT_SHADER, fs_src, "fs-exp");
+        if (fs2) {
+            GLuint p2 = glCreateProgram();
+            glAttachShader(p2, vs);
+            glAttachShader(p2, fs2);
+            glBindAttribLocation(p2, 0, "p");
+            glLinkProgram(p2);
+            GLuint fbo2 = 0, out2 = 0;
+            glGenFramebuffers(1, &fbo2);
+            glGenTextures(1, &out2);
+            glBindTexture(GL_TEXTURE_2D, out2);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, NX, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+            glBindFramebuffer(GL_FRAMEBUFFER, fbo2);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, out2, 0);
+            glViewport(0, 0, NX, 1);
+            glUseProgram(p2);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+            glFinish();
+            std::vector<uint8_t> ex((size_t)NX * 4);
+            glReadPixels(0, 0, NX, 1, GL_RGBA, GL_UNSIGNED_BYTE, ex.data());
+            double worst = 0, worst_x = 0;
+            int ulp_worst = 0;
+            for (int i = 0; i < NX; ++i) {
+                const uint8_t* q = &ex[(size_t)i * 4];
+                const uint32_t u = ((uint32_t)q[0] << 24) | ((uint32_t)q[1] << 16) |
+                                   ((uint32_t)q[2] << 8) | (uint32_t)q[3];
+                float f = 0;
+                memcpy(&f, &u, 4);
+                const double x = -30.0 * (i + 0.5) / 64.0;
+                const double ref = exp(x);
+                const double rel = fabs((double)f - ref) / ref;
+                if (rel > worst) { worst = rel; worst_x = x; }
+            }
+            (void)ulp_worst;
+            printf("\nexp(): worst relative error over x in [-30,0] (64 points):\n"
+                   "  %.3e  at x = %.2f   (host uses double exp as the reference)\n",
+                   worst, worst_x);
+            glDeleteFramebuffers(1, &fbo2);
+            glDeleteTextures(1, &out2);
+        }
+    }
+
     const char* names[NSHAPE] = {"ltr", "ltr8", "engine4", "two-tree", "tree8", "pairwise"};
     // Host references, same terms and magnitudes, f32 and f64.
     printf("\n%-6s %-9s %14s %14s %10s %10s %10s\n", "M", "shape", "exact",
