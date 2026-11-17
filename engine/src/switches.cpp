@@ -121,6 +121,9 @@ static const SwitchDef kSwitches[] = {
     // ---- Att: the attention block's own fixed-point ------------------------
     {"ATT_SCORE_GRID", "ATT_SCALE", SwKind::Num, "", SwStatus::Permanent, SwAxis::Att,
      "score/(max) grid: round(score*N), so +-32768/N range and 1/N step (1024)"},
+    {"ATT_EXP", "", SwKind::Str, "drv|poly", SwStatus::Probe, SwAxis::Att,
+     "the weight's exponential: the driver's exp (default) or a portable polynomial "
+     "(VC4's exp/exp2 are the same sequence at 4.6e-05, Xe 2.2e-06, poly 1.5e-06)"},
     {"ATT_SUM", "", SwKind::Str, "linear|log2", SwStatus::Permanent, SwAxis::Att,
      "the sum's domain: linear grid (default) or log2(sum)*2048 — a trade, see the doc"},
     {"ATT_SUM_GRID", "ATT_SUM_SCALE", SwKind::Num, "", SwStatus::Permanent, SwAxis::Att,

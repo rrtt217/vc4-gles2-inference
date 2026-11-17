@@ -28,6 +28,12 @@ struct AttnConfig {
     // KV value encoding: 0 = the fixed q16 grid (KVSCALE), 1 = bf16 (same two
     // values a texel, uniform 0.1% relative precision, no scale to tune).
     int kv_fmt = 0;
+    // ATT_EXP=poly: use the portable exp (x_exp) instead of the driver's.
+    // VC4's exp/exp2 are the same fixed-point sequence at 4.6e-05 worst
+    // relative error against Xe's 2.2e-06; the polynomial is 1.5e-06 on
+    // both (probes/sumorder_probe).  Off by default: the pins and the
+    // shader digests belong to the driver's exp.
+    bool exp_poly = false;
     float kv_scale = 16384.0f;
     int kv_width = 0;
     // 8-bit KV only: V is quantised on a per-head, per-position grid derived

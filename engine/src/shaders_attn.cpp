@@ -52,9 +52,40 @@ static void need_attn(const AttnConfig& c) {
     }
 }
 
+// A portable exp for the attention weights.
+//
+// `exp()` and `exp2()` are the *same* approximation on VC4 -- both land on the
+// fixed-point ALU sequence -- and measure 4.6e-05 worst relative error over
+// x in [-30, 0], against 2.2e-06 on Xe (probes/sumorder_probe, 2026-11-17).
+// att_v multiplies that into every position's probability, so it is a
+// systematic weight error, 28 layers deep, on a model whose residual reaches
+// 2300.  This is a degree-6 minimax on r = x - k ln2 with 2^k built by a
+// bit-cast (ESSL 3.00, which RES/ACT=f32 already requires): 1.5e-06 on VC4,
+// 1.1e-06 on Xe -- the polynomial's own error, not the driver's.
+//
+// Selected by ATT_EXP=poly; the default stays the driver's exp so that existing
+// pins and shader digests do not move.
+static const char* kExpPoly =
+    "float x_exp(float x){"
+    "float k=floor(x*1.4426950408889634+0.5);"
+    "float r=x-k*0.6931471805599453;"
+    "float t=1.0+r*(1.0+r*(0.5+r*(1.0/6.0+r*(1.0/24.0+r*(1.0/120.0+r/720.0)))));"
+    "return t*uintBitsToFloat(uint(int(k)+127)<<23);}\n";
+
+// The name the shader bodies call: the driver's exp or the portable one.
+static std::string exp_call(const AttnConfig& c){
+    return c.exp_poly ? "x_exp(" : "exp(";
+}
+
+
+// The shader-side definition of the portable exp, or nothing (see kExpPoly).
+static const char* exp_poly_text(const AttnConfig& c){
+    return c.exp_poly ? kExpPoly : "";
+}
+
 string att_defs(const AttnConfig& c) {
     need_attn(c);
-    return string("#define DIM ") + to_string(c.dim) + "\n" +
+    return std::string(exp_poly_text(c)) + string("#define DIM ") + to_string(c.dim) + "\n" +
            "#define KVDIM " + to_string(c.kv_dim) + "\n" +
            "#define QKVDIM " + to_string(c.dim + 2 * c.kv_dim) + "\n" +
            "#define QKVTW " + to_string((c.dim + 2 * c.kv_dim + 1) / 2) + "\n" +
@@ -307,7 +338,8 @@ string att_stats(const AttnConfig& c) {
         "float sum=0.0;"
         "for(int T=0;T<SEQ/2;T++){int t0=T*2;if(float(t0)>pos)break;"
         "vec4 c=texture2D(S,vec2((float(T)+0.5)/float(SEQ/2),(float(h)+0.5)/float(HEADS)));"
-        "sum+=exp(dec16(c.rg)*SCSI-mx);if(float(t0+1)<=pos)sum+=exp(dec16(c.ba)*SCSI-mx);}"
+        "sum+=" + exp_call(c) + "dec16(c.rg)*SCSI-mx);"
+        "if(float(t0+1)<=pos)sum+=" + exp_call(c) + "dec16(c.ba)*SCSI-mx);}"
         // The sum's domain is a choice, not a decision (`AttnConfig::sum_log`):
         // the linear grid is a 1/32 step, which is 2% of a peaked softmax's sum
         // (~1.5) and a pure *gain* error on every probability in the head, while
@@ -328,9 +360,10 @@ string att_prob(const AttnConfig& c) {
         "vec4 sm=texture2D(ST,vec2((float(2*h)+0.5)/float(2*HEADS),0.5));"
         "vec4 ss=texture2D(ST,vec2((float(2*h+1)+0.5)/float(2*HEADS),0.5));"
         "float mx=dec24s(sm,SCS);float sum=dec24s(ss,SMS);float p=0.0;"
-        "if(float(t)<=pos && sum>0.0)p=exp(dec24s(texture2D(S,vec2((float(t)+0.5)/float(SEQ),(float(h)+0.5)/float(HEADS))),SCS)-mx)/sum;"
+        "if(float(t)<=pos && sum>0.0)p=" + exp_call(c) + "dec24s(texture2D(S,vec2((float(t)+0.5)/float(SEQ),(float(h)+0.5)/float(HEADS))),SCS)-mx)/sum;"
         "gl_FragColor=enc24s(p,65536.0);}";
 }
+
 
 string att_v(const AttnConfig& c, XFormat out) {
     // The q16 score/stats layout packs (max,sum) into one texel per head, so the
@@ -393,9 +426,9 @@ string att_v(const AttnConfig& c, XFormat out) {
         "for(int T=0;T<SEQ/2;T++){if(T>=mxT)break;"
         "int t0=T*2;int t1=t0+1;"
         "vec4 sp=texture2D(S,vec2((float(T)+0.5)/float(SEQ/2),(float(h)+0.5)/float(HEADS)));"
-        "float p0=exp(dec16(sp.rg)*SCSI-mx)*invs;" + (vstep ? step0 : string("")) +
+        "float p0=" + exp_call(c) + "dec16(sp.rg)*SCSI-mx)*invs;" + (vstep ? step0 : string("")) +
         loads0 + bodies +
-        "if(float(t1)<=pos){float p1=exp(dec16(sp.ba)*SCSI-mx)*invs;" + (vstep ? step1 : string("")) + loads1 +
+        "if(float(t1)<=pos){float p1=" + exp_call(c) + "dec16(sp.ba)*SCSI-mx)*invs;" + (vstep ? step1 : string("")) + loads1 +
         "a0+=p1*v1_0;" + (N > 1 ? "a1+=p1*v1_1;" : "") + (N > 2 ? "a2+=p1*v1_2;a3+=p1*v1_3;" : "") + "}}"
         + enc;
     return fs;

@@ -405,7 +405,8 @@ private:
     int att_kv_fmt_ = 0;                 // KV_FMT: 0 fixed grid, 1 bf16
     float att_score_scale_ = 1024.0f;   // ATT_SCALE: score/(max) grid
     float att_sum_scale_ = 32.0f;       // ATT_SUM_SCALE: exp-sum grid (linear)
-    bool att_sum_log_ = false;          // ATT_SUM=log2: sum stored as log2
+    bool att_sum_log_ = false;
+    bool att_exp_poly_ = false;   // ATT_EXP=poly (see shaders_attn.cpp)          // ATT_SUM=log2: sum stored as log2
     int att_kv_width_ = 0;
     bool att_kv_vstep_ = false;   // 8-bit KV: per-head V grid
     int max_target_dim_ = 0;

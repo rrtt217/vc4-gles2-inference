@@ -68,6 +68,11 @@ void GPU::init_attention(int dim, int kv_dim, int heads, int kv_heads, int head_
         // linear grid stays the default even though log2 is the more accurate
         // one (the two MiniMind3 containers disagree in sign).
         if (const char* sd = getenv("ATT_SUM")) att_sum_log_ = !strcmp(sd, "log2");
+        // The weight's exponential: VC4's exp and exp2 are the same fixed-point
+        // approximation (4.6e-05 worst relative error against Xe's 2.2e-06), so
+        // the portable polynomial exists for the board.  Default stays the
+        // driver's -- the pins and the digests belong to it.
+        if (const char* ax = getenv("ATT_EXP")) att_exp_poly_ = !strcmp(ax, "poly");
         // bf16 keeps two values a texel (14 in the codec, the scale only in the
         // grid ATT_DUMP prints on); f32 uses the one-value-a-texel layout (the
         // 24-bit path's) with no rounding to flip, which is the only encoding

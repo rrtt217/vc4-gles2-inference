@@ -7549,3 +7549,30 @@ candidates, in the order the per-layer dump suggests:
    difference there is a *multiplicative* weight error on every value in the
    sum, applied 28 times per token.  This is the next thing to measure, and it
    is a two-second probe, not a model run.
+
+### The portable exp costs 0.4-1.8% and does not fix the degeneration
+
+`ATT_EXP=poly` (commit below) replaces the driver's `exp` in the attention
+weights with the degree-6 minimax that `probes/sumorder_probe` measures at
+1.5e-06 on VC4 against the driver's 4.6e-05.  Same binary, one switch, runs
+interleaved on the board:
+
+| model | `ATT_EXP=drv` (ms/token) | `ATT_EXP=poly` | delta |
+|---|---:|---:|---:|
+| MiniMind3 q4, SEQ=128, gen 24 | 180.6 (median of 3) | 181.3 | **+0.4%** |
+| pocket qat, SEQ=128, gen 32 | 1694.5 | 1725.3 | **+1.8%** |
+
+Not an explosive cost, and the reason is structural: at SEQ=128 `att_v` runs 64
+iterations that are dominated by texture fetches, so ~12 extra ALU ops per exp
+hide under the fetch latency -- and VC4's own `exp`/`exp2` is a multi-op
+sequence there, not a single instruction (that is *why* it is 20x less accurate
+than Xe's).
+
+**It does not stop pocket's repetition**: both settings print
+`杭州是中国中国中国…`.  So the transcendental is not the cause either.  With this
+change and the `matvec_i4_pair` tree (above), every kernel in pocket's decode
+path now has a single accumulator or a tree -- the shape the probe calls safe --
+and the divergence at the 2300-magnitude layers is still there.  The next
+measurement is therefore not another knob: it is a same-path stage dump on the
+board at those layers, before and after the two changes, to see which *stage*
+still differs rather than which *kernel* might.
