@@ -7072,3 +7072,140 @@ Until that is answered, the serial path is the board's best bet and P7's own
 change is path-independent: 94 fewer read-backs a token, and the same
 `glFinish`-per-upload behaviour it already had.
 
+
+## 2026-11-17, later — RWKV-7 P7: the channel mix, priced; two negative results (Iris Xe + Pi Zero)
+
+P7 left the fused path's channel mix as one number: 42.5 ms a layer on the Pi
+Zero, 43% of a 98 ms layer, against a 4.72M-MAC estimate of 16.7 ms — a 2.5x
+gap.  This section prices the inside of that stage, then measures the two
+levers the gap suggested on the board.  **Both are negative**: the region is
+matvec throughput, not launches, and the two switches are kept as default-off
+measurement arms rather than shipped defaults.
+
+### The instrument: `RWKV_PROFILE`'s second fused-path line
+
+`RWKV_PROFILE=1` now prints one more line per layer, breaking `cm` into the
+passes the region consists of (docs/test-hooks.md): `pre` = `att_norm_2` + the
+channel-mix lerp + the token-shift copy, `key_*`/`sq_*` = the key matvec and
+its relu^2 per chunk of `split_rwkv`'s cut, `val_*`/`add_*` = the value matvec
+and the q16 residual add per chunk.  The laps are the same `glFinish` deltas the
+stage laps use, so the same caveat applies — the totals are inflated against a
+real token and only the shares are to be read — and the sub-lap total is folded
+back into the layer line's `cm`, so that field still means the whole region.
+
+Xe, q8r 0.1B chat container, SEQ=512, `--gen 12`, layer 6 (steady state, two
+tokens):
+
+| cm line | total | pre | key | sq | val | add |
+|---|---:|---:|---:|---:|---:|---:|
+| token A (unchunked) | 4.05 | 1.28 | 0.75 | 0.51 | 1.52 | 0.00 |
+| token B (unchunked) | 4.43 | 0.90 | 1.35 | 0.75 | 1.42 | 0.00 |
+
+(`add` is 0 on the fused path because `matvec_add` carries the residual add
+inside `val`; the two-step form is the board's.)  Two things already showed on
+the laptop: `pre` is 20–30% of the region — the `att_norm_2` statistics pass
+fetches all 768 elements per fragment — and the key matvec (2.36M MAC, 3
+strips) is *not* slower than the value matvec (2.36M MAC, one draw), which is
+what a MAC-bound region looks like and the first hint that the board's 16 draws
+here were not the cost.
+### The calibrated probe: `RWKV_SHIFT_PP=1`
+
+Every layer draws `rwkv_copy` twice to store the normalised row into the
+layer's shift texture.  The shift is a per-layer *state*, but the two roles do
+not need one texture: `rwkv_cur_` already flips once a token for the WKV
+state's ping-pong, so the norm can render this token's row into slot `par` and
+the lerp read slot `par ^ 1`, which holds exactly the bytes the copy left
+there.  `RWKV_SHIFT_PP=1` does that; with it off every index is slot 0, i.e.
+the shipped draw sequence.
+
+It is bit-identical, and that is the point — it is the one change on this path
+whose only difference is launches.  Measured on Xe: PPL 9.1850 default and
+9.1850 with it, 9.1781/9.1781 on the hybrid (`RWKV_WKV_CPU=1`), and
+9.3712/9.3712 and 9.1726/9.1726 on the chunked arms; `TOKENS_OUT` identical
+over 64 tokens across two turns.
+
+### Where the draws are, and what they are worth
+
+`DRAWCOUNT=1` on Xe (a count, not a timing, so the arithmetic transfers; only
+`rwkv_draw1`'s strip split is driver-dependent):
+
+| arm | draws/token | delta |
+|---|---:|---:|
+| default (copy) | 594 | — |
+| `RWKV_SHIFT_PP=1` | 570 | **-24** = the two copies a layer, exactly |
+| chunked (`RWKV_CHUNK_TEST=1`) | 630 | +36 = chunking's three extra passes a layer |
+| chunked + `RWKV_CM_SPLIT=2048` | 618 | **-12** on Xe, -24 on VC4 (below) |
+| chunked + `RWKV_CM_SPLIT=2048` + `RWKV_SHIFT_PP=1` | 594 | the default's count, on the chunked path |
+
+`split_rwkv` cut the 3072-row channel-mix key at the even 1536 because one
+weight texture may not exceed `GL_MAX_TEXTURE_SIZE` (2048 on VC4).  The cut is
+now `RWKV_CM_SPLIT=<rows>`, and where it falls decides how many `kDrawCap`-sized
+strips the key matvec and its relu^2 take: 1536+1536 is 2+2 strips of each,
+2048+1024 is 2+1 — and `init_rwkv` now sizes each chunk's relu^2 scratch to that
+chunk too, since one max width had made the narrow half's `rwkv_sqrelu` as
+expensive as the wide one's.  Xe measures -12 a token, not -24, because it does
+not split an elementwise draw at all (`rwkv_draw1` strips only under
+`needs_finish()`); on the board the relu^2 half of the saving is real, and the
+profile's strip counts moved 4 -> 3 exactly as predicted.
+
+The cut also moves the numbers, by construction: the q16 residual add runs once
+per chunk, so the cut point changes where the channel mix is rounded.  Xe with
+`RWKV_CHUNK_TEST=1`, SEQ=512: 1536 -> 9.3712 (bit-identical to unset),
+2048 -> 9.1726, 1024 -> 9.2531, 2040 -> 9.4001.  Adopting a cut would
+re-baseline the board's GPU pin.
+### The board's verdict: no gain from either switch (Pi Zero, VC4)
+
+The instrument and both switches were cross-built and run on the board by the
+lead (this laptop cannot).  Decode, interleaved, q8r 0.1B chat:
+
+| arm | ms/token | what it removed |
+|---|---:|---|
+| default | 993.6 | — |
+| `RWKV_CM_SPLIT=2048` | 1015.3 | 2 cm strips a layer (4 -> 3 per chunked pass) |
+| `RWKV_SHIFT_PP=1`, round 1 | 990.3 -> 970.6 | 24 draws a token |
+| `RWKV_SHIFT_PP=1`, round 2 | 965.1 -> 976.4 | the same 24 draws |
+
+Neither moves the token: the cut is 21.7 ms the *wrong* way on one pair, and the
+ping-pong's two rounds have opposite signs (-19.7 then +11.3).  Both are inside
+the board's own spread for one binary (965–1015 across these runs, and P6's
+1138 was measured under a different prompt and load), so the honest reading is
+**no effect**, and the useful part is that the draw arithmetic was right:
+removing 24 of ~1879 draws a token, with every byte of arithmetic identical,
+changes nothing measurable — which is the same conclusion P7 reached on Xe from
+the other direction (deleting 564 draws cost nothing).  **A draw on this board
+is not what a token pays for.**
+
+### Why: the fetch ratio, not slack
+
+Then what does the 42.5 ms/layer buy?  cm's 4.72M MACs at 42.5 ms is ~111
+MMAC/s, and the board's whole-token rate lands in the same band (~127–145
+MMAC/s by the lead's board estimate over the layer's MACs), against the ~283
+MMAC/s the dense paths see.  The two kernels' inner loops explain it: per four
+multiply-adds, `matvec_q8`'s I24_1 single-row form issues **1 weight fetch + 4
+input fetches**, its I16_2 inline form **1 + 2**, and the pair form feeds *two*
+output rows from one input decode — 1.25 fetches per MAC against 0.5, a factor
+of 2.5, which is the gap to within the noise of the numbers it is computed
+from.  The channel mix is not paying for its draws or its elementwise passes;
+it is paying for `I24_1` activations in a single-row kernel.
+
+That also bounds what is left inside the stage, and none of it is 25%:
+
+- **The relu^2 folded into the value matvec's input sampling** would remove the
+  measured `sq_a + sq_b` — 4 of the region's 16 draws and two 1536-element
+  write/read passes — at the price of the relu^2 paid once per input fetch
+  (2.36M squarings a layer instead of 3072).  It needs a shader builder
+  (`shaders.cpp`), and it is a few percent at best.
+- **Merging the two q16 residual adds** is declined, not deferred: summing the
+  two I24 deltas first, or the fused `matvec_add`, is one rounding instead of
+  two, i.e. a different grid, and the fused form is exactly what P6 had to give
+  up on VC4.
+- **A pair kernel or packed activations for this path** is the only thing that
+  addresses the 2.5x, and both are `shaders.cpp`: the `rwkv_*` elementwise
+  builders hard-code `I24_1`, so neither can be reached from the driver.
+
+Conclusion for the board: the fused RWKV path's cost is matvec MAC throughput,
+not launches.  Until the kernels change shape, the Pi's GPU path stays where P6
+left it (GPU ~1.1 s/token against the CPU's ~0.97 s), and the >=3x win stays
+Xe-only.  The two switches stay in the tree as default-off measurement arms —
+`RWKV_SHIFT_PP` is the cheapest known "remove 24 draws, change nothing" probe
+on this path.
