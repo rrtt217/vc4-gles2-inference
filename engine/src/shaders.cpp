@@ -1177,18 +1177,28 @@ string matvec_i4_pair(int rows, int cols, XFormat xf) {
         "(float(r)+0.5)/float(" + to_string(rows) + ")));"
         "float sa1=x_i16raw(q1.rg)*ps1,ma1=x_i16raw(q1.ba)*ps1;"
         "float sa2=x_i16raw(q2.rg)*ps2,ma2=x_i16raw(q2.ba)*ps2;"
-        "float xsum=0.0,d1=0.0,d2=0.0;"
+        // The group's 32 taps are summed as a TREE, not by accumulating two
+        // long runs: d1/d2 used to hold 32 terms each while s1/s2/xsum stayed
+        // live, i.e. five f32 accumulators whose magnitude is set by the
+        // activations rather than by the result.  VC4's fragment ALU keeps less
+        // precision in that shape than Xe does -- probes/sumorder_probe measures
+        // 44% error at magnitude 2300 against 0.000% for a tree, bit-identical
+        // to Xe (2026-11-17).  Same adds, same multiplies, different order.
+        "float xsum=0.0,t1=0.0,t2=0.0,t3=0.0,t4=0.0;"
         "for(int q=0;q<4;q++){int c=g*32+q*8;"
         "vec4 xa=X4Q(X,c," + to_string(axw) + ".0);"
         "vec4 xb=X4Q(X,c+4," + to_string(axw) + ".0);"
         + q4_xsum() +
         "vec4 w0=texture2D(W1,vec2((float(g*4+q)+0.5)/float(" + to_string(texw) + "),"
         "(float(r)+0.5)/float(" + to_string(rows) + ")));"
-        "d1+=dot4(w0,xa,xb);"
+        "float p1=dot4(w0,xa,xb);"
         "w0=texture2D(W2,vec2((float(g*4+q)+0.5)/float(" + to_string(texw) + "),"
         "(float(r)+0.5)/float(" + to_string(rows) + ")));"
-        "d2+=dot4(w0,xa,xb);}"
-        "s1+=sa1*d1+ma1*xsum;s2+=sa2*d2+ma2*xsum;}"
+        "float p2=dot4(w0,xa,xb);"
+        // four pairwise trees, combined pairwise, added to s once per group
+        "if(q==0){t1=p1;t2=p2;}else if(q==1){t1+=p1;t2+=p2;}"
+        "else if(q==2){t3=p1;t4=p2;}else{t3+=p1;t4+=p2;}}"
+        "s1+=sa1*((t1+t3))+ma1*xsum;s2+=sa2*((t2+t4))+ma2*xsum;}"
         "gl_FragColor=x_st2q(s1,s2);}";
 }
 

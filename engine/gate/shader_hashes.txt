@@ -101,7 +101,7 @@ ccaeb151ee9d014f    4304 q4shift0/matvec_i4_6400x768_i16_2_gen
 05cdc9d46699d9f9    3860 q4shift0/matvec_i4_add_768x768_i16_2_i16_1
 231828575461d157    4432 q4shift0/matvec_i4_add_pair_768x768_i16_2_gen
 7e8f10c1b1711bd9    4902 q4shift0/matvec_i4_add_pair_768x768_i16_2_inl
-106d7377d30cf442    3937 q4shift0/matvec_i4_pair_2432x768_i16_2
+e68e1e707ca89f7f    4073 q4shift0/matvec_i4_pair_2432x768_i16_2
 f5bca5d50b32813b    4708 q4shift0/matvec_i4_pair_swiglu_2432x768_i16_2_gen
 2dfce41926c72caf    5178 q4shift0/matvec_i4_pair_swiglu_2432x768_i16_2_inl
 77de43be2fff0472    4286 q4shift1/matvec_i4_6400x768_i16_2_gen
@@ -109,7 +109,7 @@ f5bca5d50b32813b    4708 q4shift0/matvec_i4_pair_swiglu_2432x768_i16_2_gen
 393824ccb43ee15a    3842 q4shift1/matvec_i4_add_768x768_i16_2_i16_1
 92abcfe7f5774654    4414 q4shift1/matvec_i4_add_pair_768x768_i16_2_gen
 77eccde6c0a69f02    4884 q4shift1/matvec_i4_add_pair_768x768_i16_2_inl
-33a593328e9f8beb    3919 q4shift1/matvec_i4_pair_2432x768_i16_2
+5128eaf8ad64551e    4055 q4shift1/matvec_i4_pair_2432x768_i16_2
 0d2163d1d6a195f4    4690 q4shift1/matvec_i4_pair_swiglu_2432x768_i16_2_gen
 db4a3c2477138344    5160 q4shift1/matvec_i4_pair_swiglu_2432x768_i16_2_inl
 26e6ed1d6952df41    3977 rms_norm_768_i16_1_i8_4
