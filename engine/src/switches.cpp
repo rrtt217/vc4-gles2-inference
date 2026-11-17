@@ -194,24 +194,6 @@ static const SwitchDef kSwitches[] = {
      "the flat-loop form of the q4 qkv matvec"},
     {"Q4_W2_FLAT", "", SwKind::Str, "", SwStatus::Probe, SwAxis::Q4,
      "the flat-loop form of the q4 w2/wo matvec-add"},
-    {"Q4_4X4_FLAT", "", SwKind::Str, "", SwStatus::Probe, SwAxis::Q4,
-     "4x4 gate arm: flat group loop"},
-    {"Q4_4X4_FLAT8", "", SwKind::Str, "", SwStatus::Probe, SwAxis::Q4,
-     "4x4 gate arm: eight-wide flat loop"},
-    {"Q4_4X4_FLAT8M", "", SwKind::Str, "", SwStatus::Probe, SwAxis::Q4,
-     "4x4 gate arm: eight-wide, min folded"},
-    {"Q4_4X4_FLAT8G", "", SwKind::Str, "", SwStatus::Probe, SwAxis::Q4,
-     "4x4 gate arm: eight-wide, group plane hoisted"},
-    {"Q4_4X4_FLAT8B", "", SwKind::Str, "", SwStatus::Probe, SwAxis::Q4,
-     "4x4 gate arm: eight-wide, block form"},
-    {"Q4_4X4_ONEW", "", SwKind::Str, "", SwStatus::Probe, SwAxis::Q4,
-     "stage-removal arm: one matrix of the 4-bit gate"},
-    {"Q4_4X4_ONEROW", "", SwKind::Str, "", SwStatus::Probe, SwAxis::Q4,
-     "stage-removal arm: one row of the 4-bit gate"},
-    {"Q4_4X4_NOOUT", "", SwKind::Str, "", SwStatus::Probe, SwAxis::Q4,
-     "stage-removal arm: no swiglu/output (the driver deletes the kernel: 0.8 ms)"},
-    {"Q4_4X4_NOP", "", SwKind::Str, "", SwStatus::Probe, SwAxis::Q4,
-     "pricing arm: drop the P fetches and the scale/min decode (wrong weights)"},
 
     // ---- Rwkv: the RWKV-7 layer loop --------------------------------------
     {"RWKV_GPU", "", SwKind::Flag, "", SwStatus::Probe, SwAxis::Rwkv,
@@ -304,6 +286,31 @@ static const SwitchDef kSwitches[] = {
      "the timezone the tool's date functions render in"},
 
     // ---- Retired: documented as gone; the source must not read them ------
+    // The 2026-11-16 q4 campaign's nine arms.  Each was a stage removal (ONEW,
+    // ONEROW, NOOUT, NOP: wrong results on purpose) or a loop shape on the way
+    // to the flat 8-wide gate (FLAT, FLAT8, FLAT8M, FLAT8G, FLAT8B), and the
+    // flat 8-wide body IS the default now, so the road is the conclusion.  They
+    // were deleted on 2026-11-17 (194 lines, shader_hashes.txt unchanged, which
+    // is what makes the deletion safe to believe); docs/performance.md keeps
+    // what they measured.
+    {"Q4_4X4_FLAT", "", SwKind::Str, "", SwStatus::Retired, SwAxis::Retired,
+     "dead: the 4-wide flat gate arm; the flat 8-wide body is the default"},
+    {"Q4_4X4_FLAT8", "", SwKind::Str, "", SwStatus::Retired, SwAxis::Retired,
+     "dead: the flat 8-wide arm; it became the default and the arm was removed"},
+    {"Q4_4X4_FLAT8M", "", SwKind::Str, "", SwStatus::Retired, SwAxis::Retired,
+     "dead: pricing arm, metadata applied per iteration"},
+    {"Q4_4X4_FLAT8G", "", SwKind::Str, "", SwStatus::Retired, SwAxis::Retired,
+     "dead: pricing arm, metadata decoded once per group"},
+    {"Q4_4X4_FLAT8B", "", SwKind::Str, "", SwStatus::Retired, SwAxis::Retired,
+     "dead: the byte-identical candidate; it is the shipped gate now"},
+    {"Q4_4X4_ONEW", "", SwKind::Str, "", SwStatus::Retired, SwAxis::Retired,
+     "dead: stage-removal arm, one matrix of the 4-bit gate (8.18 -> 6.31 ms)"},
+    {"Q4_4X4_ONEROW", "", SwKind::Str, "", SwStatus::Retired, SwAxis::Retired,
+     "dead: stage-removal arm, one row of the 4-bit gate (-> 5.71 ms)"},
+    {"Q4_4X4_NOOUT", "", SwKind::Str, "", SwStatus::Retired, SwAxis::Retired,
+     "dead: stage-removal arm; the driver deletes the kernel, so it measured 0.8 ms"},
+    {"Q4_4X4_NOP", "", SwKind::Str, "", SwStatus::Retired, SwAxis::Retired,
+     "dead: pricing arm, constant scale/min (84 ms of the gate's 159 on the Pi)"},
     {"ATTN_HOIST", "", SwKind::Str, "", SwStatus::Retired, SwAxis::Retired,
      "dead: the hoisted attention path is mandatory, there is no other score kernel"},
     {"ATTN_FUSE_PROB", "", SwKind::Str, "", SwStatus::Retired, SwAxis::Retired,

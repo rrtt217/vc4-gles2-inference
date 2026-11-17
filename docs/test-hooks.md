@@ -283,22 +283,13 @@ binary.  They are measurement hooks, not production settings.
 - `Q4_SHIFT=0` — force the float nibble decode instead of the ESSL 3.00 shift
   decode (`Q4_SHIFT_NO_MESA`, `Q4_SHIFT_VERBOSE` are VC4-specific overrides).
   `gpu_q4_shift()` reports the choice at startup.
-- `Q4_4X4_ONEW=1`, `Q4_4X4_ONEROW=1`, `Q4_4X4_NOOUT=1` — stage-removal arms for
-  the 4-bit gate: one matrix, one row, and the swiglu/output.  **`NOOUT` is not
-  a price**: discarding the fragment value lets the driver eliminate the whole
-  kernel, so it measures 0.8 ms against 8.2 and means nothing.  The other two
-  are real: 8.18 -> 6.31 (one matrix) and 5.71 (one row), i.e. sub-linear, so a
-  fixed ~4-5 ms a draw sits under the per-matrix-row work.
-- `Q4_4X4_NOP=1` — pricing arm for the 4-bit gate above, the `Q4_NOUNPACK`
-  methodology: it drops the four P fetches and the scale/min decode per group
-  (constant scale), with wrong weights on purpose.  It measured 84 ms of the
-  gate's 159 on the Pi, which is why the group plane is the next target.
 - `Q4_GATE_NESTED=1` — restore the nested group-loop form of the 4-bit FFN
   gate (the pre-2026-11-16 default) for an interleaved A/B.  The default is
   the flat 8-wide gate: byte-identical (probe hash matches at 304/608/1216/2048
   rows on Xe and VC4) and ~43% faster at the engine's 1216-row chunk
-  (6.55 -> 3.74 ms/draw).  The legacy pricing arms below route to the nested
-  body too.
+  (6.55 -> 3.74 ms/draw).  The nine `Q4_4X4_*` arms that priced that road are
+  gone (see Retired below): the flat 8-wide body is the default, so what is left
+  of them is the measurement, in `docs/performance.md`.
 - `Q4_QKV_FLAT=1`, `Q4_W2_FLAT=1` — opt into the flat-loop form of the qkv
   (`matvec_i4_4x4`) and w2/wo (`matvec_i4_add_4x4`) 4-bit kernels.  **Default
   off: measured a net loss.**  The same rewrite that sped the gate up -43%
@@ -308,17 +299,6 @@ binary.  They are measurement hooks, not production settings.
   byte-identical (same per-group operation order via conditional float
   updates; w2 keeps its generic `X4Q` decode) and stay as the measurement
   arms that produced the negative result.
-- `Q4_4X4_FLAT=1`, `Q4_4X4_FLAT8=1`, `Q4_4X4_FLAT8M=1`, `Q4_4X4_FLAT8G=1`,
-  `Q4_4X4_FLAT8B=1` — structure arms for the residual gap that survives
-  `NOP`+`Q4_NOMIN` (all q4 metadata gone, yet ~1.5x the q8 gate).  `FLAT`/`FLAT8`
-  use the NOP constant scale and no min, wrong weights on purpose: `FLAT` is
-  q8's single 4-wide loop with 4-bit weights (no decode), `FLAT8` is the current
-  8-wide inner body flattened into one loop.  `FLAT8M` fetches/applies the
-  per-group scale/min per iteration (96x); `FLAT8G` fetches/decodes once per
-  group via a conditional (24x), applies per iteration (both reassociate the
-  min, so pricing arms).  `FLAT8B` is the byte-identical candidate: flat 8-wide
-  loop, per-group d1/xsum reset at q%4==0 and flush `s10+=sa1*d1+ma1*xsum` at
-  q%4==3, the nested kernel's exact operation order (`q4mv_probe`).
 - `Q4_FMT=rgba4` — bind every INT4 weight matrix (qkv, wo, w13 and, on the
   hybrid, the conv block's `in_proj` slices and `out_proj`) as a four-bit texel surface
   at twice the width: four weights per texel, sampled as n/15 with the 15 folded
@@ -526,6 +506,17 @@ the blob these switches act on.
   probability texture to read).
 - `LEGACY_Q8=1`, `ROPE_THETA=`, `ROPE_HALF=`, `--template` — gone with the
   legacy readers; the container states all of it.
+- `Q4_4X4_ONEW`, `Q4_4X4_ONEROW`, `Q4_4X4_NOOUT`, `Q4_4X4_NOP`,
+  `Q4_4X4_FLAT`, `Q4_4X4_FLAT8`, `Q4_4X4_FLAT8M`, `Q4_4X4_FLAT8G`,
+  `Q4_4X4_FLAT8B` — the 2026-11-16 q4 campaign's nine arms, **removed
+  2026-11-17** (194 lines of builder).  They were stage removals and loop
+  shapes on the way to the flat 8-wide gate, which is the default, so each one
+  was a second kernel text to keep verified for a conclusion already in the
+  code.  `shader_hashes.txt` did not move when they were deleted, which is what
+  makes the deletion safe to believe.  What they measured stays in
+  `docs/performance.md`: `NOOUT` is not a price (0.8 ms against 8.2, the driver
+  deletes the kernel), one matrix is 8.18 -> 6.31 ms and one row 5.71, and the
+  group plane was 84 of the gate's 159 ms on the Pi.
 - **`TOKENIZER=` is *not* retired**, and it is the one to be careful with: the
   engine loads that blob *instead of* the container's embedded tokenizer
   (`engine.cpp`: `if (model.tok_blob && !getenv("TOKENIZER"))`).  Nothing warns,
