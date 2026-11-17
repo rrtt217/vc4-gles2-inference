@@ -94,6 +94,10 @@ cd "$(dirname "$0")/.."
 
 REBASE=0
 if [ "${1:-}" = "--rebaseline" ]; then REBASE=1; shift; fi
+# A gate that passes with nothing to compare is worse than no gate: it is
+# counted as coverage (2026-11-17, an outside review of this design).  So an
+# unset pin is a failure, and the only way past it is to say so out loud.
+ALLOW_UNPINNED="${ALLOW_UNPINNED:-0}"
 
 BIN="${1:-${BIN:-./engine_mm3}}"
 TOK="${TOKENIZER:-}"   # optional: the container embeds its tokenizer
@@ -119,10 +123,22 @@ RWKV="${RWKV-../models/rwkv7/packed/rwkv7-g1d-0.1b.q8r.chat.mmcf}"
 RWKV_EXPECT="${RWKV_EXPECT:-}"
 RWKV_PPL_EXPECT="${RWKV_PPL_EXPECT:-}"
 RWKV_PPL_SEQ="${RWKV_PPL_SEQ:-512}"
+# --rebaseline replaces these pins, so it must not be measured against them:
+# before this, a deliberate numeric change made `--rebaseline` exit at the first
+# comparison and never print the values it exists to produce.
+if [ "$REBASE" = 1 ]; then
+    Q8_EXPECT=""; Q4_EXPECT=""; PPL_EXPECT=""; Q4_PPL_EXPECT=""
+    MOE_EXPECT=""; MOE_PPL_EXPECT=""; RWKV_EXPECT=""; RWKV_PPL_EXPECT=""
+fi
 PROMPT="用一句话介绍你自己。"
 PROMPT2="写一首关于春天的短诗。"
 
 [ -x "$BIN" ] || { echo "missing engine: $BIN" >&2; exit 1; }
+# A missing container used to come back as an empty string and then compare as
+# "unpinned", which is a pass.  Say it once, here, with the path.
+for c in "$Q8" "$Q4"; do
+    [ -f "$c" ] || { echo "missing container: $c  (Q8=/Q4= select them)" >&2; exit 1; }
+done
 if [ "${NO_PPL:-0}" != 1 ]; then
     [ -f "$CORPUS" ] || { echo "missing PPL corpus: $CORPUS" >&2; exit 1; }
 fi
@@ -162,11 +178,15 @@ if MODEL="$Q8" GPU_LAYER=1 KV_PACK=16 "$BIN" --prompt x --gen 1 2>&1 >/dev/null 
     exit 1
 fi
 
+# $1 tag, $2 expected prefix, $3 got, $4 the environment variable that holds it
 check_prefix() {
-    tag="$1" want="$2" got="$3"
+    tag="$1" want="$2" got="$3" var="${4:-<pin>}"
     if [ -z "$want" ]; then
-        echo "$tag (unpinned): $got"
-        return 0
+        if [ "$REBASE" = 1 ]; then echo "$tag (rebaseline): $got"; return 0; fi
+        if [ "$ALLOW_UNPINNED" = 1 ]; then echo "$tag (unpinned, allowed): $got"; return 0; fi
+        echo "$tag FAIL: no pin.  export $var='...' (the value is per machine; see" >&2
+        echo "  AGENTS.local.md), or pass ALLOW_UNPINNED=1 to run without one" >&2
+        exit 1
     fi
     case "$got" in
         "$want"*) echo "$tag OK: $got" ;;
@@ -271,9 +291,9 @@ q8_def=$(text "$Q8" "$PROMPT" 16 "")
 }
 echo "default system prompt OK"
 
-check_prefix q8 "$Q8_EXPECT" "$q8"
+check_prefix q8 "$Q8_EXPECT" "$q8" Q8_EXPECT
 q4=$(text "$Q4" "$PROMPT" 16 "$SYS")
-check_prefix q4 "$Q4_EXPECT" "$q4"
+check_prefix q4 "$Q4_EXPECT" "$q4" Q4_EXPECT
 poem=$(text "$Q8" "$PROMPT2" 48 "$SYS")
 behaviour poem "$poem"
 
@@ -291,7 +311,7 @@ if [ -n "$MOE" ]; then
         exit 1
     fi
     echo "moe determinism OK"
-    check_prefix moe "$MOE_EXPECT" "$m1"
+    check_prefix moe "$MOE_EXPECT" "$m1" MOE_EXPECT
     behaviour moe "$m1"
     # The route sequence is the discrete part of a MoE: a flipped expert is a
     # different FFN, so a text pin alone can pass on a model whose routing has
@@ -349,7 +369,7 @@ if [ -n "$RWKV" ] && [ -f "$RWKV" ]; then
         exit 1
     }
     echo "rwkv default system prompt OK"
-    check_prefix rwkv "$RWKV_EXPECT" "$r1"
+    check_prefix rwkv "$RWKV_EXPECT" "$r1" RWKV_EXPECT
     python3 - "$r1" <<'PY'
 import sys
 s = sys.argv[1]
@@ -384,8 +404,14 @@ ppl() {
 }
 
 check_ppl() {
-    tag="$1" want="$2" got="$3"
-    if [ -z "$want" ]; then echo "$tag (unpinned): $got"; return 0; fi
+    tag="$1" want="$2" got="$3" var="${4:-<pin>}"
+    if [ -z "$want" ]; then
+        if [ "$REBASE" = 1 ]; then echo "$tag (rebaseline): $got"; return 0; fi
+        if [ "$ALLOW_UNPINNED" = 1 ]; then echo "$tag (unpinned, allowed): $got"; return 0; fi
+        echo "$tag FAIL: no pin.  export $var='...' (the value is per machine; see" >&2
+        echo "  AGENTS.local.md), or pass ALLOW_UNPINNED=1 to run without one" >&2
+        exit 1
+    fi
     python3 - "$tag" "$want" "$got" "$PPL_TOL" <<'PY'
 import sys
 tag, want, got, tol = sys.argv[1], float(sys.argv[2]), float(sys.argv[3]), float(sys.argv[4])
@@ -405,12 +431,12 @@ if [ "${NO_PPL:-0}" != 1 ]; then
     echo "PPL ACT8=2:   $p2"
     echo "PPL ACT8=1:   $p1"
     echo "PPL q4:       $q4p"
-    check_ppl PPL "$PPL_EXPECT" "$p0"
-    check_ppl "PPL q4" "$Q4_PPL_EXPECT" "$q4p"
+    check_ppl PPL "$PPL_EXPECT" "$p0" PPL_EXPECT
+    check_ppl "PPL q4" "$Q4_PPL_EXPECT" "$q4p" Q4_PPL_EXPECT
     if [ -n "$MOE" ] && [ "$MOE_PPL" = 1 ]; then
         moep=$(ppl "$MOE" 0)
         echo "PPL moe:      $moep"
-        check_ppl "PPL moe" "$MOE_PPL_EXPECT" "$moep"
+        check_ppl "PPL moe" "$MOE_PPL_EXPECT" "$moep" MOE_PPL_EXPECT
     fi
     if [ -n "$RWKV" ]; then
         # The RWKV container's own SEQ, not PPL_SEQ: the window protocol moves
@@ -419,7 +445,7 @@ if [ "${NO_PPL:-0}" != 1 ]; then
             "$BIN" --ppl "$CORPUS" 2>&1 \
             | sed -n 's/^PPL \([0-9.]*\).*/\1/p' | head -1)
         echo "PPL rwkv:     $rwkvp"
-        check_ppl "PPL rwkv" "$RWKV_PPL_EXPECT" "$rwkvp"
+        check_ppl "PPL rwkv" "$RWKV_PPL_EXPECT" "$rwkvp" RWKV_PPL_EXPECT
     fi
 fi
 

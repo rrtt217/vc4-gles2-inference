@@ -107,16 +107,21 @@ Build for the target and do not reuse a stale binary:
   be Raspbian; Debian's armhf is ARMv7).
 - Probes: `make -C engine -B probes/<name>[_pi]` — see the targets in
   `engine/Makefile`.
-- Before pushing: `make -C engine check` — the same no-GPU half, one command
-  (warncheck, `docs_check.sh`, `shader_hashes.sh`, `check_q16_decode.sh`,
-  `check_target_reset.sh`, `server/selftest.py`).  `-Wall -Wextra` is on by
-  default and `warncheck` fails the target if `src/` produces any warning; the
-  eight warnings the vendored Jinja headers produce are filtered, not silenced,
-  so the flag keeps working for our own code.
-- CI: `.github/workflows/gate.yml` runs the **no-GPU half** of the gate on every
-  push: build, `warncheck`, `docs_check.sh`, `shader_hashes.sh`,
-  `check_target_reset.sh`, `server/selftest.py`, the eval case file's
-  `--selftest`, shell and Python syntax, and the tool CLIs.  The model-dependent half (golden strings, PPL,
+- Before pushing: `make -C engine check` — the no-GPU half in one command, and
+  it is nine gates: `warncheck`, `docs_check.sh` (six sub-checks: the generated
+  inventory, the switch registry, the doc style, the paths, the "gone" names and
+  the links/index), `shader_hashes.sh`, `check_q16_decode.sh`,
+  `check_draw_cap.sh`, `check_target_reset.sh`, `test_mmcf_format.py`,
+  `test_lineedit` (the editor through a pty) and `server/selftest.py`.  It takes
+  about a minute, and ~55 of those seconds are `warncheck`'s forced rebuild: the
+  checks themselves are ~2 s.  `-Wall -Wextra` is on by default; `warncheck`
+  fails the target if `src/` produces any warning, and the eight warnings the
+  vendored Jinja headers produce are filtered, not silenced.
+- CI: `.github/workflows/gate.yml` runs the same no-GPU half on every push — all
+  nine, plus the eval case file's `--selftest`, shell and Python syntax, and the
+  tool CLIs.  It used to miss `check_q16_decode.sh` (fixed 2026-11-17), and
+  `test_mmcf_format.py` checks only the C++ constants there because `models/` is
+  gitignored — the step says so in its name.  The model-dependent half (golden strings, PPL,
   `swap_matrix.py`) needs the containers and a GL driver, so it stays local —
   run `scripts/regression.sh` before pushing anything that touches numerics.
 
@@ -314,8 +319,16 @@ the machine sets them, and perplexity.  A deliberate numeric change
 re-baselines `Q8_EXPECT` / `Q4_EXPECT` / `PPL_EXPECT` in the same commit and
 cites the evidence — PPL on a corpus large enough to matter, the behaviour
 checks, and where possible a cross-implementation check (llama.cpp on the same
-prompt).  `scripts/regression.sh --rebaseline` prints the new values; keep them
-in the machine's override, not here.
+prompt).
+
+**A gate with nothing to compare is not a gate.**  `regression.sh` fails when a
+pin is unset — `q8 FAIL: no pin.  export Q8_EXPECT=...` — and `ALLOW_UNPINNED=1`
+is the only way past it, because a run that prints `ACCEPT` having compared
+nothing is counted as coverage it does not have (2026-11-17; it did exactly that
+before).  `scripts/regression.sh --rebaseline` blanks the pins, measures, and
+prints the block to paste into the machine's override: it no longer compares
+against the values it is about to replace, which used to make it exit at the
+first mismatch and never print anything.
 
 The same command **without** `--system` must print the same text; that is the
 check that the container's default system prompt (metadata key 6) and the packer

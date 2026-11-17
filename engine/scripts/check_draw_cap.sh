@@ -9,9 +9,14 @@
 # the previous contents of the scratch target, which looks like a plausible
 # number, so nothing downstream can notice.
 #
-# The rule is `kDrawCap` in gpu_internal.h and not a literal, in any gpu*.cpp file.
-# Comments are ignored: several of them legitimately quote 1024 to explain the
-# limit (docs/engine-internals.md does too).
+# The rule is `kDrawCap` in gpu_internal.h and not a literal, in the files that
+# split draws -- `src/gpu*.cpp`, which is where `draw()` and `matvec_add()` live.
+# The scope is deliberate and it is stated in the summary line: a bare 1024
+# elsewhere in src/ is legitimate (SEQ's 1024-token default, a sampling range, a
+# shader-builder argument, a doc string -- four of them today), and an
+# allowlist for those would be worse than a scoped rule.  What the scope costs:
+# a new strip loop in a file that is not named gpu* is not checked.  Comments are
+# ignored: several legitimately quote 1024 to explain the limit.
 #
 # Usage: scripts/check_draw_cap.sh        (no GPU, no model)
 set -u
@@ -37,4 +42,4 @@ grep -q 'constexpr int kDrawCap = 1024;' src/gpu_internal.h || {
     exit 1
 }
 [ "$bad" = 0 ] || exit 1
-echo "draw cap: ok (kDrawCap = 1024, no bare literals in src/gpu*.cpp)"
+echo "draw cap: ok (kDrawCap = 1024, no bare literal in the src/gpu*.cpp draw loops)"
