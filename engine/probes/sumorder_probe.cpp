@@ -254,8 +254,8 @@ int main() {
             "#version 300 es\nprecision highp float;\n"
             "uniform sampler2D T;out vec4 fragColor;\n"
             "void main(){int i=int(gl_FragCoord.x);"
-            "float x=-30.0*(float(i)+0.5)/float(64);"
-            "float v=exp(x);"
+            "int j=(i<32)?i:(i-32);float x=-30.0*(float(j)+0.5)/float(32);"
+            "float v=(i<32)?exp(x):exp2(x*1.4426950408889634);"
             "uint u=floatBitsToUint(v);"
             "fragColor=vec4(float(u>>24),float((u>>16)&255u),float((u>>8)&255u),"
             "float(u&255u))/255.0;}\n";
@@ -279,7 +279,7 @@ int main() {
             glFinish();
             std::vector<uint8_t> ex((size_t)NX * 4);
             glReadPixels(0, 0, NX, 1, GL_RGBA, GL_UNSIGNED_BYTE, ex.data());
-            double worst = 0, worst_x = 0;
+            double worst = 0, worst_x = 0, worst2 = 0, worst2_x = 0;
             int ulp_worst = 0;
             for (int i = 0; i < NX; ++i) {
                 const uint8_t* q = &ex[(size_t)i * 4];
@@ -287,15 +287,21 @@ int main() {
                                    ((uint32_t)q[2] << 8) | (uint32_t)q[3];
                 float f = 0;
                 memcpy(&f, &u, 4);
-                const double x = -30.0 * (i + 0.5) / 64.0;
+                const int j = i < 32 ? i : i - 32;
+                const double x = -30.0 * (j + 0.5) / 32.0;
                 const double ref = exp(x);
                 const double rel = fabs((double)f - ref) / ref;
-                if (rel > worst) { worst = rel; worst_x = x; }
+                // columns 0..31 are exp(), 32..63 exp2(x*log2 e) at the same x
+                const int half = i < 32 ? 0 : 1;
+                if (half == 0) { if (rel > worst) { worst = rel; worst_x = x; } }
+                else { if (rel > worst2) { worst2 = rel; worst2_x = x; } }
             }
             (void)ulp_worst;
-            printf("\nexp(): worst relative error over x in [-30,0] (64 points):\n"
-                   "  %.3e  at x = %.2f   (host uses double exp as the reference)\n",
-                   worst, worst_x);
+            printf("\nexp(): worst relative error over x in [-30,0], 32 points each:\n"
+                   "  exp(x)          %.3e  at x = %.2f\n"
+                   "  exp2(x*log2 e)  %.3e  at x = %.2f\n"
+                   "  (host uses double exp as the reference)\n",
+                   worst, worst_x, worst2, worst2_x);
             glDeleteFramebuffers(1, &fbo2);
             glDeleteTextures(1, &out2);
         }
