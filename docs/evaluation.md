@@ -549,3 +549,42 @@ truncated-template ifeval) are archived next to them with READMEs.  The
 per-item files keep every probability / reply, so a surprising number can be
 re-checked without the GPU.
 
+## 2026-11-17 — RWKV-7 0.4B: how to run it (and why q8r only)
+
+The 0.1B rows above are scores; this section is the **operating recipe** for
+the 0.4B (`rwkv7-g1d-0.4b-20260210-ctx8192`, 450.8M parameters, 24x1024,
+FFN 4096, ranks 64/64/32/128, a bf16 checkpoint).  Container
+`models/rwkv7/packed/rwkv7-g1d-0.4b.q8r.chat.mmcf` (454,949,100 B, MMCF v4,
+key 16 ranks with the gate flag, key 17 logit_shift 2), on Xe with
+`GPU_LAYER=1 KV_PACK=16` and `SEQ=512`.
+
+**Three tiers, do not mix them:**
+
+| tier | flags | when |
+|---|---|---|
+| production | `--temp 1.0 --topp 0.3 --repeat-penalty 1.2 --seed 42 --gen 80` | every chat / translation / explanation request. All 20 sampled matrix runs produced readable output inside 80 tokens, including both translation directions |
+| tripwire | `--greedy --gen 16` | determinism and regression checks only (self-intro and the like). Greedy is **not** usable for open-ended or translation prompts on this checkpoint |
+| thinking | `--thinking --gen 400` or more, and the caller must check that `</think>` closes | only to watch the reasoning chain, never to get an answer |
+
+**Why greedy is a tripwire only.**  The nothink template does not stop this
+checkpoint opening its own `<think>`: with `--greedy --gen 200` both
+translation prompts spend the whole budget reasoning and never emit an answer,
+and the `--thinking` variant is still inside an unclosed think block at 200
+tokens.  The same prompts under the card's sampling preset answer inside 80
+(and translate, where the 0.1B only repeated its source).  Six runs, all rc=0:
+`models/rwkv7/phase2-direct/`.
+
+**q8r only, q4 is not viable.**  PPL on the gate corpus is 6.3432 at q8r
+against **7.7273** at q4 (f32 oracle 5.7405 on the same token stream), and the
+generation matrix shows what that costs: the q4 greedy column collapses into
+`<line>` x18 on the haiku prompt and repeats one clause ten times on the poem,
+while q8r stays readable.  The 0.4B is a desktop model (453 MB of container,
+386 MB of textures); the Pi cannot hold it at any precision.
+
+**Three behaviours that matter when scoring** (documented in
+[rwkv7-assessment.zh-CN.md](rwkv7-assessment.zh-CN.md) section 11): it invents
+wrapper tags (`<translation_output>`, `<answer>`) and, worst, echoes the user
+turn as `<user>...</user>`; and the multiple-choice battery still needs
+`--completion` because the template puts a think marker at the answer
+position.  Raw matrix (50 runs) and the per-prompt side-by-side against the
+0.1B: `models/rwkv7/phase2-gen/SUMMARY.md`.
