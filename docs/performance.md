@@ -7293,7 +7293,6 @@ commit:
 - **Width.**  The staging block is `groups x n` texture rows (64 at n=16) and the
   widest input is `dim/2` texels, so 0.1B needs 384x64 — inside VC4's 2048.
 
-Pi numbers are pending; this section gets them when they land.
 ### The board's first attempt failed numerically (3fd8b21, before the fix)
 
 The Pi Zero ran the A/B on the first integrated commit (`3fd8b21`, 0.1B q8r,
@@ -7316,9 +7315,42 @@ through both paths, and a mismatch on that machine falls back to the serial
 prefill with a line saying so.  On Xe the logits are byte-identical again at
 n=1/4/16/64 on 100-, 445- and 512-token prompts and on the 0.4B container.
 
-**The board's number for the fixed commit is not measured yet.**  What the board
-has shown is that a 2.3x prefill win is available there even with the strip policy
-that keeps the serial draw count (the batched path is read-back-bound, which is
-what the P7 profile said: `mv_read` is ~90% of a serial token), so the fixed
-commit is expected to land at or above 2.3x.  The Pi rows stay pending — the
-project stopped before that run.
+### The board on the fixed commit: 2.6x, and numerically close but not exact
+
+Pi Zero, q8r chat container, ~90-token prompt, one binary, `0a8b271`:
+
+| arm | prefill |
+|---|---:|
+| serial | 93.63 s |
+| `RWKV_PREFILL=1` (n=16) | **36.05 s — 2.6x** |
+
+`LOGITS_OUT` against the serial arm: **max|d| 0.3672, mean|d| 0.0661, 63067 of
+65536 dimensions over one q16 LSB, top-1 and the whole top-5 order identical**
+(11 / 11685 / 12307 / 10460 / 12605).  Cosine is ~0.9999.
+
+**So the Pi is not byte-identical, where Xe is.**  The bet was that the kernel
+text is the serial kernel's, and on Xe it is, byte for byte.  On VC4 the same
+text reads its staging row through a *uniform* coordinate while the serial kernel
+bakes a literal, and this tree already has the measurement that those two are not
+the same arithmetic there (AGENTS.md: "a constant is not a uniform" cost
+MiniMind3 PPL 270.3170 -> 269.9303 for exactly that reason).  A sample landing on
+the far side of a texel boundary in a few rows is enough: it is a coordinate
+rounding difference, not a different sum order, which is why the magnitude is
+0.37 and not 47.
+
+Consequences, recorded rather than smoothed over:
+
+- the switch stays **default off**; it is a long-prompt opt-in, and on the board
+  it buys 2.6x with a ~0.9999 cosine and an unchanged top-1;
+- the one-time guard ("the batched kernel must prove itself") compares one real
+  projection against `GPU::matvec` on the machine that is running and accepts a
+  difference up to 1.0 -- the board's 0.37 passes, the broken row mapping's 47
+  does not -- and says on stderr when it accepted a non-zero one;
+- `RWKV_PREFILL_CHECK=1` is still the exact comparison, for a machine where a
+  difference needs to be named;
+- nothing here claims bit-identity across machines.  Xe's byte-identical result
+  is Xe's, and the board's is `cos ~= 0.9999, top-1 unchanged`.
+
+The project stopped at this measurement (RWKV-7 optimization ended: the 0.1B is
+slower and weaker than LFM2.5-230M on the board).  The machinery stays as a
+default-off arm; the 0.4B, the strip question and a VC4-exact kernel are open.

@@ -1290,10 +1290,19 @@ int Session::prefill_batch_size() const {
 // false), so the caller's loop and the LOGITS_OUT dump are unchanged.
 vector<float> Session::prefill_batch(const vector<int>& toks, bool want_logits){
         if (toks.empty()) return {};
-        if (!prefill_batch_ok()) {
-                for (size_t i = 0; i < toks.size(); ++i) step(toks[i], (int)i, false);
-                return {};
-        }
+        // The serial fallback has to finish the job, not just move the state: the
+        // caller asked for the last token's logits and would otherwise answer
+        // from an empty vector.
+        const auto serial = [&]() -> vector<float> {
+                vector<float> out;
+                for (size_t i = 0; i < toks.size(); ++i) {
+                        const bool want = want_logits && i + 1 == toks.size();
+                        vector<float> lg = step(toks[i], (int)i, want);
+                        if (want) out = std::move(lg);
+                }
+                return out;
+        };
+        if (!prefill_batch_ok()) return serial();
         // The one-time guard: one real projection through both paths before any
         // token is committed.  RWKV_PREFILL defaults off, but a machine where the
         // batched kernel is wrong (the VC4 tall-draw question, or a driver whose
@@ -1318,16 +1327,27 @@ vector<float> Session::prefill_batch(const vector<int>& toks, bool want_logits){
                         }
                 else
                         ndiff = (int)one.size();
-                rwkv_batch_state_ = ndiff ? -1 : 1;
-                if (ndiff)
-                        cerr << "RWKV_PREFILL: the batched matvec does not reproduce the serial one on "
-                             << "this machine (" << ndiff << "/" << one.size() << " rows differ, max|d| "
-                             << mxd << "); the serial prefill is used\n";
+                // A tolerance, not exactness.  On Xe the batched row is the
+                // serial row bit for bit; on VC4 the same kernel text reads its
+                // staging row through a *uniform* coordinate, which the driver
+                // rounds differently from the literals the serial kernel bakes in
+                // (the effect AGENTS.md records as "a constant is not a uniform"),
+                // so the board measures max|d| 0.37 on a projection whose rows are
+                // O(10) -- with top-1 and the whole top-5 order unchanged -- where
+                // the broken row mapping this guards against was 47.  The line is
+                // therefore drawn at 1.0, and an accepted difference is reported
+                // rather than hidden.
+                rwkv_batch_state_ = (mxd <= 1.0f) ? 1 : -1;
+                if (mxd > 0.0f)
+                        cerr << "RWKV_PREFILL: the batched matvec differs from the serial one on this "
+                             << "machine by max|d| " << mxd << " over " << one.size() << " rows ("
+                             << ndiff << " differ); "
+                             << (rwkv_batch_state_ > 0
+                                     ? "within the 1.0 tolerance, so batching is used"
+                                     : "past the 1.0 tolerance, so the serial prefill is used")
+                             << "\n";
         }
-        if (rwkv_batch_state_ < 0) {
-                for (size_t i = 0; i < toks.size(); ++i) step(toks[i], (int)i, false);
-                return {};
-        }
+        if (rwkv_batch_state_ < 0) return serial();
         vector<vector<float>> x = forward_rwkv_batch(toks);
         if (g_stop || !want_logits || x.empty()) return {};
         return gpu_.logits(m_.logits_tiles, rwkv_head_input(x.back()));
