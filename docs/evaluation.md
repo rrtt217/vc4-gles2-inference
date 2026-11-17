@@ -646,13 +646,17 @@ Reading it:
 | Model | pass | hard pass | zh | en | most-failed checks (over 72 attempts) |
 |---|---:|---:|---:|---:|---|
 | **pocket qat** | **0.792** | **0.792** | 0.700 | 0.857 | bullets 3, cjk_ratio_min 3, max_words 3, min_words 3, regex 3 |
+| pocket bf16 | 0.708 | 0.708 | 0.600 | 0.786 | **max_words 9**, bullets 3, contains_any 3, max_chars 3, min_words 3, regex 3 |
 | LFM2.5-230M QAD q4 (2026-11-12 rows, 2 seeds) | 0.562 | 0.542 | 0.45 | 0.64 | json_valid+json_keys 6+6, max_words 6, max_chars 4 |
 
 * **The first model in this document that passes the JSON cases.**  Every other
   row's top failure is `json_valid+json_keys 6+6` — the document says "JSON is
   the universal failure" — and pocket's failure list contains no `json_*` at all.
-* `hard pass == pass`: it either satisfies the instruction completely or not at
-  all, which is a different profile from a model that half-complies.
+* `hard pass == pass` in both containers: an attempt either satisfies the
+  instruction completely or not at all, which is a different profile from a model
+  that half-complies.  The containers' failure profiles also differ in a way
+  that matches their translation lengths: bf16's largest single failure is
+  `max_words 9` (it runs long), qat's are spread evenly at 3.
 * Chinese 0.700 against LFM2.5's 0.45, English 0.857 against 0.64.
 * Protocol difference: 3 seeds here (72 attempts) against 2 (48) for the rows
   above, so the *rates* compare and the failure counts do not.
@@ -681,9 +685,14 @@ Reading it:
 Pocket is the strongest 0.36B-class model in this document on knowledge and
 instruction following, and the first that is usable in Chinese at this size
 without a translation penalty.  Its weak spot is arithmetic, identical in both
-containers, and its Chinese *generation* lags its Chinese *comprehension*.  The
-QAT container is the one to ship: better on MC (+8 calibrated points) and on
-ifeval, with the translate difference inside one battery's noise.
+containers, and its Chinese *generation* lags its Chinese *comprehension*.
+
+**The QAT container wins two of the three batteries, and not narrowly**: MC 0.480
+against 0.450 (8 points once the letter prior is removed) and ifeval 0.792
+against 0.708 (zh 0.700 against 0.600).  bf16 is ahead only on translation
+(0.383 against 0.366, from 30 cases), which is the one place where the two
+containers' shapes differ least — and bf16 gets there by writing longer (its
+top ifeval failure is `max_words 9`), not by translating better.  Ship qat.
 
 Reproduce (paths absolute — the batteries spawn a tokenizer probe whose cwd is
 not `engine/`):
