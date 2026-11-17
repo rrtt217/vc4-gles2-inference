@@ -7576,3 +7576,43 @@ and the divergence at the 2300-magnitude layers is still there.  The next
 measurement is therefore not another knob: it is a same-path stage dump on the
 board at those layers, before and after the two changes, to see which *stage*
 still differs rather than which *kernel* might.
+
+## 2026-11-17 (correction) — VC4's ALU is fp32, not fixed point; the weak link is the SFU
+
+The two sections above explain the board's arithmetic with "VC4's fragment ALU is
+fixed-point under Mesa".  **That is wrong**, and the probe numbers do not need it:
+per the *VideoCore IV 3D Architecture Reference Guide* §3, the QPU's two ALUs are
+32-bit **floating point** (one add pipe, one multiply pipe duality) with integer
+and 4x8-bit packed modes alongside, and fixed point appears only in the
+interfaces around them (Z is 24-bit in the FEP payload, colour is unorm8 in the
+pack path, rasteriser coordinates are 11-bit integers).  Mesa compiles even the
+fixed-function fragment pipeline (blend, texture combiners) to QPU float shaders.
+
+What the `sumorder_probe` numbers still say, restated without the wrong
+mechanism: single-accumulator and tree sums reproduce Xe **bit for bit** at every
+magnitude, and the multi-accumulator shapes do not (44% and 489% at magnitude
+2300).  With an IEEE-fp32 ALU the only way to get that is a **different
+summation order** -- which is the compiler's, not the ALU's -- so the actionable
+conclusion is the same (write the tree, keep one accumulator) but the reason is
+"the backend schedules this shape differently", not "the mantissa is fixed
+point".
+
+The genuine accuracy gap is the **SFU**: `exp2`/`log2` are the shared
+lookup-table unit and Mesa applies **no** refinement to them, unlike `rcp`/`rsqrt`
+which get a Newton-Raphson step (`vc4_program.c`: `ntq_rcp`, `ntq_rsq`; commits
+`1fc124b80f`, `15eb4c59f6`, and `283d4d18e5` for 1/W).  Mesa's own
+`broadcom-rpi3-fails.txt` still lists `fs-exp-*`, `exp2-*`, `log-*`, `log2-*`,
+`pow-*` against piglit's 1e-5 strict tolerance while `*sqrt` and `*-op-div` have
+left it -- the observable consequence of N-R versus no N-R.  This matches what
+the probe measures on the board (exp 4.6e-05 against Xe's 2.2e-06) and it is
+*compliant*: GLSL ES 1.00 §4.5 allows 2^-16 relative for `highp` and says
+compute-heavy built-ins may return less.
+
+Consequence for this engine: the SFU is touched far more widely than the
+attention weights -- the SiLU is `a/(1+exp(-a))` and lives in **five** emitted
+kernels (`shaders.cpp`), i.e. 71,680 `exp` calls per token for pocket's
+28 x 2560 FFN, against `att_v`'s two per position-fragment.  So `ATT_EXP=poly`
+above prices and fixes the smaller half.  The next change is to promote it to a
+single `EXP=drv|poly` axis covering the SiLU kernels as well, on the same
+evidence: 1.5e-06 on the board against the driver's 4.6e-05, for +0.4-1.8%
+decode.

@@ -54,9 +54,13 @@ static void need_attn(const AttnConfig& c) {
 
 // A portable exp for the attention weights.
 //
-// `exp()` and `exp2()` are the *same* approximation on VC4 -- both land on the
-// fixed-point ALU sequence -- and measure 4.6e-05 worst relative error over
-// x in [-30, 0], against 2.2e-06 on Xe (probes/sumorder_probe, 2026-11-17).
+// `exp()` and `exp2()` are the *same* approximation on VC4: the QPU's ALU is
+// plain fp32 (VideoCore IV 3D Architecture Reference Guide, section 3), but
+// exp2/log2 are the shared SFU's table lookups and Mesa does **not** refine
+// them -- unlike rcp/rsqrt, which get a Newton-Raphson step in vc4_program.c.
+// Measured: 4.6e-05 worst relative error over x in [-30, 0] on the board,
+// against 2.2e-06 on Xe (probes/sumorder_probe, 2026-11-17), and Mesa's own
+// rpi3 piglit list still fails fs-exp-*/exp2-*/log-*/log2-*/pow-*.
 // att_v multiplies that into every position's probability, so it is a
 // systematic weight error, 28 layers deep, on a model whose residual reaches
 // 2300.  This is a degree-6 minimax on r = x - k ln2 with 2^k built by a
