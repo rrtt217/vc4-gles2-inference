@@ -45,11 +45,11 @@ Metrics
 
 Usage
 -----
-    python3 engine/scripts/eval_translate.py \
+    python3 engine/eval/eval_translate.py \
         --model minimind3-q8=models/minimind3/minimind3.q8.mmcf \
         --model minimind3-moe-q8=models/minimind3-moe/minimind3-moe.q8.mmcf \
         --model lfm2.5-qad-q4=models/lfm2.5-230m/qad/lfm2.5.qad.q4.mmcf \
-        --data engine/scripts/eval/translate.jsonl --out /tmp/eval_translate
+        --data engine/eval/data/translate.jsonl --out /tmp/eval_translate
 
 The per-item dump keeps every hypothesis next to its reference, so a chrF that
 looks wrong can be read rather than argued about.

@@ -16,7 +16,7 @@ OpenAI 兼容 HTTP 服务器和磁盘 KV prefix cache。
 
 - **数字是实测的，文字是生成的。**  `docs/performance.md` 与
   `docs/evaluation.md` 里的每个数字都对应本仓库中一条可执行命令，数值由
-  `engine/scripts/regression.sh` 与 `engine/scripts/shader_hashes.sh` 钉住。
+  `engine/scripts/regression.sh` 与 `engine/gate/shader_hashes.sh` 钉住。
   解释不是证据——要跑门禁。
 - **依赖前请先审查。** 智能体写的改动在这里经过审查和门禁，但这是一个面向研究
   与端侧推理的工程，不是经过认证的产品。除 MIT 许可证外没有任何担保；如果需要

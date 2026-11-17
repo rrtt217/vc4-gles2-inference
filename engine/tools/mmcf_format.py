@@ -5,7 +5,7 @@ Three tools read and write this format (`mmcf_pack.py`, `mmcf_dump.py`,
 the record size, the `struct` format strings, the TLV helper and the tables of
 dtypes, kinds and template kinds.  They happened to agree; the dtype table already
 did not (q6 was missing from one copy, which is how P1-3 found it).  This module is
-now the source, and `engine/scripts/test_mmcf_format.py` proves it against real
+now the source, and `engine/gate/test_mmcf_format.py` proves it against real
 containers and against the C++ reader.
 
 Layout (little-endian, no implicit padding -- every `struct` format is `<`):

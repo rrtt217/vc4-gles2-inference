@@ -21,8 +21,8 @@ reference document that carries history instead of state:
   dated paragraph, which makes it read as what it is.  `docs/performance.md` is
   the log and needs no such mark: every section in it is dated by construction.
 
-Run from anywhere: `engine/scripts/check_docs_style.py [-v]`.  Exit 1 on drift.
-Called by `scripts/docs_check.sh`, so it is step 0 of the gate.
+Run from anywhere: `engine/gate/check_docs_style.py [-v]`.  Exit 1 on drift.
+Called by `gate/docs_check.sh`, so it is step 0 of the gate.
 """
 import os
 import re
@@ -153,7 +153,7 @@ def main():
         print("  %d state documents, %d history documents exempt"
               % (len(STATE), len(HISTORY + HISTORY_PREFIX)))
     if fail:
-        print("\nsee the header of engine/scripts/check_docs_style.py: a state "
+        print("\nsee the header of engine/gate/check_docs_style.py: a state "
               "document records the present; the record is docs/performance.md.")
         return 1
     print("doc style: ok (%d state documents: canonical commands, dated "

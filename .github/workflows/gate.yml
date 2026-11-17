@@ -38,25 +38,25 @@ jobs:
         run: make -C engine warncheck
 
       - name: documentation drift
-        run: sh engine/scripts/docs_check.sh
+        run: sh engine/gate/docs_check.sh
 
       - name: shader text digests
-        run: sh engine/scripts/shader_hashes.sh
+        run: sh engine/gate/shader_hashes.sh
 
       - name: q16 rail spellings
-        run: sh engine/scripts/check_q16_decode.sh
+        run: sh engine/gate/check_q16_decode.sh
 
       - name: draw-cap literal
-        run: sh engine/scripts/check_draw_cap.sh
+        run: sh engine/gate/check_draw_cap.sh
 
       - name: target-reset ledger
-        run: sh engine/scripts/check_target_reset.sh
+        run: sh engine/gate/check_target_reset.sh
 
       # The round trip needs the containers, and models/ is gitignored, so on a
       # hosted runner this checks the C++ constants only and the script says
       # SKIP for the round trip.  The step is named for what actually runs.
       - name: container constants (round trip needs a model store, skipped here)
-        run: python3 engine/scripts/test_mmcf_format.py
+        run: python3 engine/gate/test_mmcf_format.py
 
       # The line editor's cursor arithmetic, its paste handling, and the editor
       # itself driven through a pty: no GPU, no model, no tty of the runner's.
@@ -67,7 +67,7 @@ jobs:
         run: python3 server/selftest.py
 
       - name: eval case file self-check
-        run: python3 engine/scripts/eval_ifeval.py --selftest
+        run: python3 engine/eval/eval_ifeval.py --selftest
 
       - name: shell syntax
         run: |

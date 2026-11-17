@@ -49,7 +49,7 @@ void ffn_sync();                          // glFlush+glFinish if FFN_SYNC is set
 // `matvec_add()` splitting (docs/engine-internals.md, "draw splitting").  It was a
 // bare 1024 in seven places with no name and no check, and a wrong width fails
 // *silently* -- the read-back returns the previous contents of the target, which
-// looks like a plausible number.  scripts/check_draw_cap.sh keeps it named.
+// looks like a plausible number.  gate/check_draw_cap.sh keeps it named.
 constexpr int kDrawCap = 1024;
 
 // gpu_dmabuf.cpp: a 4-bit texture allocated and imported by hand -- the only

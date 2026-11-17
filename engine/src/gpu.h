@@ -65,7 +65,7 @@ public:
     void reset_format_plan();
     // Zeroes every scratch Target (textures and FBOs are in the ledger).  Kept
     // next to release_scene() because the two always run together, and
-    // scripts/check_target_reset.sh keeps the list complete.
+    // gate/check_target_reset.sh keeps the list complete.
     void reset_targets();
 
     vector<float> matvec(const Mat& m, const vector<float>& x);

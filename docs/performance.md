@@ -5356,7 +5356,7 @@ one run per tokenizer added token) yields a per-layer hidden peak.  Key 15
 carries one byte per layer: `k` is the smallest exponent with
 `peak / 2^k <= 127.996`, capped at 5.  The serial FFN kernels write the SwiGLU
 hidden `* 2^-k` (one multiply before the q16 encode; the emitted GLSL is
-byte-identical when `k = 0`, so `scripts/shader_hashes.sh` is untouched), and
+byte-identical when `k = 0`, so `gate/shader_hashes.sh` is untouched), and
 `Model::apply_hidden_scale()` multiplies every w2 and w2 chunk by `2^k` after
 `split_ffn()`.  The read side needs no shader change: `ws`/`ps` already carry
 a per-matrix scale, and the q8 row-scale path multiplies the same unit.  The

@@ -24,7 +24,10 @@
 | `src/shaders*.cpp` | GLSL 源码构建 |
 | `tools/` | MMCF 打包器/查看器和 numpy 参考前向（host python） |
 | `quantize/` | F16/I16/q8/q4 转换脚本（legacy 布局，由打包器串起来） |
-| `scripts/` | 回归门禁、CPU-vs-GPU 逐段对比、attention/logits oracle、基准、模型质量评测 |
+| `gate/` | 无需 GPU 的判定检查：文档、开关注册表、着色器摘要、q16 负轨、draw cap、target 台账、容器布局 |
+| `scripts/` | 需要 GPU 和/或模型的 oracle、测量与验收：`regression.sh`、基准脚本、`swap_matrix.py`、`check_att.py` |
+| `eval/` | 模型质量：`bench_mc.py`、`eval_ifeval.py`、`eval_translate.py` 及其 `data/` |
+| `tests/` | 编译型测试（`test_lineedit.cpp`，由 Makefile 构建） |
 | `probes/` | 独立 VC4 探针，不链接进引擎 |
 | `Makefile` | 本地、Pi 和探针构建参数 |
 
@@ -149,7 +152,7 @@ TinyChat15M 是 llama-2 chat 格式的 15M 模型，不是补全模型：容器�
 程序；引擎做的只是请求终端在粘贴块前后加标记（`ESC[?2004h`，终端以 `ESC[200~ … ESC[201~`
 回应），块内换行因此不会被当成回车。终端若不回应这个请求，粘贴就等同于逐字节输入，第一个
 换行即发送，这时用 `Ctrl-V` 回车或 `Alt-Enter` 手动换行。`make check` 会用 pty 跑一遍编辑器
-（`engine/scripts/test_lineedit.cpp`）。
+（`engine/tests/test_lineedit.cpp`）。
 
 `/params` 打印采样参数，任何一个参数命令的裸形式也打印同一行。`/temp F`（0 = greedy）、
 `/topp F`、`/topk N`（0 = 关）、`/topk-candidates on|off`、`/greedy on|off`、`/seed N`、

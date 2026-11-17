@@ -60,5 +60,5 @@ Everything the GPU owns must be released **and reset**, not left to the context
 teardown: `release_scene()` deletes the textures/FBOs, `reset_targets()` zeroes
 the scratch targets (including the lazily filled `target_for()` map), the
 per-layer handle vectors and the activation caches are cleared, and
-[`check_target_reset.sh`](../engine/scripts/check_target_reset.sh) fails the gate
+[`check_target_reset.sh`](../engine/gate/check_target_reset.sh) fails the gate
 if a `Target` member is added without being cleared.

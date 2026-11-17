@@ -31,12 +31,12 @@ Scoring
 
 Usage
 -----
-    python3 engine/scripts/bench_mc.py \
+    python3 engine/eval/bench_mc.py \
         --model minimind3-q8=models/minimind3/minimind3.q8.mmcf \
         --model moe-q8=models/minimind3-moe/minimind3-moe.q8.mmcf \
         --model lfm-qad-q4=models/lfm2.5-230m/qad/lfm2.5.qad.q4.mmcf \
-        --data engine/scripts/eval/mc_zh.jsonl \
-        --data engine/scripts/eval/mc_en.jsonl \
+        --data engine/eval/data/mc_zh.jsonl \
+        --data engine/eval/data/mc_en.jsonl \
         --out /tmp/bench_mc
 
 The per-item dump (<out>/<model>.items.jsonl) keeps the raw probabilities so a

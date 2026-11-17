@@ -8,18 +8,18 @@ numbers, and the numbers themselves.
 
 | Battery | Script | Answers |
 |---|---|---|
-| Multiple-choice knowledge/reasoning | [`engine/scripts/bench_mc.py`](../engine/scripts/bench_mc.py) | does the model pick the right option, and can it even answer in the asked format? |
-| Instruction following | [`engine/scripts/eval_ifeval.py`](../engine/scripts/eval_ifeval.py) | does the reply obey the constraint (JSON, word count, exact prefix/suffix, language)? |
-| Translation | [`engine/scripts/eval_translate.py`](../engine/scripts/eval_translate.py) | does it translate the sentence, or just talk about translating it? |
+| Multiple-choice knowledge/reasoning | [`engine/eval/bench_mc.py`](../engine/eval/bench_mc.py) | does the model pick the right option, and can it even answer in the asked format? |
+| Instruction following | [`engine/eval/eval_ifeval.py`](../engine/eval/eval_ifeval.py) | does the reply obey the constraint (JSON, word count, exact prefix/suffix, language)? |
+| Translation | [`engine/eval/eval_translate.py`](../engine/eval/eval_translate.py) | does it translate the sentence, or just talk about translating it? |
 
 The data lives next to the tools, so a re-run needs no download:
 
 | File | Contents |
 |---|---|
-| [`engine/scripts/eval/mc_zh.jsonl`](../engine/scripts/eval/mc_zh.jsonl) | 50 Chinese 4-option items (math 10, chinese 8, history 8, geography 7, science 9, common_sense 5, logic 3; easy 15 / medium 25 / hard 10) |
-| [`engine/scripts/eval/mc_en.jsonl`](../engine/scripts/eval/mc_en.jsonl) | 50 English 4-option items (science 14, common_sense 12, math 9, language 6, geography 5, history 4; same difficulty split) |
-| [`engine/scripts/eval/ifeval.jsonl`](../engine/scripts/eval/ifeval.jsonl) | 24 instruction-following cases (zh 10, en 14), each with machine checks and a good/bad example |
-| [`engine/scripts/eval/translate.jsonl`](../engine/scripts/eval/translate.jsonl) | 15 sentence pairs (daily/idiom/news/science/technical) run in **both** directions; each direction's reference is the other direction's source |
+| [`engine/eval/data/mc_zh.jsonl`](../engine/eval/data/mc_zh.jsonl) | 50 Chinese 4-option items (math 10, chinese 8, history 8, geography 7, science 9, common_sense 5, logic 3; easy 15 / medium 25 / hard 10) |
+| [`engine/eval/data/mc_en.jsonl`](../engine/eval/data/mc_en.jsonl) | 50 English 4-option items (science 14, common_sense 12, math 9, language 6, geography 5, history 4; same difficulty split) |
+| [`engine/eval/data/ifeval.jsonl`](../engine/eval/data/ifeval.jsonl) | 24 instruction-following cases (zh 10, en 14), each with machine checks and a good/bad example |
+| [`engine/eval/data/translate.jsonl`](../engine/eval/data/translate.jsonl) | 15 sentence pairs (daily/idiom/news/science/technical) run in **both** directions; each direction's reference is the other direction's source |
 
 ## The multiple-choice battery
 
@@ -65,12 +65,12 @@ matter:
 ### Run
 
 ```bash
-python3 engine/scripts/bench_mc.py \
+python3 engine/eval/bench_mc.py \
   --model minimind3-q8=models/minimind3/minimind3.q8.mmcf \
   --model minimind3-moe-q8=models/minimind3-moe/minimind3-moe.q8.mmcf \
   --model lfm2.5-qad-q4=models/lfm2.5-230m/qad/lfm2.5.qad.q4.mmcf \
-  --data engine/scripts/eval/mc_zh.jsonl \
-  --data engine/scripts/eval/mc_en.jsonl \
+  --data engine/eval/data/mc_zh.jsonl \
+  --data engine/eval/data/mc_en.jsonl \
   --out /tmp/eval_mc --resume
 ```
 
@@ -113,11 +113,11 @@ cannot silently score a model down.
 ### Run
 
 ```bash
-python3 engine/scripts/eval_ifeval.py --data engine/scripts/eval/ifeval.jsonl --selftest
+python3 engine/eval/eval_ifeval.py --data engine/eval/data/ifeval.jsonl --selftest
 
-python3 engine/scripts/eval_ifeval.py \
+python3 engine/eval/eval_ifeval.py \
   --model minimind3-q8=models/minimind3/minimind3.q8.mmcf --preset minimind --seeds 3 \
-  --data engine/scripts/eval/ifeval.jsonl --out /tmp/eval_ifeval
+  --data engine/eval/data/ifeval.jsonl --out /tmp/eval_ifeval
 ```
 
 
@@ -158,11 +158,11 @@ zero.  Alongside it the dump records:
 ### Run
 
 ```bash
-python3 engine/scripts/eval_translate.py \
+python3 engine/eval/eval_translate.py \
   --model minimind3-q8=models/minimind3/minimind3.q8.mmcf \
   --model minimind3-moe-q8=models/minimind3-moe/minimind3-moe.q8.mmcf \
   --model lfm2.5-qad-q4=models/lfm2.5-230m/qad/lfm2.5.qad.q4.mmcf \
-  --data engine/scripts/eval/translate.jsonl --out /tmp/eval_translate
+  --data engine/eval/data/translate.jsonl --out /tmp/eval_translate
 ```
 
 30 items per model, under a second per item per model on the laptop GPU; the
@@ -526,20 +526,20 @@ quoted below the old table (dense 0.085, MoE 0.130, LFM 0.335).
 ### Reproducing the RWKV rows
 
 ```bash
-python3 engine/scripts/bench_mc.py \
+python3 engine/eval/bench_mc.py \
   --model rwkv7-q8r=models/rwkv7/packed/rwkv7-g1d-0.1b.q8r.chat.mmcf \
-  --data engine/scripts/eval/mc_zh.jsonl --data engine/scripts/eval/mc_en.jsonl \
+  --data engine/eval/data/mc_zh.jsonl --data engine/eval/data/mc_en.jsonl \
   --out /tmp/eval_mc --completion --resume
 
-python3 engine/scripts/eval_ifeval.py \
+python3 engine/eval/eval_ifeval.py \
   --model rwkv7-q8r=models/rwkv7/packed/rwkv7-g1d-0.1b.q8r.chat.mmcf \
   --preset rwkv --seeds 2 \
-  --data engine/scripts/eval/ifeval.jsonl --out /tmp/eval_ifeval
+  --data engine/eval/data/ifeval.jsonl --out /tmp/eval_ifeval
 
-python3 engine/scripts/eval_translate.py \
+python3 engine/eval/eval_translate.py \
   --model rwkv7-q8r=models/rwkv7/packed/rwkv7-g1d-0.1b.q8r.chat.mmcf \
   --preset rwkv \
-  --data engine/scripts/eval/translate.jsonl --out /tmp/eval_translate
+  --data engine/eval/data/translate.jsonl --out /tmp/eval_translate
 ```
 
 `--preset auto` (the default) picks the rwkv preset for this container by

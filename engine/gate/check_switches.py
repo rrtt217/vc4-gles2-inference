@@ -11,11 +11,11 @@ Four directions, all of them mechanical:
                     set must be spelled a|b|c or lo..hi
   registry -> docs  every row's name is mentioned in docs/test-hooks.md
 
-The registry and the reader set are parsed by scripts/switch_registry.py, which
-is also what renders the document (scripts/gen_test_hooks.py), so there is one
+The registry and the reader set are parsed by gate/switch_registry.py, which
+is also what renders the document (gate/gen_test_hooks.py), so there is one
 parser and one definition of "the source reads this switch".
 
-usage: engine/scripts/check_switches.py [-v]
+usage: engine/gate/check_switches.py [-v]
 """
 import sys
 

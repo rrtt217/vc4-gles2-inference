@@ -29,11 +29,11 @@ cjk_ratio_min, ascii_ratio_min.
 
 Usage
 -----
-    python3 engine/scripts/eval_ifeval.py \
+    python3 engine/eval/eval_ifeval.py \
         --model minimind3-q8=models/minimind3/minimind3.q8.mmcf --preset minimind \
-        --data engine/scripts/eval/ifeval.jsonl --seeds 3 --out /tmp/eval_ifeval
+        --data engine/eval/data/ifeval.jsonl --seeds 3 --out /tmp/eval_ifeval
 
-    python3 engine/scripts/eval_ifeval.py --data engine/scripts/eval/ifeval.jsonl --selftest
+    python3 engine/eval/eval_ifeval.py --data engine/eval/data/ifeval.jsonl --selftest
 """
 import argparse
 import json
@@ -213,7 +213,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--model", action="append", default=[], metavar="NAME=PATH")
     ap.add_argument("--data", default=os.path.join(ROOT, "engine", "scripts", "eval", "ifeval.jsonl"),
-                    help="case file (default: engine/scripts/eval/ifeval.jsonl)")
+                    help="case file (default: engine/eval/data/ifeval.jsonl)")
     ap.add_argument("--out", default="/tmp/eval_ifeval")
     ap.add_argument("--preset", default="auto", choices=["auto"] + sorted(PRESETS),
                     help="auto: rwkv for an RWKV-7 container, minimind otherwise "

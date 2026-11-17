@@ -11,7 +11,7 @@
 //
 // The invariants did not move with the code: a program key is not a program text
 // (`gpu_prog.cpp`), everything the GPU owns is released and reset
-// (`gpu_state.cpp`, scripts/check_target_reset.sh) and a draw never covers more
+// (`gpu_state.cpp`, gate/check_target_reset.sh) and a draw never covers more
 // than `kDrawCap` fragments (`gpu_internal.h`).
 
 #include "gpu.h"

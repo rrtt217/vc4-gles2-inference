@@ -15,7 +15,7 @@
 # site must carry one of the two known thresholds and the fold, and a new spelling
 # fails here instead of on the board as a sign error.
 #
-# Usage: scripts/check_q16_decode.sh [dump-file]   (no dump = run --dump-shaders=raw)
+# Usage: gate/check_q16_decode.sh [dump-file]   (no dump = run --dump-shaders=raw)
 set -u
 cd "$(dirname "$0")/.." || exit 1
 

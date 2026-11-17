@@ -12,7 +12,7 @@
 //
 // Everything that decides *where* a byte sits is a pure function here, over
 // (buffer, offset, prompt width, terminal width), so the arithmetic has a test
-// that needs no terminal: scripts/test_lineedit.cpp, run by `make check`.
+// that needs no terminal: tests/test_lineedit.cpp, run by `make check`.
 //
 // The conventions are the terminal's, because the editor prints prompt + buffer
 // and lets the terminal do the wrapping:

@@ -7,7 +7,7 @@ only reads that file, so the gate can compare it with the source and the
 documentation, and `gen_test_hooks.py` can render it into the document.
 
 Parsed from the C++ rather than from `--dump-switches` on purpose: the gate
-(scripts/docs_check.sh) is step 0 and must run without a compiler, a GPU or a
+(gate/docs_check.sh) is step 0 and must run without a compiler, a GPU or a
 model.
 """
 import os

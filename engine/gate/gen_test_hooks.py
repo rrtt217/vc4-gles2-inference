@@ -14,8 +14,8 @@ drift from the code â€” `--check` (called by docs_check.sh) fails when it does â
 and the prose is free to be prose.
 
 usage:
-    engine/scripts/gen_test_hooks.py --write     rewrite the region
-    engine/scripts/gen_test_hooks.py --check     exit 1 if it is stale
+    engine/gate/gen_test_hooks.py --write     rewrite the region
+    engine/gate/gen_test_hooks.py --check     exit 1 if it is stale
 """
 import sys
 
@@ -26,7 +26,7 @@ DOC = reg.ROOT + "/docs/test-hooks.md"
 BEGIN = "<!-- BEGIN generated: switches"
 END = "<!-- END generated: switches"
 
-HEAD = """<!-- BEGIN generated: switches -- `engine/scripts/gen_test_hooks.py --write`
+HEAD = """<!-- BEGIN generated: switches -- `engine/gate/gen_test_hooks.py --write`
      rewrites this block from `engine/src/switches.cpp`.  Do not edit it by
      hand: the registry is the inventory, and `--check` (step 0 of the gate)
      fails when this text and the registry disagree. -->
@@ -97,7 +97,7 @@ def main():
                   % len(reg.load()[0]))
             return 0
         print("test-hooks: FAIL -- docs/test-hooks.md's inventory is stale.\n"
-              "  run engine/scripts/gen_test_hooks.py --write and commit the diff",
+              "  run engine/gate/gen_test_hooks.py --write and commit the diff",
               file=sys.stderr)
         return 1
     if "--write" in sys.argv:

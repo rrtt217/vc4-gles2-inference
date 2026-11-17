@@ -245,7 +245,7 @@ can land in `[32767.5, 32768)`.  `32767.5` is the documented rail test (it
 classifies the VC4 rail exactly); `32768.0` is the older spelling and behaves
 identically.  Changing the text would change the numerics by the letter of
 "the emitted text *is* the numerics", so the rule is enforced instead:
-`engine/scripts/check_q16_decode.sh` (gate step 0d) requires every decode in
+`engine/gate/check_q16_decode.sh` (gate step 0d) requires every decode in
 `--dump-shaders=raw` to carry one fold per decode and one of the two thresholds.
 A third spelling, or a fold dropped in an edit, fails there instead of on the
 board as a sign error.

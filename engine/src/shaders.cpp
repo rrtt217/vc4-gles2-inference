@@ -59,7 +59,7 @@ const string kQzSl =
 // value * 2^-hs so a hidden over the q16 activation rail still fits, and w2's
 // read-back multiplies by 2^hs (folded into its scale on the host).  hs = 0
 // emits no text at all, so a container without the key produces byte-identical
-// GLSL and scripts/shader_hashes.sh stays green.
+// GLSL and gate/shader_hashes.sh stays green.
 static const char* const kHidScaleLit[] = {"", "0.5", "0.25", "0.125", "0.0625", "0.03125"};
 static int hid_scale_max() { return (int)(sizeof(kHidScaleLit) / sizeof(kHidScaleLit[0])) - 1; }
 static string hid_scale_def(int hs) {

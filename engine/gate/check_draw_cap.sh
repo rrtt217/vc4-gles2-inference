@@ -18,7 +18,7 @@
 # a new strip loop in a file that is not named gpu* is not checked.  Comments are
 # ignored: several legitimately quote 1024 to explain the limit.
 #
-# Usage: scripts/check_draw_cap.sh        (no GPU, no model)
+# Usage: gate/check_draw_cap.sh        (no GPU, no model)
 set -u
 cd "$(dirname "$0")/.." || exit 1
 

@@ -24,8 +24,15 @@ This README is the quick start. Deep notes are in [../docs/](../docs/):
 | `src/shaders*.cpp` | GLSL source builders |
 | `tools/` | MMCF packer/inspector and numpy reference forwards (host python) |
 | `third_party/jinja/` | vendored llama.cpp Jinja engine (MIT), renders the container's chat template |
-| `scripts/` | regression gate, CPU-vs-GPU diff, attention/logits oracles, benchmarks, the model-quality batteries |
+| `gate/` | pass/fail checks that need no GPU: documents, the switch registry, shader digests, the q16 rail, the draw cap, the target ledger, the container layout |
+| `scripts/` | oracles, measurement and acceptance, which need a GPU and/or a model: `regression.sh`, the benchmarks, `swap_matrix.py`, `check_att.py` |
+| `eval/` | model quality: `bench_mc.py`, `eval_ifeval.py`, `eval_translate.py` and their `data/` |
+| `tests/` | compiled tests (`test_lineedit.cpp`, built by the Makefile) |
 | `probes/` | standalone VC4 probes, not linked into the engine |
+
+Each of those five has a `README.md` whose table is the map — one row per file
+with what it answers and what it needs; `gate/check_scripts.py` fails if a file
+has no row.
 | `Makefile` | local, Pi and probe build flags |
 
 ## Build
@@ -152,7 +159,7 @@ paste begins and ends (`ESC[?2004h`, answered with `ESC[200~ ... ESC[201~`) so a
 pasted newline is not mistaken for Enter.  A terminal that does not answer that
 request sends the paste as plain bytes, indistinguishable from typing, and then
 the first newline sends: use Ctrl-V Enter or Alt-Enter there.  `make check` runs
-the editor against a pty (`engine/scripts/test_lineedit.cpp`), including the
+the editor against a pty (`engine/tests/test_lineedit.cpp`), including the
 pasted-block and wrapped-line cursor cases.
 
 `/clear` forgets the conversation, `/exit` leaves, `/help` lists them.  When

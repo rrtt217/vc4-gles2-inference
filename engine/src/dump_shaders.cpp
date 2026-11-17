@@ -1,5 +1,5 @@
 // Emits the GLSL of every shader builder for a fixed matrix of arguments.
-// See dump_shaders.h for why this exists; scripts/shader_hashes.sh is the gate.
+// See dump_shaders.h for why this exists; gate/shader_hashes.sh is the gate.
 #include "dump_shaders.h"
 
 #include "gpu.h"

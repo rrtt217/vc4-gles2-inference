@@ -10,7 +10,7 @@
 // builders has to be shown to emit the same bytes, not argued to.
 //
 //   docs: docs/engine-layout.md
-//   gate: scripts/shader_hashes.sh
+//   gate: gate/shader_hashes.sh
 //
 // It needs no model and no GL context: builders are pure string functions, and
 // the q4 shift decode (normally a driver query) is forced instead.

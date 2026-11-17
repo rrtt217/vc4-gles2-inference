@@ -16,10 +16,10 @@
 #   5. the three directions that need more than grep (links and their heading
 #      anchors, the docs/README.md index against git, and doc->source: every
 #      switch test-hooks.md documents must be read by engine/src).  Those live in
-#      scripts/check_docs_links.py, which is where CONV_GPU would have been caught.
+#      gate/check_docs_links.py, which is where CONV_GPU would have been caught.
 #
-# Usage:  scripts/docs_check.sh            (from engine/, or anywhere)
-#         scripts/docs_check.sh -v         also list what was checked
+# Usage:  gate/docs_check.sh            (from engine/, or anywhere)
+#         gate/docs_check.sh -v         also list what was checked
 #
 # Exit status is 1 if anything drifted.  Run it before committing a document
 # change, and after adding or removing an environment switch.
@@ -39,21 +39,33 @@ $ROOT/models/README.md $ROOT/engine/probes/README.md $(ls "$ROOT"/docs/*.md 2>/d
 # 1. the switch registry against the source and against test-hooks.md, and the
 # document's generated inventory against the registry (the inventory is
 # rendered, so "the doc is stale" is a mechanical verdict, not a review)
-if ! python3 scripts/gen_test_hooks.py --check; then fail=1; fi
+if ! python3 gate/gen_test_hooks.py --check; then fail=1; fi
 
 # Every switch the engine reads has a row in src/switches.cpp (the inventory),
 # the row has to be read somewhere, a retired row must not be read, and the row
 # has to be documented.  This replaced a grep loop in 2026-11-17: the grep could
 # only ask "does the doc mention this name", never "is this name a whole switch".
-if ! python3 scripts/check_switches.py $VERBOSE; then fail=1; fi
+if ! python3 gate/check_switches.py $VERBOSE; then fail=1; fi
 n=$(grep -cE '^ *\{"[A-Z][A-Z_0-9]+",.*SwKind::' src/switches.cpp)
 
 # 2. files a document tells you to run must exist
-refs=$(grep -rhoE "(engine/(tools|scripts|probes|src)|engine|minimind3|server|templates)/[A-Za-z0-9_.-]+\.(py|sh|jinja|cpp|h)" \
+# Both spellings a document uses: `engine/gate/x.sh` from the repository root,
+# and `gate/x.sh` from engine/ (which is where the commands are run from).  A
+# bare prefix is resolved against engine/ as a second try, so a doc that says
+# `scripts/bench.sh` is checked as well as one that says `engine/scripts/...`.
+# Extensions only: a *runtime output* a document names (server/stats.jsonl) is
+# not an in-tree path and must not be checked.
+# Bare prefixes are limited to the three directories nothing else in this tree
+# could mean: `tools/`, `src/` and `scripts/` also name host-side helpers and
+# upstream llama.cpp files in these documents, and a path check that fires on a
+# legitimate mention is a check people learn to ignore.
+refs=$(grep -rhoE "(engine/(tools|scripts|probes|src|gate|eval|tests)|engine|minimind3|server|templates|gate|eval|tests)/[A-Za-z0-9_.-]+\.(py|sh|jinja|cpp|h|awk|txt)" \
         $DOCS 2>/dev/null | sort -u)
 [ "$VERBOSE" = "-v" ] && say "  $(printf '%s\n' "$refs" | wc -l) in-tree paths referenced"
 for f in $refs; do
-    [ -e "$ROOT/$f" ] || bad "a document references $f, which does not exist"
+    if [ ! -e "$ROOT/$f" ] && [ ! -e "$ROOT/engine/$f" ]; then
+        bad "a document references $f, which does not exist"
+    fi
 done
 
 # 3. a switch called "gone" that the source still reads
@@ -77,11 +89,15 @@ for flag in --template; do
 done
 
 # 4b. the style rules: canonical spellings in commands, dated measurements in a
-# state document (see the header of scripts/check_docs_style.py)
-if ! python3 scripts/check_docs_style.py $VERBOSE; then fail=1; fi
+# state document (see the header of gate/check_docs_style.py)
+if ! python3 gate/check_docs_style.py $VERBOSE; then fail=1; fi
+
+# 4c. the script directories against their READMEs: a file with no row, or a row
+# with no file (the four directories are split by what each file *needs*)
+if ! python3 gate/check_scripts.py $VERBOSE; then fail=1; fi
 
 # 5. links, the index and the doc->source direction
-if ! python3 scripts/check_docs_links.py; then fail=1; fi
+if ! python3 gate/check_docs_links.py; then fail=1; fi
 
 if [ "$fail" = 0 ]; then
     say "docs: ok ($n switches, $(printf '%s\n' "$refs" | wc -l) paths)"

@@ -178,8 +178,8 @@ finetune，不是公式）。逐层表见 `models/rwkv7/phase0-g1d-report.md`。
    check_target_reset、server selftest。
 2. `engine/scripts/regression.sh`：MiniMind3 q8/q4、LFM2.5、MoE、i16 的引脚**一个都不许动**；
    RWKV 只新增自己的 `RWKV_*` 引脚。
-3. `engine/scripts/shader_hashes.sh`：P2 **不新增 builder**，文本应零变化；
-   P6 每加一个 builder 都要在同一个 commit 里重基 `scripts/shader_hashes.txt` 并写明原因。
+3. `engine/gate/shader_hashes.sh`：P2 **不新增 builder**，文本应零变化；
+   P6 每加一个 builder 都要在同一个 commit 里重基 `gate/shader_hashes.txt` 并写明原因。
 4. `engine/scripts/swap_matrix.py`：新 arch 要么进链，要么在 `/model` 处明确拒绝（不许半加载）。
 5. 新模型的自身门：numpy cos>0.999 且 top-1 一致；PPL；MC/IFEval/translate 三套；Pi 计时。
 

@@ -9,7 +9,7 @@
 // `release_scene()` deletes every texture and framebuffer the context created and
 // `reset_targets()` zeroes the scratch targets; together they are what lets a
 // model be replaced without rebuilding the context (AGENTS.md, "Switching models
-// without restarting the engine").  scripts/check_target_reset.sh keeps that
+// without restarting the engine").  gate/check_target_reset.sh keeps that
 // ledger complete.
 
 #include "gpu.h"
@@ -74,7 +74,7 @@ void GPU::reset_targets(){
         // deletes their textures, and a Target that still carried a deleted
         // name would be *reused* by the guarded create sites in this file
         // ("if (t.tex == 0 || ...)") - silent garbage instead of a new one.
-        // scripts/check_target_reset.sh fails if a Target member is added
+        // gate/check_target_reset.sh fails if a Target member is added
         // without being listed here.
         conv_t_b_ = Target();
         conv_t_c_ = Target();

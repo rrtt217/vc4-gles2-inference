@@ -89,7 +89,7 @@ No model, no GPU.  This proves the cross build did not change any shader.
 wc -l /tmp/pi.hash                                # 117
 
 # transfer /tmp/pi.hash to the laptop, then:
-grep -v '^#' engine/scripts/shader_hashes.txt > /tmp/golden
+grep -v '^#' engine/gate/shader_hashes.txt > /tmp/golden
 diff -u /tmp/golden pi.hash && echo "GLSL identical"
 ```
 
@@ -259,7 +259,7 @@ container and the extra binary afterwards.
 
 Cross build: `Tag_CPU_arch v6`, `Tag_FP_arch VFPv2`.  `--dump-shaders` on the Pi:
 117 programs, 6609 bytes of digests, **byte-identical** to
-`scripts/shader_hashes.txt` (`diff` clean) - the cross build emits the laptop's
+`gate/shader_hashes.txt` (`diff` clean) - the cross build emits the laptop's
 GLSL.
 
 `draw_probe_pi` (halves comparison, MB/s in the last column of the run):

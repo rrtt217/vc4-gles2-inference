@@ -15,7 +15,7 @@ Five rules before using this list:
   `engine/src/switches.cpp`: canonical name, the spellings it replaced, type,
   the closed set of values, whether it is permanent or a probe, and the *axis*
   it moves.  `./engine_mm3 --dump-switches` prints that table with what this
-  environment resolved to (no GPU, no model), and `scripts/check_switches.py`
+  environment resolved to (no GPU, no model), and `gate/check_switches.py`
   fails the gate if the source reads a name with no row, if a row is read
   nowhere, if a retired name is read again, or if a row is missing from this
   document.
@@ -36,12 +36,12 @@ Five rules before using this list:
 ## The inventory
 
 The table below is rendered from the registry by
-`engine/scripts/gen_test_hooks.py --write` and verified by `--check` (step 0 of
+`engine/gate/gen_test_hooks.py --write` and verified by `--check` (step 0 of
 the gate), so it cannot drift from the code.  `permanent` is part of the
 documented configuration surface, `probe` is a diagnostic or a pricing arm
 (candidates for retirement), `retired` is gone.
 
-<!-- BEGIN generated: switches -- `engine/scripts/gen_test_hooks.py --write`
+<!-- BEGIN generated: switches -- `engine/gate/gen_test_hooks.py --write`
      rewrites this block from `engine/src/switches.cpp`.  Do not edit it by
      hand: the registry is the inventory, and `--check` (step 0 of the gate)
      fails when this text and the registry disagree. -->

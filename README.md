@@ -20,7 +20,7 @@ you build on it:
 - **The measurements are real; the prose is generated.**  Every number in
   `docs/performance.md` and `docs/evaluation.md` comes from a command that
   exists in this tree, and `engine/scripts/regression.sh` /
-  `engine/scripts/shader_hashes.sh` pin the numerics.  An explanation is not
+  `engine/gate/shader_hashes.sh` pin the numerics.  An explanation is not
   evidence: run the gate.
 - **Review before you rely on it.**  Agent-written changes are reviewed and
   gated here, but this is a research/edge-inference stack, not a certified

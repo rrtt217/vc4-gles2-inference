@@ -212,12 +212,12 @@ probes/load_probe_pi: probes/load_probe.cpp | check-cross
 # The half of the gate that needs no GPU and no model: what a contributor can run
 # before pushing, and what .github/workflows/gate.yml runs on every push.
 check: warncheck test_lineedit
-	sh scripts/docs_check.sh
-	sh scripts/shader_hashes.sh
-	sh scripts/check_q16_decode.sh
-	sh scripts/check_draw_cap.sh
-	sh scripts/check_target_reset.sh
-	python3 scripts/test_mmcf_format.py
+	sh gate/docs_check.sh
+	sh gate/shader_hashes.sh
+	sh gate/check_q16_decode.sh
+	sh gate/check_draw_cap.sh
+	sh gate/check_target_reset.sh
+	python3 gate/test_mmcf_format.py
 	./test_lineedit
 	python3 ../server/selftest.py
 
@@ -240,8 +240,8 @@ warncheck:
 # driven through a pty: no GPU, no model, no terminal.  It is part of `check`
 # because where the cursor lands is arithmetic no build warning can catch -- the
 # old relative `ESC[nD` move was wrong on every wrapped line and looked fine.
-test_lineedit: scripts/test_lineedit.cpp $(SRC)/lineedit.cpp $(SRC)/lineedit_layout.cpp $(HEADERS)
-	$(CXX) $(ALL_CXXFLAGS) $(INCS) -o $@ scripts/test_lineedit.cpp $(SRC)/lineedit.cpp $(SRC)/lineedit_layout.cpp -lutil -pthread
+test_lineedit: tests/test_lineedit.cpp $(SRC)/lineedit.cpp $(SRC)/lineedit_layout.cpp $(HEADERS)
+	$(CXX) $(ALL_CXXFLAGS) $(INCS) -o $@ tests/test_lineedit.cpp $(SRC)/lineedit.cpp $(SRC)/lineedit_layout.cpp -lutil -pthread
 
 clean:
 	rm -f engine engine_mm3 engine_mm3_pi test_lineedit

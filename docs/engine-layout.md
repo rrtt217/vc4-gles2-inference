@@ -13,7 +13,7 @@ responsibility, not by line count:
 | `src/dump_shaders.h/.cpp` | the `--dump-shaders` matrix: every builder's emitted GLSL, digested |
 | `src/gpu.cpp` | the GL object's own state: the constructor (which reads the three target limits), the capability queries (`gpu_attn_enabled`, `gpu_layer_enabled`, `rms_fused`, `needs_finish`, `att_cfg`) and the qkv probes.  118 lines; it was 2674 before the 2026-11-14 split |
 | `src/gpu_gl.cpp` | EGL/GLES2: `init_egl` (surfaceless context, the MESA version overrides for the q4 kernels), `init_gl`, `draw`, the bind cache accessors and the read-backs |
-| `src/gpu_state.cpp` | textures/targets factories, `release_scene`/`reset_targets`, the scene ledgers (the ones `scripts/check_target_reset.sh` keeps complete) |
+| `src/gpu_state.cpp` | textures/targets factories, `release_scene`/`reset_targets`, the scene ledgers (the ones `gate/check_target_reset.sh` keeps complete) |
 | `src/gpu_prog.cpp` | the program cache: `x_prog` (key **and** text hash), `link_program`, `es3ify`, the `Q4_SHIFT`/`Q4_INLINE` probes |
 | `src/gpu_attn.cpp` | the attention block: qkv draws, RoPE, scores, softmax, KV writes and their probes |
 | `src/gpu_conv.cpp` | the hybrid (LFM2.5) conv block |
@@ -36,7 +36,7 @@ responsibility, not by line count:
 | `src/chat.h/.cpp` | the chat path: `run_turn`/`run_tool_turn` (the template, the tool rounds, the marker mask, the prefix-cache reuse), `repl()` (the `--chat` REPL with `/model`) and `complete()` (one prefill, one decode loop).  `main()` is 135 lines of wiring around these |
 | `src/worker.h/.cpp` | the `--worker` protocol: request line, JSONL events, control ops (`load`/`cancel`/`stats`), its own stdin reader (a cancel must be seen mid-request) and `proc_meminfo_kb` for the diagnostics |
 | `src/chat_format.h/.cpp` | strip a tool-call block, split a `<think>` block, render tool calls for the template |
-| `src/lineedit.h/.cpp` + `src/lineedit_layout.h/.cpp` | the REPL's line editor: raw-mode key decoding (UTF-8 and column aware, never byte counts), history, a buffer that may contain newlines, and the terminal's paste frame (`ESC[?2004h` answered by `ESC[200~ ... ESC[201~`).  The layout arithmetic -- rows, cursor position, vertical moves -- is pure in `lineedit_layout`, so `scripts/test_lineedit.cpp` checks it (and the editor itself, through a pty) in `make check` |
+| `src/lineedit.h/.cpp` + `src/lineedit_layout.h/.cpp` | the REPL's line editor: raw-mode key decoding (UTF-8 and column aware, never byte counts), history, a buffer that may contain newlines, and the terminal's paste frame (`ESC[?2004h` answered by `ESC[200~ ... ESC[201~`).  The layout arithmetic -- rows, cursor position, vertical moves -- is pure in `lineedit_layout`, so `tests/test_lineedit.cpp` checks it (and the editor itself, through a pty) in `make check` |
 | `src/engine.cpp` | the entry point: worker protocol, chat loop, capability/template handling, and the wiring around the modules above |
 
 The sibling directories are **not** linked into `engine_mm3`:
@@ -45,7 +45,10 @@ The sibling directories are **not** linked into `engine_mm3`:
 |---|---|---|
 | `engine/third_party/jinja/` | engine | vendored llama.cpp Jinja engine (MIT); see its README for the three local edits |
 | `engine/tools/` | host python | container packer/inspector, numpy reference forwards |
-| `engine/scripts/` | host shell | regression gate, CPU-vs-GPU diff, attention/logits oracles, benchmarks |
+| `engine/gate/` | host shell/python | the pass/fail checks that need no GPU: documents, the switch registry, shader digests, the q16 rail, the draw cap, the target ledger, the container layout |
+| `engine/scripts/` | host shell/python | needs a GPU and/or a model: the acceptance gate, the CPU-vs-GPU diff, the attention/logits oracles, the benchmarks, `swap_matrix.py` |
+| `engine/eval/` | host python | model quality: the MC/ifeval/translate batteries and their cases |
+| `engine/tests/` | host C++ | compiled tests, built by the Makefile |
 | `engine/probes/` | target GLES2 | standalone VC4 feature and throughput probes |
 
 `engine/tools/` and `engine/scripts/` are where a numerics question should start;
@@ -95,7 +98,7 @@ are the contract, not the builder's source. Two tools read them:
 |---|---|
 | what did the program that just ran look like? | `SHADER_SRC=<substr> ./engine_mm3 ...` |
 | what does *every* builder emit? | `./engine_mm3 --dump-shaders[=raw]` |
-| did a refactor move any of it? | `scripts/shader_hashes.sh` |
+| did a refactor move any of it? | `gate/shader_hashes.sh` |
 
 `--dump-shaders` needs no model and no GL context: it calls every builder over a
 fixed matrix (q8/q4/i16 shapes, all four X formats, the attention layouts) and
@@ -104,7 +107,7 @@ choice in the builders, the q4 shift/and decode, is forced both ways, so
 `q4shift0/…` and `q4shift1/…` appear only where the two texts differ and the
 dump is machine independent.
 
-`scripts/shader_hashes.sh` compares that dump with `scripts/shader_hashes.txt`
+`gate/shader_hashes.sh` compares that dump with `gate/shader_hashes.txt`
 (`--rebaseline` rewrites it, `--show NAME` prints one program). A refactor that
 claims to be text-neutral must leave the golden file untouched. The hot kernels
 repeat the decode inline on purpose, so the repetition is generated from the
@@ -166,7 +169,7 @@ Then `engine/scripts/regression.sh`, which is the gate — determinism, a second
 prompt's behaviour, the per-machine pins, and PPL.  Only after those pass should
 `ACT=i8` or performance numbers be compared.
 
-When the change touches a builder at all, run `engine/scripts/shader_hashes.sh`
+When the change touches a builder at all, run `engine/gate/shader_hashes.sh`
 first: it is seconds, it needs no GPU, and it says whether the emitted text moved
 at all.  PPL can hide a one-texel change; a digest cannot.
 

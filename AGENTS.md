@@ -25,7 +25,10 @@ replace working paths with demos or cosmetic rewrites.
 | `engine/tools/` | container packer, container inspector, numpy reference forward passes |
 | `engine/third_party/jinja/` | vendored llama.cpp Jinja engine (MIT) — renders the container's chat template |
 | `templates/` | the chat templates this repository ships, for `mmcf_pack.py --chat-template` |
-| `engine/scripts/` | the regression gate **and** the diagnostic tools, and the model-quality batteries (`bench_mc.py`, `eval_ifeval.py`, `eval_translate.py`) |
+| `engine/gate/` | the pass/fail checks that need no GPU: documentation, the switch registry, the shader digests, the q16 rail, the draw cap, the target ledger, the container layout.  `gate/README.md` is the map |
+| `engine/scripts/` | oracles, measurement and acceptance, which need a GPU and/or a model: `regression.sh`, the benchmarks, `swap_matrix.py`, `check_att.py`.  `scripts/README.md` is the map |
+| `engine/eval/` | model quality: `bench_mc.py`, `eval_ifeval.py`, `eval_translate.py`, `evalkit.py` and their `data/`.  `eval/README.md` is the map |
+| `engine/tests/` | compiled tests: `test_lineedit.cpp` (`make -C engine test_lineedit`) |
 | `engine/probes/` | standalone VC4 feature/throughput probes (not linked into the engine); `README.md` is the map: one row per probe = the question it answers, its `_pi` target and where the answer is written down |
 | `server/` | OpenAI-compatible HTTP server, deterministic tools, self-test, eval suite.  `server.py` is the entry point; `http_api.py` (routes/SSE), `engine_bridge.py` (the worker protocol), `chat_render.py`, `tool_calls.py` and `sampling.py` are the parts it was split into on 2026-11-14, all stdlib only |
 | `models/` | central model store (gitignored), one `.mmcf` per precision |
@@ -57,39 +60,32 @@ the file format in [`docs/model-formats.md`](docs/model-formats.md) and
 | Tool | Use it when |
 |---|---|
 | `mmcf_pack.py` | converting an HF directory (safetensors + config) or a legacy checkpoint (Q8M1/Q8M2, Q4M1, I16M1/I16M2) into an MMCF container |
-| `mmcf_format.py` | the layout in one place: magic, header, record format, TLV, CRC, the dtype/kind/template tables.  Imported by the three tools above rather than copied into each; `scripts/test_mmcf_format.py` round-trips every container in `models/` through it and compares its constants with `engine/src/model.cpp` |
+| `mmcf_format.py` | the layout in one place: magic, header, record format, TLV, CRC, the dtype/kind/template tables.  Imported by the three tools above rather than copied into each; `gate/test_mmcf_format.py` round-trips every container in `models/` through it and compares its constants with `engine/src/model.cpp` |
 | `mmcf_dump.py` | answering "what does the engine actually read from this file" — the whole metadata block, from the file alone (`--check` verifies every CRC) |
 | `mmcf_requant_q8.py` | rebuilding the q8 matrices of a container from its i16 sibling (`--clip P` for a percentile scale) |
 | `ref_forward.py` | a numpy forward pass over an HF safetensors source: separates "bad conversion / bad tokenizer / engine bug" |
 | `make_tok.py` | building the `.tok` blob from a HF `tokenizer.json` — ByteLevel or SentencePiece, with added tokens laid onto their ids (a blob built from `model["vocab"]` alone ends at the wrong id and the engine splits `<\|im_start\|>` into characters) |
 | `make_tok_byte.py` | the same blob from a *pure byte* `byte_vocab.json` (259 entries, no merges — `void.1`): `<0xNN>` becomes the raw byte, not six characters. `make_tok.py` writes the text `<0x41>` for that vocab, which still gives every id a home, so nothing fails loudly |
 
-### `engine/scripts/` — the gate and the diagnostics
+### The four non-engine directories — split by what a file *needs*
 
-| Script | Answers |
-|---|---|
-| `regression.sh` | the acceptance gate: docs drift, shader hashes, q16-decode rule, target-reset ledger, determinism, behaviour, pinned strings, PPL |
-| `shader_hashes.sh` | did a builder change move the emitted GLSL: digests of every builder's text (`--dump-shaders`), no GPU or model needed |
-| `diff_paths.sh` + `dump_diff.awk` | per-stage CPU-vs-GPU comparison, from `STAGE_DUMP=1 HIDDEN_DUMP=1 PREFILL_PAIR=0` |
-| `dump_stats.py` | per-row `max/mean/clamp-count` of a `DUMP` file (is a row saturating?) |
-| `check_att.py` | offline oracle for `ATT_DUMP`: score, softmax stats and `att_out` reproduced from the integers the shaders consumed |
-| `cmp_logits.py` | compares two `LOGITS_OUT` dumps tile by tile |
-| `verify_packing.sh` | byte-for-byte check of the packed-activation layout against a known-good binary |
-| `bench.sh`, `bench_ab.sh`, `bench_plain_ab.sh`, `longctx.sh` | timings; the `ab` ones interleave two binaries to cancel drift.  All of them source `scripts/lib.sh` for the one copy of the tree root, the default model, the measurement environment, the load guard and the min/median summary |
-| `lib.sh` | the shared half of the measurement scripts: `ENGINE`/`ROOT`, the model defaults (including the runtime-root fallback), `measure_env`, `cma_free`, `load_guard`, `timing_line`/`timing_fields` (chat) and `plain_decode` (plain), and the min/median statistics |
-| `swap_matrix.py` | acceptance for `/model`: swaps containers inside one process over the q8, q4, i16, hybrid and mixed-precision families (three template kinds, a round trip, a quantisation change, a repeat run) and requires every turn to be byte-identical to a fresh process.  Needs the GPU and `models/`; about three minutes on Xe |
-| `check_q16_decode.sh` | every q16 decode in `--dump-shaders=raw` folds the negative rail and uses one of the two documented thresholds (`32767.5`, `32768.0`); a third spelling or a dropped fold fails here instead of on the board.  Ten spellings share the rule -- the text is the numerics, so this checks it rather than rewriting it.  No GPU, no model |
-| `check_draw_cap.sh` | the 1024-fragment draw limit is `kDrawCap` in `gpu_internal.h` and not a bare number anywhere in `src/gpu*.cpp`; a wrong width fails silently (the read-back returns the previous contents of the scratch target).  No GPU, no model |
-| `check_target_reset.sh` | every scratch `Target` in `gpu.h` is cleared by `GPU::reset_targets()`, so a released scene cannot be reused with a deleted texture name.  Runs without a GPU or a model |
-| `docs_check.sh` | documentation drift: every switch the source reads is in `docs/test-hooks.md`, every in-tree path a document names exists (including `probes/`, `src/` and `engine/*.cpp`), nothing calls a live switch dead, and (via `check_docs_links.py`) every relative link and `#anchor` resolves, every `docs/README.md` entry exists and is tracked, and every switch `test-hooks.md` documents is read by `engine/src`.  Runs without a model or a GPU |
-| `evalkit.py` | the eval batteries' shared half: one `Engine` client (one process per call, `--chat`/`--gen 0` with `LOGITS_OUT`), the sampling-knob table, `read_floats`/`read_ints` and the JSONL case loader.  `bench_mc.py`, `eval_ifeval.py` and `eval_translate.py` import it instead of carrying a copy each |
-| `bench_mc.py` | "can this model answer a multiple-choice question": letter-logit accuracy, calibrated accuracy and format compliance from `LOGITS_OUT`, one engine run per item, no sampler.  Data in `scripts/eval/mc_zh.jsonl` and `mc_en.jsonl` |
-| `eval_ifeval.py` | "does the reply obey the instruction": sampled replies scored against regexes and counts; `--selftest` validates the case file (`scripts/eval/ifeval.jsonl`) without a GPU |
-| `eval_translate.py` | "does it translate or just talk about translating": 15 sentence pairs both directions, greedy, chrF against the reference plus source-script leakage (`scripts/eval/translate.jsonl`) |
+| Directory | Rule | The map |
+|---|---|---|
+| `engine/gate/` | pass/fail checks that need **no GPU and no model store** (the source, the generated GLSL, the documents, a container file) | `gate/README.md` |
+| `engine/scripts/` | oracles, measurement and acceptance: **a GPU and/or a model** | `scripts/README.md` |
+| `engine/eval/` | **model quality** (accuracy, instruction-following, translation): the engine plus a container | `eval/README.md` |
+| `engine/tests/` | **compiled** C++ tests, built by the Makefile | `tests/README.md` |
 
-These scripts existed since `14754be` but were missing from this map, which is
-how a long investigation ended up hand-rolling probes they already contain.
-When a numerics question comes up, read them first.
+Each README's table is the map: one row per file with what it answers, what it
+needs and what calls it, and `gate/check_scripts.py` fails the gate if a file has
+no row or a row has no file.  That check exists because the failure mode is real:
+AGENTS.md records a long investigation that hand-rolled a probe `engine/scripts/`
+already contained, and before the split one directory held the gate, the
+oracles, the benchmarks, the eval batteries, a C++ test and a doc generator.
+
+**Read the map before writing a new script.**  A pass/fail check that needs no
+GPU goes in `gate/`; something that prints numbers for a human to read goes in
+`scripts/`; anything that scores a model goes in `eval/`.
 
 ## Build
 
@@ -194,7 +190,7 @@ Three rules, all of them paid for (the evidence is in
   name, so the cache validates the shader *hash* on every hit
   (`prog_key_hash_`); otherwise the second model runs the first model's kernels.
 - **Everything the GPU owns is released *and* reset**, and
-  `scripts/check_target_reset.sh` fails the gate if a `Target` member is added
+  `gate/check_target_reset.sh` fails the gate if a `Target` member is added
   without a line in `reset_targets()`.
 
 **There is no capacity pre-check, deliberately.**  `CmaFree` is not the budget a
@@ -362,14 +358,14 @@ Pick the tool that answers the question before writing a new probe:
 | does a new sampler / texture fetch work on the target? | `probes/wrow_probe` (and `_pi`): drives the engine's own q8 kernels against a CPU reference and names the rows that differ.  It is how the per-row scale plane's two fetches from one sampler were found to be undefined on VC4 |
 | does the conv (hybrid) block's fetching work? | `probes/conv_probe` (and `_pi`): section A drives the kernel fetch patterns byte-for-byte, B/C run the shipped `conv3_act`/`mul_act` against a CPU reference.  It is how "three fetches from one sampler" was cleared on VC4 -- the kernel texture is 512x3, and every case is exact |
 | did my change alter numerics? | `regression.sh`, and PPL rather than one string |
-| did my change move the emitted GLSL? | `scripts/shader_hashes.sh` (no GPU needed); `--dump-shaders` / `--dump-shaders=raw` to look |
+| did my change move the emitted GLSL? | `gate/shader_hashes.sh` (no GPU needed); `--dump-shaders` / `--dump-shaders=raw` to look |
 
 `docs/test-hooks.md` lists the environment switches and
 [`engine/src/switches.cpp`](engine/src/switches.cpp) is the inventory: one row
 per switch with its canonical name, the spellings it replaced, its type, its
 closed set of values, whether it is permanent or a probe, and the axis it moves.
 `./engine_mm3 --dump-switches` prints that table with what the environment
-resolved to (no GPU, no model), and `scripts/check_switches.py` (step 0 of the
+resolved to (no GPU, no model), and `gate/check_switches.py` (step 0 of the
 gate) fails if the source reads a name with no row, a row is read nowhere, a
 retired name is read again, or a row is missing from the document.
 
@@ -478,7 +474,7 @@ tiers, and a sentence belongs to exactly one of them:
 
 The test for a sentence: delete it — does someone make a wrong decision
 tomorrow?  No → it is history.  Yes → keep it as one dated line with a link.
-`engine/scripts/check_docs_style.py` is the mechanical half: a **command** in a
+`engine/gate/check_docs_style.py` is the mechanical half: a **command** in a
 state document uses the axis spelling (`KV=q16`, not `KV_PACK=16` — the alias
 still works, but the document is the teaching copy), and a **four-decimal
 number** in a state document sits under a dated heading or in a dated paragraph,
@@ -486,7 +482,7 @@ because PPL is re-baselined deliberately and the current pins are in the
 machine's override, not in prose.  It is step 0 of the gate.
 
 A command in a document that no longer runs is a bug in the document, not a
-detail.  `engine/scripts/docs_check.sh` is the mechanical half of that rule; it
+detail.  `engine/gate/docs_check.sh` is the mechanical half of that rule; it
 is step 0 of `scripts/regression.sh`, and it runs in under a second: it compares
 the switch registry (`engine/src/switches.cpp`) with the source and with
 `docs/test-hooks.md`, checks that every in-tree path a document tells you to run
@@ -494,7 +490,7 @@ still exists (`engine/tools`, `engine/scripts`, `engine/probes`, `engine/src`,
 `engine/*.cpp`, `minimind3`, `server`, `templates`), and refuses to let a document
 call a switch dead while the source still reads it.  The three directions that
 need slug matching, relative resolution or git live in
-`scripts/check_docs_links.py`, called from the same step: every relative link and
+`gate/check_docs_links.py`, called from the same step: every relative link and
 `#anchor` resolves, every `docs/README.md` entry exists and is tracked, and every
 switch `test-hooks.md` documents is read by `engine/src` -- that last one is the
 direction that would have caught `CONV_GPU`.  Run it before committing a
@@ -532,8 +528,8 @@ keeps `nlohmann` in `json.cpp`.
 Run q8, q4 and `--ppl` comparisons after any GPU or
 format change, and run `engine/scripts/regression.sh` (determinism, behaviour,
 pinned strings, PPL).  A shader refactor also runs
-`engine/scripts/shader_hashes.sh`: the emitted text is the numerics, so a
-text-neutral change must leave `scripts/shader_hashes.txt` untouched.  A single
+`engine/gate/shader_hashes.sh`: the emitted text is the numerics, so a
+text-neutral change must leave `gate/shader_hashes.txt` untouched.  A single
 golden string is a tripwire, not the gate: it is chaotic across GPUs and across
 reassociations, so pin it per machine and re-baseline it deliberately when the
 numbers move on purpose.

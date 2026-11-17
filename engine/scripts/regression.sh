@@ -14,11 +14,11 @@
 #   0. docs          - the documents still describe this tree: every switch the
 #                      source reads is in docs/test-hooks.md, every in-tree path
 #                      a document names exists, and no document calls a live
-#                      switch dead.  scripts/docs_check.sh, no GPU needed; a
+#                      switch dead.  gate/docs_check.sh, no GPU needed; a
 #                      drift here is a real defect (a stale doc sends the next
 #                      reader at the wrong thing), so it fails the gate.
 #   0b. shaders      - the emitted GLSL *is* the numerics, so a builder change
-#                      that moves it must move scripts/shader_hashes.txt in the
+#                      that moves it must move gate/shader_hashes.txt in the
 #                      same commit.  --dump-shaders returns before any EGL call,
 #                      so this needs no GPU and no model (~0.03 s).
 #   0c. target reset - every scratch Target in gpu.h is cleared by
@@ -222,8 +222,8 @@ PY
 
 # Documentation first: it costs a fraction of a second, needs no model, and a
 # command that no longer runs is a bug in the document (AGENTS.md).
-sh scripts/docs_check.sh || {
-    echo "docs FAIL: run scripts/docs_check.sh for the list" >&2
+sh gate/docs_check.sh || {
+    echo "docs FAIL: run gate/docs_check.sh for the list" >&2
     exit 1
 }
 
@@ -237,38 +237,38 @@ sh scripts/docs_check.sh || {
 # --dump-shaders fails earlier) - still a gate failure, but not a numerics
 # signal, so say which one happened.
 shader_rc=0
-sh scripts/shader_hashes.sh "$BIN" || shader_rc=$?
+sh gate/shader_hashes.sh "$BIN" || shader_rc=$?
 case $shader_rc in
     0) ;;
-    1) echo "shader FAIL: the emitted GLSL moved; run scripts/shader_hashes.sh $BIN" >&2
+    1) echo "shader FAIL: the emitted GLSL moved; run gate/shader_hashes.sh $BIN" >&2
        exit 1 ;;
-    *) echo "shader gate could not run: scripts/shader_hashes.sh $BIN exited $shader_rc" >&2
+    *) echo "shader gate could not run: gate/shader_hashes.sh $BIN exited $shader_rc" >&2
        echo "  (binary not runnable on this host, or built without --dump-shaders)" >&2
        exit 1 ;;
 esac
 
 # A Target that outlives a scene release is reused with a deleted name: the
 # create sites in gpu.cpp are guarded on "tex == 0", and nothing else notices.
-sh scripts/check_q16_decode.sh "$BIN" || {
-    echo "q16 decode FAIL: see scripts/check_q16_decode.sh $BIN" >&2
+sh gate/check_q16_decode.sh "$BIN" || {
+    echo "q16 decode FAIL: see gate/check_q16_decode.sh $BIN" >&2
     exit 1
 }
 
-sh scripts/check_target_reset.sh || {
-    echo "target reset FAIL: run scripts/check_target_reset.sh for the list" >&2
+sh gate/check_target_reset.sh || {
+    echo "target reset FAIL: run gate/check_target_reset.sh for the list" >&2
     exit 1
 }
 
 # The draw cap and the container layout are two more checks that cost nothing and
 # were only in `make check`/CI: the acceptance gate is the one that runs on the
 # hardware, so it should not be the one with fewer checks (2026-11-15).
-sh scripts/check_draw_cap.sh || {
+sh gate/check_draw_cap.sh || {
     echo "draw cap FAIL: a gpu*.cpp uses a bare 1024 instead of kDrawCap" >&2
     exit 1
 }
 
-MMCF_MODELS=${MMCF_MODELS:-../models} python3 scripts/test_mmcf_format.py || {
-    echo "container layout FAIL: see scripts/test_mmcf_format.py (MMCF_MODELS=$MMCF_MODELS)" >&2
+MMCF_MODELS=${MMCF_MODELS:-../models} python3 gate/test_mmcf_format.py || {
+    echo "container layout FAIL: see gate/test_mmcf_format.py (MMCF_MODELS=$MMCF_MODELS)" >&2
     exit 1
 }
 
