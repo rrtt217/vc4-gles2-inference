@@ -197,6 +197,15 @@ public:
     // per matrix row (no sync win; isolates the multi-row read).
     vector<vector<float>> matvec_rows(const vector<MvRow>& rows, int slot0 = 0, int read_mode = 0);
     GLuint rwkv_upload_slot(const vector<float>& x, int slot);
+    // RWKV_PROFILE (docs/test-hooks.md): where a serial-path token time goes.
+    // Wall time around the three GL steps of a matvec, filled only when the
+    // switch is on.  On a needs_finish() driver the upload finishes inside its
+    // own step, so the read-back is what carries the GPU work.
+    struct RwkvProf { double upload_ms = 0, draw_ms = 0, read_ms = 0; };
+    RwkvProf rwkv_prof;
+    bool rwkv_prof_on() const;   // RWKV_PROFILE, read once
+    // The fused loop per-stage totals, printed once per token (RWKV_PROFILE).
+    void rwkv_prof_fused_summary();
     void rwkv_flip() { rwkv_cur_ ^= 1; }
     void clear_rwkv_state();
     // Read the final q16 residual row back as floats (once per token).

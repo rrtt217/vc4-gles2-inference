@@ -701,8 +701,19 @@ vector<float> Session::forward_rwkv(int token){
         vector<float> x = embedding(token, true);
         if (!m_.rwkv_tok_norm.empty()) x = rwkv_layernorm(x, m_.rwkv_tok_norm.data(), eps);
         vector<float> sa((size_t)hs);           // <S[i], kk>, per head, reused
+        // RWKV_PROFILE (docs/test-hooks.md): read-only.  The matvec three GL
+        // steps come from GPU counters (upload/draw/read-back); elem is the
+        // layer wall time minus those, i.e. the host side of the block.  On a
+        // needs_finish() driver the upload finishes inside its own step, so the
+        // read-back is what carries the GPU matvec work.
+        static const bool prof = env_set("RWKV_PROFILE");
+        double t_up = 0.0, t_draw = 0.0, t_read = 0.0, t_tot = 0.0;
         for (int l = 0; l < L; ++l) {
             if (g_stop) return x;
+            const auto tl0 = Clock::now();
+            const double up0 = gpu_.rwkv_prof.upload_ms;
+            const double dr0 = gpu_.rwkv_prof.draw_ms;
+            const double rd0 = gpu_.rwkv_prof.read_ms;
             // O1/O2/O3: att_norm, then the six token-shifted inputs.  Position
             // t's previous input is the *normalised* row of t-1, which is why
             // the shift state holds xn and not x.
@@ -938,7 +949,20 @@ vector<float> Session::forward_rwkv(int token){
                 if (have_gate) cerr << " g_max=" << gmax;
                 cerr << "\n";
             }
+            if (prof) {
+                const double up = gpu_.rwkv_prof.upload_ms - up0;
+                const double dr = gpu_.rwkv_prof.draw_ms - dr0;
+                const double rd = gpu_.rwkv_prof.read_ms - rd0;
+                const double tot = elapsed_ms(tl0, Clock::now());
+                t_up += up; t_draw += dr; t_read += rd; t_tot += tot;
+                fprintf(stderr, "RWKV_PROFILE cpu layer=%d total=%.2f mv_up=%.2f mv_draw=%.2f "
+                                "mv_read=%.2f elem=%.2f\n", l, tot, up, dr, rd, tot - up - dr - rd);
+            }
         }
+        if (prof)
+            fprintf(stderr, "RWKV_PROFILE cpu token total=%.2f mv_up=%.2f mv_draw=%.2f "
+                            "mv_read=%.2f elem=%.2f\n", t_tot, t_up, t_draw, t_read,
+                    t_tot - t_up - t_draw - t_read);
         return x;
     }
 
@@ -983,13 +1007,21 @@ vector<float> Session::forward_gpu_rwkv(int token){
             resid = gpu_.rwkv_block(l, m_, resid, cs);
         }
         gpu_.rwkv_flip();
+        gpu_.rwkv_prof_fused_summary();
         return gpu_.rwkv_read_residual(resid);
     }
 
 vector<float> Session::step_rwkv(int token, bool want_logits){
         vector<float> x = rwkv_gpu_ ? forward_gpu_rwkv(token) : forward_rwkv(token);
         if (g_stop || !want_logits) return {};
-        return gpu_.logits(m_.logits_tiles, rwkv_head_input(x));
+        // RWKV_PROFILE: the head is its own pass (43 tiles x draw + one read-back).
+        static const bool prof = env_set("RWKV_PROFILE");
+        const auto th0 = Clock::now();
+        vector<float> out = gpu_.logits(m_.logits_tiles, rwkv_head_input(x));
+        if (prof)
+                fprintf(stderr, "RWKV_PROFILE head total=%.2f (logits draw+readback)\n",
+                        elapsed_ms(th0, Clock::now()));
+        return out;
     }
 
 // Defined next to read_hidden() further down; the fused loop dumps through it

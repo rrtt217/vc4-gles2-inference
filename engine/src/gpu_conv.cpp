@@ -225,11 +225,30 @@ GLuint GPU::conv_block(const Mat& in_b, const Mat& in_c, const Mat& in_x,
 }
 
 vector<float> GPU::matvec(const Mat& m, const vector<float>& x){
+        // RWKV_PROFILE only: the three GL steps timed apart, so the serial
+        // path's read-back can be compared with its draw and its upload.  The
+        // cached switch leaves every other model on the same instructions.
+        const bool prof = rwkv_prof_on();
+        const auto tp0 = Clock::now();
         Target& t = target_for(m.rows);
         GLuint xt = upload_activations(x);
+        if (prof) {
+                const auto now = Clock::now();
+                rwkv_prof.upload_ms += elapsed_ms(tp0, now);
+        }
+        const auto td0 = Clock::now();
         draw(m, xt, t);
         if (needs_finish()) { glFlush(); glFinish(); }
+        if (prof) {
+                const auto now = Clock::now();
+                rwkv_prof.draw_ms += elapsed_ms(td0, now);
+        }
+        const auto tr0 = Clock::now();
         vector<int32_t> raw = read_i32(t, m.rows, 1);
+        if (prof) {
+                const auto now = Clock::now();
+                rwkv_prof.read_ms += elapsed_ms(tr0, now);
+        }
         vector<float> out(m.rows);
         for (int i = 0; i < m.rows; ++i) {
             int v = raw[i];

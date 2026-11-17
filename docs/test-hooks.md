@@ -131,6 +131,31 @@ binary.  They are measurement hooks, not production settings.
 - `READBACK_TIME=1` — print the per-token logits finish/read-back timing:
   `finish` and `readback` separately on the full-read-back path, and one lap
   per reduction stage on the greedy fast path.  Diagnostic only.
+- `RWKV_PROFILE=1` — the RWKV paths' per-phase timing, read-only (no numbers
+  move: every hook is a cached switch around a clock read, and the fused path's
+  laps are `glFinish` only when the switch is on).  Serial path prints one line
+  per layer and a token total:
+  `RWKV_PROFILE cpu layer=3 total=12.87 mv_up=0.14 mv_draw=0.14 mv_read=12.42 elem=0.17`,
+  where the three `mv_*` terms are wall time around the matvec's GL steps (upload,
+  draw, read-back) and `elem` is the layer's remaining host time (the lerps,
+  norms, recurrence, sqrelu, the residual adds).  On a `needs_finish()` driver
+  the upload finishes inside its own step, so `mv_draw` carries the matvec's GPU
+  work there while `mv_read` is the transfer; on the laptop the read-back carries
+  both, because the draws are still in flight when it runs.  Fused path
+  (`RWKV_GPU=1`) prints one line per layer and a `layers` total per token:
+  `RWKV_PROFILE gpu layer=3 total=14.80 ln=1.55 lerp=0.53 matvec=2.34 lowrank=2.67 wkv=1.43 gn=1.29 rk=0.74 gate=1.00 cm=3.24`
+  (each share is a `glFinish` lap, so the total is inflated against a real
+  token — same caveat as `LAYER_PROFILE`).  A head line
+  (`RWKV_PROFILE head total=...`) prices the logits pass on both paths.  The
+  first token of a process includes the program links and is not steady state.
+- `RWKV_WKV_ONE=1` — force the fused path's WKV update to **one** draw on a
+  driver that would otherwise split it at `kDrawCap` (VC4: 48 strips a layer,
+  576 draws a token = 31% of the board's draws).  Default off, and it exists to
+  settle what `kDrawCap` limits: if it is *fragments per draw*, VC4 silently
+  drops the 64 x heads*hs draw and the state comes back as the clear colour —
+  the reply collapses, which is itself the answer; if it is *width*, the board
+  saves 47 of its 48 update draws a layer with the numbers unmoved (Xe takes
+  this arm by default, so it is bit-identical there).
 - `RWKV_GROUP=0|1|2|3|4` — the serial RWKV path's matvec grouping (P7, A2/A3).
   `1` (the default everywhere except VC4) draws a group of independent matvecs
   into the rows of one target

@@ -123,6 +123,34 @@ void GPU::init_rwkv(const Model& m){
 // in matvec() -- and only the *read-back* is shared: the draws land in the rows
 // of one target and a single glReadPixels takes the block.  The CPU path's cost
 // is that sync (one per matvec, 14 per layer), not the draw.
+// RWKV_PROFILE (docs/test-hooks.md): read-only timing.  The serial path's
+// counters are wall time around the GL calls in rwkv_upload_slot / matvec_rows /
+// GPU::matvec; the fused path's are per-stage glFinish laps in rwkv_block.
+bool GPU::rwkv_prof_on() const {
+        static const bool on = env_set("RWKV_PROFILE");
+        return on;
+}
+
+namespace {
+// The fused loop's stage laps.  A lap is glFinish + delta, so it serialises the
+// pipeline and inflates the total -- that is what makes a pass's own share
+// visible, and it is why this is a diagnostic, not a benchmark (docs/test-hooks).
+enum { RS_LN, RS_LERP, RS_MV, RS_LOWRANK, RS_WKV, RS_GN, RS_RK, RS_GATE, RS_CM, RS_COUNT };
+const char* const kRwkvStage[RS_COUNT] = {"ln", "lerp", "matvec", "lowrank",
+                                          "wkv", "gn", "rk", "gate", "cm"};
+double g_stage_ms[RS_COUNT];
+double g_stage_tot[RS_COUNT];
+Clock::time_point g_lap_t;
+bool g_lap_on = false;
+
+void lap(int stage){
+        if (!g_lap_on) return;
+        glFinish();
+        const auto now = Clock::now();
+        g_stage_ms[stage] += elapsed_ms(g_lap_t, now);
+        g_lap_t = now;
+}
+}  // namespace
 GLuint GPU::rwkv_upload_slot(const vector<float>& x, int slot){
         const int n = (int)x.size();
         const int texels = x_texels(n, act_fmt_);
@@ -136,16 +164,19 @@ GLuint GPU::rwkv_upload_slot(const vector<float>& x, int slot){
         // wider texture silently samples other texels.  (Found the hard way: the
         // up projections, whose inputs are the rank-long t vectors, read a 384-
         // texel staging texture that had been made for a 768-long one.)
+        const auto tp0 = Clock::now();
         GLuint t = rwkv_in_tex_[(size_t)slot];
         if (t == 0 || rwkv_in_w_[(size_t)slot] != texels) {
                 t = make_texture(texels, 1, data.data());
                 rwkv_in_tex_[(size_t)slot] = t;
                 rwkv_in_w_[(size_t)slot] = texels;
+                rwkv_prof.upload_ms += elapsed_ms(tp0, Clock::now());
                 return t;
         }
         bind_tex(0, t);
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, texels, 1, GL_RGBA, GL_UNSIGNED_BYTE, data.data());
         if (needs_finish()) { glFlush(); glFinish(); }
+        rwkv_prof.upload_ms += elapsed_ms(tp0, Clock::now());
         return t;
 }
 
@@ -162,9 +193,12 @@ vector<vector<float>> GPU::matvec_rows(const vector<MvRow>& rows, int slot0, int
                 t = make_target(std::max(w, t.w), std::max((int)rows.size(), t.h));
         for (size_t i = 0; i < rows.size(); ++i) {
                 GLuint xt = rwkv_upload_slot(*rows[i].x, slot0 + (int)i);
+                const auto td0 = Clock::now();
                 draw(*rows[i].m, xt, t, (int)i);
+                rwkv_prof.draw_ms += elapsed_ms(td0, Clock::now());
         }
         if (needs_finish()) { glFlush(); glFinish(); }
+        const auto tr0 = Clock::now();
         // The block read is the one thing this path does that the pre-P7 path
         // never did: a sub-rectangle of a wider target (the downs group reads
         // 128 of 768 columns) and, for the wide groups, more than one row.  The
@@ -185,6 +219,7 @@ vector<vector<float>> GPU::matvec_rows(const vector<MvRow>& rows, int slot0, int
         } else {
                 raw = read_i32(t, w, (int)rows.size());
         }
+        rwkv_prof.read_ms += elapsed_ms(tr0, Clock::now());
         for (size_t i = 0; i < rows.size(); ++i) {
                 const int n = rows[i].m->rows;
                 out[i].resize((size_t)n);
@@ -487,7 +522,14 @@ GLuint GPU::rwkv_wkv(int layer, GLuint r, GLuint k, GLuint v, GLuint a, GLuint k
         bind_tex(5, kk); set_sampler(pu, "KK", 5);
         bind_tex(6, a); set_sampler(pu, "A", 6);
         setup_attrib(pu);
-        if (needs_finish()) {
+        // RWKV_WKV_ONE=1 (default off): drive the update pass as ONE draw on a
+        // driver that would split it at kDrawCap.  It exists to settle what
+        // kDrawCap limits -- fragments per draw (then VC4 silently drops this
+        // draw and the state comes back as the clear colour: the reply collapses,
+        // which is itself the answer) or width (then the board saves 47 of its 48
+        // update draws a layer).  Wants the board; Xe is unaffected either way.
+        static const bool wkv_one = env_flag("RWKV_WKV_ONE");
+        if (needs_finish() && !wkv_one) {
             // VC4 drops a draw wider than kDrawCap *fragments*, and the state is
             // one fragment per f32 element (H*hs*hs = 49152 here), so the update
             // is 48 cap-sized strips there -- that is the largest draw count in
@@ -512,12 +554,46 @@ GLuint GPU::rwkv_wkv(int layer, GLuint r, GLuint k, GLuint v, GLuint a, GLuint k
         return out.tex;
 }
 
+void GPU::rwkv_prof_fused_summary(){
+        if (!rwkv_prof_on()) return;
+        double sum = 0.0;
+        for (int i = 0; i < RS_COUNT; ++i) sum += g_stage_tot[i];
+        if (sum <= 0.0) return;
+        fprintf(stderr, "RWKV_PROFILE gpu layers total=%.2f", sum);
+        for (int i = 0; i < RS_COUNT; ++i) {
+                fprintf(stderr, " %s=%.2f", kRwkvStage[i], g_stage_tot[i]);
+                g_stage_tot[i] = 0.0;
+        }
+        fprintf(stderr, "\n");
+}
 GLuint GPU::rwkv_block(int l, const Model& m, GLuint resid, float* cpu_wkv_state){
+        if (rwkv_prof_on()) {
+                g_lap_on = true;
+                g_lap_t = Clock::now();
+                for (int i = 0; i < RS_COUNT; ++i) g_stage_ms[i] = 0.0;
+        }
+        // Every return goes through this, so the last stage is always closed and
+        // the layer's shares are printed from one place.
+        auto finish = [&](GLuint tex) {
+                lap(RS_CM);
+                if (g_lap_on) {
+                        double sum = 0.0;
+                        for (int i = 0; i < RS_COUNT; ++i) sum += g_stage_ms[i];
+                        fprintf(stderr, "RWKV_PROFILE gpu layer=%d total=%.2f", l, sum);
+                        for (int i = 0; i < RS_COUNT; ++i) {
+                                fprintf(stderr, " %s=%.2f", kRwkvStage[i], g_stage_ms[i]);
+                                g_stage_tot[i] += g_stage_ms[i];
+                        }
+                        fprintf(stderr, "\n");
+                }
+                return tex;
+        };
         const bool have_gate = m.rwkv.gate && l < (int)m.rwkv_g1.size() && m.rwkv_g1[l].rows > 0;
         const GLuint lp = rwkv_const(l, RC_LERP), sc = rwkv_const(l, RC_SCALE);
         // O1-O3: att_norm, then the six token-shifted inputs; shift := xn.
         GLuint xn = (l == 0) ? rwkv_ln_p(resid, rwkv_const(l, RC_ATTNorm), rwkv_tmp(RT_XN))
                              : rwkv_ln(resid, rwkv_const(l, RC_ATTNorm), rwkv_tmp(RT_XN));
+        lap(RS_LN);
         Target& shA = rwkv_shift_[(size_t)l * 2 + 0];
         GLuint xr = rwkv_lerp(xn, shA.tex, lp, 0, 6, rwkv_tmp(RT_XR));
         GLuint xw = rwkv_lerp(xn, shA.tex, lp, 1, 6, rwkv_tmp(RT_XW));
@@ -526,10 +602,12 @@ GLuint GPU::rwkv_block(int l, const Model& m, GLuint resid, float* cpu_wkv_state
         GLuint xa = rwkv_lerp(xn, shA.tex, lp, 4, 6, rwkv_tmp(RT_XA));
         GLuint xg = rwkv_lerp(xn, shA.tex, lp, 5, 6, rwkv_tmp(RT_XG));
         rwkv_copy(xn, shA);
+        lap(RS_LERP);
         // O4-O6: the three projections.
         GLuint r = rwkv_mv(m.rwkv_r[l], xr, rwkv_tmp(RT_R));
         GLuint k = rwkv_mv(m.rwkv_k[l], xk, rwkv_tmp(RT_K));
         GLuint v = rwkv_mv(m.rwkv_v[l], xv, rwkv_tmp(RT_V));
+        lap(RS_MV);
         RwkvTmp vidx = RT_V;
         // O7: decay branch (tanh on the down projection, then exp/sigmoid).
         GLuint t = rwkv_mv(m.rwkv_w1[l], xw, rwkv_tmp(RT_TW));
@@ -557,6 +635,7 @@ GLuint GPU::rwkv_block(int l, const Model& m, GLuint resid, float* cpu_wkv_state
             t = rwkv_sigmoid(t, 0, rwkv_tmp(RT_TG2), 1);
             g = rwkv_mv(m.rwkv_g2[l], t, rwkv_tmp(RT_G));
         }
+        lap(RS_LOWRANK);
         // O11/O12: kk = l2norm(k*k_k) (*16 store), k' = k + (a-1)*k*k_a.
         GLuint kk = rwkv_l2(k, sc, rwkv_tmp(RT_KK));
         GLuint kd = rwkv_keydelta(k, a, sc, rwkv_tmp(RT_KD));
@@ -621,12 +700,16 @@ GLuint GPU::rwkv_block(int l, const Model& m, GLuint resid, float* cpu_wkv_state
         } else {
             y = rwkv_wkv(l, r, kd, v, a, kk, decay, rwkv_tmp(RT_Y));
         }
+        lap(RS_WKV);
         // O15: per-head group norm + ln_x affine.
         y = rwkv_gn(y, rwkv_const(l, RC_LNX), rwkv_tmp(RT_Y2));
+        lap(RS_GN);
         // O16: r_k bonus (uses the delta key).
         y = rwkv_rk(kd, r, sc, v, y, rwkv_tmp(RT_Y));
+        lap(RS_RK);
         // O17: gate.
         if (have_gate) y = rwkv_mul(y, g, rwkv_tmp(RT_Y2), 256);
+        lap(RS_GATE);
         // O18/O19: W_o + residual.  Two-step (matvec to I24, then q16 add) like
         // the CPU's read-back + add_q16; the fused matvec_add drops its dot on
         // VC4's I24_1 chain, and the split keeps the add's input fetch ordered.
@@ -645,6 +728,7 @@ GLuint GPU::rwkv_block(int l, const Model& m, GLuint resid, float* cpu_wkv_state
                 resid = wo_out.tex;
             }
         }
+        lap(RS_MV);
         // O20-O22: ffn norm, its token shift and the channel-mix lerp.
         GLuint xn2 = rwkv_ln(resid, rwkv_const(l, RC_ATTNorm2), rwkv_tmp(RT_XN2));
         Target& shF = rwkv_shift_[(size_t)l * 2 + 1];
@@ -664,21 +748,21 @@ GLuint GPU::rwkv_block(int l, const Model& m, GLuint resid, float* cpu_wkv_state
                 GLuint ca = rwkv_mv(m.w2a[l], ha, rwkv_tmp(RT_U));
                 GLuint mid_r = rwkv_res_add(resid, ca, mid);
                 GLuint cb = rwkv_mv(m.w2b[l], hb, rwkv_tmp(RT_U));
-                return rwkv_res_add(mid_r, cb, fin);
+                return finish(rwkv_res_add(mid_r, cb, fin));
             }
             matvec_add(m.w2a[l], ha, resid, mid, act_fmt_);
             matvec_add(m.w2b[l], hb, mid.tex, fin, act_fmt_);
-            return fin.tex;
+            return finish(fin.tex);
         }
         GLuint h = rwkv_mv(m.w1[l], xk2, rwkv_tmp(RT_CMH));
         h = rwkv_sqrelu(h, rwkv_tmp(RT_CMH2));
         Target& cm_out = (resid == rwkv_tmp(RT_RES).tex) ? rwkv_tmp(RT_RES2) : rwkv_tmp(RT_RES);
         if (needs_finish()) {
             GLuint cm_t = rwkv_mv(m.w2[l], h, rwkv_tmp(RT_U));
-            return rwkv_res_add(resid, cm_t, cm_out);
+            return finish(rwkv_res_add(resid, cm_t, cm_out));
         }
         matvec_add(m.w2[l], h, resid, cm_out, act_fmt_);
-        return cm_out.tex;
+        return finish(cm_out.tex);
 }
 
 
