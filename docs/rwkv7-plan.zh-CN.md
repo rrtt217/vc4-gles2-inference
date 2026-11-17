@@ -408,3 +408,10 @@ metadata key 17（**P0b 新增**，`<B>`）：**logits 输入尺度指数 k**。
 
 **验证口径**：每步同机 A/B、PPL 裁决、draws/syncs 计数下降、`make -C engine check` 108/0 + `regression.sh` ACCEPT + `shader_hashes` 仅新/改 builder；跨机/跨路径只比 PPL。
 
+**收尾结论（2026-11-17）**
+
+- **Xe（桌面）**：P7 回读合并后 CPU 108.6 → 64–70 ms/token（约 1.6×），GPU ~36 ms；0.4B q8r PPL 6.3432（f32 oracle 5.7405），量化代价 +0.100 nats/token。GPU 融合 + bit-cast f32 state 保留。
+- **Pi Zero（VC4）decode**：两条路径都在 ~0.97–1.04 s/token，**已到这套 q8 纹理核的地板**（~127–145 MMAC/s；dense 路径 ~283 MMAC/s，差距来自取指比 1.25 vs 0.5 fetch/MAC）。syncs 167→73、draws 1879→1855、cm 切点 1536+1536→2048+1024、token-shift ping-pong 等改动在板子上都 <2%（噪声内），**draw/sync 不是 Pi 的边际成本**。
+- **Pi prefill**：P1 批量 prefill（默认关）93.63 → 36.05 s（2.6×），但 VC4 上 logits 不逐位（max|d|=0.367、top-1 不变）；Xe 上 62.25 → 6.81 s（9.1×，逐位）。
+- **定位**：Pi 上 RWKV-7 0.1B q8r ~0.97 s/token vs LFM2.5-230M q4 1133 ms/token（参数少 2.3×），而质量全面更低（MC 0.240/0.310 vs 0.380/0.400；ifeval 0.25 vs 0.562/0.542；translate chrF 0.099 vs 0.328/0.368）。**RWKV 0.1B 在 Pi 上不具竞争力**；0.4B（453 MB）只在桌面 Xe 可用。决定：停止 RWKV 优化，保留已交付的容器/loader/CPU 层循环/分词器/模板、Xe GPU 融合与回归引脚。
+
