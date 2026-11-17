@@ -221,10 +221,17 @@ Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
                     else cerr << "ACT=i8 needs an all-q8 model; keeping the q16 streams\n";
                 }
             }
+            // FFN_HID: the FFN hidden stream's format.  `f32` exists because the
+            // q16 grid rails at +-128 and a model whose hidden state exceeds it
+            // loses the tail of every FFN output -- MNN-Pocket peaks at 1005
+            // (probe_residuals.py), i.e. 8x the rail, and that is why it is the
+            // first container to ask for this.  `i8` needs all-q8 weights.
             if (const char* fh = sw_enum("FFN_HID")) {
                 if (!strcmp(fh, "i8")) {
                     if (q8_model) gpu_.ffn_fmt_ = XFormat::I8_4;
                     else cerr << "FFN_HID=i8 needs an all-q8 model; keeping the q16 hidden\n";
+                } else if (!strcmp(fh, "f32")) {
+                    gpu_.ffn_fmt_ = XFormat::F32;
                 }
             }
             // Residual stream packed two int16 per texel: halves the fetch count in

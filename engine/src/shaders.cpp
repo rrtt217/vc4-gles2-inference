@@ -1580,6 +1580,13 @@ string swiglu_pair(int hidden, XFormat out, int hs) {
         "vec2 g=X2(A,2*i," + H + ".0);"
         "return (g.x/(1.0+exp(-g.x)))*g.y;}";
     string body;
+    if (out == XFormat::F32) {
+        body = "void main(){int i=int(gl_FragCoord.x);"
+               "gl_FragColor=x_f32enc(actv(i)" + HM + ");}";
+        // head(I16_2), not head(F32): the pair buffer A holds two q16 values a
+        // texel and actv() reads it with X2.  Only the *store* is f32.
+        return head(XFormat::I16_2) + x_f32_store_glsl() + HD + "uniform sampler2D A;" + act + body;
+    }
     if (out == XFormat::I8_4) {
         body = "void main(){int t=int(gl_FragCoord.x);int i0=4*t;"
                "gl_FragColor=x_i8enc4(actv(i0)" + HM + ",actv(i0+1)" + HM + ",actv(i0+2)" + HM + ",actv(i0+3)" + HM + ");}";
@@ -1601,6 +1608,16 @@ string swiglu_2row(int hidden, XFormat out, int hs) {
         "float a=x_i24q(ca),b=x_i24q(cb);"
         "return (a/(1.0+exp(-a)))*b;}";
     string body;
+    if (out == XFormat::F32) {
+        // One value a texel: the fragment index *is* the hidden index, so
+        // there is no i0 offset and no pair to pack.  This is the only output
+        // format that can hold a hidden state beyond the q16 rail (-128), and
+        // pocket's peaks at 1005 (probe_residuals.py).
+        body = "void main(){int i=int(gl_FragCoord.x);"
+               "gl_FragColor=x_f32enc(yat(i)" + HM + ");}";
+        return head(XFormat::I16_2) + x_f32_store_glsl() + HD + q24_helpers() +
+               "uniform sampler2D A;" + read + body;
+    }
     if (out == XFormat::I8_4) {
         body = "void main(){int t=int(gl_FragCoord.x);int i0=4*t;"
                "gl_FragColor=x_i8enc4(yat(i0)" + HM + ",yat(i0+1)" + HM + ",yat(i0+2)" + HM + ",yat(i0+3)" + HM + ");}";
@@ -1632,6 +1649,11 @@ string swiglu(int hidden, bool fused, XFormat out, int hs) {
                "return (a/(1.0+exp(-a)))*b;}";
     }
     string body;
+    if (out == XFormat::F32) {
+        body = "void main(){int i=int(gl_FragCoord.x);"
+               "gl_FragColor=x_f32enc(yat(i)" + HM + ");}";
+        return head(XFormat::I16_2) + x_f32_store_glsl() + HD + q24_helpers() + read + body;
+    }
     if (out == XFormat::I8_4) {
         body = "void main(){int t=int(gl_FragCoord.x);int i0=4*t;"
                "gl_FragColor=x_i8enc4(yat(i0)" + HM + ",yat(i0+1)" + HM + ",yat(i0+2)" + HM + ",yat(i0+3)" + HM + ");}";

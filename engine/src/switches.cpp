@@ -111,8 +111,8 @@ static const SwitchDef kSwitches[] = {
     // ACT_FMT (format), ACT8=1 (width) and ACT8=2 (the FFN hidden's width).
     {"ACT", "ACT_FMT", SwKind::Str, "i16|i8|f32", SwStatus::Permanent, SwAxis::Act,
      "the GPU activation streams' format: i16 q16 grid (default), i8, or bit-cast f32"},
-    {"FFN_HID", "", SwKind::Str, "i16|i8", SwStatus::Permanent, SwAxis::Act,
-     "the FFN hidden stream's width (ACT8=2 used to set only this one)"},
+    {"FFN_HID", "", SwKind::Str, "i16|i8|f32", SwStatus::Permanent, SwAxis::Act,
+     "the FFN hidden stream's format: q16 (default), i8, or f32 past the q16 rail"},
     {"ACT_CPU", "ACT_F32", SwKind::Str, "q16|f32", SwStatus::Permanent, SwAxis::Act,
      "the CPU layer loop's activation grid (ACT_F32 meant f32, whatever its value)"},
     {"Q16_DECODE", "", SwKind::Str, "", SwStatus::Permanent, SwAxis::Act,

@@ -56,6 +56,11 @@ std::string x_glsl(XFormat f);
 // Residual-stream variants use distinct R1/R2 names so a shader can read an
 // int8 activation and a q16 residual with different layouts in one pass.
 std::string x_residual_glsl(XFormat f);
+// Only the float32 *store* helper (`x_f32enc`), without the X1/X2/X4 read
+// macros: a kernel that reads a fixed q16 pair layout and writes an f32
+// stream -- the swiglu feeding the FFN hidden -- needs the encoder without
+// the decoder, or the read macros would change meaning under it.
+std::string x_f32_store_glsl();
 
 // Two-position ("batch pair", P2) target layout, used by the 2-position prefill
 // kernels: a vector of n values occupies n texels, texel k holding value k of

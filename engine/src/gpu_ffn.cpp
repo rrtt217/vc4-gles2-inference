@@ -68,7 +68,14 @@ void GPU::ffn_split_chunked(const Mat& w1a, const Mat& w3a, const Mat& w1b, cons
                            GLuint x, int n1, int n2, GLuint& ha, GLuint& hb, int hs){
         static const bool pair_env = !(env_zero("FFN_PAIR"));
         // The paired shader assumes int8 weights; q4/i16 keep the old path.
-        const bool pair = pair_env &&
+        // It also assumes the *q16 pair* hidden layout: `matvec_i4_pair` and
+        // `matvec_q8_pair` write (gate_r, up_r) as two q16 values in one texel,
+        // and swiglu_pair reads that layout.  An f32 hidden is one value a
+        // texel, so the pair path cannot express it -- f32 takes the
+        // two-buffer path below (`swiglu_2row`, which has an f32 output).
+        // Without this condition FFN_HID=f32 produced a garbage half-width
+        // buffer and the model answered in one repeated token (2026-11-17).
+        const bool pair = pair_env && ffn_fmt_ != XFormat::F32 &&
                           ((w1a.type == WeightType::INT8 && w3a.type == WeightType::INT8) ||
                            (w1a.type == WeightType::INT4 && w3a.type == WeightType::INT4));
         if (pair) {

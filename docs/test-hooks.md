@@ -59,7 +59,7 @@ same table with what *this* environment resolved to).
 |---|---|---|
 | `ACT` <br><sub>`ACT_FMT`</sub> | `i16\|i8\|f32` | the GPU activation streams' format: i16 q16 grid (default), i8, or bit-cast f32 |
 | `ACT_CPU` <br><sub>`ACT_F32`</sub> | `q16\|f32` | the CPU layer loop's activation grid (ACT_F32 meant f32, whatever its value) |
-| `FFN_HID` | `i16\|i8` | the FFN hidden stream's width (ACT8=2 used to set only this one) |
+| `FFN_HID` | `i16\|i8\|f32` | the FFN hidden stream's format: q16 (default), i8, or f32 past the q16 rail |
 | `Q16_DECODE` | value | the q16 decode: fast classifies the -32768 rail at 32767.5, exact is integer |
 | `QKV_PAIR` | `=1` | two qkv rows per fragment (int8 only, default on); QKV_PAIR=0 disables |
 
@@ -512,8 +512,15 @@ conclusion from its output.
   MNN-Pocket: cosine 0.9415 with the q16 streams against 0.9552 with f32 ones
   (float32 numpy reference, same q4 container).
 
-- `FFN_HID=i16|i8` — the FFN hidden stream's width alone (the legacy `ACT8=2`
-  set only this; the legacy `ACT8=1` set this *and* `ACT`).  q8 weights only.
+- `FFN_HID=i16|i8|f32` — the FFN hidden stream's format alone (the legacy
+  `ACT8=2` set only this; the legacy `ACT8=1` set this *and* `ACT`).  `i8` needs
+  q8 weights; **`f32` exists because the q16 grid rails at ±128** and a model
+  whose hidden state exceeds it loses the tail of every FFN output — MNN-Pocket's
+  peaks at 1005 (8x the rail, `models/pocket-0.3b/probe_residuals.py`), measured
+  2026-11-17.  The f32 form is one value a texel, so it doubles the hidden
+  target's width and forces the two-buffer FFN path: the paired gate kernels
+  write (gate_r, up_r) as two q16 values in one texel, a layout f32 cannot
+  express (`gpu_ffn.cpp` says so at the branch).
 
 - `ACT_CPU=q16|f32` — the CPU layer loop's activation grid, a *placement*
   question next to the two above (was `ACT_F32=1`; that spelling meant "on" for

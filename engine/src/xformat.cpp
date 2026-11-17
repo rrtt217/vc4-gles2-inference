@@ -241,10 +241,8 @@ std::string x_glsl(XFormat f) {
             s +=
                 "float x_f32(vec4 c){uint u=(uint(int(c.x*255.0+0.5))<<24)|"
                 "(uint(int(c.y*255.0+0.5))<<16)|(uint(int(c.z*255.0+0.5))<<8)|"
-                "uint(int(c.w*255.0+0.5));return uintBitsToFloat(u);}\n"
-                "vec4 x_f32enc(float v){uint u=floatBitsToUint(v);"
-                "return vec4(float(u>>24),float((u>>16)&255u),float((u>>8)&255u),"
-                "float(u&255u))/255.0;}\n"
+                "uint(int(c.w*255.0+0.5));return uintBitsToFloat(u);}\n" +
+                x_f32_store_glsl() +
                 "#define X1(T,I,TW) x_f32(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)))\n"
                 "#define X2(T,BASE,TW) vec2(X1(T,(BASE),TW),X1(T,(BASE)+1,TW))\n"
                 "#define X4(T,BASE,TW) vec4(X1(T,(BASE),TW),X1(T,(BASE)+1,TW),X1(T,(BASE)+2,TW),X1(T,(BASE)+3,TW))\n"
@@ -324,4 +322,14 @@ std::string x_pair2_glsl() {
         "vec4 x_p2_st(float a,float b){return x_st2(a,b);}\n"
         "vec4 x_p2_stq(float qa,float qb){vec2 p=x_q16enc(qa),q=x_q16enc(qb);"
         "return vec4(p.x,p.y,q.x,q.y);}\n";
+}
+
+// The f32 store helper on its own (see xformat.h).  `x_glsl(F32)` emits this
+// plus the read macros; a kernel with a fixed q16 *input* layout and an f32
+// *output* (the swiglu) emits this plus `head(XFormat::I16_2)`.
+std::string x_f32_store_glsl() {
+    return
+        "vec4 x_f32enc(float v){uint u=floatBitsToUint(v);"
+        "return vec4(float(u>>24),float((u>>16)&255u),float((u>>8)&255u),"
+        "float(u&255u))/255.0;}\n";
 }
