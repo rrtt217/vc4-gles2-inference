@@ -162,8 +162,14 @@ unaffected.
 
 `/params` prints the sampling knobs, and the bare form of any of the knob
 commands prints the same line.  `/temp F` (0 = greedy), `/topp F`, `/topk N`
-(0 = off), `/greedy on|off`, `/seed N`, `/gen N` and `/penalty R` (1 = off) each
-change one knob and echo the result.  A change takes effect on the **next** turn:
+(0 = off), `/topk-candidates on|off`, `/greedy on|off`, `/seed N`, `/gen N`,
+`/penalty F` (1 = off), `/freq-penalty F`, `/pres-penalty F`, `/min-p F`,
+`/ngram N`, `/thinking on|off` each change one knob and echo the result, and
+`/system TEXT` replaces the system prompt and forgets the conversation (the
+rendered prefix moved, so the KV cache no longer matches).  The commands and
+knobs are one table: `/help` is rendered from it, so it is the authority on
+syntax and range, and a mistyped one-word command says "did you mean" instead of
+being sent to the model.  A change takes effect on the **next** turn:
 the REPL reads stdin only between turns, so nothing typed while the model is
 decoding can reach the sampler.  `/stats` prints the live container (path, shape,
 template, rms eps), the context usage, available memory and the SoC temperature

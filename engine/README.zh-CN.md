@@ -146,8 +146,12 @@ TinyChat15M 是 llama-2 chat 格式的 15M 模型，不是补全模型：容器�
 （`engine/scripts/test_lineedit.cpp`）。
 
 `/params` 打印采样参数，任何一个参数命令的裸形式也打印同一行。`/temp F`（0 = greedy）、
-`/topp F`、`/topk N`（0 = 关）、`/greedy on|off`、`/seed N`、`/gen N`、`/penalty R`（1 = 关）
-各改一个开关并回显。改动在**下一轮**生效：REPL 只在两轮之间读 stdin，所以模型解码时敲的
+`/topp F`、`/topk N`（0 = 关）、`/topk-candidates on|off`、`/greedy on|off`、`/seed N`、
+`/gen N`、`/penalty F`（1 = 关）、`/freq-penalty F`、`/pres-penalty F`、`/min-p F`、
+`/ngram N`、`/thinking on|off` 各改一个开关并回显；`/system TEXT` 换掉系统提示词并忘记
+当前对话（渲染出的前缀变了，KV 缓存不再匹配）。命令和参数是同一张表：`/help` 由它渲染，
+所以语法和取值范围的权威就是 `/help`；打错一个字的单词命令会说“你是不是想用 X”，
+而不是被当成消息发给模型。改动在**下一轮**生效：REPL 只在两轮之间读 stdin，所以模型解码时敲的
 东西到不了采样器。`/stats` 打印当前容器（路径、形状、模板、rms eps）、上下文占用、可用内存和
 板上的 SoC 温度——不报 CmaFree，那不是 GL 场景真正能拿到的额度。每轮结束在终端上打一行 `[8 tok  108.1 tok/s  0.55 s prefill  ctx 39/256]`，
 加载容器时在同一条线上画进度条（`[upload  45% ...]`）；stderr 不是终端时两者都不打，设了

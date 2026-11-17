@@ -27,12 +27,29 @@ struct Chat {
     std::vector<int> cli_cache_tokens;   // what --prefix-cache loaded
     std::string tools_array;         // the normalised tool list the CLI passed
 
+    // The REPL's command surface, in one table (chat.cpp, `kCmd`): `repl_command`
+    // parses "/name rest", finds the row and calls the handler, and `/help` is
+    // rendered from the same rows, so a command cannot be documented and unhandled
+    // (the CLI got the same treatment in cli.cpp).
+    bool repl_command(const std::string& line);   // true = the line was a command
+    void print_help() const;
     // Slash commands that change a sampling knob or report state.  A knob takes
     // effect on the next turn: the REPL reads stdin only between turns, so nothing
     // typed while the model is decoding can reach the sampler.
     bool apply_param(const std::string& line);   // true = the line was a command
     void print_params() const;
     void print_stats() const;
+    bool quit_after_line = false;   // /exit or /quit asked the loop to leave
+    bool cleared_ = false;          // /clear or /model: the loop resets its history
+    // Handlers behind the table.  `arg` is the text after "/name ".
+    bool cmd_model(const std::string& arg);
+    bool cmd_clear(const std::string& arg);
+    bool cmd_stats(const std::string& arg);
+    bool cmd_params(const std::string& arg);
+    bool cmd_help(const std::string& arg);
+    bool cmd_system(const std::string& arg);
+    bool cmd_exit(const std::string& arg);
+    bool cmd_param(const std::string& name, const std::string& arg);
     // One line after each turn, on stderr and only at a terminal, so a redirected
     // stdout stays the conversation.
     void print_status() const;

@@ -4,6 +4,7 @@
 
 #include <unistd.h>
 #include <algorithm>
+#include <cstdio>
 #include <cerrno>
 #include <climits>
 #include <cstdarg>
@@ -553,61 +554,225 @@ void Chat::run_tool_turn(const std::string& user, bool first, std::vector<ChatMs
     }
 }
 
+// The sampler knobs a slash command can set, one row each: the name, the syntax
+// hint for /help, the accepted range and which `CliOpt` field it writes.  The
+// gate for the range lives here as data, so "/min-p 2" and "/topp 2" are refused
+// the same way and neither can be forgotten.
+struct ParamDef {
+    const char* name;
+    CliOpt opt;          // the same vocabulary the command line uses (cli.h)
+    int kind;            // 0 = float in [lo, hi], 1 = int in [lo, hi], 2 = on|off
+    float lo, hi;
+    const char* hint;
+};
+
+static const ParamDef kParams[] = {
+    {"/temp", CliOpt::Temp, 0, 0.0f, 5.0f, "F  [0 = greedy]"},
+    {"/topp", CliOpt::Topp, 0, 0.0f, 1.0f, "F  (0, 1]"},
+    {"/topk", CliOpt::TopK, 1, 0.0f, 1024.0f, "N  [0 = off]"},
+    {"/gen", CliOpt::Gen, 1, 0.0f, 4096.0f, "N  tokens per reply"},
+    {"/seed", CliOpt::Seed, 1, 0.0f, 4294967295.0f, "N"},
+    {"/greedy", CliOpt::Greedy, 2, 0.0f, 0.0f, "on|off"},
+    {"/penalty", CliOpt::RepeatPenalty, 0, 1.0f, 10.0f, "F  repetition [1 = off]"},
+    {"/freq-penalty", CliOpt::FrequencyPenalty, 0, -2.0f, 2.0f, "F  [0 = off]"},
+    {"/pres-penalty", CliOpt::PresencePenalty, 0, -2.0f, 2.0f, "F  [0 = off]"},
+    {"/min-p", CliOpt::MinP, 0, 0.0f, 1.0f, "F  [0 = off]"},
+    {"/ngram", CliOpt::NoRepeatNgram, 1, 0.0f, 16.0f, "N  block an n-gram [0 = off]"},
+    {"/topk-candidates", CliOpt::TopKCandidates, 2, 0.0f, 0.0f, "on|off  approximate top-k"},
+    {"/thinking", CliOpt::Thinking, 2, 0.0f, 0.0f, "on|off"},
+};
+
+static const ParamDef* find_param(const std::string& name) {
+    for (const ParamDef& p : kParams)
+        if (name == p.name) return &p;
+    return nullptr;
+}
+
+// ---- the REPL's command surface, one table -------------------------------
+// Same regime as the command line (cli.cpp): the table owns the names, the syntax
+// and the help, `repl_command` walks it, and `/help` is rendered from it.  Before
+// this, a command lived in three places -- the name list in apply_param, an `if`
+// in the REPL loop, and a line of hand-written help -- and the three disagreed
+// (the `/params` name was missing from the list once and typed at a model).
+struct CmdDef {
+    const char* name;
+    const char* alias;     // "" for none
+    const char* arg;       // syntax hint, "" for a bare command
+    const char* help;
+    bool (Chat::*fn)(const std::string& arg);
+};
+
+static const CmdDef kCmd[] = {
+    {"/help", "", "", "this list", &Chat::cmd_help},
+    {"/model", "", "PATH", "load another container, keeping the GPU context",
+     &Chat::cmd_model},
+    {"/clear", "", "", "forget the conversation so far", &Chat::cmd_clear},
+    {"/stats", "", "", "the container, the context and the memory state",
+     &Chat::cmd_stats},
+    {"/params", "", "", "the sampling knobs (same as any knob with no value)",
+     &Chat::cmd_params},
+    {"/system", "", "TEXT", "replace the system prompt (forgets the conversation)",
+     &Chat::cmd_system},
+    {"/exit", "/quit", "", "leave", &Chat::cmd_exit},
+};
+
+// Levenshtein, for the "did you mean" hint only: two rows of the table, not a
+// library.
+static int edit_distance(const std::string& a, const std::string& b) {
+    std::vector<int> prev(b.size() + 1), cur(b.size() + 1);
+    for (size_t j = 0; j <= b.size(); ++j) prev[j] = (int) j;
+    for (size_t i = 1; i <= a.size(); ++i) {
+        cur[0] = (int) i;
+        for (size_t j = 1; j <= b.size(); ++j) {
+            const int cost = a[i - 1] == b[j - 1] ? 0 : 1;
+            cur[j] = std::min(std::min(cur[j - 1] + 1, prev[j] + 1), prev[j - 1] + cost);
+        }
+        prev.swap(cur);
+    }
+    return prev[b.size()];
+}
+
+static const CmdDef* find_cmd(const std::string& name) {
+    for (const CmdDef& c : kCmd)
+        if (name == c.name || (c.alias[0] && name == c.alias)) return &c;
+    return nullptr;
+}
+
+bool Chat::cmd_help(const std::string&) {
+    print_help();
+    return true;
+}
+
+void Chat::print_help() const {
+    cout << "commands\n";
+    for (const CmdDef& c : kCmd) {
+        string head = c.name;
+        if (c.alias[0]) head += string(" (") + c.alias + ")";
+        if (c.arg[0]) head += string(" ") + c.arg;
+        cout << fmt("  %-22s %s\n", head.c_str(), c.help);
+    }
+    // One line per knob: the syntax *and* its range come from the table, so
+    // /help cannot promise something apply_param refuses.
+    cout << "sampling knobs (a bare name, or /params, prints the live state)\n";
+    string row;
+    for (size_t i = 0; i < sizeof(kParams) / sizeof(kParams[0]); ++i) {
+        row += (row.empty() ? "  " : "   ") + string(kParams[i].name) + " " + kParams[i].hint;
+        if (row.size() > 46 || i + 1 == sizeof(kParams) / sizeof(kParams[0])) {
+            cout << row << "\n";
+            row.clear();
+        }
+    }
+    cout << "anything else is sent to the model; arrows edit, Ctrl-Left/Right\n"
+            "(or Alt-b/f) move by word.  Enter sends, Ctrl-V Enter or Alt-Enter\n"
+            "starts a new line, and pasted text keeps its line breaks, so a pasted\n"
+            "block is one message.  Up/Down move inside such a block; above its\n"
+            "first line they recall earlier inputs.\n";
+}
+
+bool Chat::cmd_clear(const std::string&) {
+    cleared_ = true;   // repl() owns `first` and `history`; it resets them
+    cout << "[conversation cleared]\n";
+    return true;
+}
+
+bool Chat::cmd_stats(const std::string&) {
+    print_stats();
+    return true;
+}
+
+bool Chat::cmd_system(const std::string& text) {
+    // The system prompt is part of the rendered prefix, so the KV cache no longer
+    // matches: this is a /clear that also changes the prompt, and it says so.
+    app.opt.system_prompt = text;
+    cleared_ = true;
+    cout << "[system prompt set; conversation cleared]\n";
+    return true;
+}
+
+bool Chat::cmd_params(const std::string&) {
+    print_params();
+    return true;
+}
+
+bool Chat::cmd_exit(const std::string&) {
+    quit_after_line = true;
+    return true;
+}
+
 bool Chat::apply_param(const std::string& line) {
     // A multi-line input is a message, never a command: the first line of a pasted
     // block can easily start with "/temp".
-    if (line.find('\n') != string::npos) return false;
+    if (line.find('\n') != std::string::npos) return false;
     const size_t sp = line.find(' ');
-    const string name = line.substr(0, sp == string::npos ? line.size() : sp);
-    const string arg = sp == string::npos ? string() : line.substr(sp + 1);
+    const string name = line.substr(0, sp == std::string::npos ? line.size() : sp);
+    const string arg = sp == std::string::npos ? string() : line.substr(sp + 1);
 
-    if (name != "/params" && name != "/temp" && name != "/topp" && name != "/topk" &&
-        name != "/gen" && name != "/seed" && name != "/greedy" && name != "/penalty")
-        return false;
+    const ParamDef* p = find_param(name);
+    if (!p && name != "/params") return false;
     // The bare form of any of these prints the state; "/params" exists as the one
     // name that says so, and it was the name left out of this list once already.
-    if (name == "/params" || arg.empty()) { print_params(); return true; }
+    if (!p || arg.empty()) { print_params(); return true; }
 
-    auto bad = [&](const char* what) {
+    auto bad = [&](const std::string& what) {
         cerr << what << "\n";
         print_params();
         return true;
     };
-    if (name == "/temp") {
-        float v = 0;
-        if (!parse_float(arg, v) || v < 0.0f || v > 5.0f) return bad("/temp takes 0..5 (0 = greedy)");
-        // Temperature 0 *is* greedy everywhere in this engine (the sampler defines
-        // it that way, see sampling.cpp), and saying it here also picks the fast
-        // greedy path.  A non-zero temperature turns sampling back on.
-        app.opt.temp = v;
-        app.opt.greedy = (v == 0.0f);
-    } else if (name == "/topp") {
-        float v = 0;
-        if (!parse_float(arg, v) || !(v > 0.0f) || v > 1.0f) return bad("/topp takes (0, 1]");
-        app.opt.top_p = v;
-    } else if (name == "/topk") {
+    char span[96];
+    if (p->kind == 2)
+        snprintf(span, sizeof(span), "on or off");
+    else if (p->kind == 1)
+        snprintf(span, sizeof(span), "an integer in %ld..%ld", (long) p->lo, (long) p->hi);
+    else
+        snprintf(span, sizeof(span), "a float in %g..%g", (double) p->lo, (double) p->hi);
+    const string range = std::string(p->name) + " takes " + span;
+    if (p->kind == 2) {                    // on|off
+        if (arg != "on" && arg != "off") return bad(range);
+        const bool on = arg == "on";
+        switch (p->opt) {
+            case CliOpt::Greedy: app.opt.greedy = on; break;
+            case CliOpt::Thinking: app.opt.open_thinking = on; break;
+            case CliOpt::TopKCandidates: app.opt.top_k_candidates = on; break;
+            default: return bad(range);
+        }
+        print_params();
+        return true;
+    }
+    if (p->kind == 1) {
         int v = 0;
-        if (!parse_int(arg, v) || v < 0) return bad("/topk takes N >= 0 (0 = off)");
-        app.opt.top_k = v;
-        if (v == 0) app.opt.top_k_candidates = false;   // there is nothing to keep
-    } else if (name == "/gen") {
-        int v = 0;
-        if (!parse_int(arg, v) || v < 0 || v > 4096) return bad("/gen takes 0..4096");
-        app.opt.gen = v;
-    } else if (name == "/seed") {
-        int v = 0;
-        if (!parse_int(arg, v)) return bad("/seed takes an integer");
-        app.opt.seed = (uint32_t)v;
-        rng.seed(app.opt.seed);      // the next turn draws from the new stream
-    } else if (name == "/greedy") {
-        if (arg == "on") app.opt.greedy = true;
-        else if (arg == "off") app.opt.greedy = false;
-        else return bad("/greedy takes on or off");
-    } else {                          // /penalty
-        float v = 0;
-        if (!parse_float(arg, v) || v < 0.0f || v > 10.0f)
-            return bad("/penalty takes 0..10 for the repetition penalty (1 = off)");
-        g_sampling.repetition_penalty = v;
+        if (!parse_int(arg, v) || (float) v < p->lo || (float) v > p->hi) return bad(range);
+        switch (p->opt) {
+            case CliOpt::TopK:
+                app.opt.top_k = v;
+                if (v == 0) app.opt.top_k_candidates = false;   // nothing to keep
+                break;
+            case CliOpt::Gen: app.opt.gen = v; break;
+            case CliOpt::Seed:
+                app.opt.seed = (uint32_t) v;
+                rng.seed(app.opt.seed);   // the next turn draws from the new stream
+                break;
+            case CliOpt::NoRepeatNgram: g_sampling.no_repeat_ngram = v; break;
+            default: return bad(range);
+        }
+        print_params();
+        return true;
+    }
+    float v = 0;
+    if (!parse_float(arg, v) || v < p->lo || v > p->hi) return bad(range);
+    switch (p->opt) {
+        case CliOpt::Temp:
+            // Temperature 0 *is* greedy everywhere in this engine (the sampler
+            // defines it that way, see sampling.cpp), and saying it here also picks
+            // the fast greedy path.  A non-zero temperature turns sampling back on.
+            app.opt.temp = v;
+            app.opt.greedy = (v == 0.0f);
+            break;
+        case CliOpt::Topp: app.opt.top_p = v; break;
+        case CliOpt::MinP: g_sampling.min_p = v; break;
+        case CliOpt::RepeatPenalty: g_sampling.repetition_penalty = v; break;
+        case CliOpt::FrequencyPenalty: g_sampling.frequency_penalty = v; break;
+        case CliOpt::PresencePenalty: g_sampling.presence_penalty = v; break;
+        default: return bad(range);
     }
     print_params();
     return true;
@@ -617,14 +782,99 @@ void Chat::print_params() const {
     const Options& o = app.opt;
     cout << "sampling: " << (o.greedy ? "greedy" : "sampled")
          << "  temp " << num(o.temp) << "  top_p " << num(o.top_p)
-         << "  top_k " << o.top_k << "  seed " << o.seed << "  gen " << o.gen << "\n";
-    if (sampling_penalties_active())
-        cout << "penalties: repeat " << num(g_sampling.repetition_penalty)
-             << "  frequency " << num(g_sampling.frequency_penalty)
-             << "  presence " << num(g_sampling.presence_penalty)
-             << "  min_p " << num(g_sampling.min_p)
-             << "  no_repeat_ngram " << g_sampling.no_repeat_ngram << "\n";
+         << "  top_k " << o.top_k
+         << (o.top_k_candidates ? " (candidates only)" : "") << "  seed " << o.seed
+         << "  gen " << o.gen
+         << "  thinking " << (o.open_thinking ? "on" : "off") << "\n";
+    cout << "penalties: repeat " << num(g_sampling.repetition_penalty)
+         << "  frequency " << num(g_sampling.frequency_penalty)
+         << "  presence " << num(g_sampling.presence_penalty)
+         << "  min_p " << num(g_sampling.min_p)
+         << "  no_repeat_ngram " << g_sampling.no_repeat_ngram << "\n";
     cout << flush;
+}
+
+bool Chat::repl_command(const std::string& line) {
+    if (line.empty() || line[0] != '/') return false;
+    const size_t sp = line.find(' ');
+    const string name = line.substr(0, sp == std::string::npos ? line.size() : sp);
+    const string arg = sp == std::string::npos ? string() : line.substr(sp + 1);
+    // A command is one line: a pasted block that happens to start with "/model "
+    // is a message, not a path with newlines in it.
+    if (line.find('\n') != std::string::npos) return false;
+    if (const CmdDef* c = find_cmd(name)) {
+        if (c->arg[0] && arg.empty() && c->fn != &Chat::cmd_exit) {
+            cerr << name << " takes " << c->arg << "\n";
+            return true;
+        }
+        return (this->*c->fn)(arg);
+    }
+    if (apply_param(line)) return true;   // the sampler knobs, their own table
+    // A one-word slash command that is two edits away from a real one is a typo,
+    // and sending it to the model (what "anything else is a message" did) wastes a
+    // turn and reads as if the model answered the user's mistyped command.
+    if (name.size() > 1) {
+        for (const CmdDef& c : kCmd)
+            if (edit_distance(name, c.name) <= 2) {
+                cerr << "unknown command " << name << " (did you mean " << c.name
+                     << "?  /help lists them)\n";
+                return true;
+            }
+        for (const ParamDef& p : kParams)
+            if (edit_distance(name, p.name) <= 2) {
+                cerr << "unknown command " << name << " (did you mean " << p.name
+                     << "?  /help lists them)\n";
+                return true;
+            }
+    }
+    return false;
+}
+
+bool Chat::cmd_model(const std::string& path) {
+    const auto t_swap = Clock::now();
+    // There is deliberately no capacity pre-check here.  The free CMA the kernel
+    // reports is not the budget a new scene actually gets -- it is often less than
+    // what the driver can find -- and a desktop kernel has no CMA at all, so the
+    // old `st_size + 48 MB` heuristic refused swaps that would have worked and
+    // could not answer on a laptop.  A container that does not fit now fails in the
+    // upload, which is where the truth is; there is nothing to guess.
+    //
+    // What *is* decidable before releasing anything is whether the container is
+    // usable at all, because the capability bits live in the metadata.  The old
+    // code released the scene first and then refused (stories15M advertises
+    // capabilities 0, and its refusal *left* the process with no model); the probe
+    // reads the header and the metadata and never the tensors, so a refusal costs
+    // nothing and keeps the session.
+    struct stat st {};
+    if (stat(path.c_str(), &st) != 0) {
+        cerr << "/model: cannot read " << path << "\n";
+        return true;
+    }
+    Model probe;
+    if (!probe.probe(path)) {
+        cerr << "/model: not a container this build can read: " << path
+             << "  (engine/tools/mmcf_dump.py explains a file)\n";
+        return true;
+    }
+    if (app.opt.chat && probe.have_capabilities && !(probe.capabilities & 1)) {
+        cerr << "/model: this checkpoint does not advertise chat support "
+                "(capabilities 0x" << std::hex << probe.capabilities << std::dec
+             << "); keeping the current model\n";
+        return true;
+    }
+    app.gpu.release_scene();
+    app.model.reset();
+    if (!app.model.load(path)) { cerr << "no model loaded; leaving\n"; quit_after_line = true; return true; }
+    app.opt.model_path = path;    // /stats reports the live container
+    app.prepare_model();          // FFN split, hidden scale, seq clamp
+    if (!app.setup_from_model()) { quit_after_line = true; return true; }
+    app.upload_weights();
+    session.reset();
+    cleared_ = true;
+    cout << "[model] " << (app.model.template_name.empty() ? string("(kind 0)") : app.model.template_name)
+         << "  chat_template " << (app.chat_tmpl ? "yes" : "no")
+         << "  " << (long) elapsed_ms(t_swap, Clock::now()) << " ms\n" << flush;
+    return true;
 }
 
 void Chat::print_stats() const {
@@ -714,84 +964,14 @@ int Chat::repl() {
                 continue;
             }
             cancels = 0;
-            if (line == "/exit" || line == "/quit") break;
-            if (line == "/clear") {
-                first = true;
-                history.clear();
-                kv_tokens.clear();
-                cout << "[conversation cleared]\n";
-                continue;
-            }
-            if (line == "/stats") { print_stats(); continue; }
-            if (apply_param(line)) continue;
-            // A slash command is one line: a pasted multi-line block that happens
-            // to start with "/model " is a message, not a path with newlines in it.
-            if (line.find('\n') == string::npos && line.rfind("/model ", 0) == 0) {
-                const string path = line.substr(7);
-                const auto t_swap = Clock::now();
-                // There is deliberately no capacity pre-check here.  The free CMA the
-                // kernel reports is not the budget a new scene actually gets -- it is
-                // often less than what the driver can find -- and a desktop kernel has
-                // no CMA at all, so the old `st_size + 48 MB` heuristic refused swaps
-                // that would have worked and could not answer on a laptop.  A container
-                // that does not fit now fails in the upload, which is where the truth
-                // is; there is nothing to guess.
-                //
-                // What *is* decidable before releasing anything is whether the
-                // container is usable at all, because the capability bits live in the
-                // metadata.  The old code released the scene first and then refused
-                // (stories15M advertises capabilities 0, and its refusal *left* the
-                // process with no model); the probe reads the header and the metadata
-                // and never the tensors, so a refusal costs nothing and keeps the
-                // session.
-                struct stat st {};
-                if (stat(path.c_str(), &st) != 0) {
-                    cerr << "/model: cannot read " << path << "\n";
-                    continue;
+            if (repl_command(line)) {
+                if (cleared_) {
+                    first = true;
+                    history.clear();
+                    kv_tokens.clear();
+                    cleared_ = false;
                 }
-                Model probe;
-                if (!probe.probe(path)) {
-                    cerr << "/model: not a container this build can read: " << path
-                         << "  (engine/tools/mmcf_dump.py explains a file)\n";
-                    continue;
-                }
-                if (app.opt.chat && probe.have_capabilities && !(probe.capabilities & 1)) {
-                    cerr << "/model: this checkpoint does not advertise chat support "
-                            "(capabilities 0x" << std::hex << probe.capabilities << std::dec
-                         << "); keeping the current model\n";
-                    continue;
-                }
-                app.gpu.release_scene();
-                app.model.reset();
-                if (!app.model.load(path)) { cerr << "no model loaded; leaving\n"; return 1; }
-                app.opt.model_path = path;    // /stats reports the live container
-                app.prepare_model();          // FFN split, hidden scale, seq clamp
-                if (!app.setup_from_model()) return 2;
-                app.upload_weights();
-                session.reset();
-                history.clear();
-                kv_tokens.clear();
-                first = true;
-                cout << "[model] " << (app.model.template_name.empty() ? string("(kind 0)") : app.model.template_name)
-                     << "  chat_template " << (app.chat_tmpl ? "yes" : "no")
-                     << "  " << (long) elapsed_ms(t_swap, Clock::now()) << " ms\n" << flush;
-                continue;
-            }
-            if (line == "/help") {
-                cout << "/clear  forget the conversation so far\n"
-                        "/model PATH  load another container, keeping the GPU context\n"
-                        "/stats  the container, the context and the memory state\n"
-                        "/params  sampling knobs; the bare form of any of these prints them\n"
-                        "        /temp F [0 = greedy] /topp F /topk N /greedy on|off\n"
-                        "        /seed N /gen N /penalty R [1 = off]\n"
-                        "/exit   leave\n"
-                        "/help   this list\n"
-                        "anything else is sent to the model; arrows edit, Ctrl-Left/Right\n"
-                        "(or Alt-b/f) move by word.\n"
-                        "Enter sends.  Ctrl-V Enter or Alt-Enter starts a new line, and\n"
-                        "pasted text keeps its line breaks, so a pasted block is one\n"
-                        "message.  Up/Down move inside such a block; above its first\n"
-                        "line they recall earlier inputs.\n";
+                if (quit_after_line) break;
                 continue;
             }
             if (app.opt.tools_json.empty()) run_turn(line, first, 0, app.chat_tmpl ? &history : nullptr);
