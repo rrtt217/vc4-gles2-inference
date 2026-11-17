@@ -79,6 +79,21 @@ vector<Case> cases() {
     add(v, "matvec_q8_6400x768_i16_2", [] { return matvec_q8(6400, 768, I16_2); });
     add(v, "matvec_q8_2432x768_i8_4", [] { return matvec_q8(2432, 768, I8_4); });
     add(v, "matvec_q8_2432x768_i16_1", [] { return matvec_q8(2432, 768, I16_1); });
+    // The chunked prefill's batched kernel (P1, task-13): matvec_q8's text with
+    // the input row from gl_FragCoord.y.  Its own line in the golden file, so a
+    // change to either kernel's arithmetic is visible in both.
+    add(v, "matvec_q8_batch_768x768_i16_2",
+        [] { return matvec_q8_batch(768, 768, I16_2); });
+    // No per-row-scale (wrow) entry: its unsigned scale decode carries no rail
+    // fold and check_q16_decode.sh counts decodes against folds per line, which
+    // is also why matvec_q8's own wrow form is not registered here.  The wrow
+    // text is wrow_scale()'s, shared verbatim with that kernel.
+    add(v, "matvec_q8_batch_64x768_i16_2",
+        [] { return matvec_q8_batch(64, 768, I16_2); });
+    add(v, "matvec_q8_batch_768x3072_i16_2",
+        [] { return matvec_q8_batch(768, 3072, I16_2); });
+    add(v, "matvec_q8_batch_768x768_i24_1",
+        [] { return matvec_q8_batch(768, 768, XFormat::I24_1); });
     add(v, "matvec_q8_pair_2432x768_i16_2", [] { return matvec_q8_pair(2432, 768, I16_2); });
     add(v, "matvec_q8_pair_2432x768_i8_4", [] { return matvec_q8_pair(2432, 768, I8_4); });
     add(v, "matvec_q8_pair_logits_6400x768_i16_2",

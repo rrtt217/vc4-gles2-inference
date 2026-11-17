@@ -251,6 +251,23 @@ void Chat::run_turn(const std::string& user, bool first, int pos, std::vector<Ch
             session.step_pair(tokens[i], pos, tokens[i + 1], pos + 1, false);
             pos += 2;
             ++i;
+        } else if (!fast_greedy && !cand_mode && session.prefill_batch_ok()) {
+            // RWKV-7 chunked prefill (P1, task-13): one layer pass per layer for
+            // a whole batch of prompt tokens, with every projection drawn once
+            // per weight for the batch.  The elementwise chain and the WKV
+            // recurrence stay per token, in token order, so the numbers and the
+            // state are the serial path's (the batch kernel is the same text
+            // with the input row substituted).  The batch may include the last
+            // prompt token -- then it is also the call that returns the logits.
+            size_t n = (size_t)session.prefill_batch_size();
+            n = std::min(n, tokens.size() - i);
+            n = std::min(n, (size_t)(app.model.seq - pos));
+            const bool ends = (i + n == tokens.size());
+            vector<int> span(tokens.begin() + i, tokens.begin() + i + (long)n);
+            vector<float> lg = session.prefill_batch(span, ends);
+            if (ends && !lg.empty()) logits = std::move(lg);
+            pos += (int)n;
+            i += n - 1;
         } else {
             logits = session.step(tokens[i], pos++, last);
         }
@@ -829,6 +846,16 @@ auto prefill_once = [&]() {
         } else if (!last && i + 2 < tokens.size() && (int)i + 1 < app.model.seq && session.pair_ok()) {
             session.step_pair(tokens[i], (int)i, tokens[i + 1], (int)i + 1, false);
             ++i;
+        } else if (!fast_greedy && !cand_mode && session.prefill_batch_ok()) {
+            // RWKV-7 chunked prefill; same rule as the chat loop above.
+            size_t n = (size_t)session.prefill_batch_size();
+            n = std::min(n, tokens.size() - i);
+            n = std::min(n, (size_t)(app.model.seq - (int)i));
+            const bool ends = (i + n == tokens.size());
+            vector<int> span(tokens.begin() + i, tokens.begin() + i + (long)n);
+            vector<float> lg2 = session.prefill_batch(span, ends);
+            if (ends && !lg2.empty()) lg = std::move(lg2);
+            i += n - 1;
         } else {
             lg = session.step(tokens[i], (int)i, last);
         }

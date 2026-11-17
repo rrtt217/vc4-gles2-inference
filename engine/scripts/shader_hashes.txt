@@ -77,6 +77,10 @@ b632c1553fdbfd69    3572 matvec_q8_2432x768_i8_4
 89e6d9bd1e3df87d    3129 matvec_q8_add_768x768_i8_4_i16_1
 1178fdb01b8cf602    3735 matvec_q8_add_pair_768x768_i16_2_gen
 054b740d82f53b01    1096 matvec_q8_add_pair_768x768_i16_2_inl
+2ca22ee1113c84a6     818 matvec_q8_batch_64x768_i16_2
+08c29abc41fcd6ed     819 matvec_q8_batch_768x3072_i16_2
+c4839f8d55548c01     819 matvec_q8_batch_768x768_i16_2
+d79530a7a773946e    3874 matvec_q8_batch_768x768_i24_1
 e98f52ad41702c13    4254 matvec_q8_gate2_2432x768
 e6602405551fb8b1    4124 matvec_q8_gate2_p2_2432x768
 3c43befd6bab820b    3752 matvec_q8_p2_768x768
