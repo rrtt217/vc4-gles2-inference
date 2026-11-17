@@ -370,6 +370,32 @@ WKV7 GPU（VC4 上性价比最低）、prefix cache 状态快照、q6 head。
 - 所以 `<user_input>` 是 **q8（每矩阵 scale）容器的数值漂移**：q8r 与 q4 的前两个 token 都与
   oracle 一致（`\n我`），且 q8 的 PPL 比 q8r 高 0.70。**0.4B 的 generation 结论以 q8r 为准。**
 
+### 0.4B 的 generation（2026-11-17，Xe，q8r，50 次：10 prompt × {greedy, 推荐采样}）
+
+二进制 `/tmp/engine_mm3_p10` md5 `18c1361a…`（与上面的 PPL 同源），`GPU_LAYER=1 KV_PACK=16`，
+`--gen 80`；采样 = `--temp 1.0 --topp 0.3 --repeat-penalty 1.2 --seed 42`。全套 24.6 min。
+原文在 `models/rwkv7/phase2-gen/`，汇总见该目录 `SUMMARY.md`。
+
+| prompt | 0.4B q8r | 0.1B q8r（已知） |
+|---|---|---|
+| 中国首都（只要城市名） | `中国的首都是北京市。` **对**（G/S 都是） | `**上海**`（还编造"上海位于江苏省苏州市"）/ `成都` **错** |
+| 翻译 zh→en | 采样式 `Today the weather is very good, let's go to the park together.` **真译** | 原样复读中文源句，**不译** |
+| 翻译 en→zh | `快速的棕色狐狸跳过懒狗。` **真译**（带自造 `<translation_output>` 标签） | `**翻译：快速跳过的狗**` ×6 复读 |
+| 光合作用（三句） | 事实正确的 1 句 | 同一句重复两遍 |
+| 为什么天是蓝的（一句） | 正确 1 句 | 事实错（"nitrogen-16 吸收大部分阳光"） |
+| 五言绝句 | greedy 四言+自嘲注释；采样给 5 字句为主的八句 | 七言，并幻觉出一个 `User:` 轮次自问自答 |
+| haiku | greedy **塌缩成 34 行 `*`**；采样 4 行可读 | 松散长诗 |
+
+**结论：0.4B 值。** 知识（北京 vs 上海/成都）与翻译（真译 vs 复读）是质变，与 PPL −29%（f32 层面）
+一致；代价是 2.35× 容器与 2.7× MAC，桌面可接受。**0.4B 只发 q8r**：q4 的 10 次 greedy 出现
+`<line>`×18 塌缩、"此时为秋"×10 重复，与 q4 PPL 7.7273 一致。格式约束（三句/五字/只要城市名）
+两个规模都不守，是模型层而非引擎层。
+
+两个新行为，后续 generation 要记着：**(1)** nothink 模板挡不住它开 `<think>`（两个翻译 prompt 的
+greedy 把 80 token 全花在推理上、答案没出来）——要直答得把 `--gen` 提到 200+ 或正式用 `--thinking`；
+**(2)** 会自造标签，最严重的是 `<user>…</user>` **回显用户轮次**（en-4 采样），与 q8 的
+`<user_input>` 同族。
+
 ## 参考
 
 - 本地 llama.cpp b12283 副本：`refs/llamacpp/src-b12283/src/models/rwkv7.cpp`（超参/张量表）、
