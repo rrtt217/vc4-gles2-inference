@@ -108,6 +108,12 @@ std::string matvec_i4_add_pair_4x4(int rows, int cols, XFormat xf, bool inl = tr
 // programs are byte-identical.
 std::string swiglu_pair(int hidden, XFormat out, int hs = 0);
 std::string swiglu_2row(int hidden, XFormat out, int hs = 0);
+// EXP=drv|poly: one switch for every exponential the shaders emit (the SiLU in
+// the FFN kernels, the sigmoid in the RWKV gate kernels, and the attention
+// weights).  See shaders.cpp for the evidence.
+bool exp_poly_enabled();
+std::string exp_poly_source();
+
 std::string swiglu(int hidden, bool fused, XFormat out, int hs = 0);
 // LFM2 conv block: elementwise gate, 3-tap depthwise convolution, and a copy
 // (the state shift).  All three work in raw q16 units on I16_2 textures.

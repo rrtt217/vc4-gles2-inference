@@ -171,33 +171,33 @@ probes/logits_grid_probe: probes/logits_grid_probe.cpp $(SRC)/shaders_attn.cpp \
                           $(SRC)/shaders.h $(SRC)/xformat.cpp $(SRC)/xformat.h $(HEADERS)
 	$(CXX) $(ALL_CXXFLAGS) -I$(SRC) -o $@ probes/logits_grid_probe.cpp $(SRC)/shaders_attn.cpp $(SRC)/xformat.cpp
 
-probes/matvec_probe: probes/matvec_probe.cpp $(SRC)/common.cpp $(SRC)/common.h $(HEADERS)
-	$(CXX) $(ALL_CXXFLAGS) -I$(SRC) -o $@ probes/matvec_probe.cpp $(SRC)/common.cpp $(LDLIBS)
+probes/matvec_probe: probes/matvec_probe.cpp $(SRC)/common.cpp $(SRC)/switches.cpp $(SRC)/common.h $(HEADERS)
+	$(CXX) $(ALL_CXXFLAGS) -I$(SRC) -o $@ probes/matvec_probe.cpp $(SRC)/common.cpp $(SRC)/switches.cpp $(LDLIBS)
 
-probes/texsize_probe: probes/texsize_probe.cpp $(SRC)/common.cpp $(SRC)/common.h $(HEADERS)
-	$(CXX) $(ALL_CXXFLAGS) -I$(SRC) -o $@ probes/texsize_probe.cpp $(SRC)/common.cpp $(LDLIBS)
+probes/texsize_probe: probes/texsize_probe.cpp $(SRC)/common.cpp $(SRC)/switches.cpp $(SRC)/common.h $(HEADERS)
+	$(CXX) $(ALL_CXXFLAGS) -I$(SRC) -o $@ probes/texsize_probe.cpp $(SRC)/common.cpp $(SRC)/switches.cpp $(LDLIBS)
 
 # Does a per-row q8 scale plane reach the shader?  Links the engine's own
 # shader builders, so the fragment program under test is the shipped one.
-probes/wrow_probe: probes/wrow_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(HEADERS)
-	$(CXX) $(ALL_CXXFLAGS) -I$(SRC) -o $@ probes/wrow_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(LDLIBS)
+probes/wrow_probe: probes/wrow_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(SRC)/switches.cpp $(HEADERS)
+	$(CXX) $(ALL_CXXFLAGS) -I$(SRC) -o $@ probes/wrow_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(SRC)/switches.cpp $(LDLIBS)
 
 # Do the conv block's fetches work on this driver?  Links the engine's own
 # shader builders, so sections B and C run the shipped text.
-probes/conv_probe: probes/conv_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(HEADERS)
-	$(CXX) $(ALL_CXXFLAGS) -I$(SRC) -o $@ probes/conv_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(LDLIBS)
+probes/conv_probe: probes/conv_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(SRC)/switches.cpp $(HEADERS)
+	$(CXX) $(ALL_CXXFLAGS) -I$(SRC) -o $@ probes/conv_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(SRC)/switches.cpp $(LDLIBS)
 
-probes/conv_probe_pi: probes/conv_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp | check-cross $(HEADERS)
-	$(CROSS_CXX) $(CROSS_CXXFLAGS) -I$(SRC) -o $@ probes/conv_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(CROSS_LDLIBS)
+probes/conv_probe_pi: probes/conv_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(SRC)/switches.cpp | check-cross $(HEADERS)
+	$(CROSS_CXX) $(CROSS_CXXFLAGS) -I$(SRC) -o $@ probes/conv_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(SRC)/switches.cpp $(CROSS_LDLIBS)
 
-probes/rwkv_probe: probes/rwkv_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(HEADERS)
-	$(CXX) $(ALL_CXXFLAGS) -I$(SRC) -o $@ probes/rwkv_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(LDLIBS)
+probes/rwkv_probe: probes/rwkv_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(SRC)/switches.cpp $(HEADERS)
+	$(CXX) $(ALL_CXXFLAGS) -I$(SRC) -o $@ probes/rwkv_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(SRC)/switches.cpp $(LDLIBS)
 
-probes/rwkv_probe_pi: probes/rwkv_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp | check-cross $(HEADERS)
-	$(CROSS_CXX) $(CROSS_CXXFLAGS) -I$(SRC) -o $@ probes/rwkv_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(CROSS_LDLIBS)
+probes/rwkv_probe_pi: probes/rwkv_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(SRC)/switches.cpp | check-cross $(HEADERS)
+	$(CROSS_CXX) $(CROSS_CXXFLAGS) -I$(SRC) -o $@ probes/rwkv_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(SRC)/switches.cpp $(CROSS_LDLIBS)
 
-probes/wrow_probe_pi: probes/wrow_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp | check-cross $(HEADERS)
-	$(CROSS_CXX) $(CROSS_CXXFLAGS) -I$(SRC) -o $@ probes/wrow_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(CROSS_LDLIBS)
+probes/wrow_probe_pi: probes/wrow_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(SRC)/switches.cpp | check-cross $(HEADERS)
+	$(CROSS_CXX) $(CROSS_CXXFLAGS) -I$(SRC) -o $@ probes/wrow_probe.cpp $(SRC)/shaders.cpp $(SRC)/xformat.cpp $(SRC)/common.cpp $(SRC)/switches.cpp $(CROSS_LDLIBS)
 
 # Standalone VC4 format probes: no engine sources, cross-built for the Pi.
 probes/q4fmt_probe_pi: probes/q4fmt_probe.cpp | check-cross

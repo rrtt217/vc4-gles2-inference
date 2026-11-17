@@ -69,27 +69,21 @@ static void need_attn(const AttnConfig& c) {
 //
 // Selected by ATT_EXP=poly; the default stays the driver's exp so that existing
 // pins and shader digests do not move.
-static const char* kExpPoly =
-    "float x_exp(float x){"
-    "float k=floor(x*1.4426950408889634+0.5);"
-    "float r=x-k*0.6931471805599453;"
-    "float t=1.0+r*(1.0+r*(0.5+r*(1.0/6.0+r*(1.0/24.0+r*(1.0/120.0+r/720.0)))));"
-    "return t*uintBitsToFloat(uint(int(k)+127)<<23);}\n";
-
 // The name the shader bodies call: the driver's exp or the portable one.
 static std::string exp_call(const AttnConfig& c){
     return c.exp_poly ? "x_exp(" : "exp(";
 }
 
 
-// The shader-side definition of the portable exp, or nothing (see kExpPoly).
-static const char* exp_poly_text(const AttnConfig& c){
-    return c.exp_poly ? kExpPoly : "";
+// The shader-side definition of the portable exp, or nothing: one copy lives in
+// shaders.cpp (EXP=drv|poly, the same switch the FFN kernels read).
+static std::string exp_poly_text(const AttnConfig& c){
+    return c.exp_poly ? exp_poly_source() : string();
 }
 
 string att_defs(const AttnConfig& c) {
     need_attn(c);
-    return std::string(exp_poly_text(c)) + string("#define DIM ") + to_string(c.dim) + "\n" +
+    return exp_poly_text(c) + string("#define DIM ") + to_string(c.dim) + "\n" +
            "#define KVDIM " + to_string(c.kv_dim) + "\n" +
            "#define QKVDIM " + to_string(c.dim + 2 * c.kv_dim) + "\n" +
            "#define QKVTW " + to_string((c.dim + 2 * c.kv_dim + 1) / 2) + "\n" +

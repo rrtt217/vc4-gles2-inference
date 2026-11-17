@@ -1,5 +1,6 @@
 #include "shaders.h"
 #include "gpu.h"
+#include "switches.h"
 
 #include <string>
 #include <cstdio>
@@ -14,6 +15,8 @@ namespace {
 string head(XFormat xf) {
     return "precision highp float;\n" + x_glsl(xf);
 }
+
+
 
 string q24_helpers() {
     return
@@ -50,10 +53,42 @@ const string kDec16B =
     "float dB(vec4 c){float u=c.b*65280.0+c.a*255.0;"
     "return u>=32768.0?u-65536.0:u;}";
 
+// ---- the exponential: EXP=drv|poly -----------------------------------------
+// VC4's exp2/log2 are the shared SFU's table lookups and Mesa does not refine
+// them, unlike rcp/rsqrt which get a Newton-Raphson step (vc4_program.c); its
+// own rpi3 piglit list still fails fs-exp-*/exp2-*/log2-*/pow-*.  Measured on
+// the board: 4.6e-05 worst relative error over the attention range against Xe's
+// 2.2e-06, and the poly below is 1.5e-06 on the board / 1.1e-06 on Xe for
+// +0.4-1.8% decode (docs/performance.md, 2026-11-17).
+//
+// It is one axis and not one per block because the SiLU carries five of the
+// eight sites (`a/(1+exp(-a))` in the FFN kernels) and doubles as the sigmoid
+// in the RWKV gate kernels: 71,680 exp calls a token in pocket's FFN alone,
+// against att_v's two per position.
+static const char* kExpPolySource =
+    "float x_exp(float x){"
+    "float k=floor(x*1.4426950408889634+0.5);"
+    "float r=x-k*0.6931471805599453;"
+    "float t=1.0+r*(1.0+r*(0.5+r*(1.0/6.0+r*(1.0/24.0+r*(1.0/120.0+r/720.0)))));"
+    "return t*uintBitsToFloat(uint(int(k)+127)<<23);}\n";
+
+// `exp(<arg>)` as this build should spell it.
+static std::string EXP(const char* arg) {
+    return std::string(exp_poly_enabled() ? "x_exp(" : "exp(") + arg + ")";
+}
+
+// The poly's definition, or nothing, for the shaders that call EXP().
+static std::string poly_src() { return exp_poly_enabled() ? kExpPolySource : ""; }
+
 // Round/clamp to q16, then swiglu: the fused gate kernels.
-const string kQzSl =
-    "float qz(float v){return clamp(floor(v+0.5),-32768.0,32767.0);}"
-    "float sl(float q,float g){float a=q/256.0;return (a/(1.0+exp(-a)))*(g/256.0);}";
+// The fused gate kernels' q16 round + SiLU.  A function, not a constant, because
+// the SiLU's exponential depends on EXP and a static-initialised string would
+// read the registry before sw_init has run.
+static string qz_sl() {
+    return poly_src() +
+        "float qz(float v){return clamp(floor(v+0.5),-32768.0,32767.0);}"
+        "float sl(float q,float g){float a=q/256.0;return (a/(1.0+" + EXP("-a") + "))*(g/256.0);}";
+}
 
 // FFN hidden store scale (metadata key 15): the SwiGLU output is written as
 // value * 2^-hs so a hidden over the q16 activation rail still fits, and w2's
@@ -544,7 +579,7 @@ string matvec_q8_pair_swiglu(int rows, int cols, XFormat xf, bool inl, bool wrow
     if (inl && xf == XFormat::I16_2) {
         return head(xf) + HD + "uniform sampler2D W1,W2,X;uniform float ws1,ws2;" + WD +
                kDec16A + kDec16B
-               + kQzSl +
+               + qz_sl() +
                "void main(){int t=int(gl_FragCoord.x);int r0=2*t;"
                "int r1=min(r0+1," + to_string(rows - 1) + ");" + SP +
                "float s10=0.0,s20=0.0,s11=0.0,s21=0.0;"
@@ -565,7 +600,7 @@ string matvec_q8_pair_swiglu(int rows, int cols, XFormat xf, bool inl, bool wrow
     }
     return head(xf) + HD +
         "uniform sampler2D W1,W2,X;uniform float ws1,ws2;" + WD +
-               kQzSl +
+               qz_sl() +
         "void main(){int t=int(gl_FragCoord.x);int r0=2*t;"
         "int r1=min(r0+1," + to_string(rows - 1) + ");" + SP +
         "float s10=0.0,s20=0.0,s11=0.0,s21=0.0;"
@@ -605,7 +640,7 @@ string matvec_q8_gate2(int rows, int cols) {
     return head(XFormat::I16_2) + x_pair2_glsl() +
         "uniform sampler2D W1,W2,X;uniform float ws1,ws2;"
                + kDec16A + kDec16B
-               + kQzSl +
+               + qz_sl() +
         "void main(){int r=int(gl_FragCoord.x);"
         "float s10=0.0,s20=0.0,s11=0.0,s21=0.0;"
         "for(int q=0;q<" + COLS4 + ";q++){"
@@ -731,7 +766,7 @@ string matvec_q8_gate2_p2(int rows, int cols, bool wrow) {
     // The scale uniforms have to be declared before the helpers that read
     // them (GLSL is not hoisted), which is why WD comes after this string.
     return head(XFormat::I16_2) + x_pair2_glsl() +
-        "uniform sampler2D W1,W2,X;uniform float ws1,ws2;" + WD + kQzSl +
+        "uniform sampler2D W1,W2,X;uniform float ws1,ws2;" + WD + qz_sl() +
         "void main(){int r=int(gl_FragCoord.x);" + SP + 
         "float s10=0.0,s20=0.0,s11=0.0,s21=0.0;"
         "for(int q=0;q<" + COLS4 + ";q++){"
@@ -1251,7 +1286,7 @@ string matvec_i4_pair_swiglu(int rows, int cols, XFormat xf, bool inl, int hs) {
         (mv4 ? string()
              : "float dot4(vec4 w0,vec4 xa,vec4 xb){" + q4_taps("w0") +
                "return l0*xa.x+h0*xa.y+l1*xa.z+h1*xa.w+l2*xb.x+h2*xb.y+l3*xb.z+h3*xb.w;}")
-        + kQzSl +
+        + qz_sl() +
         "void main(){int t=int(gl_FragCoord.x);int r0=2*t;"
         "int r1=min(r0+1," + to_string(rows - 1) + ");"
         "float u0=float(r0),u1=float(r1);"
@@ -1318,7 +1353,7 @@ static string i4_gate_flat8b(int rows, int cols, XFormat xf, bool inl, int hs) {
              + wt1 + ".x*xb.x+" + wt1 + ".y*xb.y+" + wt1 + ".z*xb.z+" + wt1 + ".w*xb.w";
     };
     return q4_head(xf, inl) + HD +
-        "uniform sampler2D W1,W2,P1,P2,X;uniform float ps1,ps2;" + kQzSl +
+        "uniform sampler2D W1,W2,P1,P2,X;uniform float ps1,ps2;" + qz_sl() +
         "void main(){int t=int(gl_FragCoord.x);int r0=2*t;"
         "int r1=min(r0+1," + to_string(rows - 1) + ");"
         "float v0r=(float(r0)+0.5)/float(" + ROWS + "),v1r=(float(r1)+0.5)/float(" + ROWS + ");"
@@ -1379,7 +1414,7 @@ string matvec_i4_pair_swiglu_4x4(int rows, int cols, XFormat xf, bool inl, int h
     const string MA1 = nom ? "" : "+ma1*xsum", MA2 = nom ? "" : "+ma2*xsum";
     const string MB1 = nom ? "" : "+mb1*xsum", MB2 = nom ? "" : "+mb2*xsum";
     return q4_head(xf, inl) + HD +
-        "uniform sampler2D W1,W2,P1,P2,X;uniform float ps1,ps2;" + kQzSl +
+        "uniform sampler2D W1,W2,P1,P2,X;uniform float ps1,ps2;" + qz_sl() +
         "void main(){int t=int(gl_FragCoord.x);int r0=2*t;"
         "int r1=min(r0+1," + to_string(rows - 1) + ");"
         "float u0=float(r0),u1=float(r1);"
@@ -1588,14 +1623,14 @@ string swiglu_pair(int hidden, XFormat out, int hs) {
     string act =
         "float actv(int i){if(i>=" + H + ")return 0.0;"
         "vec2 g=X2(A,2*i," + H + ".0);"
-        "return (g.x/(1.0+exp(-g.x)))*g.y;}";
+        "return (g.x/(1.0+" + EXP("-g.x") + "))*g.y;}";
     string body;
     if (out == XFormat::F32) {
         body = "void main(){int i=int(gl_FragCoord.x);"
                "gl_FragColor=x_f32enc(actv(i)" + HM + ");}";
         // head(I16_2), not head(F32): the pair buffer A holds two q16 values a
         // texel and actv() reads it with X2.  Only the *store* is f32.
-        return head(XFormat::I16_2) + x_f32_store_glsl() + HD + "uniform sampler2D A;" + act + body;
+        return head(XFormat::I16_2) + poly_src() + x_f32_store_glsl() + HD + "uniform sampler2D A;" + act + body;
     }
     if (out == XFormat::I8_4) {
         body = "void main(){int t=int(gl_FragCoord.x);int i0=4*t;"
@@ -1604,7 +1639,7 @@ string swiglu_pair(int hidden, XFormat out, int hs) {
         body = "void main(){int t=int(gl_FragCoord.x);int i0=2*t;"
                "gl_FragColor=x_st2(actv(i0)" + HM + ",actv(i0+1)" + HM + ");}";
     }
-    return head(XFormat::I16_2) + HD + "uniform sampler2D A;" + act + body;
+    return head(XFormat::I16_2) + poly_src() + HD + "uniform sampler2D A;" + act + body;
 }
 
 string swiglu_2row(int hidden, XFormat out, int hs) {
@@ -1616,7 +1651,7 @@ string swiglu_2row(int hidden, XFormat out, int hs) {
         "vec4 ca=texture2D(A,vec2((x+0.5)/float(" + H + "),0.25));"
         "vec4 cb=texture2D(A,vec2((x+0.5)/float(" + H + "),0.75));"
         "float a=x_i24q(ca),b=x_i24q(cb);"
-        "return (a/(1.0+exp(-a)))*b;}";
+        "return (a/(1.0+" + EXP("-a") + "))*b;}";
     string body;
     if (out == XFormat::F32) {
         // One value a texel: the fragment index *is* the hidden index, so
@@ -1625,7 +1660,7 @@ string swiglu_2row(int hidden, XFormat out, int hs) {
         // pocket's peaks at 1005 (probe_residuals.py).
         body = "void main(){int i=int(gl_FragCoord.x);"
                "gl_FragColor=x_f32enc(yat(i)" + HM + ");}";
-        return head(XFormat::I16_2) + x_f32_store_glsl() + HD + q24_helpers() +
+        return head(XFormat::I16_2) + poly_src() + x_f32_store_glsl() + HD + q24_helpers() +
                "uniform sampler2D A;" + read + body;
     }
     if (out == XFormat::I8_4) {
@@ -1649,14 +1684,14 @@ string swiglu(int hidden, bool fused, XFormat out, int hs) {
                "vec4 ca=texture2D(A,vec2((x+0.5)/float(" + to_string(2 * hidden) + "),0.5));"
                "vec4 cb=texture2D(A,vec2((x+0.5+float(" + H + "))/float(" + to_string(2 * hidden) + "),0.5));"
                "float a=x_i24q(ca),b=x_i24q(cb);"
-               "return (a/(1.0+exp(-a)))*b;}";
+               "return (a/(1.0+" + EXP("-a") + "))*b;}";
     } else {
         read = "uniform sampler2D A,B;"
                "float yat(int i){float x=float(i);"
                "vec4 ca=texture2D(A,vec2((x+0.5)/float(" + H + "),0.5));"
                "vec4 cb=texture2D(B,vec2((x+0.5)/float(" + H + "),0.5));"
                "float a=x_i24q(ca),b=x_i24q(cb);"
-               "return (a/(1.0+exp(-a)))*b;}";
+               "return (a/(1.0+" + EXP("-a") + "))*b;}";
     }
     string body;
     if (out == XFormat::F32) {
@@ -1671,7 +1706,7 @@ string swiglu(int hidden, bool fused, XFormat out, int hs) {
         body = "void main(){int t=int(gl_FragCoord.x);int i0=2*t;"
                "gl_FragColor=x_st2(yat(i0)" + HM + ",yat(i0+1)" + HM + ");}";
     }
-    return head(XFormat::I16_2) + HD + q24_helpers() + read + body;
+    return head(XFormat::I16_2) + poly_src() + HD + q24_helpers() + read + body;
 }
 
 string rms_stats_split(int dim, XFormat residual) {
@@ -1946,7 +1981,7 @@ std::string rwkv_first_add(int dim) {
     need_dim("rwkv_first_add", dim);
     const string D = to_string(dim);
     // q16(x0/256 + delta): the first residual add, x0 precise (*256 I24_1).
-    return rwkv_head() +
+    return rwkv_head() + poly_src() +
         "uniform sampler2D P,D;"
         "void main(){int i=int(gl_FragCoord.x);"
         "float v=" + rd24("P", "i", D + ".0") + "*0.00390625+" + rd24("D", "i", D + ".0") + ";"
@@ -1986,7 +2021,7 @@ std::string rwkv_gn_norm(int dim, int hs) {
 std::string rwkv_lerp(int dim, int which, int nrows) {
     need_dim("rwkv_lerp", dim);
     const string D = to_string(dim), NR = to_string(nrows), WH = to_string(which);
-    return rwkv_head() + kRwkvRS +
+    return rwkv_head() + poly_src() + kRwkvRS +
         "uniform sampler2D XN,SH,L;"
         "void main(){int i=int(gl_FragCoord.x);"
         "float x=" + rd24("XN", "i", D + ".0") + "*0.00390625;"
@@ -1998,7 +2033,7 @@ std::string rwkv_lerp(int dim, int which, int nrows) {
 std::string rwkv_l2_stats(int dim, int hs) {
     need_dim("rwkv_l2_stats", dim);
     const string D = to_string(dim), HS = to_string(hs);
-    return rwkv_head() + kRwkvRS +
+    return rwkv_head() + poly_src() + kRwkvRS +
         "uniform sampler2D K,SC;"
         "void main(){int h=int(gl_FragCoord.x);float ss=0.0;"
         "for(int i=0;i<" + HS + ";i++){int o=h*" + HS + "+i;"
@@ -2009,7 +2044,7 @@ std::string rwkv_l2_stats(int dim, int hs) {
 std::string rwkv_l2_norm(int dim, int hs) {
     need_dim("rwkv_l2_norm", dim);
     const string D = to_string(dim), HS = to_string(hs), H = to_string(dim / hs);
-    return rwkv_head() + kRwkvRS +
+    return rwkv_head() + poly_src() + kRwkvRS +
         "uniform sampler2D K,SC,N;"
         "void main(){int i=int(gl_FragCoord.x);int h=i/" + HS + ";"
         "float z=" + rd24("K", "i", D + ".0") + "*" + rd24_2d("SC", "i", "0", D + ".0", "3.0") + "*RS;"
@@ -2020,7 +2055,7 @@ std::string rwkv_l2_norm(int dim, int hs) {
 std::string rwkv_keydelta(int dim) {
     need_dim("rwkv_keydelta", dim);
     const string D = to_string(dim);
-    return rwkv_head() + kRwkvRS +
+    return rwkv_head() + poly_src() + kRwkvRS +
         "uniform sampler2D K,A,SC;"
         "void main(){int i=int(gl_FragCoord.x);"
         "float k=" + rd24("K", "i", D + ".0") + ";"
@@ -2033,7 +2068,7 @@ std::string rwkv_tanh(int dim) {
     need_dim("rwkv_tanh", dim);
     const string D = to_string(dim);
     // Overflow-safe: exp(-2|x|) in (0,1], the decay/gate logits reach +-80.
-    return rwkv_head() +
+    return rwkv_head() + poly_src() +
         "uniform sampler2D X;"
         "float th(float x){float a=abs(x);float e=exp(-2.0*a);float t=(1.0-e)/(1.0+e);"
         "return x<0.0?-t:t;}"
@@ -2047,7 +2082,7 @@ std::string rwkv_sigmoid(int dim, bool has_bias, int oscale) {
     const string bias = has_bias ? ("z+=" + rd24("B", "i", D + ".0") + "*RS;") : "";
     return rwkv_head() + (has_bias ? kRwkvRS : "") +
         "uniform sampler2D X;" + (has_bias ? "uniform sampler2D B;" : "") +
-        "float sg(float z){if(z<0.0){float e=exp(z);return e/(1.0+e);}return 1.0/(1.0+exp(-z));}"
+        "float sg(float z){if(z<0.0){float e=" + EXP("z") + ";return e/(1.0+e);}return 1.0/(1.0+" + EXP("-z") + ");}"
         "void main(){int i=int(gl_FragCoord.x);float z=" + rd24("X", "i", D + ".0") + ";" + bias +
         "gl_FragColor=x_q24enc(sg(z)*" + OS + ".0);}";
 }
@@ -2057,9 +2092,9 @@ std::string rwkv_decay(int dim) {
     const string D = to_string(dim);
     // w = exp(-sigmoid(u+w0)/sqrt(e)) in (0.545,1]; store (1-w)*256 so the I24
     // 1/256 texel step becomes 1/65536 in w (W-1).  0.60653... = 1/sqrt(e).
-    return rwkv_head() + kRwkvRS +
+    return rwkv_head() + poly_src() + kRwkvRS +
         "uniform sampler2D X,B;"
-        "float sg(float z){if(z<0.0){float e=exp(z);return e/(1.0+e);}return 1.0/(1.0+exp(-z));}"
+        "float sg(float z){if(z<0.0){float e=" + EXP("z") + ";return e/(1.0+e);}return 1.0/(1.0+" + EXP("-z") + ");}"
         "void main(){int i=int(gl_FragCoord.x);"
         "float u=" + rd24("X", "i", D + ".0") + ";"
         "float w0=" + rd24("B", "i", D + ".0") + "*RS;"
@@ -2070,9 +2105,9 @@ std::string rwkv_decay(int dim) {
 std::string rwkv_vres(int dim) {
     need_dim("rwkv_vres", dim);
     const string D = to_string(dim);
-    return rwkv_head() + kRwkvRS +
+    return rwkv_head() + poly_src() + kRwkvRS +
         "uniform sampler2D V,VF,U,B;"
-        "float sg(float z){if(z<0.0){float e=exp(z);return e/(1.0+e);}return 1.0/(1.0+exp(-z));}"
+        "float sg(float z){if(z<0.0){float e=" + EXP("z") + ";return e/(1.0+e);}return 1.0/(1.0+" + EXP("-z") + ");}"
         "void main(){int i=int(gl_FragCoord.x);"
         "float v=" + rd24("V", "i", D + ".0") + ";"
         "float vf=" + rd24("VF", "i", D + ".0") + ";"
@@ -2084,7 +2119,7 @@ std::string rwkv_vres(int dim) {
 std::string rwkv_sqrelu(int dim) {
     need_dim("rwkv_sqrelu", dim);
     const string D = to_string(dim);
-    return rwkv_head() +
+    return rwkv_head() + poly_src() +
         "uniform sampler2D X;"
         "void main(){int i=int(gl_FragCoord.x);float r=max(" + rd24("X", "i", D + ".0") + ",0.0);"
         "gl_FragColor=x_q24enc(r*r);}";
@@ -2094,7 +2129,7 @@ std::string rwkv_mul(int dim, int adiv) {
     need_dim("rwkv_mul", dim);
     const string D = to_string(dim);
     const string AS = adiv == 256 ? "*0.00390625" : "";
-    return rwkv_head() +
+    return rwkv_head() + poly_src() +
         "uniform sampler2D A,B;"
         "void main(){int i=int(gl_FragCoord.x);"
         "gl_FragColor=x_q24enc(" + rd24("A", "i", D + ".0") + AS + "*" + rd24("B", "i", D + ".0") + ");}";
@@ -2103,7 +2138,7 @@ std::string rwkv_mul(int dim, int adiv) {
 std::string rwkv_rk_reduce(int dim, int hs) {
     need_dim("rwkv_rk_reduce", dim);
     const string D = to_string(dim), HS = to_string(hs);
-    return rwkv_head() + kRwkvRS +
+    return rwkv_head() + poly_src() + kRwkvRS +
         "uniform sampler2D K,R,SC;"
         "void main(){int h=int(gl_FragCoord.x);float acc=0.0;"
         "for(int i=0;i<" + HS + ";i++){int o=h*" + HS + "+i;"
@@ -2115,7 +2150,7 @@ std::string rwkv_rk_reduce(int dim, int hs) {
 std::string rwkv_rk_add(int dim, int hs) {
     need_dim("rwkv_rk_add", dim);
     const string D = to_string(dim), HS = to_string(hs), H = to_string(dim / hs);
-    return rwkv_head() +
+    return rwkv_head() + poly_src() +
         "uniform sampler2D Y,V,RK;"
         "void main(){int i=int(gl_FragCoord.x);int h=i/" + HS + ";"
         "float y=" + rd24("Y", "i", D + ".0") + "*0.00390625;"
@@ -2182,5 +2217,14 @@ std::string rwkv_wkv_out(int heads, int hs) {
         "gl_FragColor=x_q24enc(acc*16.0);}";
 }
 
+// The switch reader and the poly's definition, at file scope: the builders in
+// the anonymous namespace above call them, and so does shaders_attn.cpp.
+bool exp_poly_enabled() {
+    static const bool v = [] {
+        const char* e = sw_str("EXP");
+        return e && !strcmp(e, "poly");
+    }();
+    return v;
+}
 
-
+std::string exp_poly_source() { return exp_poly_enabled() ? kExpPolySource : ""; }
