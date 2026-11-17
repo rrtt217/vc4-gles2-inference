@@ -7491,3 +7491,61 @@ sampling with a repetition penalty is (`--temp 0.7 --topp 0.9 --top-k 64
 --repeat-penalty 1.1`).  The engine keeps `FFN_HID=f32` because it removes a real
 8x rail violation (the container's hidden peaks at 1005); it is not the fix for
 this and was measured not to be.
+
+## 2026-11-17 (addendum 2) — VC4's fragment ALU loses precision in multi-accumulator sums, and the probe that says so
+
+Written for the pocket-on-Pi degeneration (addendum above).  The per-layer dump
+put the loss in the layers whose residual reaches 2300; the question was whether
+a *kernel* is wrong or the *arithmetic* differs.  `probes/sumorder_probe`
+answers it with one 1024-term dot product whose exact value is known in closed
+form: terms in pairs (+M, -M*(1-2^-20)), so 512 pairs give M/2048 exactly and
+the sum cancels two orders of magnitude away from its result.  Two machines,
+same binary source:
+
+| shape | Xe: gpu - host | Pi: gpu - host | same value on both? |
+|---|---:|---:|---|
+| one accumulator (`s += w*x`) | 0.000% | 0.000% | **yes** |
+| tree over the vector (`pairwise`) | 0.000% | 0.000% | **yes** |
+| two accumulators, 2-wide trees (`two-tree`) | 0.001% | 0.000% | **yes** |
+| one accumulator, 8-wide tree per group (`tree8`) | 0.043% | 0.000% | **yes** |
+| four accumulators, 8 lanes, 32-wide group (**the shipped matvec shape**) | 0.000% | **44%** | no |
+| eight accumulators | 0.000% | **489%** | no |
+
+The pattern is unambiguous: **a single accumulator or a tree is bit-identical to
+Xe; several live f32 accumulators are not.**  VC4's V3D 2.1 fragment ALU is
+fixed-point under Mesa, and a shape that keeps four or eight accumulators alive
+loses the low bits of the result when the accumulator's magnitude is set by the
+inputs rather than by the result — exactly what a layer with |x| = 2300 does to
+a dot product whose output is O(1).  Xe computes those shapes in IEEE f32 and
+gets 0.000%.
+
+Two side findings, both recorded in the probe's header: VC4 returns 0 for a
+dynamically indexed **uniform array** (`mags[int(y)]`) while Xe honours it — the
+engine never indexes a uniform array, so it is a probe-side constraint; and the
+magnitudes' table also prices the *orders themselves* (at M=2300 the shipped
+four-accumulator shape is 50% off the exact value **on Xe too**, against 0.17%
+for a tree — an order that cancels early is better arithmetic, independently of
+the driver).
+
+### The first application, and what it did not fix
+
+`matvec_i4_pair` (the q4 gate, five live accumulators) now builds the group's
+32 taps as a tree and adds once per group — commit `c9c7853`.  It moves exactly
+one program's digest (`matvec_i4_pair_2432x768_i16_2`, both q4shift variants),
+and MiniMind3 q4's PPL 326.1483 and pinned string are **bit-identical** before
+and after, i.e. the change is invisible where the accumulators never carried a
+large magnitude.
+
+**It did not stop pocket's repetition on the board** (`杭州是中国中国中国…` again,
+decode 1696 ms/token).  So the q4 gate was not the source.  The remaining
+candidates, in the order the per-layer dump suggests:
+
+1. `att` is the first stage to diverge at the large-magnitude layers, but its
+   own accumulators (`att_stats`' sum, `att_v`'s four channel accumulators) hold
+   O(1) magnitudes, where the probe shows no loss.  Its *inputs* are the qkv
+   matvec's output, whose accumulator reaches ~10-100x the result.
+2. **`exp()` precision**: `att_v` evaluates `exp(dec16(score)*SCSI - mx)` per
+   position.  VC4's transcendental approximation is not Xe's, and a relative
+   difference there is a *multiplicative* weight error on every value in the
+   sum, applied 28 times per token.  This is the next thing to measure, and it
+   is a two-second probe, not a model run.

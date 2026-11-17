@@ -370,7 +370,7 @@ gate) fails if the source reads a name with no row, a row is read nowhere, a
 retired name is read again, or a row is missing from the document.
 
 A switch names an **axis**, not a module: `ACT=i16|i8|f32`, `KV=i24|q8|q16|bf16|f32`,
-`RES=i16|i16_1|i24|f32`, `FFN_HID=i16|i8`, `ACT_CPU=q16|f32`.  The spellings they
+`RES=i16|i16_1|i24|f32`, `FFN_HID=i16|i8|f32`, `ACT_CPU=q16|f32`.  The spellings they
 replaced (`ACT_FMT`, `ACT8`, `ACT_F32`, `KV_PACK`, `KV_FMT`, `KV_SCALE`,
 `RES_FMT`, `RES_PACK`, `ATT_SCALE`, `ATT_SUM_SCALE`) still work — the registry
 rewrites them and says so on stderr once — but new code and new documents use the
