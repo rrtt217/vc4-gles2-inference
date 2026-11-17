@@ -150,6 +150,56 @@ void lap(int stage){
         g_stage_ms[stage] += elapsed_ms(g_lap_t, now);
         g_lap_t = now;
 }
+
+// The cm stage's own split (P7, the board's cm task).  The channel mix is 43%
+// of a Pi Zero layer and was one number; this prices its inside.  Same lap
+// mechanism, separate array, and *only* when RWKV_PROFILE is set -- no GL
+// call, no arithmetic and no texture otherwise, so the numbers do not move.
+//
+// cm region = att_norm_2 + the channel-mix lerp + the shift copy ("pre"),
+// then per chunk of the split key: the key matvec and its relu^2, then per
+// chunk of the value: the value matvec and the q16 residual add.  The
+// non-chunked path (Xe, where the 3072-row key fits one texture) reports the
+// same four stages once instead of twice.
+enum { CMP_PRE, CMP_KEY_A, CMP_SQ_A, CMP_VAL_A, CMP_ADD_A,
+       CMP_KEY_B, CMP_SQ_B, CMP_VAL_B, CMP_ADD_B,
+       CMP_KEY, CMP_SQ, CMP_VAL, CMP_ADD, CMP_COUNT };
+double g_cm_ms[CMP_COUNT];
+
+void cm_lap(int stage){
+        if (!g_lap_on) return;
+        glFinish();
+        const auto now = Clock::now();
+        g_cm_ms[stage] += elapsed_ms(g_lap_t, now);
+        g_lap_t = now;
+}
+
+// One line per layer from the layout above.  total is the sum of these laps,
+// so it is comparable with the layer line's cm field.
+void cm_report(int l, bool chunked){
+        if (!g_lap_on) return;
+        double tot = 0.0;
+        for (int i = 0; i < CMP_COUNT; ++i) tot += g_cm_ms[i];
+        // Called from rwkv_block's finish() right after lap(RS_CM), whose own
+        // delta is now ~0 because the last sub-lap closed first: fold the
+        // sub-laps back in so the layer line's cm keeps meaning the whole cm
+        // region (and the layer total keeps summing to the same thing).
+        g_stage_ms[RS_CM] += tot;
+        fprintf(stderr, "RWKV_PROFILE cm layer=%d total=%.2f pre=%.2f", l, tot,
+                g_cm_ms[CMP_PRE]);
+        if (chunked)
+                fprintf(stderr, " key_a=%.2f sq_a=%.2f key_b=%.2f sq_b=%.2f"
+                                " val_a=%.2f val_b=%.2f add_a=%.2f add_b=%.2f",
+                        g_cm_ms[CMP_KEY_A], g_cm_ms[CMP_SQ_A], g_cm_ms[CMP_KEY_B],
+                        g_cm_ms[CMP_SQ_B], g_cm_ms[CMP_VAL_A], g_cm_ms[CMP_VAL_B],
+                        g_cm_ms[CMP_ADD_A], g_cm_ms[CMP_ADD_B]);
+        else
+                fprintf(stderr, " key=%.2f sq=%.2f val=%.2f add=%.2f",
+                        g_cm_ms[CMP_KEY], g_cm_ms[CMP_SQ], g_cm_ms[CMP_VAL],
+                        g_cm_ms[CMP_ADD]);
+        fprintf(stderr, "\n");
+        for (int i = 0; i < CMP_COUNT; ++i) g_cm_ms[i] = 0.0;
+}
 }  // namespace
 GLuint GPU::rwkv_upload_slot(const vector<float>& x, int slot){
         const int n = (int)x.size();
@@ -571,11 +621,13 @@ GLuint GPU::rwkv_block(int l, const Model& m, GLuint resid, float* cpu_wkv_state
                 g_lap_on = true;
                 g_lap_t = Clock::now();
                 for (int i = 0; i < RS_COUNT; ++i) g_stage_ms[i] = 0.0;
+                for (int i = 0; i < CMP_COUNT; ++i) g_cm_ms[i] = 0.0;
         }
         // Every return goes through this, so the last stage is always closed and
         // the layer's shares are printed from one place.
         auto finish = [&](GLuint tex) {
                 lap(RS_CM);
+                cm_report(l, m.ffn_chunked);
                 if (g_lap_on) {
                         double sum = 0.0;
                         for (int i = 0; i < RS_COUNT; ++i) sum += g_stage_ms[i];
@@ -734,34 +786,56 @@ GLuint GPU::rwkv_block(int l, const Model& m, GLuint resid, float* cpu_wkv_state
         Target& shF = rwkv_shift_[(size_t)l * 2 + 1];
         GLuint xk2 = rwkv_lerp(xn2, shF.tex, rwkv_const(l, RC_CMLERP), 0, 1, rwkv_tmp(RT_XR));
         rwkv_copy(xn2, shF);
+        cm_lap(CMP_PRE);
         // O23-O25: key matvec -> relu^2 -> value matvec + residual.  The key is
         // chunked on VC4 (split_rwkv); the two halves recombine at the value add.
+        // The cm_lap calls below are the RWKV_PROFILE sub-laps (the file's lap
+        // helper); with the switch off they are one boolean test each.
         if (m.ffn_chunked) {
             GLuint ha = rwkv_mv(m.w1a[l], xk2, rwkv_tmp(RT_CMH));
+            cm_lap(CMP_KEY_A);
             ha = rwkv_sqrelu(ha, rwkv_tmp(RT_CMH2));
+            cm_lap(CMP_SQ_A);
             GLuint hb = rwkv_mv(m.w1b[l], xk2, rwkv_tmp(RT_CMH3));
+            cm_lap(CMP_KEY_B);
             hb = rwkv_sqrelu(hb, rwkv_tmp(RT_CMH4));
+            cm_lap(CMP_SQ_B);
             // mid != resid; the final add reuses resid's (now dead) buffer.
             Target& mid = (resid == rwkv_tmp(RT_RES).tex) ? rwkv_tmp(RT_RES2) : rwkv_tmp(RT_RES);
             Target& fin = (resid == rwkv_tmp(RT_RES).tex) ? rwkv_tmp(RT_RES) : rwkv_tmp(RT_RES2);
             if (needs_finish()) {
                 GLuint ca = rwkv_mv(m.w2a[l], ha, rwkv_tmp(RT_U));
+                cm_lap(CMP_VAL_A);
                 GLuint mid_r = rwkv_res_add(resid, ca, mid);
+                cm_lap(CMP_ADD_A);
                 GLuint cb = rwkv_mv(m.w2b[l], hb, rwkv_tmp(RT_U));
-                return finish(rwkv_res_add(mid_r, cb, fin));
+                cm_lap(CMP_VAL_B);
+                GLuint cm_fin = rwkv_res_add(mid_r, cb, fin);
+                cm_lap(CMP_ADD_B);
+                return finish(cm_fin);
             }
+            // Fused path (Xe): the add is inside the matvec, so add_a/add_b are
+            // 0 and val_a/val_b carry the add.
             matvec_add(m.w2a[l], ha, resid, mid, act_fmt_);
+            cm_lap(CMP_VAL_A);
             matvec_add(m.w2b[l], hb, mid.tex, fin, act_fmt_);
+            cm_lap(CMP_VAL_B);
             return finish(fin.tex);
         }
         GLuint h = rwkv_mv(m.w1[l], xk2, rwkv_tmp(RT_CMH));
+        cm_lap(CMP_KEY);
         h = rwkv_sqrelu(h, rwkv_tmp(RT_CMH2));
+        cm_lap(CMP_SQ);
         Target& cm_out = (resid == rwkv_tmp(RT_RES).tex) ? rwkv_tmp(RT_RES2) : rwkv_tmp(RT_RES);
         if (needs_finish()) {
             GLuint cm_t = rwkv_mv(m.w2[l], h, rwkv_tmp(RT_U));
-            return finish(rwkv_res_add(resid, cm_t, cm_out));
+            cm_lap(CMP_VAL);
+            GLuint cm_fin = rwkv_res_add(resid, cm_t, cm_out);
+            cm_lap(CMP_ADD);
+            return finish(cm_fin);
         }
         matvec_add(m.w2[l], h, resid, cm_out, act_fmt_);
+        cm_lap(CMP_VAL);
         return finish(cm_out.tex);
 }
 
