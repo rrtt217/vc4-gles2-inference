@@ -254,8 +254,20 @@ int main() {
             "#version 300 es\nprecision highp float;\n"
             "uniform sampler2D T;out vec4 fragColor;\n"
             "void main(){int i=int(gl_FragCoord.x);"
-            "int j=(i<32)?i:(i-32);float x=-30.0*(float(j)+0.5)/float(32);"
-            "float v=(i<32)?exp(x):exp2(x*1.4426950408889634);"
+            "int j=i%16;float x=-30.0*(float(j)+0.5)/float(16);"
+            // columns 0..15 exp(), 16..31 exp2(), 32..47 a portable polynomial,
+            // 48..63 the same polynomial with its range reduction removed (so a
+            // reader can see which half carries the accuracy)
+            "float v;"
+            "if(i<16)v=exp(x);"
+            "else if(i<32)v=exp2(x*1.4426950408889634);"
+            "else{"
+            "float k=floor(x*1.4426950408889634+0.5);"
+            "float r=x-k*0.6931471805599453;"
+            "float t=1.0+r*(1.0+r*(0.5+r*(1.0/6.0+r*(1.0/24.0+r*(1.0/120.0+r/720.0)))));"
+            "uint u=uint(int(k)+127)<<23;"
+            "float p=t*uintBitsToFloat(u);"
+            "v=(i<48)?p:t;}"
             "uint u=floatBitsToUint(v);"
             "fragColor=vec4(float(u>>24),float((u>>16)&255u),float((u>>8)&255u),"
             "float(u&255u))/255.0;}\n";
@@ -280,6 +292,7 @@ int main() {
             std::vector<uint8_t> ex((size_t)NX * 4);
             glReadPixels(0, 0, NX, 1, GL_RGBA, GL_UNSIGNED_BYTE, ex.data());
             double worst = 0, worst_x = 0, worst2 = 0, worst2_x = 0;
+            double worst3 = 0, worst3_x = 0, worst4 = 0, worst4_x = 0;
             int ulp_worst = 0;
             for (int i = 0; i < NX; ++i) {
                 const uint8_t* q = &ex[(size_t)i * 4];
@@ -287,21 +300,27 @@ int main() {
                                    ((uint32_t)q[2] << 8) | (uint32_t)q[3];
                 float f = 0;
                 memcpy(&f, &u, 4);
-                const int j = i < 32 ? i : i - 32;
-                const double x = -30.0 * (j + 0.5) / 32.0;
+                const int j = i % 16;
+                const double x = -30.0 * (j + 0.5) / 16.0;
                 const double ref = exp(x);
                 const double rel = fabs((double)f - ref) / ref;
-                // columns 0..31 are exp(), 32..63 exp2(x*log2 e) at the same x
-                const int half = i < 32 ? 0 : 1;
-                if (half == 0) { if (rel > worst) { worst = rel; worst_x = x; } }
-                else { if (rel > worst2) { worst2 = rel; worst2_x = x; } }
+                const int which = i / 16;   // 0 exp, 1 exp2, 2 poly, 3 poly-no-reduction
+                if (which == 0) { if (rel > worst) { worst = rel; worst_x = x; } }
+                else if (which == 1) { if (rel > worst2) { worst2 = rel; worst2_x = x; } }
+                else if (which == 2) { if (rel > worst3) { worst3 = rel; worst3_x = x; } }
+                else { if (rel > worst4) { worst4 = rel; worst4_x = x; } }
             }
             (void)ulp_worst;
             printf("\nexp(): worst relative error over x in [-30,0], 32 points each:\n"
                    "  exp(x)          %.3e  at x = %.2f\n"
                    "  exp2(x*log2 e)  %.3e  at x = %.2f\n"
-                   "  (host uses double exp as the reference)\n",
-                   worst, worst_x, worst2, worst2_x);
+                   "  poly + 2^k       %.3e  at x = %.2f\n"
+                   "  poly, no 2^k     %.3e  at x = %.2f  (what the reduction is worth)\n"
+                   "  (host uses double exp as the reference; the third row is a\n"
+                   "   degree-6 minimax on r = x - k ln2 with the exponent built\n"
+                   "   by a bit-cast)\n",
+                   worst, worst_x, worst2, worst2_x, worst3, worst3_x,
+                   worst4, worst4_x);
             glDeleteFramebuffers(1, &fbo2);
             glDeleteTextures(1, &out2);
         }
