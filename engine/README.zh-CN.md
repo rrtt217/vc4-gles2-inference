@@ -129,7 +129,13 @@ TinyChat15M 是 llama-2 chat 格式的 15M 模型，不是补全模型：容器�
 
 ### TinyStories 15M/42M
 
-交互式 `--chat` 里还有 `/clear`（忘记本轮对话）、`/help` 和 `/model PATH`：后者在
+交互式 `--chat` 里还有 `/clear`（忘记本轮对话）、`/help` 和 **REPL 还没有的**（这是有意的清单，不是遗漏）：`--ppl` 和 `--worker` 是进程而不是对话；
+`/tools` 需要重新规范化工具列表，而那是启动时做的；`--prefix-cache` /
+`--build-prefix-cache` 是为某个容器构建状态，而 `/model` 会把它丢掉；`--quiet` /
+`--dump-*` 是启动开关。另一件缺的是命令名的 Tab 补全：`line_edit_read` 没有补全钩子，
+要做需要先加钩子再接到 `kCmd` 上。
+
+`/model PATH`：后者在
 不重建 GL 上下文的前提下换一个容器（板上上下文 4.23 s + 13 个程序链接 1.89 s 是省下来的
 那部分，见 `docs/performance.md`）。权重、分词器、聊天模板和 session 的 target 会被替换，
 已编译程序保留，对话历史清空。路径不可读、不是容器、或不是 chat 模型的情况在**释放当前模型之前**

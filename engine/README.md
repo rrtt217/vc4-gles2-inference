@@ -179,6 +179,14 @@ draws one bar there (`[upload  45% ############------------   27.1/  60.9 MB]`),
 both off when stderr is not a terminal and the bar also off under `SHADER_TIME`,
 whose `STARTUP` lines are grep targets.
 
+**What the REPL does not have** (a deliberate list, not an oversight): `--ppl`
+and `--worker` are processes, not conversations; `/tools` would have to
+re-normalise the tool list, which happens at startup; `--prefix-cache` /
+`--build-prefix-cache` build state for a container, and `/model` throws that
+state away; and `--quiet` / `--dump-*` are startup switches.  Tab completion of
+command names is the other missing piece: `line_edit_read` has no completion hook,
+so it would need one plus a call into `kCmd`.
+
 `/model PATH` loads another container without rebuilding the GL context, which
 is the expensive part: on the Pi Zero the context costs 4.23 s and the 13
 program links 1.89 s per process, against 6.12 s to read a container and 2.99 s
