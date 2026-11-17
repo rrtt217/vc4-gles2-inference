@@ -658,7 +658,11 @@ vector<vector<float>> Session::rwkv_mv_group(const vector<const Mat*>& ms,
         // only the runs whose matrices share a row count (the VC4-safe arm if
         // the unequal-width draws turn out to be the problem), 0 is the pre-P7
         // path verbatim, 2 and 3 are the read-back bisect.
-        static const int mode = env_int("RWKV_GROUP", 1);
+        // The default arm is the safe one wherever the read-back behaviour is not
+        // ours to assume: VC4 (needs_finish) keeps the pre-P7 path until the board
+        // bisect names an arm that is bit-identical there, every other driver keeps
+        // the grouping.  RWKV_GROUP overrides either way.
+        static const int mode = env_int("RWKV_GROUP", gpu_.needs_finish() ? 0 : 1);
         if (mode == 0) {
                 vector<vector<float>> out(ms.size());
                 for (size_t i = 0; i < ms.size(); ++i) out[i] = rwkv_mv(*ms[i], *xs[i]);

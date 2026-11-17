@@ -132,7 +132,8 @@ binary.  They are measurement hooks, not production settings.
   `finish` and `readback` separately on the full-read-back path, and one lap
   per reduction stage on the greedy fast path.  Diagnostic only.
 - `RWKV_GROUP=0|1|2|3|4` — the serial RWKV path's matvec grouping (P7, A2/A3).
-  `1` (default) draws a group of independent matvecs into the rows of one target
+  `1` (the default everywhere except VC4) draws a group of independent matvecs
+  into the rows of one target
   and reads the block back once; `0` is the pre-P7 path verbatim (one read-back
   per matrix), which makes it the reference arm for a same-binary A/B; `2` reads
   the block at the target's *full* width instead of the group's own, and `3`
@@ -140,6 +141,10 @@ binary.  They are measurement hooks, not production settings.
   bisect for the +0.0006 nats/token drift the board saw on 2026-11-17; `4`
   groups only runs of equal-row matrices, which is the safe arm if the
   unequal-width draws are what VC4 dislikes.  Same numbers on Xe in all five.
+  **The default is `0` on VC4** (`needs_finish()`): the board measured 9.2990
+  before P7 and 9.3047 after, so a machine whose read-back behaviour has not
+  been bisected keeps the pre-P7 path and loses only the sync win, not the pin.
+  Every other driver keeps `1`.
 - `RWKV_GROUP_CHECK=1` — with the grouping on, recompute every grouped matvec
   with `rwkv_mv()` in the same process and print the first 12 members that
   differ (`member rows cols ndiff/n maxdiff first`).  It turns "the board drifts
