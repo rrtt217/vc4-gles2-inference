@@ -161,7 +161,16 @@ vector<vector<vector<float>>> GPU::matvec_batch_group(const vector<MvBatch>& gro
                 bind_tex(1, tin.tex);
                 set_sampler(p, "X", 1);
                 if (wrow) { bind_tex(3, m.row_scale_tex); set_sampler(p, "WS", 3); }
-                glUniform1f(uloc(p, "xh"), (float)bh);
+                // The kernel indexes its input row as (row + 0.5) / xh, i.e. in
+                // the *texture's* normalized space: both divisors are the
+                // texture's own dimensions, not the logical block.  They differ
+                // once the staging texture has grown past this call's block (a
+                // 1-matrix call after a 4-matrix one), and using the logical
+                // height there reads row (b+0.5)/bh*tin.h instead of row b --
+                // every row of every later batch off by a stretch, which is
+                // exactly what RWKV_PREFILL_CHECK reports on a 100-token prompt
+                // while a short prompt (one block size) looks clean.
+                glUniform1f(uloc(p, "xh"), (float)tin.h);
                 glUniform1f(uloc(p, "xw"), (float)tstride);
                 glUniform1f(uloc(p, "ws"), m.scale);
                 setup_attrib(p);

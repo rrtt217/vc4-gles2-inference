@@ -7209,3 +7209,88 @@ left it (GPU ~1.1 s/token against the CPU's ~0.97 s), and the >=3x win stays
 Xe-only.  The two switches stay in the tree as default-off measurement arms —
 `RWKV_SHIFT_PP` is the cheapest known "remove 24 draws, change nothing" probe
 on this path.
+
+## 2026-11-17 — RWKV-7 P1: chunked prefill (batched projections, serial recurrence)
+
+The serial prefill walks one token through all L layers, so every projection is
+drawn and read back once per token: 14 matvecs a layer, ~170 host syncs a token.
+Nothing in a projection depends on the previous token, so the block can be
+evaluated one *layer* pass at a time for a batch of tokens, with the token shift,
+the elementwise chain and the WKV7 recurrence left per token and in token order
+(the recurrence is 1.1-2.0% of the MACs — docs/rwkv7-plan.zh-CN.md section 12).
+
+`RWKV_PREFILL=1` selects it (default off; `RWKV_PREFILL_N` = batch size, default
+16).  The kernel is `matvec_q8_batch`: `matvec_q8`'s text with the input row taken
+from `gl_FragCoord.y`, and each input keeps its own 2^k normalisation — the rows
+are grouped by k, one draw per group, with the matrix scale folded exactly as
+`Session::rwkv_mv` folds it — so every output row is the serial path's, bit for
+bit.  One read-back per matrix per batch instead of one per token.
+
+### Before / after (Iris Xe ADL GT2, g1d 0.1B q8r chat, one binary, interleaved)
+
+512-token prompt (512 exactly: `data/ppl_test.txt` twice, truncated), `--gen 1`.
+Every run is a fresh process, because the recurrence state has to start at zero.
+
+| arm | prefill (3 runs) | per prompt token |
+|---|---:|---:|
+| serial | 62.25 / 62.48 / 60.43 s | 121.6 ms |
+| `RWKV_PREFILL=1` (n=16) | **6.81 / 6.81 / 6.81 s** | **13.3 ms** |
+
+**9.1x** on this run.  An earlier interleaved run the same day, on a quieter
+machine, gave 52.20 -> 6.69 s = 7.8x: the ratio moves with the laptop's load, the
+batched arm does not.  A 445-token prompt: 46.87 -> 5.91 s (7.9x).
+
+Decode is untouched — the loop is the same code and the state it starts from is
+bit-identical: 125.3 / 126.1 / 122.7 ms per token serial against 127.3 / 129.8 /
+118.0 batched (medians 125.3 vs 127.3, one batched run faster: this laptop's
+ordering noise), and **233 draws / 73 syncs per decode token on both arms**.
+
+### Numerics
+
+Byte-identical, not 'within noise': the same `LOGITS_OUT` file and the same greedy
+text with `RWKV_PREFILL=0/1`
+
+- g1d 0.1B q8r: 100-, 445- and 512-token prompts, batch sizes 1/4/16/64;
+- g1d 0.4B q8r (dim 1024, 4x the modules): 100-token prompt;
+- `RWKV_PREFILL_CHECK=1` compares each batched row against `GPU::matvec` on the
+  same input in the same run: zero differences at every batch size, both
+  containers.
+
+That switch is what found the two defects worth recording, because both looked
+plausible in the source:
+
+1. **The read-back must not apply 2^k.**  The draw's `ws` uniform already carries
+   the input's 2^k (the serial path folds it into the Mat view), so the kernel's
+   integer *is* the final q24 value.  Scaling it again made every row with k>0
+   come back 2^k too large — the first smoke test ran 8.5x 'faster' with logits
+   that differed in the second byte.
+2. **The row coordinate belongs to the texture, not to the block.**  The staging
+   texture grows monotonically (one texture per call would put 392 of them in the
+   scene ledger for a 445-token prompt), so a 1-matrix channel-mix call after a
+   4-matrix low-rank one has a texture taller than its own block.  `(row+0.5)/xh`
+   is a normalized coordinate, so `xh` has to be the texture's height; passing the
+   logical block height read row `(b+0.5)/bh*tin.h` instead — every row of every
+   call after the first block-size change.  A short prompt (one block size) looked
+   clean, which is why the 100-token self-check is the regression that switch
+   exists for.
+
+PPL is unchanged: 9.2919 (nll 2.2291, 421 tokens, SEQ=512) on both arms.  The
+`--ppl` path runs token by token either way, so that number is the serial path's
+on both sides — the batched path's evidence is the byte-identical logits above,
+not a PPL delta.  `RWKV_GPU=1` keeps the fused loop; its prefill is not batched.
+
+### What the board still has to answer
+
+Two VC4 questions decide the Pi's number, and both are the board run of this
+commit:
+
+- **The draw cap.**  A batched draw is `width x batch_rows` fragments, and the P7
+  section above leaves open whether `kDrawCap` limits *fragments* (`rwkv_draw1`
+  and `rwkv_wkv` assume so) or *width* (`draw()`'s comment says so).  The default
+  splits so that `width*batch` stays inside the cap, i.e. the board pays the
+  serial path's draw count and wins only the read-backs; `RWKV_PREFILL_STRIP`
+  tests the width reading.
+- **Width.**  The staging block is `groups x n` texture rows (64 at n=16) and the
+  widest input is `dim/2` texels, so 0.1B needs 384x64 — inside VC4's 2048.
+
+Pi numbers are pending; this section gets them when they land.
