@@ -3,7 +3,7 @@
 Environment switches used for A/B tests, diagnostics and debugging.  They are
 not production settings.
 
-Three rules before using this list:
+Five rules before using this list:
 
 - **A switch that no longer exists is worse than a missing one.**  `--template`,
   `ROPE_THETA=` and `ROPE_HALF=` were removed with the legacy
@@ -33,45 +33,281 @@ Three rules before using this list:
   every set switch, before any kernel reads one — including switches nothing in
   this model's path reads, so a typo cannot hide until the next model.
 
-## Diagnostics: dumps
+## The inventory
+
+The table below is rendered from the registry by
+`engine/scripts/gen_test_hooks.py --write` and verified by `--check` (step 0 of
+the gate), so it cannot drift from the code.  `permanent` is part of the
+documented configuration surface, `probe` is a diagnostic or a pricing arm
+(candidates for retirement), `retired` is gone.
+
+<!-- BEGIN generated: switches -- `engine/scripts/gen_test_hooks.py --write`
+     rewrites this block from `engine/src/switches.cpp`.  Do not edit it by
+     hand: the registry is the inventory, and `--check` (step 0 of the gate)
+     fails when this text and the registry disagree. -->
+
+The rows below are the registry, one per switch, grouped by the axis they move.
+`permanent` is part of the documented configuration surface; `probe` is a
+diagnostic or a pricing arm; `retired` is gone (`--dump-switches` prints the
+same table with what *this* environment resolved to).
+
+135 switches: 28 permanent, 93 probe, 14 retired; 16 legacy spellings are translated.
+
+### The activation streams
+
+| Switch | Takes | What it moves |
+|---|---|---|
+| `ACT` <br><sub>`ACT_FMT`</sub> | `i16\|i8\|f32` | the GPU activation streams' format: i16 q16 grid (default), i8, or bit-cast f32 |
+| `ACT_CPU` <br><sub>`ACT_F32`</sub> | `q16\|f32` | the CPU layer loop's activation grid (ACT_F32 meant f32, whatever its value) |
+| `FFN_HID` | `i16\|i8` | the FFN hidden stream's width (ACT8=2 used to set only this one) |
+| `Q16_DECODE` | value | the q16 decode: fast classifies the -32768 rail at 32767.5, exact is integer |
+| `QKV_PAIR` | `=1` | two qkv rows per fragment (int8 only, default on); QKV_PAIR=0 disables |
+
+### The attention block's fixed-point
+
+| Switch | Takes | What it moves |
+|---|---|---|
+| `ATT_SCORE_GRID` <br><sub>`ATT_SCALE`</sub> | N | score/(max) grid: round(score*N), so +-32768/N range and 1/N step (1024) |
+| `ATT_SUM` | `linear\|log2` | the sum's domain: linear grid (default) or log2(sum)*2048 — a trade, see the doc |
+| `ATT_SUM_GRID` <br><sub>`ATT_SUM_SCALE`</sub> | N | the linear sum grid in the same (max,sum) texel (32 = step 1/32) |
+
+### The KV cache
+
+| Switch | Takes | What it moves |
+|---|---|---|
+| `KV` | `i24\|q8\|q16\|bf16\|f32` | the KV value encoding (i24 fixed 24-bit, q16/q8 packed, bf16, or f32) |
+| `KV_GRID` <br><sub>`KV_SCALE`</sub> | N | the fixed-point KV scale (16384 for i24, 2048 for q16, 16 for q8) |
+| `KV8_SIM` | `0..6` | price an 8-bit KV grid on the CPU attention path (1..6 = which grids) |
+| `KV8_SIM_SCALE` | value | the global grid the KV8_SIM pricing arms use (default 16) |
+| `KV8_STATS` | value | the per-head V statistics KV8_SIM needs, on the CPU path |
+| `KV_VSTEP` | `=1` | q8 only: a per-head, per-position V grid (buys q4 6% PPL, costs q8 6%) |
+
+### The residual stream
+
+| Switch | Takes | What it moves |
+|---|---|---|
+| `RES` <br><sub>`RES_FMT`</sub> | `i16\|i16_1\|i24\|f32` | residual format: i16 packed pairs (default), i16_1 one a texel, i24, or f32 |
+
+### The FFN hidden stream and kernel shape
+
+| Switch | Takes | What it moves |
+|---|---|---|
+| `FFN_FLUSH` | `=1` | flush policy after the FFN (FFN_FLUSH=0 keeps the default) |
+| `FFN_FUSE` | `=1` | the fused gate+swiglu (default on); FFN_FUSE=0 restores the two-pass path |
+| `FFN_PAIR` | `=1` | two output rows per FFN fragment (default on); FFN_PAIR=0 disables |
+| `FFN_SW_INLINE` | value | FFN_SW_INLINE=0 restores the generic X4Q activation decode in the swiglu |
+| `FFN_SYNC` | `=1` | sync after the FFN's draws |
+| `FORCE_GLFINISH` | value | force the VC4 finish path on other drivers |
+| `LAYER_SAFE_FINISH` | value | restore the fully-finished GPU layer path |
+| `Q8AP_INLINE` | value | Q8AP_INLINE=0 restores the generic X4Q activation decode |
+| `RMS_FUSED` | value | force the fused rmsnorm reduce |
+| `RMS_SPLIT` | value | force the split rmsnorm reduce |
+
+### Placement: which path runs
+
+| Switch | Takes | What it moves |
+|---|---|---|
+| `GPU_ATTN` | `=1` | GPU attention with a CPU FFN |
+| `GPU_LAYER` | `=1` | hidden state, attention, RMSNorm and FFN all on the GPU |
+| `CONV_SKIP` | value | the LFM2 conv layers become identity copies |
+| `CPU_FFN` | value | force the FFN onto the CPU (overrides GPU_LAYER's FFN) |
+| `DRAW_CLEAR` | `=1` | clear the target before every draw (a correctness oracle, not a setting) |
+| `GPU_FFN` | value | force the FFN onto the GPU |
+| `MATVEC_STRIP` | value | override the fragment budget of the matvec draws |
+| `NO_SHADER_SELFTEST` | value | skip the startup shader self-test |
+
+### Cost attribution
+
+| Switch | Takes | What it moves |
+|---|---|---|
+| `ATTN_DUP` | value | replay one attention pass; the end-to-end delta is its marginal cost |
+| `DRAWCOUNT` | value | draws per decoded token |
+| `LAYER_PROFILE` | `=1` | per-pass marks inside a layer |
+| `PAIR_PROFILE` | value | the same for the two-position prefill pair |
+| `READBACK_TIME` | value | the per-token logits finish/read-back time |
+| `RWKV_CHUNK_TEST` | value | sweep the RWKV channel-mix cut (probe: it moves the numbers) |
+| `RWKV_PROFILE` | `=1` | the RWKV paths' per-phase timing |
+| `SHADER_TIME` | `=1` | STARTUP phase marks and one line per program |
+| `SYNCCOUNT` | value | host <-> GPU synchronisations per decoded token |
+| `TIMING` | value | prefill and decode timings to stderr |
+| `UPLOAD_TIME` | value | upload wall time and the per-texture breakdown |
+
+### Diagnostics: what the engine dumps
+
+| Switch | Takes | What it moves |
+|---|---|---|
+| `PPL_STRIDE` | value | window stride for --ppl (0 restores the cold pre-2026-11-12 windows) |
+| `ARGMAX_DUMP` | value | with the greedy fast path, print the chunk winners |
+| `ATT_DUMP` | value | the score/softmax integers at one position, for check_att.py |
+| `CHAT_CACHE` | value | the cache split of every model call (cached / prefill / prompt) |
+| `CHAT_DUMP` | `=1` | the rendered prompt on stderr, segment by segment |
+| `CONV_DEBUG` | value | the LFM2 conv block's stages for layer 0, next to the CPU reference |
+| `CPU_ADD_GPU` | value | the CPU layer loop folds the residual add in the kernel |
+| `CPU_RMS_GPU` | value | the CPU layer loop's RMSNorm runs the GPU shader (A/B for the PPL gap) |
+| `DUMP_F32` | value | dump rows as raw IEEE bits instead of q16 texels |
+| `FFN_DUMP` | value | the first 8 texels of layer 0's gate output |
+| `HIDDEN_DUMP` | value | the same for the layer output on the GPU path (GPU_LAYER 0 vs 1) |
+| `LOGITS_OUT` | value | float32 logits after prefill, for cmp_logits.py |
+| `MATVEC_DUP` | value | replay one weight-matrix pass per layer (wo,ffn,w2 or all); dup_env() |
+| `MMCF_DEBUG` | value | per-tensor detail while walking the container table |
+| `MODEL_DUMP` | value | the parsed container metadata, right after load |
+| `MOE_DUMP` | value | the route of every MoE layer/position |
+| `MOE_FIXED` | value | pin every MoE layer to one expert and skip the router (a different model) |
+| `PASS_DUP` | value | replay one fixed per-token pass (embed, rms_att, rms_ffn, logits); dup_env() |
+| `PPL_DUMP` | value | one `position token nll` line per scored token |
+| `QKV_DUMP` | value | hash every qkv matvec row; 2 also prints the first two |
+| `RWKV_DUMP` | `=1` | the RWKV block's per-layer peaks (state/residual/sqrelu rails) |
+| `SHADER_SRC` | value | print the GLSL of every program whose key contains the substring |
+| `STAGE_DUMP` | value | per-layer xb/att/x1/xbf/hid/hidA as q16 texels; diff_paths.sh reads it |
+| `TOKENS_OUT` | value | prompt and generated token ids (int32) |
+
+### The 4-bit weight kernels
+
+| Switch | Takes | What it moves |
+|---|---|---|
+| `Q4_SHIFT` | `0\|1` | Q4_SHIFT=0 forces the float nibble decode instead of the ESSL 3.00 shift |
+| `Q4_BFAST` | value | pricing arm: the fast block form of the q4 gate |
+| `Q4_FMT` | `rgba4\|0` | bind an INT4 matrix as GL_RGBA4 (dma-buf); Q4_FMT=0 keeps the packed view |
+| `Q4_GATE_NESTED` | value | restore the nested group-loop 4-bit FFN gate (pre-2026-11-16 default) |
+| `Q4_HFAST` | value | pricing arm: the fast half form of the q4 gate |
+| `Q4_IMPORT_CHECK` | value | after the first imported q4 surface, verify texel (0,0) end to end |
+| `Q4_INLINE` | value | inline the q4 group decode into the kernel body |
+| `Q4_MV4` | value | the four-output q4 matvec form |
+| `Q4_NOMIN` | value | pricing arm: drop the q4 min term |
+| `Q4_NOUNPACK` | value | pricing arm: constant scale/min instead of the group plane (wrong weights) |
+| `Q4_QKV_FLAT` | value | the flat-loop form of the q4 qkv matvec |
+| `Q4_SCOPE` | `all\|attn\|ffn` | which parts Q4_WEIGHTS converts |
+| `Q4_SHIFT_NO_MESA` | value | skip the MESA ES 3.00 version override that Q4_SHIFT needs |
+| `Q4_SHIFT_VERBOSE` | value | report the q4 decode choice at startup |
+| `Q4_TEX_STATS` | value | per texture: dma-buf import or upload, and its logical size |
+| `Q4_W2_FLAT` | value | the flat-loop form of the q4 w2/wo matvec-add |
+| `Q4_WEIGHTS` | value | quantize to q4 at load (prefer an offline container: q8 -> q4 loses twice) |
+
+### RWKV-7
+
+| Switch | Takes | What it moves |
+|---|---|---|
+| `RWKV_CM_SPLIT` | n | the RWKV channel-mix cut point (moves the numbers: the add is per chunk) |
+| `RWKV_GPU` | `=1` | RWKV's fused GPU layer loop (P6); the CPU serial loop is the reference |
+| `RWKV_GROUP` | `0..4` | the serial RWKV path's matvec grouping (P7) |
+| `RWKV_GROUP_CHECK` | `=1` | with the grouping on, recompute every grouped matvec and compare |
+| `RWKV_PREFILL` | `=1` | RWKV chunked prefill (P1): one draw per weight over a batch of tokens |
+| `RWKV_PREFILL_CHECK` | `=1` | compare every batched matvec row against the serial kernel, in the run |
+| `RWKV_PREFILL_N` | n | batch size for RWKV_PREFILL |
+| `RWKV_PREFILL_STRIP` | value | fragment budget of one batched prefill draw (default kDrawCap) |
+| `RWKV_SHIFT_PP` | `=1` | with RWKV_GPU: ping-pong the two token-shift copies (removes 24 draws a token) |
+| `RWKV_WKV_CPU` | `=1` | with RWKV_GPU: the elementwise chain on the GPU, the WKV state on the host |
+| `RWKV_WKV_ONE` | `=1` | with RWKV_GPU: force the WKV update into one draw |
+
+### Prefill batching
+
+| Switch | Takes | What it moves |
+|---|---|---|
+| `PREFILL_PAIR` | value | the two-position prefill pair (on by default); PREFILL_PAIR=0 disables it |
+| `PAIR_WROW` | value | keep the single-position prefill for a model with per-row scale planes |
+| `PREFILL_REPEAT` | value | replay the prefill n times, for timing |
+
+### Loading, memory and the container
+
+| Switch | Takes | What it moves |
+|---|---|---|
+| `MODEL` | value | the container to run when --model is absent |
+| `MODEL_BORROW` | value | MODEL_BORROW=0 copies the CPU weights instead of borrowing the mapping |
+| `SEQ` | value | override the container's KV cache length |
+| `TOKENIZER` | value | override the container's tokenizer blob; nothing warns, leave it unset |
+| `KEEP_CPU_WEIGHTS` | value | keep the CPU weights after the upload (debugging only) |
+| `Q8_LAYERS` | value | per-layer weight precision mix at load |
+| `Q8_PARTS` | value | per-part weight precision mix at load |
+| `UPLOAD_XOR` | value | UPLOAD_XOR=0 restores the byte-at-a-time int8 -> uint8 conversion |
+
+### The tokenizer
+
+| Switch | Takes | What it moves |
+|---|---|---|
+| `TOK_NO_PREFIX` | `=1` | do not force a leading space/prefix before the first token |
+| `TOK_SPACE_FOLD` | `=1` | fold the space that SentencePiece prefixes onto the next piece |
+
+### Sampling and generation
+
+| Switch | Takes | What it moves |
+|---|---|---|
+| `FREQUENCY_PENALTY` | value | sampler: frequency penalty |
+| `IGNORE_EOS` | value | keep generating past the stop token |
+| `MIN_P` | value | sampler: min-p cut |
+| `NO_REPEAT_NGRAM` | value | sampler: block an n-gram from repeating |
+| `PRESENCE_PENALTY` | value | sampler: presence penalty |
+| `REPETITION_PENALTY` | value | sampler: repetition penalty |
+| `BLOCK_MARKERS` | `=1` | mask the <|...|> marker tokens while generating |
+| `GPU_ARGMAX` | value | greedy: reduce the packed q16 logits on the GPU |
+| `LOGITS_SPLIT` | value | unpaired logits rows (a kernel-shape arm of the logits matvec) |
+| `TOPK_FAST` | value | the fast top-k selection path |
+
+### The disk prefix cache
+
+| Switch | Takes | What it moves |
+|---|---|---|
+| `PREFIX_CACHE_RESAVE` | value | write the loaded KV rows back through the save path, to diff the two |
+
+### Read from the environment
+
+| Switch | Takes | What it moves |
+|---|---|---|
+| `TZ` | value | the timezone the tool's date functions render in |
+
+### retired
+
+| Switch | Takes | What it moves |
+|---|---|---|
+| `ATTN_FUSE_PROB` | value | dead: there is no probability texture to read, att_v fuses the decode |
+| `ATTN_HOIST` | value | dead: the hoisted attention path is mandatory, there is no other score kernel |
+| `LEGACY_Q8` | value | dead: gone with the legacy q8 reader (the container states its precision) |
+| `Q4_4X4_FLAT` | value | dead: the 4-wide flat gate arm; the flat 8-wide body is the default |
+| `Q4_4X4_FLAT8` | value | dead: the flat 8-wide arm; it became the default and the arm was removed |
+| `Q4_4X4_FLAT8B` | value | dead: the byte-identical candidate; it is the shipped gate now |
+| `Q4_4X4_FLAT8G` | value | dead: pricing arm, metadata decoded once per group |
+| `Q4_4X4_FLAT8M` | value | dead: pricing arm, metadata applied per iteration |
+| `Q4_4X4_NOOUT` | value | dead: stage-removal arm; the driver deletes the kernel, so it measured 0.8 ms |
+| `Q4_4X4_NOP` | value | dead: pricing arm, constant scale/min (84 ms of the gate's 159 on the Pi) |
+| `Q4_4X4_ONEROW` | value | dead: stage-removal arm, one row of the 4-bit gate (-> 5.71 ms) |
+| `Q4_4X4_ONEW` | value | dead: stage-removal arm, one matrix of the 4-bit gate (8.18 -> 6.31 ms) |
+| `ROPE_HALF` | value | dead: the container carries the rope configuration |
+| `ROPE_THETA` | value | dead: the container carries the rope configuration |
+
+### Legacy spellings
+
+These still work: the registry rewrites them onto the axis value and says so on stderr once.  New code and new notes use the axis name.
+
+| Old | Means |
+|---|---|
+| `ACT_FMT` | `ACT=<same>` |
+| `ACT8=0` | `ACT=i16` |
+| `ACT8=1` | `ACT=i8` |
+| `ACT_F32` | `ACT_CPU=f32` |
+| `ATT_SCALE` | `ATT_SCORE_GRID=<same>` |
+| `ATT_SUM_SCALE` | `ATT_SUM_GRID=<same>` |
+| `ACT8=0` | `FFN_HID=i16` |
+| `ACT8=1`, `ACT8=2` | `FFN_HID=i8` |
+| `KV_FMT` | `KV=<same>` |
+| `KV_PACK=0` | `KV=i24` |
+| `KV_PACK=16` | `KV=q16` |
+| `KV_PACK=8` | `KV=q8` |
+| `KV_SCALE` | `KV_GRID=<same>` |
+| `RES_FMT` | `RES=<same>` |
+| `RES_PACK=0` | `RES=i16_1` |
+
+<!-- END generated: switches -->
+
+
+## Deep dives
+
+The inventory above is generated from the registry; the sections below are the measurements and the decisions behind the rows that have one.  A switch with no deep dive is a switch whose note is the whole story.
+
+
+### Diagnostics and cost attribution
 
 These write the engine's real numbers out so an offline oracle can check them.
 They are the reason `engine/tools/ref_*.py` and `engine/scripts/check_att.py`
 exist.
-
-| Switch | What it dumps |
-|---|---|
-| `STAGE_DUMP=1` | per-layer `xb` (rms_att out), `att`, `x1` (after the `wo` residual), `xbf` (rms_ffn out), `hid` (FFN output), `hidA` (layer out) as hex q16 texels, one line per row: `DUMP <name> w=<texels> h=<hash> <texels>` |
-| `HIDDEN_DUMP=1` | the same for the layer output on the GPU path, so `GPU_LAYER=0` and `GPU_LAYER=1` runs are diffable |
-| `CHAT_DUMP=1` | the rendered prompt on stderr, one line per segment: `PROMPT[in] / PROMPT[tmpl] <bytes> B  <text>`, with newlines escaped.  `[in]` segments came from a message and are the ones the tokenizer must not turn into special tokens; `[tmpl]` is template text.  Before it escaped, a segment's own newlines split it across lines and the tags looked scattered - it read as if the switch did nothing |
-| `CHAT_CACHE=1` | the cache split of every model call on stderr: `CHAT_CACHE turn cached=<n> prefill=<n> prompt=<n>` in the chat REPL, `CHAT_CACHE round=<r> ...` in the tool loop (one line per round).  `cached` is the longest common token prefix with the previous call (or the loaded disk prefix on the first), so `prefill` is what the GPU actually ran |
-| `QKV_DUMP=1` | hashes every layer/position of the `qkv` matvec output; `2` also prints the first two rows.  Layout-agnostic, so `QKV_PAIR=0` and `QKV_PAIR=1` runs compare exactly |
-| `ATT_DUMP=<pos>` | the exact integers the score/softmax path consumed and produced, for every layer at one position.  Feed the log to `engine/scripts/check_att.py` |
-| `FFN_DUMP=1` | the first 8 texels of the layer-0 gate output, for bisecting a 1-LSB drift |
-| `CPU_RMS_GPU=1` | the CPU layer loop computes its RMSNorm with the GPU shader (fixed-point partial sums) instead of the f32 CPU mean: the A/B probe for the fused path's PPL gap |
-| `CPU_ADD_GPU=1` | the CPU layer loop folds the `wo`/`w2` residual add in the kernel (`matvec_add`) instead of a read-back plus `add_q16`: the other half of that A/B |
-| `ACT_CPU=f32` | the CPU layer loop stores activations in f32 instead of on the q16 grid (1/256).  The grid is fine for a residual of order 1 and fatal for one of order 0.01: LFM2.5's embedding row peaks at 0.05, so its first norm saw 2-3 significant bits per component and came out 8.8% off (measured against the float32 numpy reference).  Off by default; on the q4 container it is worth 1.3 PPL, on i16 it is *worse* than the grid -- i.e. the activation grid is not the only error left in this model |
-| `PPL_DUMP=path` | `--ppl` writes one `position token nll` line per scored token.  A mean is not enough to see what a gap is made of: a few catastrophic positions and a uniform 2% error raise PPL the same way |
-| `PPL_STRIDE=n` | window stride for `--ppl` on a file longer than `SEQ`: each window feeds `SEQ` tokens and scores only the last `n`, so every scored token has at least `SEQ-n` tokens of context (default `SEQ/2`, printed as `stride=`).  `0` restores the pre-2026-11-12 cold windows -- stride `SEQ-1`, no warm-up, ~1.8 nats/token worse -- which is the only way to reproduce a long-file PPL measured before that date |
-| `DUMP_F32=1` | `STAGE_DUMP`/`HIDDEN_DUMP` rows print as raw IEEE bits instead of q16 texels.  The q16 form is right for comparing two engine paths, but its 1/256 step is coarser than the early-layer differences in LFM2.5 (activations of order 0.01), so an engine-vs-numpy bisect needs this |
-| `PROMPT_IDS` (with `CHAT_DUMP=1`) | the ids the model will actually see, as `PROMPT_IDS <n>: <id> ...`.  A template that renders to the same bytes can still tokenise differently, and the ids are what the model reads |
-| `CONV_SKIP=1` | LFM2 hybrid (`GPU_LAYER=1`): the conv layers become identity copies, to separate a conv-block bug from the rest of the GPU path |
-| `CONV_DEBUG=1` | prints the first values of the LFM2 conv block's stages (`xb`, `in_proj`, gates, conv output) for layer 0, next to the CPU reference; on the fused path (`GPU_LAYER=1`) it also prints the GPU `gated`/`cv`/`y` stages and the residual the `matvec_add` wrote, so the two paths can be compared without a dump file |
-| `LOGITS_OUT=path` | float32 logits after prefill.  `engine/scripts/cmp_logits.py` compares two of them per tile |
-| `TOKENS_OUT=path` | prompt + generated token ids (int32).  A tool turn rewrites it after each model round, so a watcher sees every round |
-| `MODEL_DUMP=1` | the parsed model metadata, right after load |
-| `MMCF_DEBUG=1` | per-tensor detail while walking the container table |
-| `MOE_DUMP=1` | the route of every MoE layer/position: `MOE l=<layer> route=<expert> gate=<logits>`.  The gate values are the q16 read-back, which is what the argmax saw — compare them with `ref_forward.py --routes` rather than judging a route by the text |
-| `MOE_FIXED=<e>` | pin every MoE layer to expert `e` and skip the router matvec and its read-back.  Prices the routing: on Xe q8 29.3 ms/token against 10.5 pinned, i.e. the eight per-token syncs are most of the difference.  Output is a different model, so it is a measurement switch only |
-| `RWKV_DUMP=1` | the RWKV-7 block's per-layer peaks on stderr, one line per layer per token: `RWKV l=<layer> state_max=<|S|max> resid_max=<|x|max> sqrelu_max=<h²max> w_max=<max w> a_max=<|a|max> [g_max=<|g|max>]`, plus `RWKV final_ln_max=<peak>` once per step before the key-17 `*2^-k` store.  These are the rails the format decisions watch (S-1 state, R-1 residual, Q-1 sqrelu, key 17 final LN); compare them with `engine/tools/ref_rwkv.py --measure`'s per-layer table, which computes the same numbers in f32.  P2 parked them under `STAGE_DUMP`; since P4 they have their own switch and `STAGE_DUMP` no longer prints them |
-| `RWKV_GPU=1` | RWKV-7's fused GPU layer loop (P6): the elementwise ops (LayerNorm, six-way lerp, per-head L2/group norm, key delta, r_k bonus, squared-ReLU, the decay/ICLR/gate low-rank tanh/sigmoid/exp chains) and the WKV7 recurrence run on textures; the matvec family is reused and only the final residual crosses back once per token.  Default off — the CPU serial loop (`forward_rwkv`) stays the reference.  The WKV state is bit-cast f32 in RGBA8 ping-pong textures (native ESSL 3.00, exact recurrence); the norm stats are f32 too.  Requests the MESA ES3 override like `Q4_SHIFT`.  On Xe the g1d 0.1B q8r chat container decodes ~36 ms/token against ~119 CPU (3.3x; bench protocol: warmup discarded + 3-run median).  Acceptance is PPL, not cross-path cosine or greedy (AGENTS.md measurement rules): GPU PPL 9.1850 at SEQ=512 against the CPU pin 9.2919 — same magnitude, slightly lower; the two are separate pins and are not comparable.  The greedy text differs from the CPU pin (chaotic temp-0 sensitivity of a 0.1B model, not a quality defect); the GPU path is deterministic (two runs byte-identical).  See docs/performance.md (2026-11-16, P6) |
-| `RWKV_PREFILL=1` | **RWKV-7 chunked prefill (P1, task-13), default off.**  A prompt is run one *layer* pass at a time over a batch of tokens: r/k/v, the four low-rank down/up pairs, `W_o` and the channel-mix key/value are drawn once per weight for the whole batch (`matvec_q8_batch`, one read-back per matrix) instead of once per token, while the token shift, the elementwise chain and the WKV7 recurrence stay per token and in token order.  The numbers are the serial path's bit for bit: the batch kernel is `matvec_q8`'s text with the input row taken from `gl_FragCoord.y`, and each input keeps its own 2^k normalisation (the rows are grouped by k, one draw per group, exactly the uniform `Session::rwkv_mv` binds) — on Xe a 445-token prompt gives **identical** `LOGITS_OUT` bytes and identical greedy text with the switch on and off.  It only applies to the serial path (not `RWKV_GPU=1`) and only to q8/q8r containers (the batched kernel is the q8 one); a q4/i16 container keeps the serial prefill.  A/B in one binary: `RWKV_PREFILL=0` is the reference.  Same flags cost: the MACs, the host packing and the layer arithmetic are unchanged — only the draws and host read-backs per prompt drop by the batch size.  A one-time guard runs one real projection through both paths when a session first batches and accepts a difference up to 1.0 (Xe: 0, byte-identical; VC4: 0.37 with top-1 unchanged, against 47 for the broken row mapping it guards against); beyond that the serial prefill is used and a line on stderr says so, and an accepted non-zero difference is reported the same way.  `RWKV_PREFILL` is a request, not a promise, on a driver nobody has verified |
-| `RWKV_PREFILL_N=<n>` | batch size for `RWKV_PREFILL=1`, default 16.  Bigger batches buy fewer launches and read-backs per prompt at the cost of host RAM (`n * (13*dim + hidden)` floats) and of taller GL targets (`rows x groups*n`); the last batch of a prompt is short, which is fine (the target only grows).  Must stay under the driver's texture limit: `groups*n <= 2048` on VC4 |
-| `RWKV_PREFILL_STRIP=<n>` | with `RWKV_PREFILL=1`, override the fragment budget of one batched draw (default `kDrawCap` = 1024).  On VC4 a draw is split so that `width * batch_rows <= budget`, i.e. the batch keeps the serial path's draw count while the read-backs still collapse; the question docs/performance.md leaves open on the board is whether `kDrawCap` limits *fragments* (what `rwkv_draw1` and `rwkv_wkv` assume) or *width* (what `draw()`'s comment says), and a larger value tests the width reading.  Xe drives each matrix in one strip per matrix row block |
-| `RWKV_PREFILL_CHECK=1` | with `RWKV_PREFILL=1`, after every batched matvec compare each output row against `GPU::matvec` on the same input **in the same run** and print `RWKV_PREFILL_CHECK member=<i> rows=<r> cols=<c> ndiff=<n>/<r> maxdiff=<d> first=<j>`.  Same shape as `RWKV_GROUP_CHECK` (P7): a difference here is a kernel/plumbing defect, not model drift, so it names the member and the row instead of leaving a PPL move.  It costs one extra draw and read-back per matrix, so it is a bisect only.  Note the 2^k fold: the draw's `ws` already carries the input's 2^k, so the read-back must **not** scale again (that off-by-a-power-of-two was the one defect this switch found) |
-| `RWKV_WKV_CPU=1` | with `RWKV_GPU=1`, keep the elementwise chain on the GPU but run the WKV7 recurrence on the host f32 state (the hybrid fallback).  Also forced automatically when the driver offers no ESSL 3.00, since the bit-cast state kernels need it.  An A/B for the recurrence's contribution; reads the six WKV inputs back once per layer, so it is slower than the full GPU path |
-| `RWKV_CM_SPLIT=<rows>` | **RWKV-7 channel-mix cut (cm task), a measurement arm that moves the numbers.**  On VC4 `split_rwkv` cuts the 3072-row channel-mix key (and the value's columns) into two chunks, because one weight texture cannot exceed `GL_MAX_TEXTURE_SIZE`=2048; the default is the even 1536+1536.  This sets the cut point instead: `2048` is 2048+1024, `1024` is 1024+2048 (both halves must fit one texture and stay non-empty, or the engine prints one line and keeps the even cut).  It decides how many `kDrawCap`-sized strips the key matvec and its relu^2 take on VC4 — `draw()` and `rwkv_draw1` both split at 1024 fragments, so 2048+1024 is 3+3 strips against 1536+1536's 4+4 — and `init_rwkv` sizes each chunk's relu^2 scratch to that chunk, so the narrow half's draws are narrow too.  **It also moves the grid**: the q16 residual add runs once per chunk, so the cut point changes where the channel mix is rounded (Xe, `RWKV_CHUNK_TEST=1`, SEQ=512: 1536 -> 9.3712, 2048 -> 9.1726, 2040 -> 9.4001, 1024 -> 9.2531).  A/B it with `RWKV_PROFILE=1`'s `cm layer=` line; unset (or 1536) is the pin's path and is bit-identical to it |
-| `RWKV_SHIFT_PP=1` | with `RWKV_GPU=1`, the two token-shift **copies** a layer become a ping-pong on the token parity: the norm renders straight into this token's shift texture and the lerp reads the other one, so `rwkv_copy` is not drawn — 2 of the layer's 16 cm-region draws, 24 a token.  Byte-identical to the copy form by construction (the same I24 bytes land in the slot the next token's lerp reads) and verified so on Xe: GPU PPL 9.1850 and `TOKENS_OUT` identical to the copy arm, greedy text identical.  It is the calibrated probe for "what is a draw worth on this board": a change that removes exactly 24 draws a token with no arithmetic difference at all, so any decode delta is launch cost.  Default off, because the copy form is the one p6 shipped and shipped verified |
 
 `engine/scripts/dump_stats.py` turns a `STAGE_DUMP`/`HIDDEN_DUMP` file into
 `max|x| / mean|x| / clamped-count` per row, which is how a saturating
@@ -79,22 +315,15 @@ accumulator is spotted.  `engine/scripts/diff_paths.sh` runs both paths and
 compares them with `dump_diff.awk` — read that script's header before drawing a
 conclusion from its output.
 
-## Probes: cost attribution
-
-All default off, and the replay probes are bit-exact, so they can be enabled
-without moving the gate:
-
-- `ATTN_DUP=qkv,rope,qknorm,qrot,score,stats,v|all` — replay one attention pass
-  per layer; the end-to-end delta is that pass's marginal cost.
-- `PASS_DUP=embed,rms_att,rms_ffn,rms_final,logits,logits_draw|all` — the same
-  for the fixed per-token passes (`logits_draw` also skips the read-back).
 - `MATVEC_DUP=wo,ffn,w2|all` — the same for the weight-matrix passes, which the
   two probes above leave as one residual (they are ~78% of a q4 token).  `ffn`
   prices the whole split-chunked FFN (gate + swiglu), `w2` both column halves.
   The w2 halves cannot be replayed in place: `w2b` writes the texture `w2a`
   reads as its residual, so a replay after the fact doubles it — each replay
   goes to its own scratch target instead.
+
 - `DRAWCOUNT=1` — print draws per decoded token.
+
 - `SYNCCOUNT=1` — print host↔GPU synchronisations per decoded token: every
   `glFinish` plus every `glReadPixels` on the read-back path (the matvec
   target, the logits target, `read_bytes`).  Both counters are **decode only**
@@ -103,10 +332,13 @@ without moving the gate:
   judged by, because that path is launch/sync-bound rather than MAC-bound
   (`docs/rwkv7-plan.zh-CN.md` §九, P6).  One token on the CPU path is ~230
   draws / ~167 syncs; the fused GPU path is ~1150 draws / ~3 syncs (Xe).
+
 - `LAYER_PROFILE=1` — per-pass marks.  The `glFinish` in the lap also retires
   the draw issued before it, so use the replay probes to price a pass; keep
   `LAYER_PROFILE` for finding *which* pass moved.
+
 - `PAIR_PROFILE=1` — the same for the two-position prefill pair.
+
 - `TIMING=1` — prefill and decode to stderr.  The line is printed on every way
   out of a turn, including the interrupted ones: Ctrl-C during prefill, Ctrl-C
   or SIGTERM during decode, and a context that filled up all used to return
@@ -114,24 +346,33 @@ without moving the gate:
   An interrupted turn appends `cut=prefill|decode|context` after `gen=`, which
   makes a short `gen=` unambiguous.  Covers chat turns, tool turns and the
   plain `--prompt` path.
+
 - `SHADER_TIME=1` — `STARTUP <ms>` phase marks and one line per fragment
   program link (`link <ms>`, source bytes, key, cumulative).  It also prints
   `rmsnorm eps: <v> (container-stated)` when the container carries key 11.
+
 - `UPLOAD_TIME=1` — `UPLOAD <s> wall, <n> textures, texture time <ms>` after
   the weight upload (also implied by `SHADER_TIME=1`).
+- `RWKV_CHUNK_TEST=1`：在桌面（GL 上限 16384）强制 RWKV channel-mix 按 2048 行分块，
+  复现/验证 VC4 的分块路径（Pi 天然触发）。只影响 split_rwkv 的 max_dim。
 
-## A/B switches for the landed decode work
+- `RWKV_GPU=1`：启用 RWKV-7 GPU 融合层循环（P6，默认 CPU 串行）。
 
-Each defaults to the fast path and exists so a change can be A/B-ed inside one
-binary.  They are measurement hooks, not production settings.
+- `RWKV_GPU_DBG=1`：RWKV GPU 路径逐层诊断打印（P6）。
+
+### The decode path's A/B switches
 
 - `QKV_PAIR=0` — single-row qkv matvec; the paired rows are the default
   (200.7 vs 183.5 ms/token).
+
 - `FFN_FUSE=0` — two-pass FFN gate+swiglu; the fused kernel is the default
   (228.7 vs 183.5 ms/token).
+
 - `FFN_PAIR=0` — unpaired FFN rows; the paired q8/q4 path is the default (the
   paired shader covers q8 and q4, and `FFN_FUSE` only applies inside it).
+
 - `LOGITS_SPLIT=1` — unpaired logits rows.
+
 - `GPU_ARGMAX=1` — greedy sampling reduces the packed q16 logits to the
   winning token on the GPU (the proven `top2_fast_packed` chunk pass, then
   two small 16-bound reduce passes; one texel per tile read back) instead of
@@ -143,13 +384,16 @@ binary.  They are measurement hooks, not production settings.
   winner is byte-identical to the read-back.  Only greedy turns without
   penalties, marker masks, `LOGITS_OUT` or logprobs take it; the unpacked
   logits layout (i16 weights, `ACT8`) always keeps the read-back.
+
 - `ARGMAX_DUMP=1` — with the greedy fast path, print the chunk winners, the
   per-tile winners and the CPU argmax of the same logits, so a wrong winner
   can be located stage by stage.  Diagnostic only; it reads the vocabulary
   back, so it erases the saving it is debugging.
+
 - `READBACK_TIME=1` — print the per-token logits finish/read-back timing:
   `finish` and `readback` separately on the full-read-back path, and one lap
   per reduction stage on the greedy fast path.  Diagnostic only.
+
 - `RWKV_PROFILE=1` — the RWKV paths' per-phase timing, read-only (no numbers
   move: every hook is a cached switch around a clock read, and the fused path's
   laps are `glFinish` only when the switch is on).  Serial path prints one line
@@ -177,6 +421,7 @@ binary.  They are measurement hooks, not production settings.
   layer line's `cm`, so that field still means the whole cm region.  A head line
   (`RWKV_PROFILE head total=...`) prices the logits pass on both paths.  The
   first token of a process includes the program links and is not steady state.
+
 - `RWKV_WKV_ONE=1` — force the fused path's WKV update to **one** draw on a
   driver that would otherwise split it at `kDrawCap` (VC4: 48 strips a layer,
   576 draws a token = 31% of the board's draws).  Default off, and it exists to
@@ -185,6 +430,7 @@ binary.  They are measurement hooks, not production settings.
   the reply collapses, which is itself the answer; if it is *width*, the board
   saves 47 of its 48 update draws a layer with the numbers unmoved (Xe takes
   this arm by default, so it is bit-identical there).
+
 - `RWKV_GROUP=0|1|2|3|4` — the serial RWKV path's matvec grouping (P7, A2/A3).
   `1` (the default everywhere except VC4) draws a group of independent matvecs
   into the rows of one target
@@ -199,20 +445,25 @@ binary.  They are measurement hooks, not production settings.
   before P7 and 9.3047 after, so a machine whose read-back behaviour has not
   been bisected keeps the pre-P7 path and loses only the sync win, not the pin.
   Every other driver keeps `1`.
+
 - `RWKV_GROUP_CHECK=1` — with the grouping on, recompute every grouped matvec
   with `rwkv_mv()` in the same process and print the first 12 members that
   differ (`member rows cols ndiff/n maxdiff first`).  It turns "the board drifts
   by 0.0006 nats" into "member 2 of the down group is off by one q16 step from
   index 40", which is what named the read-back rather than the arithmetic.
   Diagnostic only: the extra matvec and read-back erase the saving.
+
 - `RMS_SPLIT=1`, `RMS_FUSED=1` — force the split or fused rmsnorm reduce.  VC4
   defaults to fused (it drops one draw per norm); other drivers default to
   split, where 32 extra fetches per fragment can cost more than the draw.
+
 - `Q8AP_INLINE=0`, `FFN_SW_INLINE=0` — restore the generic `X4Q` activation
   decode in the w2/wo and FFN gate+swiglu kernels.
+
 - `UPLOAD_XOR=0` — restore the byte-at-a-time int8 → uint8 weight conversion.
   The default converts four bytes at a time with the equivalent `^ 0x80`; the
   texture bytes are identical either way.
+
 - `Q16_DECODE=exact` — the q16 activation decode.  The default is the fast
   float reconstruction (`c.x*65280 + c.y*255`) with the negative-rail sign
   classified at `32767.5`: two multiplies and an add per value, which is what
@@ -225,6 +476,7 @@ binary.  They are measurement hooks, not production settings.
   pinned strings, at the cost of the board's i16 model (326.8 against 216.0
   ms/token).  Both spellings are the same arithmetic up to the reconstruction
   error; see `docs/vc4-glsl-costs.md` for why the fast one is cheaper.
+
 - `RES=i16|i16_1|i24|f32` — the residual stream's format.  `i16` (default) is
   the two-q16-per-texel packed stream (q8 and q4 pack by default; an i16
   container does not, because its add kernels write one q16 a texel); `i16_1`
@@ -232,33 +484,24 @@ binary.  They are measurement hooks, not production settings.
   form; `f32` the bit-cast one, same memory as `i24`, needs ESSL 3.00.
   `RES` overrides a container's own q24 declaration (which is what
   `RES_FMT=i24_1` used to do, in the other direction).
+
 - `PREFILL_PAIR=0` — disable the two-position prefill pair (the default since
   step 5 of the prefill-batching work).  `diff_paths.sh` sets it so both paths
   step every position through the same code.
+
 - `PAIR_WROW=0` — keep the single-position prefill path for a model with
   per-row q8 scale planes.  The pair kernels have wrow variants and are on by
   default: byte-identical tokens, and warm prefill 7.0-7.2 s against 8.2-8.4 s
   on a Pi Zero with void.1 q8r.  The paired path compiles the P2 program set,
   so its *first* prefill is dearer (15.9 against 14.1 s); that is startup.  The
   switch exists so the A/B can run inside one binary, with `PREFILL_REPEAT`.
-- `PREFILL_REPEAT=n` — replay the prefill `n` times, for timing.
+
 - `FFN_FLUSH=0`, `FFN_SYNC=1`, `LAYER_SAFE_FINISH=1`, `FORCE_GLFINISH=1` —
   finish/flush policy.  `LAYER_SAFE_FINISH=1` restores the fully-finished
   `GPU_LAYER` path; `FORCE_GLFINISH=1` forces the VC4 finish path on other
   drivers.
 
-## Placement: which path runs
-
-- `GPU_LAYER=1` — hidden state, attention, RMSNorm and FFN all on the GPU.  The
-  fast path; not correct for every model on VC4 (see `docs/performance.md`).
-- `GPU_ATTN=1` — GPU RoPE + KV cache + attention, CPU FFN.
-- `CPU_FFN=1`, `GPU_FFN=1` — force FFN placement.
-
-> `GPU_LAYER=0` is **not** CPU-only: attention/FFN move to the CPU, but the
-> matvecs and logits still run on the GPU.  The engine has no CPU matvec path,
-> so "CPU attention" numbers are mixed CPU/GPU measurements.
-
-## Precision and quality
+### Precision and the format axes
 
 - `ACT=i16|i8|f32` — the GPU activation streams' format: the uploaded `h`, the
   attention block's output, `xb` and `xbf`.  `i16` (default) is the q16 pair
@@ -267,8 +510,10 @@ binary.  They are measurement hooks, not production settings.
   `ACT_FMT=f32`).  The f32 form is the largest single fidelity term measured on
   MNN-Pocket: cosine 0.9415 with the q16 streams against 0.9552 with f32 ones
   (float32 numpy reference, same q4 container).
+
 - `FFN_HID=i16|i8` — the FFN hidden stream's width alone (`ACT8=2` set only
   this; `ACT8=1` set this *and* `ACT`).  q8 weights only.
+
 - `ACT_CPU=q16|f32` — the CPU layer loop's activation grid, a *placement*
   question next to the two above (was `ACT_F32=1`; that spelling meant "on" for
   any value, including `ACT_F32=0`, and the new one means `f32`).  The grid is
@@ -277,12 +522,16 @@ binary.  They are measurement hooks, not production settings.
   component and came out 8.8% off against the float32 numpy reference.  On the
   q4 container it is worth 1.3 PPL, on i16 it is *worse* than the grid — the
   activation grid is not the only error left in that model.
+
 - `Q8_LAYERS=all|0,1,...`, `Q8_PARTS=qkv,wo,ffn,w2,logits,emb` — precision mix.
+
 - `Q4_WEIGHTS=1` — runtime q4 conversion for experiments.  Prefer the offline
   Q4M1 container; `Q4_SCOPE=all|attn|ffn` only applies to runtime conversion.
+
 - `Q4_SHIFT=0` — force the float nibble decode instead of the ESSL 3.00 shift
   decode (`Q4_SHIFT_NO_MESA`, `Q4_SHIFT_VERBOSE` are VC4-specific overrides).
   `gpu_q4_shift()` reports the choice at startup.
+
 - `Q4_GATE_NESTED=1` — restore the nested group-loop form of the 4-bit FFN
   gate (the pre-2026-11-16 default) for an interleaved A/B.  The default is
   the flat 8-wide gate: byte-identical (probe hash matches at 304/608/1216/2048
@@ -290,6 +539,7 @@ binary.  They are measurement hooks, not production settings.
   (6.55 -> 3.74 ms/draw).  The nine `Q4_4X4_*` arms that priced that road are
   gone (see Retired below): the flat 8-wide body is the default, so what is left
   of them is the measurement, in `docs/performance.md`.
+
 - `Q4_QKV_FLAT=1`, `Q4_W2_FLAT=1` — opt into the flat-loop form of the qkv
   (`matvec_i4_4x4`) and w2/wo (`matvec_i4_add_4x4`) 4-bit kernels.  **Default
   off: measured a net loss.**  The same rewrite that sped the gate up -43%
@@ -299,6 +549,7 @@ binary.  They are measurement hooks, not production settings.
   byte-identical (same per-group operation order via conditional float
   updates; w2 keeps its generic `X4Q` decode) and stay as the measurement
   arms that produced the negative result.
+
 - `Q4_FMT=rgba4` — bind every INT4 weight matrix (qkv, wo, w13 and, on the
   hybrid, the conv block's `in_proj` slices and `out_proj`) as a four-bit texel surface
   at twice the width: four weights per texel, sampled as n/15 with the 15 folded
@@ -316,17 +567,20 @@ binary.  They are measurement hooks, not production settings.
   unchunked FFN path (`ffn_split` reads packed nibbles).  Not bit-exact:
   `15*(n/15)` is not exactly `n`, so q4 PPL reads ~326 against the packed 330
   and the greedy strings have not moved on either machine.
+
 - `Q4_IMPORT_CHECK=1` — after the first imported q4 surface, sample texel (0,0)
   through a 1x1 render and print the word handed in against the four components
   that came back.  This is what showed the imported surface reports the word's
   nibbles reversed, i.e. that the import must be given the same `rev` buffer the
   upload path uses.
+
 - `Q4_TEX_STATS=1` — print, per texture, which path it took (dma-buf import or
   upload) and its logical size.  It deliberately reports no `CmaFree` delta: on
   this driver those are page-cache migration, not the texture (the same shape
   read 2020, 2436, 4576 and 4544 kB in four consecutive uploads, and one RGBA8
   upload *raised* CmaFree).  The measurement it used to attempt is now done with
   `/sys/kernel/debug/dri/0/bo_stats`, read around a whole process.
+
 - `KV=i24|q8|q16|bf16|f32` — the KV cache's encoding, one value for one axis.
   `i24` (the default for a dense model) is one 24-bit fixed-point value a texel
   (width `2*kv_dim`); `q16` two int16 a texel (width `kv_dim`) and `q8` four
@@ -346,8 +600,10 @@ binary.  They are measurement hooks, not production settings.
   `KV_PACK=0|8|16` and `KV_FMT=bf16|f32` are the spellings this replaces, and
   they are what the server still sends (`KV_PACK=<bits>`), which is why the
   registry translates them.
+
 - `KV_GRID=N` — the fixed-point KV scale (was `KV_SCALE`; default 16384 for
   `i24`, 2048 for `q16`, 16 for `q8`).
+
 - `KV=bf16|f32` — the value encodings this axis gained.  Default is the fixed
   q16/q24 grid on `KVSCALE`.  `bf16` keeps two values a texel (same layout, same
   memory, same fetch count) with a uniform 0.1% relative error, which is the
@@ -358,6 +614,7 @@ binary.  They are measurement hooks, not production settings.
   wins on large values and bf16's uniform 0.1% loses to it, so bf16 is not a
   free upgrade; f32 is the only one that removes the rounding, and it buys
   0.002 cosine for 2x the KV memory and 2x the KV fetches.
+
 - `ATT_SCORE_GRID=N` (was `ATT_SCALE`) — the attention score/(max) grid: the score texel holds
   `round(score*N)`, so the range is `+-32768/N` and the step `1/N`.  Default
   1024 (+-32, step 1/1024), which is what every model before 2026-11-17 was
@@ -368,9 +625,11 @@ binary.  They are measurement hooks, not production settings.
   with the f32 streams), because the coarser step costs more than the clip
   saves.  The fix for a score that really overflows is the f32 score stream,
   not a wider fixed grid.
+
 - `ATT_SUM_GRID=N` (was `ATT_SUM_SCALE`) — the exp-sum grid in the same
   (max,sum) texel when the sum is linear (default 32, step 1/32).  Ignored with
   `ATT_SUM=log2`.
+
 - `ATT_SUM=linear|log2` — the sum's *domain*.  `log2` stores
   `log2(sum)*2048` in the same q16 slot and costs one `exp2` in `att_v`; the
   relative step is then 0.03% for any sum from 1 to `SEQ`, where the linear
@@ -383,90 +642,69 @@ binary.  They are measurement hooks, not production settings.
   With `KV=q16` the packed layout is two int16 per RGBA8 texel (width 384) and
   `KV=q8` four int8 (width 192), instead of the `i24` layout's one 24-bit value
   (width 768) — that is the `KV_PACK=16|8` spelling folded into the axis.
+
 - `KV8_SIM=1..6`, `KV8_SIM_SCALE=N`, `KV8_STATS=1` — price an 8-bit KV grid on
   the CPU attention path (`GPU_LAYER=0`): 1 global K+V, 2 per-head K+V, 3 global
   K, 4 global V, 5 per-head V, 6 per-head K.  Probe only, no GPU kernel.
+
 - `SEQ=N` — override the checkpoint KV cache length; tools auto-bump to 768,
   worker mode auto-bumps to 1024.
 
-## Loading and memory
+### Placement
 
-- `MODEL` — the container path.  Everything else (tokenizer, template, rope,
-  specials) comes from the file.
+- `GPU_LAYER=1` — hidden state, attention, RMSNorm and FFN all on the GPU.  The
+  fast path; not correct for every model on VC4 (see `docs/performance.md`).
+
+- `GPU_ATTN=1` — GPU RoPE + KV cache + attention, CPU FFN.
+
+- `CPU_FFN=1`, `GPU_FFN=1` — force FFN placement.
+
+### Loading, tokenizer, sampling, prefix cache
+
+- **`TOKENIZER=`** is the one trap in this file: it is *not* retired, and the
+  engine loads that blob *instead of* the container's embedded tokenizer
+  (`engine.cpp`: `if (model.tok_blob && !getenv("TOKENIZER"))`).  Nothing warns,
+  the token ids then mean something else, and for a model whose stop token is
+  vocabulary-dependent the answer comes back **empty**.  Leave it unset; if a
+  run prints no `tokenizer: ... embedded` line, this variable is why.
+
 - `MODEL_BORROW=0` — copy the weights out of the mapping instead of borrowing
   them.  Borrowing is the default: a 69 MB q8 checkpoint then costs no RSS and
   reloads in tens of milliseconds.
+
 - `KEEP_CPU_WEIGHTS=1` — keep the CPU copies after texture upload (default:
   free them; q8 MiniMind3 RSS drops from ~119 MB to ~56 MB).
-
-## Tokenizer
-
-The container normally decides how text becomes ids: the blob is inside the
-file, and the template supplies whatever prefix the model was trained with.
-Two switches exist for the cases where it does not, both of them about the
-SentencePiece dummy prefix (a leading `▁` that a Llama-shaped tokenizer adds
-before the first word):
-
 - `TOK_NO_PREFIX=1` — do not add it at all.  This is what matches HF's
   `tokenizers.encode()` on a raw string, and it is what a fixture test needs
   when the reference tokenizes the same text.
+
 - `TOK_SPACE_FOLD=1` — add it as part of the text (`" hello"`) instead of
   emitting it as its own token, so the BPE can merge it into `▁hello`.  The
   default emits it separately, which is what the MiniMind2/3 gates were
   baselined on.
-
-Measured on a Llama-shaped fixture (`tiny-random-LlamaForCausalLM`), `"hello"`:
-
-| setting | ids |
-|---|---|
-| default | `[22172, 28401]` — prefix emitted as its own token |
-| `TOK_SPACE_FOLD=1` | `[22172, 28401]` — no merge, same output |
-| `TOK_NO_PREFIX=1` | `[12199, 4456]` — no prefix at all |
-| HF `tokenizers` | `[22172]` — prefix merged into the word |
-
-So neither switch reproduces HF for that model yet; see `engine/src/tokenizer.cpp`
-and the note in `docs/performance.md` (2026-11-09).  `make_tok.py --input` builds
-the blob these switches act on.
-
-## Generation
-
-- `--greedy` — deterministic argmax sampling.
 - `--seed N` — RNG seed for non-greedy sampling (default 1234).
+
 - `--top-k N` — hard top-k truncation before top-p (0 = off).  The default is
   the exact CPU path: the k kept logits are selected with `nth_element` and
   sorted, the rest are dropped.
+
 - `--top-k-candidates` — with `--top-k`, use the candidate pass (per-tile
   top-2 + logsumexp) instead of the full logits; it falls back to full logits
   when the candidate mass is below `top_p`.  This is the approximate path, not
   the correctness baseline.
+
 - `TOPK_FAST=1` — with `--top-k-candidates`, use the older renormalized
   candidate path; also approximate.
-- `--system TEXT` — override the default system prompt.  The compiled default
-  is `You are a helpful assistant.`; the checkpoint may state its own.
-- `--thinking`, `--open-thinking` — prefill `<think>` instead of the empty
-  think block.
-- `--tools JSON`, `--tools-file PATH` — inject tool definitions.
-- `--worker` — long-lived JSONL generation worker used by the OpenAI server.
+
 - `IGNORE_EOS=1` — keep generating after the stop tokens, for 64-token math
   tests.
-
-## Prefix cache
-
-- `--build-prefix-cache PROMPT_FILE CACHE_FILE` — prefill a fixed prefix and
-  dump the per-layer KV textures.
-- `--prefix-cache CACHE_FILE` — load a validated KV prefix at worker startup.
-  The header binds the activation format, `KV_PACK` and `KV_SCALE`, so a cache
-  built with different flags is rejected.
-- `PREFIX_CACHE_RESAVE=path` — CLI only, with `--prefix-cache`: write the
-  just-loaded KV rows back out through the normal save path, so the load can be
-  compared byte for byte with the built file (`cmp`).
-
 - `RES=i16|i16_1|i24|f32` — see the residual row above.  `f32` stores the
   residual as a bit-cast IEEE float, one value per RGBA8 texel — the 24-bit
   layout, so the same memory — and needs the ESSL 3.00 compiler `init_egl()`
   asks for when this is set.  A residual that exceeds the q16 rail (±128) is
   what a container's q24 flag answers; `f32` is the same answer without the
   fixed-point step.
+
 - `ACT=i16|i8|f32` — the *activation streams'* format: the uploaded `h`, the
   attention block's output, `xb` and `xbf` (`i16` is the default q16 grid at
   `ACT_SCALE=256`, `f32` the same bit-cast one-value-a-texel encoding as
@@ -478,7 +716,9 @@ the blob these switches act on.
   0.9415 with the q16 streams, 0.9552 with the f32 ones — the largest single
   fidelity gain of the 2026-11-17 campaign, and the reason the qkv and attention
   kernels had to learn the format at all.
+
 - `KV_FMT` also has an `f32` value; see the KV row in this section.
+
 - `SHADER_SRC=<substr>` — prints the generated GLSL for program keys containing
   the substring.  The builder branches on the activation and residual formats,
   and reading the generated text is the only way to be sure which branch ran.
@@ -498,55 +738,22 @@ the blob these switches act on.
   makes `#version 310 es` fail on Xe too.  `MESA_GLSL_VERSION_OVERRIDE` is
   inert on both boards — measured, see `docs/engine-internals.md` §4c.
 
-## Retired
+## Removed
 
-- `ATTN_HOIST=0`, `ATTN_FUSE_PROB=0` — the hoisted/fused attention path became
-  mandatory with the q16 layout, and the code they selected was removed: the
-  variables now do nothing at all (there is no unhoisted `att_score` and no
-  probability texture to read).
-- `LEGACY_Q8=1`, `ROPE_THETA=`, `ROPE_HALF=`, `--template` — gone with the
-  legacy readers; the container states all of it.
-- `Q4_4X4_ONEW`, `Q4_4X4_ONEROW`, `Q4_4X4_NOOUT`, `Q4_4X4_NOP`,
-  `Q4_4X4_FLAT`, `Q4_4X4_FLAT8`, `Q4_4X4_FLAT8M`, `Q4_4X4_FLAT8G`,
-  `Q4_4X4_FLAT8B` — the 2026-11-16 q4 campaign's nine arms, **removed
-  2026-11-17** (194 lines of builder).  They were stage removals and loop
-  shapes on the way to the flat 8-wide gate, which is the default, so each one
+The generated table above lists every retired switch (the `retired` axis) with
+what it did.  Three things about the removals are still worth a sentence:
+
+- `--template`, `ROPE_THETA=` and `ROPE_HALF=` were removed with the legacy
+  readers (`fcc4095`): the container carries the chat template, the rope
+  configuration, the BOS policy and the special ids.  Passing them is silently
+  ignored, which is worse than an error.
+- The nine `Q4_4X4_*` arms were deleted on 2026-11-17 (194 lines of builder):
+  they were the road to the flat 8-wide gate, which is the default, and each one
   was a second kernel text to keep verified for a conclusion already in the
-  code.  `shader_hashes.txt` did not move when they were deleted, which is what
-  makes the deletion safe to believe.  What they measured stays in
+  code.  `shader_hashes.txt` did not move when they went, which is what makes
+  the deletion safe to believe.  What they measured stays in
   `docs/performance.md`: `NOOUT` is not a price (0.8 ms against 8.2, the driver
-  deletes the kernel), one matrix is 8.18 -> 6.31 ms and one row 5.71, and the
-  group plane was 84 of the gate's 159 ms on the Pi.
-- **`TOKENIZER=` is *not* retired**, and it is the one to be careful with: the
-  engine loads that blob *instead of* the container's embedded tokenizer
-  (`engine.cpp`: `if (model.tok_blob && !getenv("TOKENIZER"))`).  Nothing warns,
-  the token ids then mean something else, and for a model whose stop token is
-  vocabulary-dependent the answer comes back **empty**.  Leave it unset; if a
-  run prints no `tokenizer: ... embedded` line, this variable is why.
+  deletes the kernel), one matrix 8.18 -> 6.31 ms, one row 5.71, and the group
+  plane 84 of the gate's 159 ms on the Pi.
 - `--kv-pack` and `--seq` are **server** flags, never engine flags: the server
-  turns them into `KV_PACK` / `SEQ` for the worker it spawns.
-
-## Ad-hoc debug
-
-Investigation leftovers that this document does not define.  None is part of a
-contract: read the call site before relying on one, and never build a product
-path on one.
-
-| Switch | What it does |
-|---|---|
-| `Q4_INLINE`, `Q4_MV4`, `Q4_NOUNPACK`, `Q4_BFAST`, `Q4_HFAST`, `Q4_NOMIN` | select q4 kernel variants (inline decode, vec4, no unpack, fast/slow nibble paths, drop the min term).  Landed variants are the default; these exist to A/B them inside one binary.  Every q4 kernel unpacks through `q4_taps()`, so `Q4_NOUNPACK`/`Q4_BFAST`/`Q4_HFAST` and the ESSL 3.00 shift decode reach all of them (`scripts/shader_hashes.sh` shows `q4shift0/` and `q4shift1/` entries); `Q4_MV4` and `Q4_NOMIN` are scoped to the paired swiglu gate. |
-| `KV_VSTEP` | 8-bit KV per-head V step (step 9b/9c experiment) |
-| `MATVEC_STRIP` | debug the 1536-column strip split in `draw()` |
-| `NO_SHADER_SELFTEST` | skip the link-time program self-test |
-| `DRAW_CLEAR` | fill a draw target with 0x33/0x66/0x99/0xff before the draw, so a readback can tell "the draw did not execute" from "the draw saw stale input" (used to pin down the 1536-draw drop, `docs/engine-internals.md` §2) |
-| `TZ` | timezone for the built-in `get_current_time` tool |
-
-`REPETITION_PENALTY`, `FREQUENCY_PENALTY`, `PRESENCE_PENALTY`,
-`NO_REPEAT_NGRAM` and `MIN_P` mirror the CLI flags of the same name; the flags
-win, and the worker protocol sets them per request.
-
-- `RWKV_CHUNK_TEST=1`：在桌面（GL 上限 16384）强制 RWKV channel-mix 按 2048 行分块，
-  复现/验证 VC4 的分块路径（Pi 天然触发）。只影响 split_rwkv 的 max_dim。
-
-- `RWKV_GPU=1`：启用 RWKV-7 GPU 融合层循环（P6，默认 CPU 串行）。
-- `RWKV_GPU_DBG=1`：RWKV GPU 路径逐层诊断打印（P6）。
+  turns them into `KV` / `SEQ` for the worker it spawns.

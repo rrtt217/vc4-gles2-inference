@@ -36,7 +36,11 @@ $ROOT/engine/README.md $ROOT/engine/README.zh-CN.md \
 $ROOT/server/README.md $ROOT/server/README.zh-CN.md \
 $ROOT/models/README.md $ROOT/engine/probes/README.md $(ls "$ROOT"/docs/*.md 2>/dev/null)"
 
-# 1. the switch registry against the source and against test-hooks.md
+# 1. the switch registry against the source and against test-hooks.md, and the
+# document's generated inventory against the registry (the inventory is
+# rendered, so "the doc is stale" is a mechanical verdict, not a review)
+if ! python3 scripts/gen_test_hooks.py --check; then fail=1; fi
+
 # Every switch the engine reads has a row in src/switches.cpp (the inventory),
 # the row has to be read somewhere, a retired row must not be read, and the row
 # has to be documented.  This replaced a grep loop in 2026-11-17: the grep could

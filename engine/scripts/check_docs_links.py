@@ -141,8 +141,15 @@ def check_doc_to_source():
                    for p in (ROOT / "engine/src").glob("*.cpp"))
     # A switch is read through `getenv("X")`, through one of the common.h
     # helpers, or through the switch registry's own accessors (sw_enum("ACT")).
-    read = set(re.findall(r'(?:getenv|env_set|env_flag|env_int|env_double|sw_isset|'
-                          r'sw_flag|sw_int|sw_num|sw_str|sw_enum)\(\s*"([A-Z_0-9]+)"', src))
+    # The registry's reader set is the same definition, so use it instead of a
+    # second regex: this direction exists to catch a *stale* name, and a name
+    # the registry knows as a legacy spelling (ACT8, KV_PACK, RES_PACK) is not
+    # stale -- it is documented on purpose, next to the axis that replaced it.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import switch_registry as reg
+    read = set(reg.reads()) | {l for l, _, _, _ in reg.load()[1]}
+    for r in reg.load()[0]:
+        read |= set(r.aliases)
     bad = 0
     for name in sorted(set(TEST_HOOK.findall(hooks.read_text(encoding="utf-8")))):
         if name in NOT_ENGINE_SWITCHES or name in read or EXTERNAL_SWITCH.match(name):
