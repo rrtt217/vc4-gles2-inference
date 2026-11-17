@@ -241,7 +241,27 @@ void Model::split_rwkv(int max_dim){
         // stays <= max_dim.  Xe (16384) never chunks.
         const int F = w1.empty() ? 0 : w1[0].rows;
         if (F > max_dim) {
-                const int c = (F + 1) / 2;
+                // The cut is even by default.  RWKV_CM_SPLIT=<rows> moves it
+                // (docs/test-hooks.md): the chunk widths decide how many
+                // kDrawCap-sized strips the key matvec and its relu^2 take
+                // (draw() and rwkv_draw1 both split at 1024 fragments), so a
+                // 2048+1024 cut is 3+3 strips against 1536+1536's 4+4 on VC4.
+                // It is a measurement arm: the split point moves the q16
+                // residual grid (two adds, whose first input is the chunk sum),
+                // so the PPL it lands on is the arm's own, not the pin's.
+                // Both halves must still fit one texture, and the cut must
+                // leave both halves non-empty.
+                int c = (F + 1) / 2;
+                const int cut = env_int("RWKV_CM_SPLIT", 0);
+                if (cut > 0) {
+                        if (cut >= F || cut > max_dim || F - cut > max_dim) {
+                                cerr << "RWKV_CM_SPLIT=" << cut << " is not a usable cut for "
+                                     << F << " rows (texture limit " << max_dim
+                                     << "); using " << c << "\n";
+                        } else {
+                                c = cut;
+                        }
+                }
                 ffn_chunked = true;
                 ffn_chunk = c;
                 w1a.resize(layers); w1b.resize(layers);

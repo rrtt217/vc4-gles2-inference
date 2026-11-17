@@ -38,14 +38,26 @@ void GPU::init_rwkv(const Model& m){
 
         // Low-rank widths (the t intermediates); uniform across layers, but take
         // the max so a ragged container cannot undersize a scratch target.
-        int rwm = 0, ram = 0, rvm = 0, rgm = 0, cmw = 0;
+        // The channel-mix scratch is sized per *chunk*: rwkv_sqrelu draws
+        // out.w fragments, so a target as wide as the widest chunk would make
+        // the narrow chunk's relu^2 as expensive as the wide one's.  With
+        // split_rwkv's even cut the two widths are equal (as before); with
+        // RWKV_CM_SPLIT=<rows> they are not, and this is what keeps the
+        // narrow half's strips at its own width.
+        int rwm = 0, ram = 0, rvm = 0, rgm = 0, cmwA = 0, cmwB = 0;
         for (int l = 0; l < L; ++l) {
             rwm = std::max(rwm, m.rwkv_w1[l].rows);
             ram = std::max(ram, m.rwkv_a1[l].rows);
             if (l < (int)m.rwkv_v1.size()) rvm = std::max(rvm, m.rwkv_v1[l].rows);
             if (l < (int)m.rwkv_g1.size()) rgm = std::max(rgm, m.rwkv_g1[l].rows);
-            cmw = std::max(cmw, m.ffn_chunked ? m.w1a[l].rows : m.w1[l].rows);
+            if (m.ffn_chunked) {
+                cmwA = std::max(cmwA, m.w1a[l].rows);
+                cmwB = std::max(cmwB, m.w1b[l].rows);
+            } else {
+                cmwA = std::max(cmwA, m.w1[l].rows);
+            }
         }
+        if (cmwB <= 0) cmwB = cmwA;
         rwkv_tmp_.assign(RT_COUNT, Target());
         auto mk = [&](RwkvTmp i, int w, int h = 1) { rwkv_tmp_[i] = make_target(w, h); };
         for (RwkvTmp i : {RT_XN, RT_XN2, RT_XR, RT_XW, RT_XK, RT_XV, RT_XA, RT_XG,
@@ -54,7 +66,7 @@ void GPU::init_rwkv(const Model& m){
             mk(i, dim);
         mk(RT_TW, rwm); mk(RT_TW2, rwm); mk(RT_TA, ram); mk(RT_TV, rvm);
         mk(RT_TG, rgm); mk(RT_TG2, rgm);
-        mk(RT_CMH, cmw); mk(RT_CMH2, cmw); mk(RT_CMH3, cmw); mk(RT_CMH4, cmw);
+        mk(RT_CMH, cmwA); mk(RT_CMH2, cmwA); mk(RT_CMH3, cmwB); mk(RT_CMH4, cmwB);
         mk(RT_LNSTAT, 2); mk(RT_GNSTAT, H, 2);
         mk(RT_L2STAT, H); mk(RT_RK, H); mk(RT_SA, H * hs);
 
