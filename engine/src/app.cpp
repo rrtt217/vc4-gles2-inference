@@ -178,6 +178,12 @@ void App::upload_weights() {
     uint64_t done = 0;
     for (Mat* m : mats) {
         gpu.upload(*m);
+        // The bytes just consumed are dead: drop their pages now instead of
+        // holding the whole container in the page cache while the rest of it
+        // becomes textures.  On the Pi those pages and the textures come from
+        // the same movable pool, and a 200 MB container could not be uploaded
+        // while it was also resident (models/pocket-0.3b, 2026-11-17).
+        model.drop_pages(*m);
         done += mat_bytes(*m);
         g_progress.set(done);
     }

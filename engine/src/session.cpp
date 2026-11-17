@@ -204,6 +204,12 @@ Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
             };
             const vector<Mat>& w2 = !m_.w2a.empty() ? m_.w2a : m_.w2;
             const bool q8_model = all_int8(m_.qkv) && all_int8(m_.wo) && all_int8(w2);
+            // ACT_FMT=f32: the activation streams (the uploaded h, the attention
+            // output, xb/xbf) go through the float32 format instead of the q16
+            // pair grid.  Same memory as the 24-bit residual, one bit-cast a
+            // value, and it needs ESSL 3.00 (init_egl requests it).
+            if (const char* af = getenv("ACT_FMT"))
+                if (!strcmp(af, "f32")) gpu_.act_fmt_ = XFormat::F32;
             const char* a8 = getenv("ACT8");
             const int act8_mode = a8 ? atoi(a8) : 0;
             if (q8_model && (act8_mode == 1 || act8_mode == 2)) {
@@ -235,7 +241,8 @@ Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
             // format can be A/B'd on the same file.
             if (const char* rf = getenv("RES_FMT")) {
                 gpu_.res_pack_ = false;
-                gpu_.res_fmt_ = strcmp(rf, "i24_1") == 0 ? XFormat::I24_1 : XFormat::I16_1;
+                if (!strcmp(rf, "f32")) gpu_.res_fmt_ = XFormat::F32;
+                else gpu_.res_fmt_ = strcmp(rf, "i24_1") == 0 ? XFormat::I24_1 : XFormat::I16_1;
                 if (m_.res_q24 && gpu_.res_fmt_ != XFormat::I24_1)
                     cerr << "RES_FMT overrides the container's q24 residual\n";
             } else if (m_.res_q24) {
@@ -1588,7 +1595,7 @@ bool Session::pair_ok() const {
         if (gpu_.act_fmt_ != XFormat::I16_2 || gpu_.ffn_fmt_ != XFormat::I16_2) return false;
         // The pair-prefill path stores two positions into one texel; a 24-bit
         // residual is one value per texel, so it cannot take part.
-        if (x_is_int24(gpu_.res_fmt_)) return false;
+        if (x_is_int24(gpu_.res_fmt_) || x_is_f32(gpu_.res_fmt_)) return false;
         if ((m_.dim & 1) || (m_.hidden & 1)) return false;
         const vector<Mat>& w1 = !m_.w1a.empty() ? m_.w1a : m_.w1;
         const vector<Mat>& w3 = !m_.w3a.empty() ? m_.w3a : m_.w3;
@@ -1778,6 +1785,12 @@ static vector<float> decode_act_row(const vector<uint8_t>& b, int texels, XForma
                 } else if (f == XFormat::I24_1) {
                         int v = (int)b[o + 1] * 65536 + (int)b[o + 2] * 256 + (int)b[o + 3] - 8388608;
                         out[i] = (float)v / ACT_SCALE;
+                } else if (f == XFormat::F32) {
+                        uint32_t u = ((uint32_t)b[o] << 24) | ((uint32_t)b[o + 1] << 16) |
+                                     ((uint32_t)b[o + 2] << 8) | (uint32_t)b[o + 3];
+                        float v = 0.0f;
+                        memcpy(&v, &u, 4);
+                        out[i] = v;
                 } else {
                         out[i] = ((float)b[o + (i % 4)] - 128.0f) / 16.0f;
                 }

@@ -1044,8 +1044,10 @@ string matvec_i4(int rows, int cols, XFormat xf, bool inl) {
 
 string matvec_i6(int rows, int cols, XFormat xf, bool wrow) {
     need_shape("matvec_i6", rows, cols, 8);
-    if (xf != XFormat::I16_2)
-        { fprintf(stderr, "shader matvec_i6: q6 head needs I16_2 activations\n"); exit(2); }
+    // X4Q is format-generic, so a float32 activation row works here too; the
+    // q16 pair grid is only what the VC4 fast path was tuned for.
+    if (xf != XFormat::I16_2 && xf != XFormat::F32)
+        { fprintf(stderr, "shader matvec_i6: q6 head needs I16_2 or F32 activations\n"); exit(2); }
     const int axw = x_texels(cols, xf);
     const int lo_w = cols / 8;    // one texel = 4 bytes = 8 nibbles
     const int hi_w = cols / 16;   // one texel = 4 bytes = 16 two-bit values
@@ -1962,6 +1964,20 @@ string rms_norm(int dim, XFormat residual, XFormat out, bool fused_reduce,
             "float v2=R1(X,i0+2," + RW + ".0)*inv*x_i16(wb.rg);"
             "float v3=R1(X,i0+3," + RW + ".0)*inv*x_i16(wb.ba);"
             "gl_FragColor=x_i8enc4(v0,v1,v2,v3);}";
+    } else if (out == XFormat::F32) {
+        // One value a texel: the q16 pair store below would write two values into
+        // one texel and the f32 consumer would read them as raw bits.  The norm
+        // weight plane stays two q16 a texel, so the index is halved here.
+        body =
+            "vec4 rms_f32enc(float v){uint u=floatBitsToUint(v);return vec4(float(u>>24),"
+            "float((u>>16)&255u),float((u>>8)&255u),float(u&255u))/255.0;}\n"
+            "void main(){int t=int(gl_FragCoord.x);"
+            + ss_read +
+            "float inv=inversesqrt(ss/float(" + D + ")+" + eps_src + ");"
+            "int tw=t/2;int lo2=t-tw*2;"
+            "vec4 wc=texture2D(W,vec2((float(tw)+0.5)/float(" + DW + "),0.5));"
+            "float w=(lo2==0)?x_i16(wc.rg):x_i16(wc.ba);"
+            "gl_FragColor=rms_f32enc(R1(X,t," + RW + ".0)*inv*w);}";
     } else {
         body =
             "void main(){int t=int(gl_FragCoord.x);int i0=2*t;int i1=i0+1;"

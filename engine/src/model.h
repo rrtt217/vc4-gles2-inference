@@ -208,6 +208,17 @@ public:
     // still warm, while this process carries no 69 MB of RSS through decode.
     void release_map();
 
+    // Release the resident pages of one tensor as soon as its bytes are in a
+    // texture.  The container is borrowed, so the upload reads the file through
+    // this mapping: a 200 MB container would keep a 200 MB clean page cache in
+    // the movable zone while the textures it is being copied into need the same
+    // memory, and on the Pi that is what makes a large upload fail with the
+    // whole container still resident (2026-11-17, models/pocket-0.3b).
+    // Correctness is unaffected: a page dropped here is re-read from the file if
+    // anything touches those bytes again.
+    void drop_pages(const Mat& m);
+    void drop_pages(const void* p, size_t bytes);
+
     // Copy any borrowed weights back into their vectors (only the opt-in
     // rewrite paths need that; upload reads the borrowed bytes directly).
     static void materialize(Mat& m);
@@ -248,6 +259,10 @@ private:
     void* map_ = nullptr;
     size_t map_size_ = 0;
     bool borrow_ = true;
+    // Kept open for the upload only, so drop_pages() can ask the kernel to
+    // invalidate the pages it has already consumed (POSIX_FADV_DONTNEED needs
+    // the descriptor; unmapping alone leaves them in the cache).
+    int fd_ = -1;
 
 
     static Mat slice_rows(const Mat& src, int r0, int r1);

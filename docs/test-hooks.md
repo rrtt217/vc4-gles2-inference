@@ -315,6 +315,37 @@ binary.  They are measurement hooks, not production settings.
   upload *raised* CmaFree).  The measurement it used to attempt is now done with
   `/sys/kernel/debug/dri/0/bo_stats`, read around a whole process.
 - `KV_SCALE=N` — KV fixed-point scale (default 16384; q16 uses 2048, q8 uses 16).
+- `KV_FMT=bf16|f32` — the KV value encoding.  Default (unset) is the fixed
+  q16/q24 grid on `KVSCALE`.  `bf16` keeps two values a texel (same layout, same
+  memory, same fetch count) with a uniform 0.1% relative error, which is the
+  right knob for a model whose KV *range* does not fit the fixed grid; `f32`
+  uses the one-value-a-texel 24-bit layout with no rounding at all.  Measured on
+  MNN-Pocket (q4 + f32 activation streams, against a float32 numpy forward):
+  f32 0.9552 cosine, q16 at KV_SCALE=512 0.9531, bf16 0.9454 — the fixed grid
+  wins on large values and bf16's uniform 0.1% loses to it, so bf16 is not a
+  free upgrade; f32 is the only one that removes the rounding, and it buys
+  0.002 cosine for 2x the KV memory and 2x the KV fetches.
+- `ATT_SCALE=N` — the attention score/(max) grid: the score texel holds
+  `round(score*N)`, so the range is `+-32768/N` and the step `1/N`.  Default
+  1024 (+-32, step 1/1024), which is what every model before 2026-11-17 was
+  measured on.  Widening it for a model whose scores exceed the range is a
+  trade, not a free win: MNN-Pocket's scores reach 54 under a chat prompt, and
+  on both drivers `ATT_SCALE=256` (``+-128``, step 1/256) made the distribution
+  *worse* than the clipping it avoids (Xe entropy 0.07 -> 0.33, Pi 0.16 -> 0.24
+  with the f32 streams), because the coarser step costs more than the clip
+  saves.  The fix for a score that really overflows is the f32 score stream,
+  not a wider fixed grid.
+- `ATT_SUM_SCALE=N` — the exp-sum grid in the same (max,sum) texel when the sum
+  is linear (default 32, step 1/32).  Ignored with `ATT_SUM=log2`.
+- `ATT_SUM=linear|log2` — the sum's *domain*.  `log2` stores
+  `log2(sum)*2048` in the same q16 slot and costs one `exp2` in `att_v`; the
+  relative step is then 0.03% for any sum from 1 to `SEQ`, where the linear
+  grid's 1/32 is 2% of a peaked softmax's sum.  **The accurate one is not the
+  better model, and the default is the linear grid**: MiniMind3 at `SEQ=768` on
+  Xe, q8 PPL 270.3170 (linear) against 274.4160 (log2) and q4 326.1483 against
+  323.8378 — the two containers disagree in sign, so this is not a quality
+  lever, it redistributes a sub-0.1% per-head gain.  `ATT_DUMP` +
+  `check_att.py` reads either (the checker decodes `2**(ssum/2048)`).
 - `KV_PACK=16|8` — packed KV layout: two int16 per RGBA8 texel (width 384) or
   four int8 (width 192), instead of one 24-bit value (width 768).  A hybrid
   model (LFM2) defaults to 16: the 24-bit layout is wrong for kv_dim 512 /
@@ -398,8 +429,24 @@ the blob these switches act on.
   just-loaded KV rows back out through the normal save path, so the load can be
   compared byte for byte with the built file (`cmp`).
 
-- `RES_FMT=i16_1|i24_1` — overrides the container's residual width, so a
-  format can be A/B'd on one file.
+- `RES_FMT=i16_1|i24_1|f32` — overrides the container's residual width, so a
+  format can be A/B'd on one file.  `f32` stores the residual as a bit-cast
+  IEEE float, one value per RGBA8 texel — the 24-bit layout, so the same
+  memory — and needs the ESSL 3.00 compiler `init_egl()` asks for when this is
+  set.  A residual that exceeds the q16 rail (±128) is what a container's
+  q24 flag answers; `f32` is the same answer without the fixed-point step.
+- `ACT_FMT=i16|f32` — the *activation streams'* format: the uploaded `h`, the
+  attention block's output, `xb` and `xbf` (`i16` is the default q16 grid at
+  `ACT_SCALE=256`, `f32` the same bit-cast one-value-a-texel encoding as
+  `RES_FMT=f32`, also ESSL 3.00).  Defined in `xformat.cpp` (`x_f32`/`x_f32enc`)
+  and threaded through every shader that carries one of those streams, so it is
+  a format switch, not a placement one: `ACT_F32` below moves the CPU loop,
+  `ACT8` changes the width of the same GPU streams.  Measured on MNN-Pocket
+  (q4 container, f32 residual, against the float32 numpy forward): cosine
+  0.9415 with the q16 streams, 0.9552 with the f32 ones — the largest single
+  fidelity gain of the 2026-11-17 campaign, and the reason the qkv and attention
+  kernels had to learn the format at all.
+- `KV_FMT` also has an `f32` value; see the KV row in this section.
 - `SHADER_SRC=<substr>` — prints the generated GLSL for program keys containing
   the substring.  The builder branches on the activation and residual formats,
   and reading the generated text is the only way to be sure which branch ran.

@@ -289,6 +289,18 @@ GLuint GPU::make_q4_texture(int w, int h, const void* data){
                 return imported;
         }
         GLuint t = 0; glGenTextures(1, &t); g_scene_tex.push_back(t);
+        // The fallback costs *twice* the memory on VC4: the driver cannot render
+        // to B4G4R4A4, so glTexImage2D's RGBA4 request comes back as RGBA8.
+        // A model whose q4 widths miss the 64-texel grid therefore doubles its
+        // whole weight footprint and dies at about half its size -- silently,
+        // until this line.  It stays a warning, not an error: the upload is
+        // correct, only larger (2026-11-17, models/pocket-0.3b).
+        static bool fallback_warned = false;
+        if (!fallback_warned && gpu_dmabuf_available()) {
+                fallback_warned = true;
+                cerr << "q4 texture " << w << "x" << h
+                     << ": dma-buf import failed, uploading RGBA8 (2x memory)\n";
+        }
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, t); gl_state_forget_bindings();
         // A 4-bit texel is two bytes, so a row of w texels is 2w bytes; the
         // default alignment of 4 only holds when that is a multiple of four.

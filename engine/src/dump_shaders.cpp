@@ -189,9 +189,10 @@ vector<Case> cases() {
     add(v, "conv_copy_1024", [] { return copy_act(1024, XFormat::I16_2); });
 
     // --- attention, one tag per layout the container can ask for
-    add(v, "att_helpers", [] { return att_helpers(); });
-
     AttnConfig c = attn_base();
+    add(v, "att_helpers", [c] { return att_helpers(c); });
+
+    c = attn_base();
     c.kv_bits = 16;
     add_attn(v, "attn_q8_kv16_qkvpair", c);
 

@@ -54,10 +54,38 @@ void GPU::init_attention(int dim, int kv_dim, int heads, int kv_heads, int head_
         if (att_kv_bits_ == 1) att_kv_bits_ = 16;
         if (att_kv_bits_ != 0 && att_kv_bits_ != 8 && att_kv_bits_ != 16) att_kv_bits_ = 0;
         att_kv_packed_ = att_kv_bits_ != 0;
+        att_score_scale_ = (float) env_double("ATT_SCALE", kAttnScoreScale);
+        if (att_score_scale_ < 1.0f) att_score_scale_ = 1.0f;
+        att_sum_scale_ = (float) env_double("ATT_SUM_SCALE", kAttnSumScale);
+        if (att_sum_scale_ < 1.0f) att_sum_scale_ = 1.0f;
+        // The sum's domain, not its grid: see AttnConfig::sum_log for why the
+        // linear grid stays the default even though log2 is the more accurate
+        // one (the two MiniMind3 containers disagree in sign).
+        if (const char* sd = getenv("ATT_SUM")) att_sum_log_ = !strcmp(sd, "log2");
+        if (const char* kf = getenv("KV_FMT")) {
+                if (!strcmp(kf, "bf16")) {
+                        att_kv_fmt_ = 1;
+                        // The codec carries its own exponent, so KVSCALE is only
+                        // the grid ATT_DUMP prints on and check_att.py reads.
+                        att_kv_scale_ = 2048.0f;
+                } else if (!strcmp(kf, "f32")) {
+                        // The one-value-a-texel layout (the 24-bit path's): no
+                        // rounding to flip, which is the only thing that helps
+                        // the last-bit disagreements between the drivers.
+                        att_kv_fmt_ = 2;
+                        att_kv_bits_ = 0;
+                        att_kv_packed_ = false;
+                }
+        }
         att_kv_scale_ = (float) env_double("KV_SCALE",
                         att_kv_bits_ == 16 ? 2048.0 : att_kv_bits_ == 8 ? 16.0 : 16384.0);
         if (att_kv_scale_ < 1.0f) att_kv_scale_ = 1.0f;
         att_kv_width_ = att_kv_bits_ == 16 ? kv_dim : att_kv_bits_ == 8 ? kv_dim / 2 : 2 * kv_dim;
+        if (att_kv_fmt_ == 2) {
+                // KVSCALE is only the grid the dump and the checker print on.
+                att_kv_scale_ = 512.0f;
+                att_kv_width_ = 2 * kv_dim;
+        }
         if (att_kv_bits_ != 0 &&
             ((kv_dim % 2) != 0 || (att_kv_bits_ == 8 && ((kv_dim % 4) != 0 || (head_dim % 4) != 0)))) {
             cerr << "KV_PACK width not divisible; falling back to 24-bit\n";

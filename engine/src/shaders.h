@@ -6,6 +6,14 @@
 
 #include <string>
 
+// The attention block's grids, in one place: `AttnConfig`'s field defaults and
+// the environment defaults in gpu_attn.cpp have to agree, and a bare 1024 in a
+// gpu*.cpp is what check_draw_cap.sh refuses (kDrawCap has the same value and
+// the two are unrelated -- that is exactly the confusion the check prevents).
+constexpr float kAttnScoreScale = 1024.0f;   // score grid +-32, step 1/1024
+constexpr float kAttnSumScale = 32.0f;       // (max,sum) texel, sum step 1/32
+constexpr float kAttnSumLogScale = 2048.0f;  // sum stored as log2(sum)*this
+
 struct AttnConfig {
     int dim = 0;
     int kv_dim = 0;
@@ -17,16 +25,37 @@ struct AttnConfig {
     bool qk_norm = false;
     bool qkv_pair = false;  // qkv matvec writes two q16 rows per texel
     int kv_bits = 0;
+    // KV value encoding: 0 = the fixed q16 grid (KVSCALE), 1 = bf16 (same two
+    // values a texel, uniform 0.1% relative precision, no scale to tune).
+    int kv_fmt = 0;
     float kv_scale = 16384.0f;
     int kv_width = 0;
     // 8-bit KV only: V is quantised on a per-head, per-position grid derived
     // from that head max (K keeps the global KVSCALE grid: it is qk-normed
     // before rope, so its range is already about unit RMS).
     bool kv_vstep = false;
+    // The score and (max,sum) grids.  q16 with these scales: the score texel
+    // holds round(score*score_scale), so the representable score range is
+    // +-32768/score_scale (1024 -> +-32, 256 -> +-128) and the step is
+    // 1/score_scale.  The stats max rides the same grid, the sum its own
+    // (32 -> step 1/32).  Default 1024 is what every model before 2026-11-17
+    // was measured on; ATT_SCALE overrides for a model whose scores exceed it.
+    float score_scale = kAttnScoreScale;
+    float sum_scale = kAttnSumScale;
+    // The sum's domain.  `sum_log` stores log2(sum)*sum_log_scale in the same
+    // q16 slot: 1/2048 per octave is 0.03% relative for any sum, where the
+    // linear grid on `sum_scale` is 2% at sum ~ 1.5.  Default is the linear
+    // grid, because the more accurate one is not the better model: MiniMind3
+    // q8 PPL 270.3170 (linear) against 274.4160 (log2) at SEQ=768, and q4
+    // 326.1483 against 323.8378 -- the two containers disagree in sign, so the
+    // sum's rounding is not a quality lever here, it is a redistribution of a
+    // sub-0.1% per-head gain.  ATT_SUM=log2 selects it.
+    bool sum_log = false;
+    float sum_log_scale = kAttnSumLogScale;
 };
 
 std::string att_defs(const AttnConfig& c);
-std::string att_helpers();
+std::string att_helpers(const AttnConfig& c);
 
 std::string matvec_q8(int rows, int cols, XFormat xf, bool wrow = false);
 // One draw for a whole batch of matvec inputs (RWKV-7 chunked prefill, P1):

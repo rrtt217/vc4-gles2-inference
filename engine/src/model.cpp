@@ -27,18 +27,23 @@ bool Model::load(const string& path){
     if (fstat(fd, &st) != 0 || st.st_size < 4) {
         close(fd); cerr << "cannot stat model: " << path << "\n"; return false;
     }
+    borrow_ = !(getenv("MODEL_BORROW") && !strcmp(getenv("MODEL_BORROW"), "0"));
     void* base = mmap(nullptr, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-    close(fd);
-    if (base == MAP_FAILED) { cerr << "mmap failed: " << path << "\n"; return false; }
+    if (base != MAP_FAILED && !borrow_) { close(fd); fd = -1; }
+    if (base == MAP_FAILED) { close(fd); cerr << "mmap failed: " << path << "\n"; return false; }
     source_size = (uint64_t)st.st_size;
     source_mtime = (uint64_t)st.st_mtime;
     fbase_ = (const uint8_t*)base;
     fsize_ = (size_t)st.st_size;
-    // Start the SD read now: it overlaps the EGL/Mesa init that follows, and
-    // a warm start then finds every page already in the page cache.
-    madvise(base, (size_t)st.st_size, MADV_WILLNEED);
+    // Start the SD read now: it overlaps the EGL/Mesa init that follows.
+    // Bounded, not the whole file: on a 200 MB container the full prefetch
+    // fills the page cache with the entire model before the upload starts, and
+    // on the Pi those pages come from the same movable pool the textures need
+    // (measured 2026-11-17, models/pocket-0.3b: 150 MB of page cache inside the
+    // CMA area before the first texture).  drop_pages() releases each tensor as
+    // it lands in a texture, so what stays resident is one prefetch window.
+    madvise(base, std::min<size_t>((size_t)st.st_size, (size_t)8 << 20), MADV_WILLNEED);
     fpos_ = 0;
-    borrow_ = !(getenv("MODEL_BORROW") && !strcmp(getenv("MODEL_BORROW"), "0"));
     uint32_t magic = 0; memcpy(&magic, fbase_, 4);
     bool ok = false;
     if (magic != 0x46434D4DU) {   // "MMCF"
@@ -46,6 +51,7 @@ bool Model::load(const string& path){
                  << "); the legacy Q8M1/Q4M1/I16M1/llama2c readers are gone, convert with "
                     "engine/tools/mmcf_pack.py\n";
             munmap(base, (size_t)st.st_size);
+            if (fd >= 0) close(fd);
             return false;
     }
     ok = load_mmcf();
@@ -72,8 +78,13 @@ bool Model::load(const string& path){
             if (has_q8_emb) cerr << "DUMP emb0 [" << (int)emb_q8[0] << " " << (int)emb_q8[1] << "] es0=" << emb_scale[0] << "\n";
             cerr << "DUMP rms_att0=" << (rms_att.empty() ? 0.0f : rms_att[0]) << " theta=" << rope_theta << " half=" << rope_half << " qk=" << qk_norm << "\n";
     }
-    if (borrow_ && ok) { map_ = base; map_size_ = (size_t)st.st_size; }
-    else munmap(base, (size_t)st.st_size);
+    if (borrow_ && ok) {
+            map_ = base; map_size_ = (size_t)st.st_size;
+            fd_ = fd;   // drop_pages() invalidates what the upload has consumed
+    } else {
+            munmap(base, (size_t)st.st_size);
+            if (fd >= 0) close(fd);
+    }
     return ok;
 }
 
@@ -112,6 +123,7 @@ bool Model::probe(const string& path){
 Model::~Model(){
     if (map_) munmap(map_, map_size_);
     map_ = nullptr; map_size_ = 0;
+    if (fd_ >= 0) { close(fd_); fd_ = -1; }
 }
 // After the upload the whole checkpoint is on the GPU.  Unmapping it drops the
 // resident file pages from this process - they stay in the page cache, so the
@@ -128,9 +140,42 @@ Model::~Model(){
         exit(1);
 }
 
+// One tensor: unmap this process's view of the bytes that are already in a
+// texture, then drop the (now unmapped, clean) pages behind them.  Both halves
+// are needed -- MADV_DONTNEED alone only zaps the PTEs and leaves the pages in
+// the page cache, and POSIX_FADV_DONTNEED will not invalidate a page that is
+// still mapped.  A page dropped here is re-read from the file if anything
+// touches those bytes again, so this trades no correctness for memory.
+void Model::drop_pages(const void* p, size_t bytes){
+        if (!map_ || fd_ < 0 || !p || !bytes) return;
+        const char* base = (const char*)map_;
+        const char* q = (const char*)p;
+        if (q < base || q >= base + map_size_) return;
+        const uint64_t page = 4096;
+        uint64_t off = (uint64_t)(q - base) & ~(page - 1);
+        uint64_t end = ((uint64_t)(q - base) + (uint64_t)bytes + page - 1) & ~(page - 1);
+        if (end > (uint64_t)map_size_) end = (uint64_t)map_size_;
+        if (end <= off) return;
+        madvise((void*)(base + off), (size_t)(end - off), MADV_DONTNEED);
+        posix_fadvise(fd_, (off_t)off, (off_t)(end - off), POSIX_FADV_DONTNEED);
+}
+
+void Model::drop_pages(const Mat& m){
+        const size_t cols = (size_t)m.cols, rows = (size_t)m.rows;
+        if (m.ext8) drop_pages(m.ext8, rows * cols);
+        if (m.ext16) drop_pages(m.ext16, rows * cols * 2);
+        if (m.ext4) drop_pages(m.ext4, rows * (cols / 2));
+        if (m.groups > 0) {
+                const size_t plane = rows * (size_t)m.groups * sizeof(int16_t);
+                if (m.ext_scale4) drop_pages(m.ext_scale4, plane);
+                if (m.ext_min4) drop_pages(m.ext_min4, plane);
+        }
+}
+
 void Model::release_map(){
     if (map_) munmap(map_, map_size_);
     map_ = nullptr; map_size_ = 0;
+    if (fd_ >= 0) { close(fd_); fd_ = -1; }
     auto clear = [](vector<Mat>& v){
         for (auto& m : v) {
             m.ext8 = nullptr; m.ext16 = nullptr; m.ext4 = nullptr;

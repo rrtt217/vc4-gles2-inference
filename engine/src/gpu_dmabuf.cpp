@@ -71,7 +71,20 @@ PFNGLEGLIMAGETARGETTEXTURE2DOESPROC p_image_target;
 // The surface is made of 4 KB tiles of 8x8 utiles, a utile being 8x4 texels at
 // two bytes each.  The arrangement *inside* them is the driver's business now
 // that the upload goes through glTexSubImage2D; only the size is needed here.
-static size_t t_bytes(int w, int h) { return 4096u * (size_t)(w / 64) * (size_t)((h + 31) / 32); }
+//
+// The tiled layout's pitch is the 64-texel column grid, not the requested
+// width: the kernel's modifier says so, and the import checks it.  `w / 64`
+// truncated, so a width that is not a multiple of 64 (896 columns at four
+// weights a texel is 224) got a pitch of w*2 = 448 and a surface one tile
+// column short; the driver refused the image ("unsupported stride 448 instead
+// of 512") and the q4 upload silently fell back to glTexImage2D, where VC4's
+// only renderable choice is RGBA8 -- four bytes a texel, *twice* the memory.
+// The fallback was invisible (one Q4_TEX_STATS line) and the whole model then
+// needed 2x its weights.  Pad the pitch and the tile count together.
+static int t_pitch_texels(int w) { return (w + 63) & ~63; }
+static size_t t_bytes(int w, int h) {
+        return 4096u * (size_t)(t_pitch_texels(w) / 64) * (size_t)((h + 31) / 32);
+}
 
 int drm_fd() {
     if (g_drm != -2) return g_drm;
@@ -158,7 +171,7 @@ GLuint gpu_dmabuf_texture(int w, int h, const uint16_t* data) {
             EGL_LINUX_DRM_FOURCC_EXT, (EGLint)VC4_FOURCC_ARGB4444,
             EGL_DMA_BUF_PLANE0_FD_EXT, ph.fd,
             EGL_DMA_BUF_PLANE0_OFFSET_EXT, 0,
-            EGL_DMA_BUF_PLANE0_PITCH_EXT, w * 2,
+            EGL_DMA_BUF_PLANE0_PITCH_EXT, t_pitch_texels(w) * 2,
             EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT, (EGLint)(g_modifier & 0xffffffffu),
             EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT, (EGLint)(g_modifier >> 32),
             EGL_NONE

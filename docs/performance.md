@@ -7354,3 +7354,93 @@ Consequences, recorded rather than smoothed over:
 The project stopped at this measurement (RWKV-7 optimization ended: the 0.1B is
 slower and weaker than LFM2.5-230M on the board).  The machinery stays as a
 default-off arm; the 0.4B, the strip question and a VC4-exact kernel are open.
+
+## 2026-11-17 — MNN-Pocket-0.3B: f32 activation and KV streams, the q4 pitch bug, and the attention grids' names
+
+The question was whether `models/pocket-0.3b` (`taobao-mnn/MNN-Pocket-0.3B`, a
+Qwen3 dense 0.3B: 28 layers, hidden 896, 14 q heads / **2 kv heads**, head_dim
+64, FFN 2560, qk-norm, rope theta 1e6 rotate-half, tied head) can run in this
+engine at all, and what it costs.  Machine: Iris Xe (ADL GT2, Mesa 26.2.5) and
+Pi Zero (VC4).  Container: `pocket-0.3b.q4q24.dedup.q6.mmcf` (198,007,797 B,
+q24 residual declared, q6 tied head from the BF16 lm_head).
+
+**Fidelity is where the campaign was won or lost.**  The reference is
+`engine/tools/ref_forward.py` in float32 (the model's residual peaks at 1975 —
+15x the q16 rail — and its attention scores reach 54, so this is a format
+question all the way down).  Cosine of the engine's logits against that
+reference, prompt ids 576 6649 315 9454 374:
+
+| arm | Xe | Pi |
+|---|---:|---:|
+| q8 container, q16 streams (ceiling) | 0.9733 | — |
+| q4, q16 streams, q24 residual | 0.9415 | — |
+| q4, **f32 activation streams**, KV q16 @512 | 0.9531 | 0.9532 |
+| q4, f32 streams, **KV bf16** | 0.9522 | 0.9454 |
+| q4, f32 streams, **KV f32** | **0.9552** | — |
+| q4 + q16 streams + `ATT_SUM=log2` | see below | — |
+
+Two readings of that table matter.  **The activation streams were the biggest
+single term** (0.9415 -> 0.9552); the KV encoding is worth 0.002 in the best
+case.  **bf16 is not the KV upgrade it looks like**: it keeps the same two
+values a texel and gives a uniform 0.1% relative error, which loses to the fixed
+grid at the head max and only wins 2% a decade below it, so it measured
+neutral-to-worse than simply widening the grid (q16 at `KV_SCALE=512`).  The
+only encoding that removes the last-bit disagreements between the two drivers is
+f32, and it costs 2x the KV memory and 2x the KV fetches.
+
+`ATT_DUMP` + `check_att.py` at layer 0 with the f32 streams: qrot 0.40%, KV
+1.18%, score 0.71%, smax 0.53%, **ssum 2.91%**, attout 2.49%, growing to 13-19%
+by layer 8.  The sum was the largest term *after* the streams, which is what
+produced the `ATT_SUM` question below.
+
+**`ATT_SCALE` is not the fix for a saturated score.**  The scores saturate the
+texel (|score| > 32 at `ATT_SCALE=1024`) and yet 1024 gives the best cosine on
+*both* drivers: 512 and 256 make the distribution worse than the clipping they
+avoid, because the coarser step costs more than the clip saves.  Recorded in
+`docs/test-hooks.md` so the next person does not widen it again.
+
+**`ATT_SUM=linear|log2` is a trade with two signs.**  The sum's linear q16 grid
+is a 1/32 step — 2% of a peaked softmax's sum — and the log2 domain
+(`log2(sum)*2048`) is 0.03% for any sum.  The accurate one is *not* the better
+model: MiniMind3 `SEQ=768` on Xe, q8 PPL **270.3170 (linear) against 274.4160
+(log2)**, q4 **326.1483 against 323.8378**.  The two containers disagree in
+sign, so the sum's rounding redistributes a sub-0.1% per-head gain rather than
+improving anything, and the default stays the linear grid; `ATT_SUM=log2` is
+the A/B, and the f32-stream numbers above were measured with the linear one.
+
+**The q4 pitch bug is the reason the model "did not fit".**  The first Pi upload
+died at 93 MB with `texture upload failed: RGBA4 224x1280 (0x505)`; the
+dma-buf import was refused with `unsupported stride 448 instead of 512` because
+`t_bytes()` truncated the row pitch to a whole number of tiles (w=224 -> 896 B ->
+448 B "pitch").  The silent fallback was `glTexImage2D` RGBA8 at 2x the memory,
+which is what turned a 189 MB model into a 222 MB one and made CMA the story.
+Fixed with `t_pitch_texels(w) = (w+63)&~63`; the fallback now warns once.  The
+load then reached 189 MB of 222 MB at CMA 320 and completed.
+
+**What the board costs.**  Pi Zero, `KV_FMT=f32 RES_FMT=f32 ACT_FMT=f32`,
+`SEQ=256`: load 80-100 s, prefill ~10 s for 5 tokens, decode **~2.4 s/token**;
+CMA 320 MB is required (256 MB cannot hold it) and leaves the OS ~165 MB.  A
+6-prompt greedy battery: Pi answers 3.5/6 (correct `Paris`, `2 + 2 = 4`,
+`The sky is blue.`), Xe 4/6 — the difference is a 3-prompt artifact of temp-0
+chaos, not a machine defect: Xe vs Pi per-token logit difference mean -0.41,
+std 0.89, max 4.0, and top-16 overlap Xe∩Pi 10/16 against Xe∩ref 9/16 and
+Pi∩ref 8/16.
+
+**The QAT Q4 file is a different checkpoint.**  `taobao-mnn/MNN-Pocket-0.3B`'s
+GGUF Q4 is QAT (`Q4_1`, block 32); converted with
+`models/pocket-qat/gguf_q4_to_hf.py` (GGUF v3 -> HF safetensors, dequantized to
+F16, `reshape(reversed(dims))` for 2-D, no transpose — the first attempt had the
+matrices transposed and scored cosine 0.005 against 0.9955 once fixed).  Weight
+cosine against the BF16 release is 0.9955 and its norm/embedding vectors are
+exact, but its *logits* against the BF16 reference cosine only 0.9261, so it
+needs its own reference before any of its numbers mean anything.  On Xe it
+answers `84 * 3 = 252` and a coherent Chinese sentence where the BF16-derived q4
+degenerates on the Pi; on the Pi it no longer degenerates.  PPL/cosines for it
+are still open.
+
+**Page-cache bound, measured neutral.**  `Model::drop_pages()` +
+`POSIX_FADV_DONTNEED` after each texture upload was added to keep a 200 MB
+container from holding its own page cache in the movable zone during the upload.
+Measured on both machines: no change to the load time or the peak (the kernel
+reclaims clean file pages first under CMA pressure).  It stays as a bound, not
+as a speed claim.

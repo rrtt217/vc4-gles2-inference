@@ -113,6 +113,9 @@ AttnConfig GPU::att_cfg() const{
         c.rope_half = att_rope_half_; c.qk_norm = att_qk_norm_;
         c.kv_bits = att_kv_bits_; c.kv_scale = att_kv_scale_; c.kv_width = att_kv_width_;
         c.kv_vstep = att_kv_vstep_;
+        c.kv_fmt = att_kv_fmt_;
+        c.score_scale = att_score_scale_; c.sum_scale = att_sum_scale_;
+        c.sum_log = att_sum_log_;
         c.qkv_pair = att_qkv_pair_;
         return c;
     }

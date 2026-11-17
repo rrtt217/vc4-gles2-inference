@@ -23,6 +23,13 @@ enum class XFormat : uint8_t {
     // hold exactly (24 mantissa bits).  Same 1/256 step as I16 but 256x the
     // range, which is what a model whose residual exceeds the q16 rail needs.
     I24_1 = 3,
+    // 32-bit float, one value per texel: the four bytes of the IEEE-754 number
+    // in the texel's .rgba, rebuilt with uintBitsToFloat.  The only format with
+    // no fixed-point grid at all.  It costs what I24_1 costs in memory (one
+    // texel a value) and needs the ESSL 3.00 compiler the RWKV bit-cast kernels
+    // already use (g_es3_ok, which the Q4_SHIFT MESA override makes the default
+    // on both drivers).
+    F32 = 4,
 };
 
 struct XLayout {
@@ -36,6 +43,7 @@ int x_per_texel(XFormat f);
 int x_texels(int count, XFormat f);
 bool x_is_int8(XFormat f);
 bool x_is_int24(XFormat f);
+bool x_is_f32(XFormat f);
 
 // CPU side packing.  Values are real activations; q16 is applied here.
 std::vector<uint8_t> x_pack(const float* values, int count, XFormat f);

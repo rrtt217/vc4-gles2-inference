@@ -8,11 +8,12 @@ without a second engine path:
 
   score[t]   == round( (sum_i q_i*k_i) * invsqrt(head_dim) * 1024 )
   stats max  == max_t score[t]                (exact, same 1/1024 grid)
-  stats sum  == round( 32 * sum_t exp((score[t]-max)/1024) )
+  stats sum  == round( 2048 * log2( sum_t exp((score[t]-max)/1024) ) )
   att_out[i] == round( 256 * sum_t p_t * v_t[i] ),  p_t = exp(..)/sum
 
 q and att_out are q16 activations (int/256); K and V are on the KV grid
-(int/KVSCALE); scores and the stats max on 1/1024; the stats sum on 1/32.
+(int/KVSCALE); scores and the stats max on 1/1024; the stats sum on 1/2048 in
+the log2 domain.
 All grids and shapes come from the ATTD meta line.
 
 Usage: check_att.py <log>
@@ -105,10 +106,11 @@ def main():
                     mb += 1
                     print("  statsmax L%d p%d h%d got %d want %d" % (layer, pos, h, mx_got[h], mx))
                 st = sum(math.exp((v - mx) / 1024.0) for v in got)
-                sb = max(sb, abs(sum_got[h] / 32.0 - st))
-                if abs(sum_got[h] - st * 32.0) > 2.0:
-                    print("  statssum L%d p%d h%d got %d want %.2f" % (layer, pos, h, sum_got[h], st * 32.0))
-                sm = sum_got[h] / 32.0
+                want = 2048.0 * math.log2(st) if st > 0.0 else -1e9
+                sb = max(sb, abs(sum_got[h] / 2048.0 - (math.log2(st) if st > 0.0 else -1e9)))
+                if abs(sum_got[h] - want) > 2.0:
+                    print("  statssum L%d p%d h%d got %d want %.2f" % (layer, pos, h, sum_got[h], want))
+                sm = 2.0 ** (sum_got[h] / 2048.0)
                 mxv = mx_got[h] / 1024.0
                 pv = [math.exp(v / 1024.0 - mxv) / sm for v in got]
                 for i in range(head_dim):

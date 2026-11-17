@@ -7,6 +7,9 @@
 
 #include "gpu.h"
 #include "gpu_internal.h"
+
+#include <cmath>
+#include <cstring>
 #include "xformat.h"
 
 #include <cstdio>
@@ -109,13 +112,26 @@ void GPU::dump_attention(int layer, int pos){
         }
         // Every K/V row the score and V passes read: rows 0..pos.
         for (int t = 0; t <= pos && t < att_seq_; ++t) {
-                if (layer >= (int)kv_cache_.size() || att_kv_bits_ != 16) break;
+                if (layer >= (int)kv_cache_.size()) break;
+                const bool f32kv = att_kv_fmt_ == 2;
+                if (att_kv_bits_ != 16 && !f32kv) break;
                 const vector<uint8_t> b = read_target_row(kv_cache_[layer], t);
+                auto at = [&](int texel) {
+                        if (!f32kv) return 0;
+                        const uint8_t* p = b.data() + (size_t)texel * 4;
+                        uint32_t u = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+                                     ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+                        float v = 0.0f;
+                        memcpy(&v, &u, 4);
+                        return (int)lrintf(v * att_kv_scale_);
+                };
                 fprintf(stderr, "ATTD kv %d %d %d %d", layer, pos, t, att_kv_dim_);
-                for (int i = 0; i < att_kv_dim_; ++i) fprintf(stderr, " %d", q16_at(b, i / 2, i & 1));
+                for (int i = 0; i < att_kv_dim_; ++i)
+                        fprintf(stderr, " %d", f32kv ? at(i) : q16_at(b, i / 2, i & 1));
                 fprintf(stderr, "\n");
                 fprintf(stderr, "ATTD kvv %d %d %d %d", layer, pos, t, att_kv_dim_);
-                for (int i = 0; i < att_kv_dim_; ++i) fprintf(stderr, " %d", q16_at(b, att_kv_dim_ / 2 + i / 2, i & 1));
+                for (int i = 0; i < att_kv_dim_; ++i)
+                        fprintf(stderr, " %d", f32kv ? at(att_kv_dim_ + i) : q16_at(b, att_kv_dim_ / 2 + i / 2, i & 1));
                 fprintf(stderr, "\n");
         }
         {
@@ -139,7 +155,21 @@ void GPU::dump_attention(int layer, int pos){
         if (att_out_.tex) {
                 const vector<uint8_t> b = read_target_row(att_out_, 0);
                 fprintf(stderr, "ATTD attout %d %d %d", layer, pos, att_dim_);
-                for (int i = 0; i < att_dim_; ++i) fprintf(stderr, " %d", q16_at(b, i / 2, i & 1));
+                if (act_fmt_ == XFormat::F32) {
+                        // One value a texel: print it on the q16 grid the checker
+                        // compares in, from the float the kernel actually stored
+                        // (the 1/256 rounding is the checker's, not the engine's).
+                        for (int i = 0; i < att_dim_; ++i) {
+                                const uint8_t* p = b.data() + (size_t)i * 4;
+                                uint32_t u = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+                                             ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+                                float v = 0.0f;
+                                memcpy(&v, &u, 4);
+                                fprintf(stderr, " %d", (int)lrintf(v * 256.0f));
+                        }
+                } else {
+                        for (int i = 0; i < att_dim_; ++i) fprintf(stderr, " %d", q16_at(b, i / 2, i & 1));
+                }
                 fprintf(stderr, "\n");
         }
 }
