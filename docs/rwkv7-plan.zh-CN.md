@@ -235,6 +235,7 @@ DE/DEA 变体（2.0/3.7GB），非标准 v7、Pi 不可行；标准 v7 翻译微
 | P4 | **完成 2026-11-16** | 层循环忠实（engine↔容器权重 oracle cos≈0.999 ACT_F32）；R-1 q16 保持默认；三套 battery 最终口径入 docs/evaluation.md；RWKV_DUMP 登记；regression ACCEPT + swap_matrix rwkv 链 PASS；Xe 引脚入 AGENTS.local.md |
 | P5 | **完成 2026-11-16** | Pi Zero 跑通 0.1B：**q8r 可加载且中文连贯**（"我是一名AI语言模型"），q4 亦可跑但中文退化（重复/回声）；SEQ=4096 不夹取（O(1) 状态）。此前段错误实为 apply_q4_fmt 越界读空 w3 + 分块时误传完整 3072 行 w1，均已修（62895ce/cb16490），**非 OOM/CMA**；q8r 实际能装下 | cm_key/value 已按 VC4 2048 行分块（split_rwkv(max_dim)，Xe 不触发、cos 不变）；ARMv6 二进制已部署。但 Pi 当前自由 CMA ~94MB（pumpkin 占用），0.1B q8r 需 ~141MB、q4（head q4）亦超自由 CMA，均上传失败段错误；需停 pumpkin 独占 CMA 再测 decode/prefill/长上下文。P6 已在 Xe 启动 |
 | P6 | **Xe 交付 2026-11-16；Pi 数值修复 2026-11-17（速度待优化）** | `RWKV_GPU=1` 融合层循环（`gpu_rwkv.cpp` + 27 个 `rwkv_*` builder），WKV state 用 **bit-cast f32 RGBA8 双纹理 ping-pong**（`floatBitsToUint`/`uintBitsToFloat`，精确 f32，S-1 从根上解决）；ES3 上下文/编译路径由 Q4_SHIFT 一般化（`g_es3_ok`，`needs_es3` 也匹配 bit-cast）。**PPL 裁决**（q8r chat，data/ppl_test.txt，SEQ=512）：CPU 9.2919 / GPU **9.1850** / 混合(CPU f32 state) 9.1781 —— GPU 与 CPU 同量级且略优，数值合格。greedy 串 GPU≠CPU 是 0.1B temp0 混沌（仓库规则：跨路径让 PPL 裁决，不追 byte 一致），非退化。逐元素链保留 I24_1（其网格误差被 PPL 容忍）；无 ES3 回退 CPU f32（`RWKV_WKV_CPU=1`）。速度（bench 口径：丢弃预热 + 三次中位，--gen 48）CPU 119.1 / GPU 36.0 ms/token = **3.3×**；确定性两次运行 byte 一致、behaviour 非空不塌缩。GPU PPL 引脚 9.1850、速度、确定性已入 docs/performance.md（2026-11-16 P6 段）、docs/test-hooks.md 与 AGENTS.local.md GPU 引脚注释；`make check` 108/0、regression ACCEPT（CPU 引脚全不变）、shader_hashes 仅新增。**Pi VC4 数值修复（2026-11-17）**：宽度修复后 Pi GPU 仍塌缩成 garbage（混合路径亦塌缩 ⇒ 元凶是逐元素链非 state）。板级 probe（`probes/rwkv_probe[_pi]` A–J）逐项隔离皆 PASS，逐 op GPU-vs-CPU dump 定位到 **layer 1 的 1536 宽 chunked cm sqrelu**：单 draw 超 VC4 `kDrawCap`=1024 被静默丢弃（target 留在 clear 色 I24 −32768）。两处修复均 gate 到 `needs_finish()`（VC4），Xe 逐位不变：(1) `rwkv_draw1` 在 VC4 按 kDrawCap 切条；(2) wo/cm 残差加在 VC4 走 CPU 两步序（`rwkv_mv`→I24 + 新 builder `rwkv_res_add`→q16），因 fused `matvec_add` 在 VC4 I24_1 链上丢 dot；Xe 保留 fused。修后 **Pi GPU greedy 与 Xe GPU 逐位一致**（garbage 消失）；Xe GPU PPL 9.1850 不变。**Pi 速度**：GPU ~1138 / CPU ~969 ms/token —— VC4 上 GPU draw-bound（~1879 draws/token × ~0.6ms）略慢于 CPU，≥3× 仅在 Xe 成立；Pi 提速需把逐元素融进 matvec 核（减少 draw），属后续工作。详见 docs/performance.md 2026-11-17 Addendum 2 |
+| P7 | **进行中 2026-11-17** | 优化路线立项（goal-4f0af8a7）：实测瓶颈是 launch/sync 粒度（Pi CPU ~200 sync/token、Pi GPU ~1879 draw/token；Xe 1.2/4.0 GMAC/s），非 MAC 受限。任务板 task-12..16：P0 算子打包/融合（A1 六路 lerp 合并、A2 r/k/v 合并、A3 四组低秩合并，p7-pack 进行中）→ P1 分块 prefill + 状态快照 → P2 Pi I16_2/head 专项与 Xe 0.4B。0.4B 已打包并测 PPL（q8r 6.3432 / q8 7.0384 / q4 7.7273；f32 oracle 5.7405；量化代价 +0.100/+0.204/+0.297 nats·token⁻¹；q4 334.9MB、贴图 267.8MB → Pi 仍不可行）。详见 §十二 |
 
 **P2 开工清单（P1 的交接，按代码位置）**：
 
@@ -379,4 +380,31 @@ metadata key 17（**P0b 新增**，`<B>`）：**logits 输入尺度指数 k**。
 0.1B：d=768、F=3072、r=64/64/32/128 → 每层 4·d² + 2·dF + 2·d·(r_w+r_v+r_a+r_g) + 约 25d
 ≈ 2.36M + 4.72M + 0.39M ≈ 7.47M MAC，12 层 89.6M + head 50.3M ≈ 140M MAC/token
 （与评估的 143.7M 一致，差在逐通道项）。
+
+## 十二、优化路线（2026-11-17 立项）
+
+**瓶颈画像（实测反推，不是算力）**
+
+- Pi CPU 969 ms/token ≈ ~200 次 `rwkv_mv`（GPU matvec + 回读 sync）× ~3.6 ms/sync；Pi GPU 1138 ms/token ≈ ~1879 draws × ~0.6 ms/draw；Xe CPU 119 / GPU 36 ms 对应 143.7M MAC 只有 1.2/4.0 GMAC/s。⇒ **launch/sync-bound**。
+- 所以优化优先级 = 减少算子数（融合/打包/批处理），不是换更快的数学。
+
+**任务板（Team tasks）**
+
+| 任务 | 内容 | 依赖 | 状态 |
+|---|---|---|---|
+| task-12 | P0：A1 六路 lerp 合一次 draw、A2 r/k/v 合一次 matvec、A3 四组低秩 down/up 合并 | — | p7-pack 进行中 |
+| task-13 | P1：分块 prefill（批 matmul，仅 WKV 递推串行） | task-12 | 待派 |
+| task-14 | P1：状态快照 + 多轮/跨请求复用 | task-12 | 待派 |
+| task-15 | P2：0.4B 打包与质量验证（Xe） | — | 完成 |
+| task-16 | P2：Pi 专项（I16_2 逐元素 A/B、head 量化） | task-12 | 待派 |
+
+**0.4B 实测（Xe，2026-11-17）**
+
+- 容器：q4 334,871,084 B（估算 335MB，命中 0.04%）、q8 453,364,524 B、q8r 454,949,100 B；metadata v4 / 24×1024 / FFN 4096 / 16×64 / ranks 64/64/32/128 + gate 128 / key 17 k=2。
+- PPL（SEQ=512，421 token）：q8r **6.3432**、q8 7.0384、q4 7.7273；f32 oracle **5.7405** → 量化代价 +0.60/+1.30/+1.99 PPL（+0.100/+0.204/+0.297 nats·token⁻¹）；0.1B q8r 对照 9.2919（oracle 8.1014，+0.137）。模型层面 0.4B 低 29% PPL / 0.344 nats。q8r < q8 < q4 单调（逐行 scale 在 0.4B 上值 ~10%）。
+- 模板结论：`<user_input>` **不是模板问题**，是 q8（每矩阵 scale）的数值漂移；q8r/q4 与 oracle 前两 token 一致。现有 chatml/488B 模板对 0.4B 合适。
+- 风险记档：0.4B 残差峰 **80.2**（rail 128，余量仅 1.6×；0.1B 是 3.4×）；sqrelu 76.3、最终 LN 304.19、|state|max 30.7。
+- 结论：Xe 上 0.4B q8r 值得（PPL 6.34 vs 9.29，量化代价更低）；Pi 仍只能 0.1B（q4 贴图 267.8MB > 可用 CMA）。
+
+**验证口径**：每步同机 A/B、PPL 裁决、draws/syncs 计数下降、`make -C engine check` 108/0 + `regression.sh` ACCEPT + `shader_hashes` 仅新/改 builder；跨机/跨路径只比 PPL。
 
