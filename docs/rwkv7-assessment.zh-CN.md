@@ -391,10 +391,15 @@ WKV7 GPU（VC4 上性价比最低）、prefix cache 状态快照、q6 head。
 `<line>`×18 塌缩、"此时为秋"×10 重复，与 q4 PPL 7.7273 一致。格式约束（三句/五字/只要城市名）
 两个规模都不守，是模型层而非引擎层。
 
-两个新行为，后续 generation 要记着：**(1)** nothink 模板挡不住它开 `<think>`（两个翻译 prompt 的
-greedy 把 80 token 全花在推理上、答案没出来）——要直答得把 `--gen` 提到 200+ 或正式用 `--thinking`；
-**(2)** 会自造标签，最严重的是 `<user>…</user>` **回显用户轮次**（en-4 采样），与 q8 的
-`<user_input>` 同族。
+三个新行为，后续 generation 要记着（详见 `models/rwkv7/phase2-direct/` 与 `SUMMARY.md`）：
+
+1. **nothink 模板挡不住它自己开 `<think>`**：两个翻译 prompt 的 greedy 把 80 token 全花在推理上、
+   答案没出来——所以"假思考"模板对这个 checkpoint 不是抑制开关；直答要么加预算，要么正式用
+   `--thinking`（那时模板本来就渲染 `Assistant: <think`，与 fla-hub 默认分支一致）。
+2. **自造会话/装饰标签**：`<translation_output>…</translation_output>`（en-2 采样）、
+   `<answer>`（en-4 greedy）都是它自己发明的包装；它们不影响答案本身，但会让按模板解析的下游读错。
+3. **最严重的一种：`<user>…</user>` 回显用户轮次**（en-4 采样直接从"回答"退化成"重放问题"），
+   与 q8 容器的 `<user_input>` 同族——同一个"对话标记"弱点，q8r 下只在少数 prompt 触发。
 
 ## 参考
 
