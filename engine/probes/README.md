@@ -27,6 +27,7 @@ own copy of the surfaceless-EGL setup.
 | `progbinary_probe` | can a linked program be serialised on vc4, and does reloading skip the compile?  Item 6 (first-token latency) needed the answer | `progbinary_probe_pi` |
 | `load_probe` | how long does the 69 MB q8 checkpoint take to reach RAM on this board?  Buffered vs mmap | `load_probe_pi` |
 | `draw_probe` | what does one draw cost on vc4 before any real work is in it? | `draw_probe_pi` |
+| `sumorder_probe` | does the **summation order** change the answer on this driver?  A 1024-term dot product whose terms are 2^40 larger than its result (the shape MNN-Pocket's residual creates at magnitude 2300), through the four accumulation forms the engine's kernels use | `sumorder_probe`, `sumorder_probe_pi` |
 | `ffn2_probe` | does 2-position packing make one weight fetch serve two positions, and does it stay byte-identical? | `ffn2_probe_pi` |
 | `vc4_probe` | minimal FBO/texture smoke test: is the EGL/GLES path alive at all? | `vc4_probe` |
 | `vc4_ffn_probe` | minimal split-FFN / Top-2 / q16 smoke test | `vc4_ffn_probe` |

@@ -149,6 +149,14 @@ armv6: $(CORE) $(HEADERS)
 	$(CXX) $(ARMV6_CXXFLAGS) $(WARN) $(SECTIONS) $(INCS) -o engine_mm3 $(CORE) $(LDLIBS) $(LDFLAGS)
 	@echo "  built engine_mm3 for this host (a Pi Zero reports ARMv6/VFPv2)"
 
+# Does the summation order matter on this driver, at the magnitudes a small
+# model's residual reaches?  See the header of the source for the case.
+probes/sumorder_probe: probes/sumorder_probe.cpp
+	$(CXX) $(ALL_CXXFLAGS) -o $@ $< $(LDLIBS)
+
+probes/sumorder_probe_pi: probes/sumorder_probe.cpp | check-cross
+	$(CROSS_CXX) $(CROSS_CXXFLAGS) -o $@ $< $(CROSS_LDLIBS)
+
 probes/vc4_probe: probes/vc4_probe.cpp
 	$(CXX) $(ALL_CXXFLAGS) -o $@ $< $(LDLIBS)
 
@@ -247,7 +255,7 @@ clean:
 	rm -f engine engine_mm3 engine_mm3_pi test_lineedit
 	rm -f probes/vc4_probe probes/vc4_ffn_probe probes/vc4_topk_probe probes/load_probe_pi
 	rm -f probes/matvec_probe probes/texsize_probe probes/q4fmt_probe_pi probes/glsl_probe_pi probes/q4mv_probe_pi probes/draw_probe_pi probes/packunpack_probe probes/packunpack_probe_pi probes/logits_grid_probe probes/wrow_probe probes/wrow_probe_pi probes/conv_probe probes/conv_probe_pi \
-	rm -f probes/q4mv_probe probes/progbinary_probe_pi probes/ffn2_probe_pi probes/rgba4444_probe probes/rgba4444_probe_pi
+	rm -f probes/sumorder_probe probes/sumorder_probe_pi probes/q4mv_probe probes/progbinary_probe_pi probes/ffn2_probe_pi probes/rgba4444_probe probes/rgba4444_probe_pi
 
 probes/glsl_probe_pi: probes/glsl_probe.cpp | check-cross
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -o $@ $< $(CROSS_LDLIBS)
