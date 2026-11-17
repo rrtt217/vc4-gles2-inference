@@ -32,6 +32,10 @@ __pycache__/
 /engine/engine
 /engine/engine_mm3
 /engine/engine_mm3_pi
+# local A/B builds of the board binary (engine_mm3_pi.<arm>): the arms are
+# documented in docs/performance.md, the binaries are not deliverables
+/engine/engine_mm3_pi.*
+/.final-engine_mm3_pi
 /engine/test_lineedit
 
 # Probe binaries are build outputs; track the sources only.  A hand-written
