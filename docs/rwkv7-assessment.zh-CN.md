@@ -345,12 +345,30 @@ WKV7 GPU（VC4 上性价比最低）、prefix cache 状态快照、q6 head。
 | 0.4B q8r chat | **6.3432** | 1.8474 | 逐行 scale；本次最好 |
 | 0.4B q8 chat | 7.0384 | 1.9514 | 每矩阵 scale（skew 最差 rkv[12] 103，所以逐行明显更好） |
 | 0.4B q4 chat | 7.7273 | 2.0448 | 4-bit body + q8 head |
+| 0.4B **f32 oracle**（numpy，同一条 token 流） | **5.7405** | 1.7476 | 权重真值；量化代价 q8r +0.60 / q8 +1.30 / q4 +1.99 PPL |
 | 0.1B q8r chat（对照） | 9.2919（CPU）/ 9.1850（GPU 融合） | 2.22（CPU） | 跨规模不同表，只看量级 |
+| 0.1B f32 oracle（对照） | 8.1014 | 2.09 | 量化代价 +1.19 PPL |
 
 结论未变：Xe 上能加载能出话（三个容器都过加载检查），Pi 仍然放不下（q8 贴图 386 MB）。
 0.4B 的残差余量只有 0.1B 的一半（1.6×），是 0.4B 上 rail 的第一处观察点。
 在这份 421 token 的中文语料上 0.4B 的 PPL 比 0.1B 低 32%（nll 少 0.38 nats/token），
 也就是说"参数翻 2.35 倍换来的语言建模能力"是真实存在的；生成质量（翻译/知识题）仍待测。
+
+### 0.4B 的模板与 `<user_input>`（2026-11-17，CPU 分析）
+
+0.4B q8 的一次 16-token greedy 以 `\n<user_input>\n我是一名大学生，专` 开头。查下来**不是模板问题**：
+
+- 容器内嵌模板 488 B 与 `templates/rwkv7-g1.jinja` 逐字节相同，且与
+  `fla-hub/rwkv7-0.4B-g1` 的官方 `chat_template`（516 B）只差三处不影响渲染的写法
+  （`\n` 转义 vs 原始换行、`{{` 后的空格、以及生成分支的守卫变量 `open_thinking` vs
+  `enable_thinking is defined and enable_thinking == False`——后者是故意的，见
+  [rwkv7-plan](rwkv7-plan.zh-CN.md) §十）。词表里**没有** `user_input` 词条，它不是特殊 token。
+- 引擎自己的 `ChatTemplate`+`Tokenizer`（无 GPU 探针 `models/rwkv7/p3-build/render_probe.cpp`）
+  渲染同一条 prompt 得到 34 个 id，与 numpy oracle 喂进去的 34 个 id **逐个相同**。
+- 同一 prompt 在**未量化权重**上（oracle f32）给的是 `\n我是一个名为"智能助手"的AI，`；
+  `--thinking` 给 `>好的，我需要用一句话介绍自己。`；不带 think 块给 ` 我是一个AI助手，可以回答各种问`。
+- 所以 `<user_input>` 是 **q8（每矩阵 scale）容器的数值漂移**：q8r 与 q4 的前两个 token 都与
+  oracle 一致（`\n我`），且 q8 的 PPL 比 q8r 高 0.70。**0.4B 的 generation 结论以 q8r 为准。**
 
 ## 参考
 
