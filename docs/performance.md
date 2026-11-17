@@ -6953,3 +6953,122 @@ GPU 9.4464 vs Pi CPU 9.2990: same magnitude, the VC4 two-step residual add and
 strip-split sqrelu round slightly differently from the fused Xe path.  The GPU
 path is numerically合格 on Pi (coherent greedy, PPL within ~0.15 of CPU); the
 acceptance is PPL, not cross-path greedy byte-match (AGENTS.md).
+
+## 2026-11-17 — RWKV-7 P7: launch granularity on both paths (Iris Xe ADL GT2)
+
+P6 left a puzzle: the fused GPU path spends 1879 draws a token on the board and
+36.0 ms/token on the laptop, while the serial path spends ~200 *host syncs* a
+token and 119.1 ms.  P7 asked which of those two meters a token actually pays
+for — on each path — and then moved the one that pays.
+
+### The meters
+
+`SYNCCOUNT=1` is new: every `glFinish` plus every `glReadPixels` on the
+read-back path (`docs/test-hooks.md`).  `DRAWCOUNT=1` existed but printed a
+process total and **only on the `--prompt` completion path**, so the chat runs
+the timings come from never printed it.  Both counters are now decode-scoped:
+the turn records its decode loop's delta, so the prompt's launches cannot move a
+per-token figure.
+
+### Before / after (bench protocol: discarded warm-up, interleaved A/B, one
+binary per arm, 6 rounds; canonical chat prompt, `--gen 48`, `SEQ` from the
+container)
+
+| arm | ms/token median (min) | draws/token | syncs/token |
+|---|---:|---:|---:|
+| CPU path, before | 108.6 (105.4) | 233 | 167 |
+| CPU path, **after A2/A3** | **70.0 (61.3)** | 233 | **73** |
+| `RWKV_GPU=1`, before | 34.8 (33.7) | 1158 | 3 |
+| `RWKV_GPU=1`, after | 35.8 (34.2) | **594** | 3 |
+
+PPL unmoved on both pins: CPU **9.2919** (bit-identical, `SEQ=512`,
+`data/ppl_test.txt`), GPU **9.1850**.
+
+### A2/A3 on the serial path: sharing the read-back (delivered, 1.55x)
+
+The serial layer loop crosses the bus once per matvec — 14 times a layer, and on
+Xe a read-back costs ~0.6 ms.  The ops are independent, so P7 draws them into the
+rows of one target and takes the block with a single `glReadPixels`
+(`GPU::matvec_rows`, `Session::rwkv_mv_group`):
+
+- **A2** r/k/v: three read-backs → one.
+- **A3** the four low-rank branches: eight read-backs → two (four downs, then
+  four ups).  tanh and sigmoid stay host-side and in the same order; only the
+  batching is new.
+
+Every matrix keeps its own draw, program, uniforms and 2^k input normalisation,
+and the decode is `matvec_from`'s element by element, so the vectors are
+**bit-identical** — the CPU PPL is the same number to four decimals, not "within
+noise".  Syncs 167 → 73 (the floor for this structure: rkv + downs + ups + wo +
+cm-key + cm-value per layer, plus the logits).  The fused path is still the
+faster one on Xe (35.8 against 70.0); what changed is that the serial path's
+cost is now the matvec work rather than the stalls.
+
+What it does *not* change: the upload count.  The same 14 inputs still cross the
+bus the other way, and on VC4 `upload_activations` finishes after each one, so
+the board's serial path saves the read-backs only (94 of the 167).
+
+### The WKV update's strips: 576 of the GPU path's draws were a VC4 rule
+
+The recurrence's update pass is one fragment per state element (heads·hs·hs =
+49152 here), so it is split at `kDrawCap` — *unconditionally*, which is why Xe
+paid 48 draws a layer for a cap it does not have.  Gated on `needs_finish()`
+like `rwkv_draw1`, the shader derives both indices from `gl_FragCoord`, so the
+fragments are identical: **1158 → 594 draws/token, and the decode does not move
+(31.1 against 31.5 ms/token over 4 interleaved rounds)**.
+
+That is the measurement the rest of this section turns on: **on Xe a draw costs
+nothing.**  Deleting 564 draws changed the token by less than the noise.
+
+### A1 (six token-shift lerps in one draw): declined, with the numbers
+
+One `768 × 6` draw is 4608 fragments.  `rwkv_draw1` splits at `kDrawCap`
+*fragments*, so on VC4 that draw is 5 strips against the 6 draws it replaces —
+**one draw a layer, 12 a token**, i.e. ~6 ms of the board's 1138 by P6's own
+0.6 ms/draw division.  On Xe it would be 6 → 1 and worth the ~0 ms a draw costs
+there.  The price is the whole banded-input plumbing: a `768 × 6` lerp target
+plus a matvec variant that reads input *row* `b` for output band `b`, which is
+the same machinery A2 would need on the GPU path — and that one pays nothing at
+all (next paragraph).  Declined as a net-negative on the only machine it can be
+verified on; if the Pi's draw cost is confirmed to be real, the same two pieces
+would buy back ~6 ms and a *much* larger share of the WKV question below.
+
+### A2 on the GPU path: no draw to save
+
+`draw()` splits an m-row matvec at `kDrawCap` **rows**, so a merged
+`3·dim`-row rkv draw is 2304 rows = 3 strips = exactly the three draws it would
+replace.  Merging rows cannot reduce a draw count on either machine; only the
+*consumer* side would gain (one FBO bind instead of three), and that is not a
+draw.  The serial path does not care either: it buys the shared read-back, which
+it now has.
+
+### A3 on the GPU path: the ups cannot be merged for free
+
+The four down projections (rank 64/64/32/128 = 288 rows) *could* be one draw —
+288 rows is under the cap — for 3 draws a layer, 36 a token, ~18 ms on the board
+at P6's 0.5 ms.  The four ups cannot: they are `dim × r` matrices with four
+different inputs and four different ranks, so a single draw needs either a
+zero-padded `128 × 3072` weight texture per layer (+1.8x the MACs, ~2 MB more
+resident, a new upload path) or four weight samplers plus four row-scale
+samplers (9 texture units).  At 1.8x the MACs on a fetch-bound kernel, and
+against the board's measured 283 MMAC/s, that is a loss the 3 draws do not
+cover.  Not attempted; the down merge is the coherent half and is left for
+whoever measures the board first (see below).
+
+### What the board should measure next
+
+The Pi's GPU path is the one place where a draw really is expensive (P6: ~0.6 ms
+of the 1138, from 1879 draws).  **576 of those 1879 — 31% — are the WKV update's
+cap-sized strips**, so the question that decides the board's GPU path is what
+`kDrawCap` actually limits: *fragments per draw* (as `rwkv_wkv` and
+`rwkv_draw1` assume) or *width* (as `draw()`'s comment says: "a draw wider than
+`kDrawCap`", with the 2048-wide scratch target as the reason).  If it is width,
+the update is one `64 × 768` draw on VC4 and the board's GPU path loses a third
+of its launches without touching a single number.  `probes/rwkv_probe` section F
+(render then fetch, glFinish A/B) is the vehicle; it needs the board, not this
+laptop.
+
+Until that is answered, the serial path is the board's best bet and P7's own
+change is path-independent: 94 fewer read-backs a token, and the same
+`glFinish`-per-upload behaviour it already had.
+
