@@ -7444,3 +7444,50 @@ container from holding its own page cache in the movable zone during the upload.
 Measured on both machines: no change to the load time or the peak (the kernel
 reclaims clean file pages first under CMA pressure).  It stays as a bound, not
 as a speed claim.
+
+## 2026-11-17 (addendum) — pocket on the Pi: the degeneration is in the residual path, not the rails
+
+Handling report: on the board, `pocket-qat` **greedily** degenerates after two
+or three tokens (`杭州是中国中国中国中国…`), where the same binary on Xe writes a
+full sentence.  Measured, one run each:
+
+| configuration (both machines) | Pi | Xe |
+|---|---|---|
+| `RES=f32 ACT=f32 KV=q16@512` | `杭州是中国中国中国…` | full sentence |
+| `RES=i24 ACT=i16 KV=q16@512` (container defaults) | loops | fine |
+| `RES=f32 ACT=f32 KV=f32` | loops | fine |
+| `+ ATT_SUM=log2` (sum grid 2% -> 0.03%) | loops | fine |
+| `+ ATT_SCORE_GRID=256` (scores +-32 -> +-128) | loops | fine |
+| `Q4_FMT=0` (packed q4 decode instead of the imported RGBA4 view) | loops | fine |
+| `+ FFN_HID=f32` (new, same date) | loops (`…党的第1155年` repeating) | fine |
+
+`Q4_IMPORT_CHECK=1` on the board reports `word0=0x8ca6 nibbles 6 10 12 8 ->
+sampled 8 12 10 6`: the imported q4 surface round-trips the integers exactly
+(reversed order, which the shader compensates), so the texture path is not the
+error.
+
+**What the per-layer dump says.**  Same prompt, same formats, `--gen 0`,
+`HIDDEN_DUMP=1 DUMP_F32=1 STAGE_DUMP=1`, Pi vs Xe, cosine per stage:
+
+| stage | cosine | max\|x\| | max\|Pi - Xe\| |
+|---|---:|---:|---:|
+| layer 0 `xb` | **1.00000** | 0.71 | 0.0015 |
+| layer 0 `att` / `x1` | 0.99986 / 0.99998 | 0.50 | 0.004 / 0.003 |
+| mid, `x1` | 0.9998 | 1827 | 3.8 |
+| next, `x1` | 0.9951 | **2315** | **418** |
+| late, `x1` | 0.79 .. 0.59 | 5 .. 20 | 4 .. 10 |
+| last groups' first stage | 0.719 | — | 8 |
+
+Layer 0 is identical to five decimals, so no kernel is *wrong*; the divergence
+appears in exactly the layers whose residual reaches ~2300 — an 18% relative
+difference where the signal is that large, because the dot products cancel — and
+then accumulates to cosine 0.7 in the last layers.  That is VC4's arithmetic
+(summation order and the texture sample's rounding) against Xe's, amplified by
+this model's activation magnitudes, not a format limit: `RES`, `ACT`, `KV` and
+now `FFN_HID` are all f32 in the best arm and it still loops.
+
+**Consequence.**  Greedy decoding of this container is not usable on the board;
+sampling with a repetition penalty is (`--temp 0.7 --topp 0.9 --top-k 64
+--repeat-penalty 1.1`).  The engine keeps `FFN_HID=f32` because it removes a real
+8x rail violation (the container's hidden peaks at 1005); it is not the fix for
+this and was measured not to be.
