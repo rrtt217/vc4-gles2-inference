@@ -383,14 +383,22 @@ Pick the tool that answers the question before writing a new probe:
 | did my change alter numerics? | `regression.sh`, and PPL rather than one string |
 | did my change move the emitted GLSL? | `scripts/shader_hashes.sh` (no GPU needed); `--dump-shaders` / `--dump-shaders=raw` to look |
 
-`docs/test-hooks.md` lists the environment switches; `engine/src/*.cpp` is the
-ground truth, and the inventory is one command:
+`docs/test-hooks.md` lists the environment switches and
+[`engine/src/switches.cpp`](engine/src/switches.cpp) is the inventory: one row
+per switch with its canonical name, the spellings it replaced, its type, its
+closed set of values, whether it is permanent or a probe, and the axis it moves.
+`./engine_mm3 --dump-switches` prints that table with what the environment
+resolved to (no GPU, no model), and `scripts/check_switches.py` (step 0 of the
+gate) fails if the source reads a name with no row, a row is read nowhere, a
+retired name is read again, or a row is missing from the document.
 
-```bash
-# both spellings: a direct getenv() and one of the env_* helpers in common.h
-grep -rhoE '(getenv|env_set|env_flag|env_int|env_double)\(\s*"[A-Z_0-9]+"' engine/src \
-    | sed -E 's/.*"([A-Z_0-9]+)"/\1/' | sort -u
-```
+A switch names an **axis**, not a module: `ACT=i16|i8|f32`, `KV=i24|q8|q16|bf16|f32`,
+`RES=i16|i16_1|i24|f32`, `FFN_HID=i16|i8`, `ACT_CPU=q16|f32`.  The spellings they
+replaced (`ACT_FMT`, `ACT8`, `ACT_F32`, `KV_PACK`, `KV_FMT`, `KV_SCALE`,
+`RES_FMT`, `RES_PACK`, `ATT_SCALE`, `ATT_SUM_SCALE`) still work — the registry
+rewrites them and says so on stderr once — but new code and new documents use the
+axis name.  A closed set is validated at startup: a typo stops the run instead of
+falling back to a default.
 
 ## Measurement rules
 
@@ -444,8 +452,8 @@ These were paid for; do not relearn them.
 - **CMA**: `CmaFree` is actual occupancy; reducing `cma`/`gpu_mem` does not
   create free CMA.  It is *not* a budget for a new scene either -- a swap has no
   capacity pre-check (see "Switching models without restarting the engine").
-- **Prefix cache** header flags include pack mode and `KV_SCALE`; loading with
-  another `KV_PACK` or scale must be rejected.
+- **Prefix cache** header flags include the KV axis and its grid; loading with
+  another `KV` value or `KV_GRID` must be rejected.
 - **FFN**: hidden 2432 is split into 1216-wide chunks because VC4 FBO width is
   2048, and there are exactly two chunks -- so the ceiling is 2x the GL target
   width (4096 on VC4, 4608 for LFM2-350M on Xe).  q4 slicing must copy block
@@ -474,14 +482,14 @@ Update the document that owns the fact:
 | a checkpoint format or the loader | `docs/model-formats.md` |
 | a converter or the q4/q8 numerics | `docs/quantization.md` |
 | a timing or a regression baseline | `docs/performance.md` |
-| an environment switch | `docs/test-hooks.md` |
+| an environment switch | its row in `engine/src/switches.cpp` **and** `docs/test-hooks.md` |
 | a command a human will copy | the README for that component **and** this file |
 | a GPU or format change | `docs/engine-internals.md`, `docs/engine-layout.md` |
 
 A command in a document that no longer runs is a bug in the document, not a
 detail.  `engine/scripts/docs_check.sh` is the mechanical half of that rule; it
 is step 0 of `scripts/regression.sh`, and it runs in under a second: it compares
-the `getenv()` inventory with
+the switch registry (`engine/src/switches.cpp`) with the source and with
 `docs/test-hooks.md`, checks that every in-tree path a document tells you to run
 still exists (`engine/tools`, `engine/scripts`, `engine/probes`, `engine/src`,
 `engine/*.cpp`, `minimind3`, `server`, `templates`), and refuses to let a document
@@ -511,7 +519,10 @@ layout knowledge belongs in `xformat.h/.cpp`.  Environment switches are read
 through `env_set` / `env_flag` / `env_int` / `env_double` (`common.h`), not by
 calling `getenv` twice in one expression (`getenv(X) ? atoi(getenv(X)) : d` was
 21 of the 206 sites on 2026-11-14); `env_flag` means "set and not 0", which is
-the convention `docs/test-hooks.md` documents. Do not reintroduce per-shader
+the convention `docs/test-hooks.md` documents.  Every one of them has a row in
+`engine/src/switches.cpp` — that table is the inventory, the place a rename is
+declared and the place a probe is given an owner — and a switch read through the
+registry's own `sw_enum`/`sw_str` accessors is seen by the same checks. Do not reintroduce per-shader
 activation-layout strings.  JSON (the worker event stream, tool arguments and
 results, the chat-template context) is built with `common_json` from
 `third_party/jinja/json.h` and never by concatenation: it keeps key insertion

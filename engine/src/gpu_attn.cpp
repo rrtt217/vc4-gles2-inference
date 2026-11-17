@@ -9,6 +9,7 @@
 #include "gpu.h"
 #include "gpu_internal.h"
 #include "shaders.h"
+#include "switches.h"
 #include "xformat.h"
 
 #include <cstdio>
@@ -46,38 +47,46 @@ void GPU::init_attention(int dim, int kv_dim, int heads, int kv_heads, int head_
         att_kv_heads_ = kv_heads; att_head_dim_ = head_dim; att_seq_ = seq;
         att_rope_half_ = rope_half; att_qk_norm_ = qk_norm;
         att_qkv_pair_ = qkv_pair && ((dim + 2 * kv_dim) % 2 == 0);
+        // The KV axis, one value: i24 | q8 | q16 | bf16 | f32.  It replaces
+        // KV_PACK (the width) and KV_FMT (the codec), which were the two halves
+        // of this axis and whose interaction was undefined: bf16 could be
+        // "packed" and "not packed" at once, depending on which one you set
+        // last.  kRenames maps both spellings onto the values below.
         // A hybrid model defaults to the packed 16-bit KV: the 24-bit path
         // produces garbage on LFM2.5's shape (kv_dim 512, head_dim 64) while
         // the packed one is correct, and the packed layout is the canonical
-        // Pi/Xe setting anyway.  KV_PACK overrides either way.
-        att_kv_bits_ = env_int("KV_PACK", hybrid ? 16 : 0);
-        if (att_kv_bits_ == 1) att_kv_bits_ = 16;
-        if (att_kv_bits_ != 0 && att_kv_bits_ != 8 && att_kv_bits_ != 16) att_kv_bits_ = 0;
+        // Pi/Xe setting anyway.
+        const char* kv = sw_enum("KV");
+        if (!kv) kv = hybrid ? "q16" : "i24";
+        att_kv_bits_ = !strcmp(kv, "q8") ? 8 : !strcmp(kv, "q16") ? 16 : 0;
         att_kv_packed_ = att_kv_bits_ != 0;
-        att_score_scale_ = (float) env_double("ATT_SCALE", kAttnScoreScale);
+        att_score_scale_ = (float) env_double("ATT_SCORE_GRID", kAttnScoreScale);
         if (att_score_scale_ < 1.0f) att_score_scale_ = 1.0f;
-        att_sum_scale_ = (float) env_double("ATT_SUM_SCALE", kAttnSumScale);
+        att_sum_scale_ = (float) env_double("ATT_SUM_GRID", kAttnSumScale);
         if (att_sum_scale_ < 1.0f) att_sum_scale_ = 1.0f;
         // The sum's domain, not its grid: see AttnConfig::sum_log for why the
         // linear grid stays the default even though log2 is the more accurate
         // one (the two MiniMind3 containers disagree in sign).
         if (const char* sd = getenv("ATT_SUM")) att_sum_log_ = !strcmp(sd, "log2");
-        if (const char* kf = getenv("KV_FMT")) {
-                if (!strcmp(kf, "bf16")) {
-                        att_kv_fmt_ = 1;
-                        // The codec carries its own exponent, so KVSCALE is only
-                        // the grid ATT_DUMP prints on and check_att.py reads.
-                        att_kv_scale_ = 2048.0f;
-                } else if (!strcmp(kf, "f32")) {
-                        // The one-value-a-texel layout (the 24-bit path's): no
-                        // rounding to flip, which is the only thing that helps
-                        // the last-bit disagreements between the drivers.
-                        att_kv_fmt_ = 2;
-                        att_kv_bits_ = 0;
-                        att_kv_packed_ = false;
-                }
+        // bf16 keeps two values a texel (14 in the codec, the scale only in the
+        // grid ATT_DUMP prints on); f32 uses the one-value-a-texel layout (the
+        // 24-bit path's) with no rounding to flip, which is the only encoding
+        // that removes the last-bit disagreement between the two drivers.
+        att_kv_fmt_ = !strcmp(kv, "bf16") ? 1 : !strcmp(kv, "f32") ? 2 : 0;
+        // bf16 *is* the packed pair codec: two 16-bit halves in one texel, so it
+        // goes with the q16 layout (width kv_dim).  Leaving it on the
+        // one-value-a-texel layout wrote 24-bit fixed-point and read bf16 back
+        // -- MiniMind3 q8 PPL 71840 with KV_FMT=bf16 alone, 0.0000 of that
+        // being bf16's 0.1%: the two halves of the axis had to agree, which is
+        // what folding KV_PACK and KV_FMT into one value is for.
+        if (att_kv_fmt_ == 1) {
+                att_kv_bits_ = 16;
+                att_kv_packed_ = true;
+        } else if (att_kv_fmt_ == 2) {
+                att_kv_bits_ = 0;
+                att_kv_packed_ = false;
         }
-        att_kv_scale_ = (float) env_double("KV_SCALE",
+        att_kv_scale_ = (float) env_double("KV_GRID",
                         att_kv_bits_ == 16 ? 2048.0 : att_kv_bits_ == 8 ? 16.0 : 16384.0);
         if (att_kv_scale_ < 1.0f) att_kv_scale_ = 1.0f;
         att_kv_width_ = att_kv_bits_ == 16 ? kv_dim : att_kv_bits_ == 8 ? kv_dim / 2 : 2 * kv_dim;
@@ -88,7 +97,7 @@ void GPU::init_attention(int dim, int kv_dim, int heads, int kv_heads, int head_
         }
         if (att_kv_bits_ != 0 &&
             ((kv_dim % 2) != 0 || (att_kv_bits_ == 8 && ((kv_dim % 4) != 0 || (head_dim % 4) != 0)))) {
-            cerr << "KV_PACK width not divisible; falling back to 24-bit\n";
+            cerr << "KV: width not divisible for the packed layout; falling back to i24\n";
             att_kv_bits_ = 0; att_kv_packed_ = false;
             att_kv_scale_ = 16384.0f; att_kv_width_ = 2 * kv_dim;
         }

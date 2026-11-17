@@ -36,19 +36,13 @@ $ROOT/engine/README.md $ROOT/engine/README.zh-CN.md \
 $ROOT/server/README.md $ROOT/server/README.zh-CN.md \
 $ROOT/models/README.md $ROOT/engine/probes/README.md $(ls "$ROOT"/docs/*.md 2>/dev/null)"
 
-# 1. every switch the engine reads is described in test-hooks.md
-# Both spellings read an environment switch: `getenv("X")` directly, and the
-# `env_*` helpers in common.h (2026-11-14 moved 21 double reads onto them).  Keying
-# the inventory on `getenv` alone would have made every converted switch invisible
-# here -- the check has to follow the *fact*, not the syntax it was written with.
-grep -rhoE '(getenv|env_set|env_flag|env_int|env_double)\(\s*"[A-Z_0-9]+"' src \
-    | sed -E 's/.*"([A-Z_0-9]+)"/\1/' | sort -u > /tmp/docs_check_env.$$
-n=$(wc -l < /tmp/docs_check_env.$$)
-[ "$VERBOSE" = "-v" ] && say "  $n environment switches in src/"
-while read -r v; do
-    grep -q "$v" "$ROOT/docs/test-hooks.md" || bad "src reads $v, docs/test-hooks.md does not mention it"
-done < /tmp/docs_check_env.$$
-rm -f /tmp/docs_check_env.$$
+# 1. the switch registry against the source and against test-hooks.md
+# Every switch the engine reads has a row in src/switches.cpp (the inventory),
+# the row has to be read somewhere, a retired row must not be read, and the row
+# has to be documented.  This replaced a grep loop in 2026-11-17: the grep could
+# only ask "does the doc mention this name", never "is this name a whole switch".
+if ! python3 scripts/check_switches.py $VERBOSE; then fail=1; fi
+n=$(grep -cE '^ *\{"[A-Z][A-Z_0-9]+",.*SwKind::' src/switches.cpp)
 
 # 2. files a document tells you to run must exist
 refs=$(grep -rhoE "(engine/(tools|scripts|probes|src)|engine|minimind3|server|templates)/[A-Za-z0-9_.-]+\.(py|sh|jinja|cpp|h)" \

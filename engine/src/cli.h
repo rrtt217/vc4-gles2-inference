@@ -15,6 +15,7 @@ struct Options {
     std::string build_cache_prompt, build_cache_out, prefix_cache_path, ppl_path;
     int gen = 8;
     int dump_mode = 0;   // --dump-shaders: 1 = digests, 2 = raw GLSL
+    bool dump_switches = false;  // --dump-switches: the registry, then exit
     bool prompt_set = false, gen_set = false;
     bool chat = false, qwen_template = false, minimind3_template = false, greedy = false, worker = false;
     bool tbb_template = false;   // <|user|>/<|assistant|>/<|end|>, no system turn, no BOS

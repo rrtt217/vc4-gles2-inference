@@ -6,6 +6,7 @@
 // MESA_GLES_VERSION_OVERRIDE dance for the q4 kernels (docs/engine-internals.md).
 
 #include "gpu.h"
+#include "switches.h"
 #include "gpu_internal.h"
 #include "logits_grid.h"
 #include "xformat.h"
@@ -158,8 +159,8 @@ void GPU::init_egl(){
         // caller picked.  Q4_SHIFT_MESA=0 skips this for an A/B.
         // Q4_SHIFT's nibble split and RWKV_GPU's bit-cast f32 state kernels both
         // need the ESSL 3.00 compiler, so either one requests the MESA override.
-        const char* rf = getenv("RES_FMT");
-        const char* af = getenv("ACT_FMT");
+        const char* rf = sw_enum("RES");
+        const char* af = sw_enum("ACT");
         const bool f32_res = (rf && !strcmp(rf, "f32")) || (af && !strcmp(af, "f32"));
         if ((q4_shift_wanted() || env_flag("RWKV_GPU") || f32_res) && !getenv("Q4_SHIFT_NO_MESA")) {
                 setenv("MESA_GLES_VERSION_OVERRIDE", "3.0", 0);

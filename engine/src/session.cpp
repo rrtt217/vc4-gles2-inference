@@ -1,4 +1,5 @@
 #include "session.h"
+#include "switches.h"
 #include "sampling.h"   // argmax_token: the greedy fallback path
 #include "jinja/json.h"   // the cache sidecar: JSON is built, never concatenated
 #include <algorithm>
@@ -204,17 +205,27 @@ Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
             };
             const vector<Mat>& w2 = !m_.w2a.empty() ? m_.w2a : m_.w2;
             const bool q8_model = all_int8(m_.qkv) && all_int8(m_.wo) && all_int8(w2);
-            // ACT_FMT=f32: the activation streams (the uploaded h, the attention
-            // output, xb/xbf) go through the float32 format instead of the q16
-            // pair grid.  Same memory as the 24-bit residual, one bit-cast a
-            // value, and it needs ESSL 3.00 (init_egl requests it).
-            if (const char* af = getenv("ACT_FMT"))
-                if (!strcmp(af, "f32")) gpu_.act_fmt_ = XFormat::F32;
-            const char* a8 = getenv("ACT8");
-            const int act8_mode = a8 ? atoi(a8) : 0;
-            if (q8_model && (act8_mode == 1 || act8_mode == 2)) {
-                if (act8_mode == 1) gpu_.act_fmt_ = XFormat::I8_4;
-                gpu_.ffn_fmt_ = XFormat::I8_4;
+            // The activation axis, one value for the GPU streams (the uploaded
+            // h, the attention output, xb/xbf): `i16` is the q16 pair grid,
+            // `f32` the bit-cast one (same memory as the 24-bit residual, one
+            // bit-cast a value, needs ESSL 3.00 -- init_egl asks for it), `i8`
+            // is the 8-bit stream and needs q8 weights.
+            // This replaces ACT_FMT (the format), ACT8=1 (the width) and
+            // ACT8=2 (the FFN hidden alone, now FFN_HID); kRenames rewrites
+            // those spellings into ACT/FFN_HID before we get here, so the
+            // decision is made in exactly one place.
+            if (const char* a = sw_enum("ACT")) {
+                if (!strcmp(a, "f32")) gpu_.act_fmt_ = XFormat::F32;
+                else if (!strcmp(a, "i8")) {
+                    if (q8_model) gpu_.act_fmt_ = XFormat::I8_4;
+                    else cerr << "ACT=i8 needs an all-q8 model; keeping the q16 streams\n";
+                }
+            }
+            if (const char* fh = sw_enum("FFN_HID")) {
+                if (!strcmp(fh, "i8")) {
+                    if (q8_model) gpu_.ffn_fmt_ = XFormat::I8_4;
+                    else cerr << "FFN_HID=i8 needs an all-q8 model; keeping the q16 hidden\n";
+                }
             }
             // Residual stream packed two int16 per texel: halves the fetch count in
             // every rmsnorm pass (stats and norm both read the residual) and lets
@@ -226,35 +237,30 @@ Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
             // one q16 per texel into a target the rmsnorm read as pairs -- the
             // LFM2 i16 packs answered with 0.996 constants (2026-11-12).  Use the
             // first attention layer's matrix, like the fused-loop check above.
-            const char* rp = getenv("RES_PACK");
             bool wo_packs = false;
             for (const Mat& w : m_.wo)
                 if (w.rows > 0) {
                     wo_packs = w.type == WeightType::INT8 || w.type == WeightType::INT4;
                     break;
                 }
-            gpu_.res_pack_ = !(rp && strcmp(rp, "0") == 0) && wo_packs;
+            // The residual axis, one value: `i16` keeps the default decision
+            // (two q16 a texel where the wo kernels can pack, which halves the
+            // fetch count in every rmsnorm pass: -11% decode on the q8 model,
+            // perplexity unchanged), `i16_1` the one-a-texel q16 stream (what
+            // RES_PACK=0 used to force), `i24` and `f32` the wide ones.
             // A container that declares a 24-bit residual gets one value per
-            // texel; packing two values into a texel is a q16-only idea, so it
-            // is switched off rather than reinterpreted.
-            // RES_FMT=i16_1|i24_1 overrides the container's choice, so a
-            // format can be A/B'd on the same file.
-            if (const char* rf = getenv("RES_FMT")) {
-                gpu_.res_pack_ = false;
-                if (!strcmp(rf, "f32")) gpu_.res_fmt_ = XFormat::F32;
-                else gpu_.res_fmt_ = strcmp(rf, "i24_1") == 0 ? XFormat::I24_1 : XFormat::I16_1;
-                if (m_.res_q24 && gpu_.res_fmt_ != XFormat::I24_1)
-                    cerr << "RES_FMT overrides the container's q24 residual\n";
-            } else if (m_.res_q24) {
-                // The residual-consuming kernels still store q16 (x_st1q), so
-                // the GPU path would read a 24-bit texel holding a 16-bit
-                // encode.  Refuse instead of answering from garbage; the CPU
-                // path implements the format and is what this declares.
-                gpu_.res_pack_ = false;
-                gpu_.res_fmt_ = XFormat::I24_1;
-            } else {
-                gpu_.res_fmt_ = gpu_.res_pack_ ? XFormat::I16_2 : XFormat::I16_1;
-            }
+            // texel: packing two values into a texel is a q16-only idea, and
+            // the residual-consuming kernels store q16, so a container's own
+            // declaration wins over the default but not over an explicit RES.
+            const char* res = sw_enum("RES");
+            if (res && !strcmp(res, "f32")) gpu_.res_fmt_ = XFormat::F32;
+            else if (res && !strcmp(res, "i24")) gpu_.res_fmt_ = XFormat::I24_1;
+            else if (res && !strcmp(res, "i16_1")) gpu_.res_fmt_ = XFormat::I16_1;
+            else if (m_.res_q24) gpu_.res_fmt_ = XFormat::I24_1;
+            else gpu_.res_fmt_ = wo_packs ? XFormat::I16_2 : XFormat::I16_1;
+            gpu_.res_pack_ = gpu_.res_fmt_ == XFormat::I16_2;
+            if (res && strcmp(res, "i16") && m_.res_q24 && strcmp(res, "i24"))
+                cerr << "RES overrides the container's q24 residual\n";
         }
         // Paired qkv matvec: two output rows per fragment, half the activation
         // decode.  Only the int8 checkpoint uses it; QKV_PAIR=0 restores the
@@ -294,14 +300,17 @@ void Session::zero_conv_state(){
 }
 
 
-// ACT_F32=1 keeps the CPU layer loop's activations in f32 instead of storing
-// them on the q16 grid.  The grid is 1/256, which is fine for a residual of
+// ACT_CPU=f32 (was ACT_F32=1) keeps the CPU layer loop's activations in f32
+// instead of storing them on the q16 grid.  The grid is 1/256, which is fine for a residual of
 // order 1 and fatal for one of order 0.01: LFM2.5's embedding row peaks at
 // 0.05, so quantising it left 2-3 significant bits per component and the whole
 // model drifted (probe: xb 8.8% off after the first norm).  The GPU path is
 // unaffected -- its textures are q16 by construction.
 static bool act_f32() {
-    static const bool on = env_set("ACT_F32");
+    static const bool on = [] {
+        const char* v = sw_enum("ACT_CPU");
+        return v && !strcmp(v, "f32");
+    }();
     return on;
 }
 

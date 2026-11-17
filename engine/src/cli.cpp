@@ -39,6 +39,7 @@ static const char* kUsage =
     "  --prefix-cache F      load a prefix cache (needs GPU attention)\n"
     "  --build-prefix-cache PROMPTFILE OUT   write one and exit\n"
     "  --ppl FILE            perplexity of a text file\n"
+    "  --dump-switches      print the environment-switch registry (no GPU, no model)\n"
     "  --dump-shaders[=raw]  print every shader builder's GLSL digest (or the\n"
     "                        text) and exit; needs no model and no GPU\n"
     "  --worker              JSON-lines worker (the HTTP server drives this)\n"
@@ -113,6 +114,7 @@ bool parse_args(int argc, char** argv, Options& opt, bool& quiet, int& exit_code
         else if (!strcmp(argv[i], "--min-p") && i + 1 < argc) g_sampling.min_p = atof(argv[++i]);
         else if (!strcmp(argv[i], "--dump-shaders")) opt.dump_mode = 1;
         else if (!strcmp(argv[i], "--dump-shaders=raw")) opt.dump_mode = 2;
+        else if (!strcmp(argv[i], "--dump-switches")) opt.dump_switches = true;
         else {
             // Silently ignoring an argument is how "CHAT_DUMP=1" ends up on the
             // command line (where it is not an environment variable) and the

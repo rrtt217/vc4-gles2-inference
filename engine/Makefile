@@ -22,8 +22,8 @@ JINJA := $(TP)/jinja/lexer.cpp $(TP)/jinja/parser.cpp $(TP)/jinja/runtime.cpp \
 # wildcard because the refactor split gpu.cpp into gpu_*.cpp, and every probe
 # target that still listed the old file failed to link (2026-11-15).
 GPULIB := $(wildcard $(SRC)/gpu*.cpp) $(SRC)/shaders.cpp $(SRC)/shaders_attn.cpp \
-          $(SRC)/xformat.cpp $(SRC)/common.cpp
-CORE := $(SRC)/engine.cpp $(SRC)/common.cpp $(SRC)/xformat.cpp \
+          $(SRC)/xformat.cpp $(SRC)/common.cpp $(SRC)/switches.cpp
+CORE := $(SRC)/engine.cpp $(SRC)/common.cpp $(SRC)/xformat.cpp $(SRC)/switches.cpp \
         $(SRC)/shaders.cpp $(SRC)/shaders_attn.cpp $(SRC)/dump_shaders.cpp \
         $(wildcard $(SRC)/gpu*.cpp) \
         $(SRC)/tokenizer.cpp $(SRC)/model.cpp $(SRC)/session.cpp $(SRC)/prefix_cache.cpp $(SRC)/lineedit.cpp $(SRC)/lineedit_layout.cpp \

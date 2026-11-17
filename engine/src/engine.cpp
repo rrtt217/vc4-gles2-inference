@@ -34,6 +34,7 @@
 #endif
 
 #include "common.h"
+#include "switches.h"
 #include "dump_shaders.h"
 #include "shaders.h"
 #include "xformat.h"
@@ -76,6 +77,7 @@ int main(int argc, char** argv) {
     if (!parse_args(argc, argv, opt, quiet, cli_exit)) return cli_exit;
     g_quiet = quiet;
 
+    if (opt.dump_switches) { sw_dump(stdout); return 0; }
     if (opt.dump_mode) return dump_shaders(opt.dump_mode == 2);
     if (opt.top_k < 0) opt.top_k = 0;
     if (opt.top_k_candidates && opt.top_k <= 0) {

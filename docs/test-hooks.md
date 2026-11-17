@@ -11,14 +11,27 @@ Three rules before using this list:
   silently ignored.
 - **Prefer an in-binary switch to a second build.**  Two builds add enough
   variance to hide a 1 ms effect on the Pi.
-- **The source is the ground truth.**  The full inventory, including ad-hoc
-  debug flags that are not listed here, is:
-
-  ```bash
-  # both spellings: a direct getenv() and one of the env_* helpers in common.h
-  grep -rhoE '(getenv|env_set|env_flag|env_int|env_double)\(\s*"[A-Z_0-9]+"' engine/src \
-    | sed -E 's/.*"([A-Z_0-9]+)"/\1/' | sort -u    # 93 today
-  ```
+- **The registry is the inventory.**  Every switch the engine reads has a row in
+  `engine/src/switches.cpp`: canonical name, the spellings it replaced, type,
+  the closed set of values, whether it is permanent or a probe, and the *axis*
+  it moves.  `./engine_mm3 --dump-switches` prints that table with what this
+  environment resolved to (no GPU, no model), and `scripts/check_switches.py`
+  fails the gate if the source reads a name with no row, if a row is read
+  nowhere, if a retired name is read again, or if a row is missing from this
+  document.
+- **A switch names an axis, not a module.**  `ACT=i16|i8|f32` is the activation
+  streams' precision whichever file reads it; `KV=i24|q8|q16|bf16|f32` is the
+  KV cache's encoding; `RES=i16|i16_1|i24|f32` is the residual's.  The old
+  spellings keep working — the registry rewrites them onto the axis value and
+  says so on stderr once: `ACT8=1` -> `ACT=i8` + `FFN_HID=i8`, `ACT8=2` ->
+  `FFN_HID=i8`, `ACT_FMT` -> `ACT`, `ACT_F32` -> `ACT_CPU`, `RES_FMT` -> `RES`,
+  `RES_PACK=0` -> `RES=i16_1`, `KV_PACK=16` -> `KV=q16`, `KV_FMT=bf16` ->
+  `KV=bf16`, `KV_SCALE` -> `KV_GRID`, `ATT_SCALE` -> `ATT_SCORE_GRID`,
+  `ATT_SUM_SCALE` -> `ATT_SUM_GRID`.
+- **A closed set is validated, not defaulted.**  `ACT=i9` stops the run and
+  prints the list; it does not fall back to `i16`.  Validation happens once, for
+  every set switch, before any kernel reads one — including switches nothing in
+  this model's path reads, so a typo cannot hide until the next model.
 
 ## Diagnostics: dumps
 
@@ -37,7 +50,7 @@ exist.
 | `FFN_DUMP=1` | the first 8 texels of the layer-0 gate output, for bisecting a 1-LSB drift |
 | `CPU_RMS_GPU=1` | the CPU layer loop computes its RMSNorm with the GPU shader (fixed-point partial sums) instead of the f32 CPU mean: the A/B probe for the fused path's PPL gap |
 | `CPU_ADD_GPU=1` | the CPU layer loop folds the `wo`/`w2` residual add in the kernel (`matvec_add`) instead of a read-back plus `add_q16`: the other half of that A/B |
-| `ACT_F32=1` | the CPU layer loop stores activations in f32 instead of on the q16 grid (1/256).  The grid is fine for a residual of order 1 and fatal for one of order 0.01: LFM2.5's embedding row peaks at 0.05, so its first norm saw 2-3 significant bits per component and came out 8.8% off (measured against the float32 numpy reference).  Off by default; on the q4 container it is worth 1.3 PPL, on i16 it is *worse* than the grid -- i.e. the activation grid is not the only error left in this model |
+| `ACT_CPU=f32` | the CPU layer loop stores activations in f32 instead of on the q16 grid (1/256).  The grid is fine for a residual of order 1 and fatal for one of order 0.01: LFM2.5's embedding row peaks at 0.05, so its first norm saw 2-3 significant bits per component and came out 8.8% off (measured against the float32 numpy reference).  Off by default; on the q4 container it is worth 1.3 PPL, on i16 it is *worse* than the grid -- i.e. the activation grid is not the only error left in this model |
 | `PPL_DUMP=path` | `--ppl` writes one `position token nll` line per scored token.  A mean is not enough to see what a gap is made of: a few catastrophic positions and a uniform 2% error raise PPL the same way |
 | `PPL_STRIDE=n` | window stride for `--ppl` on a file longer than `SEQ`: each window feeds `SEQ` tokens and scores only the last `n`, so every scored token has at least `SEQ-n` tokens of context (default `SEQ/2`, printed as `stride=`).  `0` restores the pre-2026-11-12 cold windows -- stride `SEQ-1`, no warm-up, ~1.8 nats/token worse -- which is the only way to reproduce a long-file PPL measured before that date |
 | `DUMP_F32=1` | `STAGE_DUMP`/`HIDDEN_DUMP` rows print as raw IEEE bits instead of q16 texels.  The q16 form is right for comparing two engine paths, but its 1/256 step is coarser than the early-layer differences in LFM2.5 (activations of order 0.01), so an engine-vs-numpy bisect needs this |
@@ -212,8 +225,13 @@ binary.  They are measurement hooks, not production settings.
   pinned strings, at the cost of the board's i16 model (326.8 against 216.0
   ms/token).  Both spellings are the same arithmetic up to the reconstruction
   error; see `docs/vc4-glsl-costs.md` for why the fast one is cheaper.
-- `RES_PACK=0` — disable the default two-q16-per-texel residual stream (q8 and
-  q4 use packed residual by default).
+- `RES=i16|i16_1|i24|f32` — the residual stream's format.  `i16` (default) is
+  the two-q16-per-texel packed stream (q8 and q4 pack by default; an i16
+  container does not, because its add kernels write one q16 a texel); `i16_1`
+  is that stream unpacked (was `RES_PACK=0`); `i24` the 24-bit once-a-texel
+  form; `f32` the bit-cast one, same memory as `i24`, needs ESSL 3.00.
+  `RES` overrides a container's own q24 declaration (which is what
+  `RES_FMT=i24_1` used to do, in the other direction).
 - `PREFILL_PAIR=0` — disable the two-position prefill pair (the default since
   step 5 of the prefill-batching work).  `diff_paths.sh` sets it so both paths
   step every position through the same code.
@@ -242,8 +260,23 @@ binary.  They are measurement hooks, not production settings.
 
 ## Precision and quality
 
-- `ACT8=1` — all matvec inputs in `I8_4` (q8 weights only, opt-in).
-- `ACT8=2` — FFN hidden state in `I8_4` (q8 weights only, opt-in).
+- `ACT=i16|i8|f32` — the GPU activation streams' format: the uploaded `h`, the
+  attention block's output, `xb` and `xbf`.  `i16` (default) is the q16 pair
+  grid at `ACT_SCALE=256`; `i8` puts all matvec inputs in `I8_4` (q8 weights
+  only — was `ACT8=1`); `f32` bit-casts them into RGBA8, one value a texel (was
+  `ACT_FMT=f32`).  The f32 form is the largest single fidelity term measured on
+  MNN-Pocket: cosine 0.9415 with the q16 streams against 0.9552 with f32 ones
+  (float32 numpy reference, same q4 container).
+- `FFN_HID=i16|i8` — the FFN hidden stream's width alone (`ACT8=2` set only
+  this; `ACT8=1` set this *and* `ACT`).  q8 weights only.
+- `ACT_CPU=q16|f32` — the CPU layer loop's activation grid, a *placement*
+  question next to the two above (was `ACT_F32=1`; that spelling meant "on" for
+  any value, including `ACT_F32=0`, and the new one means `f32`).  The grid is
+  fine for a residual of order 1 and fatal for one of order 0.01: LFM2.5's
+  embedding row peaks at 0.05, so its first norm saw 2-3 significant bits per
+  component and came out 8.8% off against the float32 numpy reference.  On the
+  q4 container it is worth 1.3 PPL, on i16 it is *worse* than the grid — the
+  activation grid is not the only error left in that model.
 - `Q8_LAYERS=all|0,1,...`, `Q8_PARTS=qkv,wo,ffn,w2,logits,emb` — precision mix.
 - `Q4_WEIGHTS=1` — runtime q4 conversion for experiments.  Prefer the offline
   Q4M1 container; `Q4_SCOPE=all|attn|ffn` only applies to runtime conversion.
@@ -314,29 +347,50 @@ binary.  They are measurement hooks, not production settings.
   read 2020, 2436, 4576 and 4544 kB in four consecutive uploads, and one RGBA8
   upload *raised* CmaFree).  The measurement it used to attempt is now done with
   `/sys/kernel/debug/dri/0/bo_stats`, read around a whole process.
-- `KV_SCALE=N` — KV fixed-point scale (default 16384; q16 uses 2048, q8 uses 16).
-- `KV_FMT=bf16|f32` — the KV value encoding.  Default (unset) is the fixed
+- `KV=i24|q8|q16|bf16|f32` — the KV cache's encoding, one value for one axis.
+  `i24` (the default for a dense model) is one 24-bit fixed-point value a texel
+  (width `2*kv_dim`); `q16` two int16 a texel (width `kv_dim`) and `q8` four
+  int8 (width `kv_dim/2`); a hybrid model (LFM2) defaults to `q16`, because the
+  24-bit layout is wrong for kv_dim 512 / head_dim 64 in the fused path.
+  `bf16` and `f32` are the 2026-11-17 additions; see the two rows below.
+  Measured on MiniMind3 q8 at `SEQ=768` (Xe), one value a run: `i24` 271.6942,
+  `q8` 269.6962, `q16` 270.3170, `bf16` 270.3891, `f32` 268.3908 — five
+  encodings, one 1.2% band, i.e. the KV encoding is worth about a percent of
+  PPL on a q8 container and a great deal more on a model whose KV range does not
+  fit the grid (MNN-Pocket).
+  **`bf16` implies the packed layout** (two 16-bit halves a texel, width
+  `kv_dim`): it is a pair codec, and leaving it on the one-value-a-texel layout
+  wrote 24-bit fixed point and read bf16 back — PPL 71840.  That combination was
+  reachable before the fold (`KV_FMT=bf16` without `KV_PACK=16`) and is not
+  reachable now, which is the argument for one value per axis in one sentence.
+  `KV_PACK=0|8|16` and `KV_FMT=bf16|f32` are the spellings this replaces, and
+  they are what the server still sends (`KV_PACK=<bits>`), which is why the
+  registry translates them.
+- `KV_GRID=N` — the fixed-point KV scale (was `KV_SCALE`; default 16384 for
+  `i24`, 2048 for `q16`, 16 for `q8`).
+- `KV=bf16|f32` — the value encodings this axis gained.  Default is the fixed
   q16/q24 grid on `KVSCALE`.  `bf16` keeps two values a texel (same layout, same
   memory, same fetch count) with a uniform 0.1% relative error, which is the
   right knob for a model whose KV *range* does not fit the fixed grid; `f32`
   uses the one-value-a-texel 24-bit layout with no rounding at all.  Measured on
   MNN-Pocket (q4 + f32 activation streams, against a float32 numpy forward):
-  f32 0.9552 cosine, q16 at KV_SCALE=512 0.9531, bf16 0.9454 — the fixed grid
+  f32 0.9552 cosine, q16 at KV_GRID=512 0.9531, bf16 0.9454 — the fixed grid
   wins on large values and bf16's uniform 0.1% loses to it, so bf16 is not a
   free upgrade; f32 is the only one that removes the rounding, and it buys
   0.002 cosine for 2x the KV memory and 2x the KV fetches.
-- `ATT_SCALE=N` — the attention score/(max) grid: the score texel holds
+- `ATT_SCORE_GRID=N` (was `ATT_SCALE`) — the attention score/(max) grid: the score texel holds
   `round(score*N)`, so the range is `+-32768/N` and the step `1/N`.  Default
   1024 (+-32, step 1/1024), which is what every model before 2026-11-17 was
   measured on.  Widening it for a model whose scores exceed the range is a
   trade, not a free win: MNN-Pocket's scores reach 54 under a chat prompt, and
-  on both drivers `ATT_SCALE=256` (``+-128``, step 1/256) made the distribution
+  on both drivers `ATT_SCORE_GRID=256` (``+-128``, step 1/256) made the distribution
   *worse* than the clipping it avoids (Xe entropy 0.07 -> 0.33, Pi 0.16 -> 0.24
   with the f32 streams), because the coarser step costs more than the clip
   saves.  The fix for a score that really overflows is the f32 score stream,
   not a wider fixed grid.
-- `ATT_SUM_SCALE=N` — the exp-sum grid in the same (max,sum) texel when the sum
-  is linear (default 32, step 1/32).  Ignored with `ATT_SUM=log2`.
+- `ATT_SUM_GRID=N` (was `ATT_SUM_SCALE`) — the exp-sum grid in the same
+  (max,sum) texel when the sum is linear (default 32, step 1/32).  Ignored with
+  `ATT_SUM=log2`.
 - `ATT_SUM=linear|log2` — the sum's *domain*.  `log2` stores
   `log2(sum)*2048` in the same q16 slot and costs one `exp2` in `att_v`; the
   relative step is then 0.03% for any sum from 1 to `SEQ`, where the linear
@@ -346,11 +400,9 @@ binary.  They are measurement hooks, not production settings.
   323.8378 — the two containers disagree in sign, so this is not a quality
   lever, it redistributes a sub-0.1% per-head gain.  `ATT_DUMP` +
   `check_att.py` reads either (the checker decodes `2**(ssum/2048)`).
-- `KV_PACK=16|8` — packed KV layout: two int16 per RGBA8 texel (width 384) or
-  four int8 (width 192), instead of one 24-bit value (width 768).  A hybrid
-  model (LFM2) defaults to 16: the 24-bit layout is wrong for kv_dim 512 /
-  head_dim 64 in the fused path, and 16 is the canonical Pi/Xe setting.  An
-  explicit `KV_PACK=0` still selects the 24-bit layout.
+  With `KV=q16` the packed layout is two int16 per RGBA8 texel (width 384) and
+  `KV=q8` four int8 (width 192), instead of the `i24` layout's one 24-bit value
+  (width 768) — that is the `KV_PACK=16|8` spelling folded into the axis.
 - `KV8_SIM=1..6`, `KV8_SIM_SCALE=N`, `KV8_STATS=1` — price an 8-bit KV grid on
   the CPU attention path (`GPU_LAYER=0`): 1 global K+V, 2 per-head K+V, 3 global
   K, 4 global V, 5 per-head V, 6 per-head K.  Probe only, no GPU kernel.
@@ -429,19 +481,19 @@ the blob these switches act on.
   just-loaded KV rows back out through the normal save path, so the load can be
   compared byte for byte with the built file (`cmp`).
 
-- `RES_FMT=i16_1|i24_1|f32` — overrides the container's residual width, so a
-  format can be A/B'd on one file.  `f32` stores the residual as a bit-cast
-  IEEE float, one value per RGBA8 texel — the 24-bit layout, so the same
-  memory — and needs the ESSL 3.00 compiler `init_egl()` asks for when this is
-  set.  A residual that exceeds the q16 rail (±128) is what a container's
-  q24 flag answers; `f32` is the same answer without the fixed-point step.
-- `ACT_FMT=i16|f32` — the *activation streams'* format: the uploaded `h`, the
+- `RES=i16|i16_1|i24|f32` — see the residual row above.  `f32` stores the
+  residual as a bit-cast IEEE float, one value per RGBA8 texel — the 24-bit
+  layout, so the same memory — and needs the ESSL 3.00 compiler `init_egl()`
+  asks for when this is set.  A residual that exceeds the q16 rail (±128) is
+  what a container's q24 flag answers; `f32` is the same answer without the
+  fixed-point step.
+- `ACT=i16|i8|f32` — the *activation streams'* format: the uploaded `h`, the
   attention block's output, `xb` and `xbf` (`i16` is the default q16 grid at
   `ACT_SCALE=256`, `f32` the same bit-cast one-value-a-texel encoding as
-  `RES_FMT=f32`, also ESSL 3.00).  Defined in `xformat.cpp` (`x_f32`/`x_f32enc`)
+  `RES=f32`, also ESSL 3.00).  Defined in `xformat.cpp` (`x_f32`/`x_f32enc`)
   and threaded through every shader that carries one of those streams, so it is
-  a format switch, not a placement one: `ACT_F32` below moves the CPU loop,
-  `ACT8` changes the width of the same GPU streams.  Measured on MNN-Pocket
+  a format switch, not a placement one: `ACT_CPU` moves the CPU loop, `FFN_HID`
+  changes the width of the FFN hidden stream.  Measured on MNN-Pocket
   (q4 container, f32 residual, against the float32 numpy forward): cosine
   0.9415 with the q16 streams, 0.9552 with the f32 ones — the largest single
   fidelity gain of the 2026-11-17 campaign, and the reason the qkv and attention

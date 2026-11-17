@@ -8,6 +8,7 @@
 // documented in `server/README.md`; `scripts/swap_matrix.py` drives it.
 
 #include "worker.h"
+#include "switches.h"
 
 #include <chrono>
 #include <cstdio>
@@ -132,6 +133,16 @@ int run_worker(App& app, Session& session, bool enc_bos, bool chat_dump) {
                                           {"idle", true}}));
                 continue;
             }
+            // The server speaks bits (`KV_PACK=16`), so this field stays
+            // numeric: the packed width, 0 for the one-value-a-texel
+            // encodings.  The axis itself is `KV=i24|q8|q16|bf16|f32` since
+            // 2026-11-17; KV_PACK is a legacy spelling kRenames understands.
+            const auto kv_bits = [] {
+                const char* kv = sw_str("KV");
+                if (kv && !strcmp(kv, "q16")) return 16LL;
+                if (kv && !strcmp(kv, "q8")) return 8LL;
+                return 0LL;
+            };
             if (kind == "stats") {
                 // What only the engine can answer: the CMA left on the board
                 // (the number that decides whether another model fits), the
@@ -142,7 +153,7 @@ int run_worker(App& app, Session& session, bool enc_bos, bool chat_dump) {
                                           {"mem_available_kb", (long long) proc_meminfo_kb("MemAvailable:")},
                                           {"programs", (long long) app.gpu.program_count()},
                                           {"seq", app.model.seq},
-                                          {"kv_pack", (long long) (env_int("KV_PACK", 0))},
+                                          {"kv_pack", (long long) kv_bits()},
                                           {"template", app.model.template_name.empty() ? string("(kind ") + std::to_string(app.model.template_kind) + ")" : app.model.template_name},
                                           {"uptime_ms", (long long) run_time_ms()}}));
                 continue;
