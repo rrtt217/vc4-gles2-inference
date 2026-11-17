@@ -51,7 +51,7 @@ The rows below are the registry, one per switch, grouped by the axis they move.
 diagnostic or a pricing arm; `retired` is gone (`--dump-switches` prints the
 same table with what *this* environment resolved to).
 
-135 switches: 28 permanent, 93 probe, 14 retired; 16 legacy spellings are translated.
+136 switches: 28 permanent, 94 probe, 14 retired; 16 legacy spellings are translated.
 
 ### The activation streams
 
@@ -70,6 +70,7 @@ same table with what *this* environment resolved to).
 | `ATT_SCORE_GRID` <br><sub>`ATT_SCALE`</sub> | N | score/(max) grid: round(score*N), so +-32768/N range and 1/N step (1024) |
 | `ATT_SUM` | `linear\|log2` | the sum's domain: linear grid (default) or log2(sum)*2048 — a trade, see the doc |
 | `ATT_SUM_GRID` <br><sub>`ATT_SUM_SCALE`</sub> | N | the linear sum grid in the same (max,sum) texel (32 = step 1/32) |
+| `ATT_EXP` | `drv\|poly` | the weight's exponential: drv (default) or a portable polynomial; VC4's exp is 20x Xe's error |
 
 ### The KV cache
 
