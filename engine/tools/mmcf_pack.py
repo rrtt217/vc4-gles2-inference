@@ -732,12 +732,15 @@ def main():
               (n, caps, mo, ms, doff, fsz, bad))
         if bad:
             raise SystemExit("verify failed")
-        # weights must match the source bit for bit (after the bias)
+        # weights must match the source bit for bit (after the bias).  The file
+        # is read once: this loop used to re-read it per tensor, which on a 0.4B
+        # container (795 tensors) is 358 GB of memcpy for no extra check.
+        blob = Path(args.out).read_bytes()
         for rec in tensors:
             tid, dt, payload = rec[0], rec[1], rec[5]
             if dt == DT_Q8I8 and (tid & 0xFF) != T_EMB:
                 payload = bytes((b ^ 0x80) for b in payload)
-            if payload not in Path(args.out).read_bytes():
+            if payload not in blob:
                 raise SystemExit("verify: tensor 0x%x not found verbatim" % tid)
         print("verify: every tensor present verbatim")
 
