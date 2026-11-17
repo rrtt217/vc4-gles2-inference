@@ -133,6 +133,7 @@ void GPU::reset_targets(){
         rwkv_shift_.clear();
         rwkv_vfirst_ = Target();
         rwkv_x0_ = Target();
+        rwkv_mvrows_ = Target();
         rwkv_cur_ = 0;
         rwkv_have_vfirst_ = false;
         // target_for(rows) caches by row count and is filled lazily *during*
@@ -166,6 +167,8 @@ void GPU::release_scene(){
         input_textures2_.clear();
         conv_k_tex_.clear();
         rwkv_const_.clear();
+        rwkv_in_tex_.clear();
+        rwkv_in_w_.clear();
         rms_att_tex_.clear();
         rms_ffn_tex_.clear();
         q_norm_tex_.clear();

@@ -117,6 +117,66 @@ void GPU::init_rwkv(const Model& m){
         }
 }
 
+// One host sync for a group of matvecs (docs/rwkv7-plan.zh-CN.md P7).  Each
+// matrix keeps its own draw, its own program and its own uniforms -- the strip
+// split, the q8 row-scale fetch and the 2^k input scaling all happen exactly as
+// in matvec() -- and only the *read-back* is shared: the draws land in the rows
+// of one target and a single glReadPixels takes the block.  The CPU path's cost
+// is that sync (one per matvec, 14 per layer), not the draw.
+GLuint GPU::rwkv_upload_slot(const vector<float>& x, int slot){
+        const int n = (int)x.size();
+        const int texels = x_texels(n, act_fmt_);
+        vector<uint8_t> data = x_pack(x, act_fmt_);
+        if ((int)rwkv_in_tex_.size() <= slot) {
+                rwkv_in_tex_.resize((size_t)slot + 1, 0);
+                rwkv_in_w_.resize((size_t)slot + 1, 0);
+        }
+        // The width has to be exactly x_texels(n): the kernels compute the
+        // sample coordinate as (i+0.5)/axw from the *matrix's* column count, so a
+        // wider texture silently samples other texels.  (Found the hard way: the
+        // up projections, whose inputs are the rank-long t vectors, read a 384-
+        // texel staging texture that had been made for a 768-long one.)
+        GLuint t = rwkv_in_tex_[(size_t)slot];
+        if (t == 0 || rwkv_in_w_[(size_t)slot] != texels) {
+                t = make_texture(texels, 1, data.data());
+                rwkv_in_tex_[(size_t)slot] = t;
+                rwkv_in_w_[(size_t)slot] = texels;
+                return t;
+        }
+        bind_tex(0, t);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, texels, 1, GL_RGBA, GL_UNSIGNED_BYTE, data.data());
+        if (needs_finish()) { glFlush(); glFinish(); }
+        return t;
+}
+
+vector<vector<float>> GPU::matvec_rows(const vector<MvRow>& rows, int slot0){
+        vector<vector<float>> out(rows.size());
+        if (rows.empty()) return out;
+        int w = 0;
+        for (const MvRow& r : rows) w = std::max(w, r.m->rows);
+        // One target for every group: grow monotonically, never shrink.  A
+        // per-call make_target would put a texture in the release ledger per
+        // layer per token (the create sites are not guarded, on purpose).
+        Target& t = rwkv_mvrows_;
+        if (t.tex == 0 || t.w < w || t.h < (int)rows.size())
+                t = make_target(std::max(w, t.w), std::max((int)rows.size(), t.h));
+        for (size_t i = 0; i < rows.size(); ++i) {
+                GLuint xt = rwkv_upload_slot(*rows[i].x, slot0 + (int)i);
+                draw(*rows[i].m, xt, t, (int)i);
+        }
+        if (needs_finish()) { glFlush(); glFinish(); }
+        vector<int32_t> raw = read_i32(t, w, (int)rows.size());
+        for (size_t i = 0; i < rows.size(); ++i) {
+                const int n = rows[i].m->rows;
+                out[i].resize((size_t)n);
+                for (int j = 0; j < n; ++j) {
+                        int v = raw[(size_t)i * (size_t)w + (size_t)j];
+                        if (v >= 32768) v -= 65536;
+                        out[i][(size_t)j] = (float)v / ACT_SCALE;
+                }
+        }
+        return out;
+}
 void GPU::clear_rwkv_state(){
         // The WKV state is bit-cast f32: +0.0 is the texel (0,0,0,0), so black
         // is the correct zero.  The token-shift rows and v_first are I24_1
@@ -408,9 +468,20 @@ GLuint GPU::rwkv_wkv(int layer, GLuint r, GLuint k, GLuint v, GLuint a, GLuint k
         bind_tex(5, kk); set_sampler(pu, "KK", 5);
         bind_tex(6, a); set_sampler(pu, "A", 6);
         setup_attrib(pu);
-        const int rps = kDrawCap / hs;
-        for (int y0 = 0; y0 < ROWS; y0 += rps) {
-            glViewport(0, y0, hs, std::min(rps, ROWS - y0));
+        if (needs_finish()) {
+            // VC4 drops a draw wider than kDrawCap *fragments*, and the state is
+            // one fragment per f32 element (H*hs*hs = 49152 here), so the update
+            // is 48 cap-sized strips there -- that is the largest draw count in
+            // the whole path and it is VC4-specific.  Every other driver takes it
+            // in one piece: the shader derives both indices from gl_FragCoord, so
+            // the fragments and their arithmetic are identical either way.
+            const int rps = kDrawCap / hs;
+            for (int y0 = 0; y0 < ROWS; y0 += rps) {
+                glViewport(0, y0, hs, std::min(rps, ROWS - y0));
+                glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+            }
+        } else {
+            glViewport(0, 0, hs, ROWS);
             glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         }
         // out: dot the updated state with r.

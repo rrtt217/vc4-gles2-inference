@@ -591,6 +591,41 @@ vector<float> Session::rwkv_mv(const Mat& m, const vector<float>& x){
         return gpu_.matvec(ms, xs);
     }
 
+// A group of matvecs sharing one read-back (docs/rwkv7-plan.zh-CN.md P7).  The
+// per-matrix work is rwkv_mv's, verbatim: the same 2^k input normalisation, the
+// same Mat view with the scale folded in, the same draw and the same decode.
+// What changes is only the number of host syncs -- one per group instead of one
+// per matrix -- because on this path the read-back, not the draw, is the cost.
+vector<vector<float>> Session::rwkv_mv_group(const vector<const Mat*>& ms,
+                                             const vector<const vector<float>*>& xs,
+                                             int slot0){
+        vector<Mat> views(ms.size());
+        vector<vector<float>> scaled(ms.size());
+        vector<GPU::MvRow> rows(ms.size());
+        for (size_t i = 0; i < ms.size(); ++i) {
+                const Mat& m = *ms[i];
+                const vector<float>& x = *xs[i];
+                float mx = 0.0f;
+                for (float v : x) mx = std::max(mx, fabsf(v));
+                int e = 0;
+                frexpf(mx, &e);
+                const int k = e - 6;
+                views[i] = m;              // a view: borrowed bytes are not copied
+                rows[i].m = &views[i];
+                if (!(mx > 0.0f) || k <= 0) {
+                        rows[i].x = xs[i];
+                        continue;
+                }
+                if (views[i].type == WeightType::INT4) views[i].q4_param_scale = ldexpf(m.q4_param_scale, k);
+                else views[i].scale = ldexpf(m.scale, k);
+                const float inv = ldexpf(1.0f, -k);
+                scaled[i].resize(x.size());
+                for (size_t j = 0; j < x.size(); ++j) scaled[i][j] = x[j] * inv;
+                rows[i].x = &scaled[i];
+        }
+        return gpu_.matvec_rows(rows, slot0);
+}
+
 vector<float> Session::forward_rwkv(int token){
         const int dim = m_.dim, L = m_.layers, H = m_.heads, hs = m_.rwkv.head_size;
         const float eps = m_.rwkv.norm_eps;
@@ -630,53 +665,79 @@ vector<float> Session::forward_rwkv(int token){
             memcpy(sh, xn.data(), sizeof(float) * dim);
             // O4-O6: the three projections.  The container stores them as one
             // 3*dim x dim matrix under the dense qkv id; split_rwkv() cut it
-            // into the three Mats each of these needs.
-            vector<float> r = rwkv_mv(m_.rwkv_r[l], xr);
-            vector<float> k = rwkv_mv(m_.rwkv_k[l], xk);
-            vector<float> v = rwkv_mv(m_.rwkv_v[l], xv);
+            // into the three Mats each of these needs.  One read-back for the
+            // three draws: r, k and v are independent, so sharing the host sync
+            // changes nothing but the number of syncs (P7, A2).
+            const Mat* rkv_m[3] = {&m_.rwkv_r[l], &m_.rwkv_k[l], &m_.rwkv_v[l]};
+            const vector<float>* rkv_x[3] = {&xr, &xk, &xv};
+            vector<vector<float>> rkv = rwkv_mv_group(
+                vector<const Mat*>(rkv_m, rkv_m + 3),
+                vector<const vector<float>*>(rkv_x, rkv_x + 3), 0);
+            vector<float> r = std::move(rkv[0]), k = std::move(rkv[1]), v = std::move(rkv[2]);
             const float* w0 = m_.rwkv_bias.data() + (size_t)l * 3 * dim;
             const float* a0 = w0 + dim;
             const float* v0 = a0 + dim;
-            // O7: the decay branch.  w = exp(-sigmoid(tanh(xw W_w1) W_w2 + w0)
-            // / sqrt(e)) is in (0.545, 1]; it multiplies the state once per
-            // token, which is why W-1 stores 1-w rather than w.
+            // O7-O10: the four low-rank branches (decay, value residual, ICLR,
+            // the optional gate).  Four down projections and four up projections
+            // become two read-backs instead of eight: the branches are
+            // independent of each other, so the draws and their arithmetic are
+            // unchanged and only the shared host sync differs (P7, A3).
+            const bool have_gate = m_.rwkv.gate && l < (int)m_.rwkv_g1.size() &&
+                                   m_.rwkv_g1[l].rows > 0;
+            const bool have_vres = l > 0 && rwkv_state_.have_v_first &&
+                                   m_.rwkv_v1[l].rows > 0;
+            vector<const Mat*> dm, um;
+            vector<const vector<float>*> dx, ux;
+            dm.push_back(&m_.rwkv_w1[l]); dx.push_back(&xw);
+            if (have_vres) { dm.push_back(&m_.rwkv_v1[l]); dx.push_back(&xv); }
+            dm.push_back(&m_.rwkv_a1[l]); dx.push_back(&xa);
+            if (have_gate) { dm.push_back(&m_.rwkv_g1[l]); dx.push_back(&xg); }
+            vector<vector<float>> down = rwkv_mv_group(dm, dx, 4);
+            size_t bi = 0;
+            vector<float> tw = std::move(down[bi++]);          // w down: tanh
+            vector<float> tv;
+            if (have_vres) tv = std::move(down[bi++]);         // v down: pass-through
+            vector<float> ta = std::move(down[bi++]);          // a down: pass-through
+            vector<float> tg;
+            if (have_gate) tg = std::move(down[bi++]);         // g down: sigmoid
+            // The two elementwise ops the down side owns.  Order and formula are
+            // the per-branch code's: tanh on the decay branch, sigmoid on the
+            // gate's (O10 applies its sigmoid on the down projection).
+            for (float& z : tw) z = tanhf(z);
+            for (float& z : tg) z = rwkv_sigmoid(z);
+            um.push_back(&m_.rwkv_w2[l]); ux.push_back(&tw);
+            if (have_vres) { um.push_back(&m_.rwkv_v2[l]); ux.push_back(&tv); }
+            um.push_back(&m_.rwkv_a2[l]); ux.push_back(&ta);
+            if (have_gate) { um.push_back(&m_.rwkv_g2[l]); ux.push_back(&tg); }
+            vector<vector<float>> up = rwkv_mv_group(um, ux, 8);
+            size_t ui = 0;
+            const vector<float> uu = std::move(up[ui++]);      // decay logits
+            vector<float> uv;
+            if (have_vres) uv = std::move(up[ui++]);           // vres logits
+            const vector<float>& ua = up[ui++];                // ICLR logits
+            // O7: w = exp(-sigmoid(tanh(xw W_w1) W_w2 + w0) / sqrt(e)) is in
+            // (0.545, 1]; it multiplies the state once per token, which is why
+            // W-1 stores 1-w rather than w.
             vector<float> w((size_t)dim);
-            {
-                vector<float> t = rwkv_mv(m_.rwkv_w1[l], xw);
-                for (float& z : t) z = tanhf(z);
-                vector<float> u = rwkv_mv(m_.rwkv_w2[l], t);
-                for (int i = 0; i < dim; ++i)
-                    w[i] = expf(-rwkv_sigmoid(u[i] + w0[i]) * kRwkvDecayC);
-            }
+            for (int i = 0; i < dim; ++i)
+                w[i] = expf(-rwkv_sigmoid(uu[i] + w0[i]) * kRwkvDecayC);
             // O8: the value residual.  Layer 0 records v_first (its v_lora is
             // absent by construction); every later layer pulls v towards it.
             if (l == 0) {
                 rwkv_state_.v_first = v;
                 rwkv_state_.have_v_first = true;
-            } else if (rwkv_state_.have_v_first && m_.rwkv_v1[l].rows > 0) {
-                vector<float> t = rwkv_mv(m_.rwkv_v1[l], xv);
-                vector<float> u = rwkv_mv(m_.rwkv_v2[l], t);
+            } else if (have_vres) {
                 const float* vf = rwkv_state_.v_first.data();
                 for (int i = 0; i < dim; ++i)
-                    v[i] += (vf[i] - v[i]) * rwkv_sigmoid(u[i] + v0[i]);
+                    v[i] += (vf[i] - v[i]) * rwkv_sigmoid(uv[i] + v0[i]);
             }
             // O9: ICLR's gate, sigmoid on the *up* projection (unlike O10).
             vector<float> a((size_t)dim);
-            {
-                vector<float> t = rwkv_mv(m_.rwkv_a1[l], xa);
-                vector<float> u = rwkv_mv(m_.rwkv_a2[l], t);
-                for (int i = 0; i < dim; ++i) a[i] = rwkv_sigmoid(u[i] + a0[i]);
-            }
-            // O10: the optional time-mix gate.  sigmoid on the *down*
-            // projection, no bias, and key 16 says whether the model has one.
-            const bool have_gate = m_.rwkv.gate && l < (int)m_.rwkv_g1.size() &&
-                                   m_.rwkv_g1[l].rows > 0;
+            for (int i = 0; i < dim; ++i) a[i] = rwkv_sigmoid(ua[i] + a0[i]);
+            // O10: the optional time-mix gate.  Its sigmoid is on the down
+            // projection and key 16 says whether the model has one.
             vector<float> g;
-            if (have_gate) {
-                vector<float> t = rwkv_mv(m_.rwkv_g1[l], xg);
-                for (float& z : t) z = rwkv_sigmoid(z);
-                g = rwkv_mv(m_.rwkv_g2[l], t);
-            }
+            if (have_gate) g = std::move(up[ui++]);
             // O11/O12: kk is the L2-normalised key, k the a-modulated one.
             const float* sk = m_.rwkv_scale.data() + (size_t)l * 3 * dim;
             const float* kk_s = sk;

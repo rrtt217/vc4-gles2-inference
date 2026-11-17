@@ -184,6 +184,16 @@ public:
     // per token.  RWKV_GPU=1 selects it (Session::forward_gpu_rwkv).
     void init_rwkv(const Model& m);
     GLuint rwkv_block(int layer, const Model& m, GLuint residual, float* cpu_wkv_state = nullptr);
+    // One host sync for a group of matvecs: each is drawn into its own row of one
+    // scratch target and the block is read back with a single glReadPixels.  The
+    // draws, their programs and their uniforms are unchanged, so the result is
+    // bit-identical to calling matvec() once per matrix -- the CPU path's cost is
+    // the read-back, and it paid one per matvec (docs/rwkv7-plan.zh-CN.md P7).
+    // rows[i].x is uploaded to its own staging texture (slot i), so several
+    // inputs of the same length cannot overwrite each other.
+    struct MvRow { const Mat* m; const vector<float>* x; };
+    vector<vector<float>> matvec_rows(const vector<MvRow>& rows, int slot0 = 0);
+    GLuint rwkv_upload_slot(const vector<float>& x, int slot);
     void rwkv_flip() { rwkv_cur_ ^= 1; }
     void clear_rwkv_state();
     // Read the final q16 residual row back as floats (once per token).
@@ -389,6 +399,11 @@ private:
     Target rwkv_vfirst_;
     // layer-0 input, *256 I24_1 (precise; the q16 grid would round it coarsely)
     Target rwkv_x0_;
+    // The grouped matvecs' read-back block (matvec_rows) and their staging
+    // textures, one slot per input so equal lengths cannot collide.
+    Target rwkv_mvrows_;
+    vector<GLuint> rwkv_in_tex_;
+    vector<int> rwkv_in_w_;            // each staging texture's width, in texels
     int rwkv_cur_ = 0;                 // state/scale ping-pong parity, flips per token
     int rwkv_dim_ = 0, rwkv_layers_ = 0, rwkv_heads_ = 0, rwkv_hs_ = 0;
     bool rwkv_have_vfirst_ = false;

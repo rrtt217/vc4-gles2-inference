@@ -111,6 +111,13 @@ private:
     // the output before the kernel's own clamp and would break this block's
     // 90-magnitude outputs.  See the comment on the definition.
     vector<float> rwkv_mv(const Mat& m, const vector<float>& x);
+    // The same matvec, for a group: one read-back for all of them.  Each keeps
+    // its own 2^k input scaling, its own draw and its own uniforms, so the
+    // numbers are rwkv_mv's; only the host sync is shared (P7, A2/A3).
+    // `slot0` picks a disjoint staging-texture range per call site (three
+    // groups per layer, each with its own input lengths).
+    vector<vector<float>> rwkv_mv_group(const vector<const Mat*>& ms,
+                                        const vector<const vector<float>*>& xs, int slot0);
     // LayerNorm with weight and bias, f32 statistics (O1): the mean and the
     // biased variance over the whole row, eps from key 16.
     static vector<float> rwkv_layernorm(const vector<float>& x, const float* wb, float eps);
