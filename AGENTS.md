@@ -63,55 +63,6 @@ replace working paths with demos or cosmetic rewrites.
 | `refs/` | untracked upstream reference material for MiniMind3 (gitignored) |
 | `docs/` | deep dives; keep READMEs short and link here |
 
-**LFM2.5-230M is the one hybrid (conv + attention) model.**  It exercises
-metadata key 14, the conv tensors `0x17`-`0x19`, the fused `GPU_LAYER=1` conv
-path and a template that supplies its own `<|startoftext|>`.  Read
-[`docs/lfm2.5-230m.md`](docs/lfm2.5-230m.md) before touching the conv block or
-its numbers: it lists what is measured, what is still broken (an i16 container
-on the fused path, a prompt longer than `SEQ`, digit-run tokenisation), and the
-two ways the engine was wrong in 2026-11 — no BOS in the chat template or in
-`--ppl`, and a matvec input that carried no scale.
-
-**SmolLM2-135M runs on the GPU path with `RMS_STORE=f32`** (2026-11-18).  Its
-residual reaches 26884 at layer 11 (210x the q16 rail, 82% of the q24 one) and
-its FFN hidden 3268, which the per-layer `2^-k` store covers (key 15, worst
-stored peak 118.6).  What blocked it is the rmsnorm: its lane sums are
-`sum(x^2)`, squared quantities in a 24-bit store that pins at 2048, so a
-residual of 2.7e4 answers with the end token until `RMS_STORE=f32`.  With it,
-the q24 residual and the q16 activation/FFN-hidden streams are within 0.6% of
-an all-f32 container (PPL 7.7157 against 7.6679), and the shipped container is
-`models/smollm2-135m/smollm2-135m.q8q24.mmcf` (11.3 ms/token on Iris Xe, and
-**630 ms/token on the Pi Zero** with the same container: 23 s to first token,
-`454` draws/token, correct answers, 164 MB of it in the 320 MB CMA).
-
-**But a Pi answer is not the Xe answer for this model.**  On the board its logits
-sit `3.490` from the float32 numpy reference (Xe: `1.079`), PPL `14.2941` where
-Xe says `7.7157`, and `17*4` comes out `220` against Xe's `68`, deterministically
-and unchanged by `EXP=poly`.  The format axes are *excluded* -- widening every
-stream to f32 makes the board **worse** (12.49 -> 13.48) while it helps Xe -- and
-so is `Q16_DECODE=exact`.  The one measured lead is `MATVEC_STRIP`: a no-op on
-Xe, and on the Pi it moves this model's logits by 12.7 (argmax flips) while
-leaving MiniMind3 byte-identical.  That is precision at magnitude, not wiring,
-and it is open.  The CPU layer loop degenerates too -- that is the supra2
-defect, not a format limit of this model.  `models/README.md` has the per-switch
-isolation table; `docs/performance.md` (2026-11-18) has both machines.
-
-**BitCPM-CANN-0.5B is the one model with ternary weights and its own rope table**
-(2026-11-18).  It is MiniCPM4-0.5B's 1.58-bit QAT release: 168 of 169 matrices
-are per-row `{0, ±s}` (37.3% exact zeros), so its q8 body is *lossless*, while
-`q4mat`'s block min/max turns every zero into `±s/15`.  It is also the only
-container carrying a rope table (metadata key 18, `longrope` with static
-per-dimension factors) and the only one needing the tokenizer's per-run space
-marker (metadata key 10's third byte): without it the prompt tokenises as
-`user` instead of `▁user` and the logits move by cosine 0.912.  MiniCPM's three
-model-wide constants (`scale_emb`, `scale_depth`, `dim_model_base`) are folded
-at pack time, and the choice `k = 1/scale_emb` is load-bearing -- `k = 1`
-divides the tied head's input by 48 instead of 4 and the q16 store destroys it
-(cosine 0.885 against 0.9868).  `RMS_STORE=f32` is required (lane sums 5.4e4).
-Read [`docs/bitcpm.md`](docs/bitcpm.md) before touching any of that; the
-assessment with the work list is
-[`docs/bitcpm-assessment.zh-CN.md`](docs/bitcpm-assessment.zh-CN.md).
-
 Engine modules are described in [`docs/engine-layout.md`](docs/engine-layout.md);
 the file format in [`docs/model-formats.md`](docs/model-formats.md) and
 [`docs/checkpoint-container.md`](docs/checkpoint-container.md).
@@ -519,6 +470,29 @@ These were paid for; do not relearn them.
 - **CPU weights** are borrowed from the checkpoint mapping by default
   (`MODEL_BORROW=0` restores the copy); keep `KEEP_CPU_WEIGHTS=1` only for
   debugging.
+
+## Model-specific constraints
+
+Three models carry constraints the dense path does not, and a change that moves
+them has to be checked against the named document rather than against MiniMind3.
+Each document owns the measurements; this section keeps only what a change must
+not break.
+
+| Model | What it forces | Read |
+|---|---|---|
+| LFM2.5-230M | the only hybrid (conv + attention): metadata key 14, the conv tensors `0x17`-`0x19`, the fused `GPU_LAYER=1` conv path, and a template that supplies its own `<\|startoftext\|>`.  Still broken: an i16 container on the fused path, a prompt longer than `SEQ`, digit-run tokenisation | [`docs/lfm2.5-230m.md`](docs/lfm2.5-230m.md) |
+| SmolLM2-135M | `RMS_STORE=f32` is **required**: the residual reaches 2.7e4 and a lane sum of `x^2` pins the 24-bit store at 2048, after which the reply comes back empty | `models/README.md`, "Two limits, measured" |
+| BitCPM-CANN-0.5B | the one ternary model: 168 of 169 matrices are per-row `{0, ±s}`, so its q8 body is lossless while `q4mat` is not.  Also the only container with a rope table (metadata key 18) and the only one needing the tokenizer's per-run space marker (metadata key 10's third byte).  `RMS_STORE=f32` is required | [`docs/bitcpm.md`](docs/bitcpm.md) |
+
+The BitCPM pack-time constants are load-bearing: `k = 1/scale_emb` is the
+choice that keeps the tied head in range, and `k = 1` destroys it.
+
+**A Pi answer is not the Xe answer for SmolLM2-135M.**  The two machines
+disagree on logits and on the greedy answer, the format axes are excluded as the
+cause (widening every stream to f32 makes the board worse), and the cause is
+open.  `MATVEC_STRIP` is the one measured lead; the per-switch isolation table is
+in `models/README.md` and both machines are in
+[`docs/performance.md`](docs/performance.md).
 
 ## Documentation rules
 
