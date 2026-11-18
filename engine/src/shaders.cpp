@@ -450,17 +450,38 @@ string matvec_q8(int rows, int cols, XFormat xf, bool wrow) {
 // VC4 the uint decode is 2.44 ns/MAC against q8's 2.98 (the ES2 float decode is
 // 7.5, i.e. worse than q8), on Iris Xe it is no faster.  docs/performance.md
 // 2026-11-18.
-static string t3_decode(const char* chan, int group, const string& axw) {
-    // Four weights out of one channel byte, dotted with activation texel
-    // `4q + group`.  A local must not carry a precision qualifier in ESSL 3.00,
-    // so the qualifier lives on the shader's `precision highp int` line.
-    const string u = "u" + to_string(group);
-    return "uint " + u + "=uint(floor(" + chan + "*255.0+0.5));"
-           "s+=dot(vec4(float(" + u + "&1u),float((" + u + ">>2)&1u),"
-           "float((" + u + ">>4)&1u),float((" + u + ">>6)&1u))"
-           "*(1.0-2.0*vec4(float((" + u + ">>1)&1u),float((" + u + ">>3)&1u),"
-           "float((" + u + ">>5)&1u),float((" + u + ">>7)&1u))),"
-           "X4Q(X,q*16+" + to_string(4 * group) + "," + axw + ".0));";
+// One iteration reads ONE weight texel and ONE activation texel, the shape the
+// q8 kernel has -- not the 16-weights-a-texel shape the bandwidth wants.
+//
+// That is not an oversight.  VC4 returns undefined data from a fragment that
+// samples the same texture twice once the texture is tall, which is why
+// wrow_scale() packs a row pair into one texel and why the q6 planes live in two
+// samplers; probes/wrow_probe measured 88 of 896 rows wrong on a two-fetch
+// kernel that is exact on Xe.  A 16-weight iteration needs four activation
+// fetches (X4Q is four texture2D calls on the one-value-a-texel formats), and on
+// the board that is exactly the shape that goes wrong: the t3 container answered
+// `ovarian` twelve times with it and is correct with this one (2026-11-18).
+//
+// The cost is the weight texel's other three bytes: four weights are decoded and
+// four used, so the kernel reads 4x the weight texels it strictly needs while
+// moving 4x fewer bytes than q8 per texel -- i.e. it matches q8's fetch count
+// and halves its traffic.  T3_WIDE=1 emits the 16-wide form for a machine where
+// the sampler can be sampled twice (Iris Xe: measured correct there).
+static string t3_byte(const string& byte_expr) {
+    // One byte -> four ternary weights, as a vec4.  Bit 0 is magnitude and bit
+    // 1 sign, so a weight is `mag * (1 - 2*sign)`: no compare, no branch, and
+    // the same four MACs the q8 kernel spends.
+    const string u = "u";
+    return "vec4("
+           "float(uint(floor(" + byte_expr + "*255.0+0.5))&1u),"
+           "float((uint(floor(" + byte_expr + "*255.0+0.5))>>2)&1u),"
+           "float((uint(floor(" + byte_expr + "*255.0+0.5))>>4)&1u),"
+           "float((uint(floor(" + byte_expr + "*255.0+0.5))>>6)&1u))"
+           "*(1.0-2.0*vec4("
+           "float((uint(floor(" + byte_expr + "*255.0+0.5))>>1)&1u),"
+           "float((uint(floor(" + byte_expr + "*255.0+0.5))>>3)&1u),"
+           "float((uint(floor(" + byte_expr + "*255.0+0.5))>>5)&1u),"
+           "float((uint(floor(" + byte_expr + "*255.0+0.5))>>7)&1u)))";
 }
 
 string matvec_t3(int rows, int cols, XFormat xf, bool wrow) {
@@ -470,15 +491,24 @@ string matvec_t3(int rows, int cols, XFormat xf, bool wrow) {
     const string ROWS = to_string(rows), NQ = to_string(nq), AXW = to_string(axw);
     const string WD = wrow ? wrow_scale(rows) : "";
     const string SC = wrow ? "wsr(r)" : "ws";
+    // The safe form: q walks activation texels (4 values), and the weight texel
+    // q/4 is fetched but only its q%4-th byte is used.
+    const string WQ = "vec2((float(q/4)+0.5)/float(" + NQ + "),(float(r)+0.5)/float(" + ROWS + "))";
     return "//T3\n" + head(xf) + "precision highp int;\n" + q24_helpers() +
            "uniform sampler2D W,X;uniform float ws;" + WD +
            "void main(){int r=int(gl_FragCoord.x);float s=0.0;"
-           "for(int q=0;q<" + NQ + ";q++){"
-           "vec4 c=texture2D(W,vec2((float(q)+0.5)/float(" + NQ + "),"
-           "(float(r)+0.5)/float(" + ROWS + ")));"
-           + t3_decode("c.r", 0, AXW) + t3_decode("c.g", 1, AXW) +
-             t3_decode("c.b", 2, AXW) + t3_decode("c.a", 3, AXW) +
-           "}"
+           "for(int q=0;q<" + to_string(cols / 4) + ";q++){"
+           "vec4 c=texture2D(W," + WQ + ");"
+           "vec4 x=X4Q(X,q*4," + AXW + ".0);"
+           // The byte is selected without a dynamic index (GLSL ES has none);
+           // `q/4` steps once per weight texel, so q%4 walks the four bytes.
+           "int j=q-" + to_string(4) + "*(q/4);"
+           "vec4 w4=vec4(0.0);"
+           "if(j==0)w4=" + t3_byte("c.r") + ";"
+           "else if(j==1)w4=" + t3_byte("c.g") + ";"
+           "else if(j==2)w4=" + t3_byte("c.b") + ";"
+           "else w4=" + t3_byte("c.a") + ";"
+           "s+=dot(w4,x);}"
            "gl_FragColor=x_i24encq(s*" + SC + ");}";
 }
 
@@ -489,15 +519,20 @@ string matvec_t3_add(int rows, int cols, XFormat xf, XFormat rf, bool wrow) {
     const string ROWS = to_string(rows), NQ = to_string(nq), AXW = to_string(axw);
     const string WD = wrow ? wrow_scale(rows) : "";
     const string SC = wrow ? "wsr(r)" : "ws";
+    const string WQ = "vec2((float(q/4)+0.5)/float(" + NQ + "),(float(r)+0.5)/float(" + ROWS + "))";
     return "//T3\n" + head(xf) + "precision highp int;\n" + x_residual_glsl(rf) +
            "uniform sampler2D W,X,R;uniform float ws;" + WD +
            "void main(){int r=int(gl_FragCoord.x);float s=0.0;"
-           "for(int q=0;q<" + NQ + ";q++){"
-           "vec4 c=texture2D(W,vec2((float(q)+0.5)/float(" + NQ + "),"
-           "(float(r)+0.5)/float(" + ROWS + ")));"
-           + t3_decode("c.r", 0, AXW) + t3_decode("c.g", 1, AXW) +
-             t3_decode("c.b", 2, AXW) + t3_decode("c.a", 3, AXW) +
-           "}"
+           "for(int q=0;q<" + to_string(cols / 4) + ";q++){"
+           "vec4 c=texture2D(W," + WQ + ");"
+           "vec4 x=X4Q(X,q*4," + AXW + ".0);"
+           "int j=q-4*(q/4);"
+           "vec4 w4=vec4(0.0);"
+           "if(j==0)w4=" + t3_byte("c.r") + ";"
+           "else if(j==1)w4=" + t3_byte("c.g") + ";"
+           "else if(j==2)w4=" + t3_byte("c.b") + ";"
+           "else w4=" + t3_byte("c.a") + ";"
+           "s+=dot(w4,x);}"
            "float res=R1Q(R,r," + to_string(x_texels(rows, rf)) + ".0);"
            "gl_FragColor=XST1Q(s*" + SC + "+res);}";
 }
