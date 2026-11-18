@@ -251,8 +251,9 @@ What it costs: the route is a 4x768 matvec whose logits are read back, so a
 token pays 8 host syncs (~29 ms on a Pi Zero, ~19 ms on Xe); the weight traffic
 is the dense model's, because only one expert is read.  The Pi Zero runs the
 198M-A64M model at q4 (131 MB, 322.0 ms/token in the 2026-11-13 campaign; a
-2026-11-11 24-token run gave 342) and cannot hold it at q8 (204 MB: the weights
-take the CMA and the session's FBOs fail).
+2026-11-11 24-token run gave 342).  At q8 it was **tried and failed** (204 MB:
+the weights take the CMA and the session's FBOs fail) -- that is an observed
+outcome on that board and configuration, not a size bound to apply elsewhere.
 `docs/performance.md` has the table; `MOE_DUMP=1` prints the routes and
 `MOE_FIXED=<e>` prices them.
 
@@ -449,9 +450,19 @@ These were paid for; do not relearn them.
   quantization and loses quality.
 - **KV cache**: Pi and laptop caches are not byte-identical. Build disk cache
   on the target machine.
-- **CMA**: `CmaFree` is actual occupancy; reducing `cma`/`gpu_mem` does not
-  create free CMA.  It is *not* a budget for a new scene either -- a swap has no
-  capacity pre-check (see "Switching models without restarting the engine").
+- **CMA**: `CmaTotal` is the hard ceiling; `CmaFree` is **not** an occupancy
+  figure.  It reports how much a caller can *probably still get*, it moves with
+  page-cache migration rather than with the allocation just made, and on this
+  driver the deltas are noise: `Q4_TEX_STATS` stopped reporting a `CmaFree`
+  delta because four consecutive uploads of the same shape read 2020, 2436,
+  4576 and 4544 kB, and an RGBA8 upload once *raised* it.  So
+  `CmaFree` is neither "free space" nor a budget for a new scene, and refusing a
+  load on its arithmetic is the mistake that a size heuristic made before swaps
+  lost their pre-check.  The board's usable figure is empirical (the notes use a
+  320 MB `CMA` configuration, against a 256 MB one that cannot hold the same
+  model), and near the ceiling the answer comes from **attempting the load**,
+  which is where the failure is real -- not from asserting that it will not fit.
+  Reducing `cma`/`gpu_mem` does not create CMA.
 - **Prefix cache** header flags include the KV axis and its grid; loading with
   another `KV` value or `KV_GRID` must be rejected.
 - **FFN**: the hidden width is split in **two** chunks and no more

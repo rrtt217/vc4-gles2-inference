@@ -198,9 +198,11 @@ GPU::~GPU(){
     }
 
 // Every allocation failure on this box is a memory failure first; print the
-// budget with it.  CmaFree is the Pi's binding constraint (docs/performance.md:
-// the MoE model at q8 takes the CMA and the session's FBOs fail), and the
-// desktop driver has no CMA at all, so the line adapts.
+// budget with it.  CMA is the Pi's binding constraint (docs/performance.md: the
+// MoE model at q8 takes it and the session's FBOs fail), and the CmaTotal line
+// is what bounds it -- CmaFree is only "what a caller can still probably get",
+// and it is not occupancy (see the Q4_TEX_STATS note below).  A desktop driver
+// has no CMA at all, so the line adapts.
 static void report_mem(const char* tag){
         FILE* f = fopen("/proc/meminfo", "r");
         if (!f) return;
