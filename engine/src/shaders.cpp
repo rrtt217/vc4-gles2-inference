@@ -1914,6 +1914,10 @@ string rms_norm(int dim, XFormat residual, XFormat out, bool fused_reduce,
             (out == XFormat::BF16 ? string("gl_FragColor=x_bf16enc2(v0,v1);}")
                                   : string("gl_FragColor=x_st2(v0,v1);}"));
     }
+    // x_residual_glsl(BF16) now carries the bf16 helpers itself, so the
+    // conditional below is redundant for that one format -- but it is what
+    // every other format's text contains, and the emitted text is the
+    // numerics (gate/shader_hashes.txt), so it stays exactly as it was.
     return head(residual) + rms_store_glsl() + x_residual_glsl(residual) +
            (residual == XFormat::BF16 ? string() : x_bf16_glsl()) + q24_helpers() +
         "uniform sampler2D X,W,S;uniform float dummy;" + (use_eps_uniform ? "uniform float eps;" : string()) + body;

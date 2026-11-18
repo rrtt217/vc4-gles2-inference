@@ -366,7 +366,15 @@ std::string x_residual_glsl(XFormat f) {
         case XFormat::BF16:
             // Same two-halves-a-texel layout; the residual add stores one value
             // a texel (XST1Q) so the pair is only used for reads.
-            return
+            //
+            // The helper block travels with the macros, like x_pair2_glsl()'s
+            // bf16 branch: a kernel that emits only x_residual_glsl(BF16) --
+            // rms_norm does, and the shader builder used to assume the helpers
+            // came from somewhere else -- had R1 call a function nobody had
+            // defined ("no function with name 'x_bf16'", found by running
+            // RES=bf16 on a q8 container, 2026-11-18; the q4 grid happened not
+            // to reach that builder).  The include guard makes it idempotent.
+            return x_bf16_glsl() +
                 "#define R1(T,I,TW) ((((I)/2)*2)==(I) ? "
                 "x_bf16(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).rg) : "
                 "x_bf16(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).ba))\n"

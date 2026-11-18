@@ -110,9 +110,9 @@ static const SwitchDef kSwitches[] = {
     // axis with one value, and it covers what used to be three switches:
     // ACT_FMT (format), ACT8=1 (width) and ACT8=2 (the FFN hidden's width).
     {"ACT", "ACT_FMT", SwKind::Str, "i16|i8|bf16|f32", SwStatus::Permanent, SwAxis::Act,
-     "the GPU activation streams' format: i16 q16 grid (default), i8, or bit-cast f32"},
+     "the GPU activation streams' format: i16 q16 grid (default), i8, bf16, or bit-cast f32"},
     {"FFN_HID", "", SwKind::Str, "i16|i8|bf16|f32", SwStatus::Permanent, SwAxis::Act,
-     "the FFN hidden stream's format: q16 (default), i8, or f32 past the q16 rail"},
+     "the FFN hidden stream's format: q16 (default), i8, bf16, or f32 past the q16 rail"},
     {"ACT_CPU", "ACT_F32", SwKind::Str, "q16|f32", SwStatus::Permanent, SwAxis::Act,
      "the CPU layer loop's activation grid (ACT_F32 meant f32, whatever its value)"},
     {"Q16_DECODE", "", SwKind::Str, "", SwStatus::Permanent, SwAxis::Act,
@@ -150,7 +150,7 @@ static const SwitchDef kSwitches[] = {
 
     // ---- Res: the residual stream's format --------------------------------
     {"RES", "RES_FMT", SwKind::Str, "i16|i16_1|i24|bf16|f32", SwStatus::Permanent, SwAxis::Res,
-     "residual format: i16 packed pairs (default), i16_1 one a texel, i24, or f32"},
+     "residual format: i16 packed pairs (default), i16_1 one a texel, i24, bf16, or f32"},
 
     // ---- Ffn: the FFN hidden stream and the finish policy ------------------
     {"FFN_FLUSH", "", SwKind::Flag, "", SwStatus::Probe, SwAxis::Ffn,

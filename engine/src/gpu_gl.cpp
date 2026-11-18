@@ -167,9 +167,16 @@ void GPU::init_egl(){
         const char* af = sw_enum("ACT");
         const char* hf = sw_enum("FFN_HID");
         const char* rs = sw_enum("RMS_STORE");
-        const bool f32_res = (rf && !strcmp(rf, "f32")) || (af && !strcmp(af, "f32")) ||
-                             (hf && !strcmp(hf, "f32")) || (rs && !strcmp(rs, "f32"));
-        if ((q4_shift_wanted() || env_flag("RWKV_GPU") || f32_res) && !getenv("Q4_SHIFT_NO_MESA")) {
+        // The two bit-cast formats need the same compiler as Q4_SHIFT's nibble
+        // split: f32 streams (uintBitsToFloat) and bf16 streams (which rebuild
+        // a float from its top 16 bits the same way).  bf16 was missing from
+        // this test -- it worked only because Q4_SHIFT is on by default, so
+        // Q4_SHIFT=0 turned every bf16 axis into a compile error.
+        const auto es3_fmt = [](const char* v) {
+                return v && (!strcmp(v, "f32") || !strcmp(v, "bf16"));
+        };
+        const bool bitcast_axes = es3_fmt(rf) || es3_fmt(af) || es3_fmt(hf) || es3_fmt(rs);
+        if ((q4_shift_wanted() || env_flag("RWKV_GPU") || bitcast_axes) && !getenv("Q4_SHIFT_NO_MESA")) {
                 setenv("MESA_GLES_VERSION_OVERRIDE", "3.0", 0);
                 setenv("MESA_GLSL_VERSION_OVERRIDE", "300", 0);
         }
