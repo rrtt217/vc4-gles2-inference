@@ -108,11 +108,26 @@ bool gpu_es3_ok(){ return g_es3_ok; }
 static string es3ify(const string& src, bool vertex){
         if (src.find("#version") != string::npos) return src;
         if (vertex) return "#version 300 es\n#define attribute in\n" + src;
-        // A duplicate precision statement is legal, so the original text can
-        // stay untouched: only the version line, the out declaration and the
-        // gl_FragColor alias are added.
+        // Three rules from the ESSL 3.00 specification, none of them optional on
+        // a compiler that is not Mesa's:
+        //
+        //  * `gl_FragColor` is *removed* in ESSL 3.00, and `gl_`-prefixed macro
+        //    names are reserved, so aliasing it with `#define` -- which this
+        //    function did until 2026-11-18 -- is undefined behaviour that Mesa
+        //    happens to allow.  The identifier is renamed in the text instead,
+        //    which needs no reserved name.
+        //  * `texture2D`/`textureCube` are removed in favour of `texture`.  The
+        //    aliases below are legal macros (no `gl_` prefix) and keep every
+        //    builder's text unchanged; Mesa accepts the removed spellings, a
+        //    vendor compiler does not.
+        //  * A fragment shader has no default float precision in ESSL 3.00, so
+        //    the statement is injected rather than assumed.
+        string body = src;
+        for (size_t at = body.find("gl_FragColor"); at != string::npos;
+             at = body.find("gl_FragColor", at + 12))
+                body.replace(at, 12, "frag_color");
         return "#version 300 es\nprecision highp float;\nout vec4 frag_color;\n"
-               "#define gl_FragColor frag_color\n" + src;
+               "#define texture2D texture\n#define textureCube texture\n" + body;
     }
 
 bool q4_shift_wanted(){
