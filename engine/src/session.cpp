@@ -1441,11 +1441,19 @@ static vector<float> decode_act_row(const vector<uint8_t>& b, int texels, XForma
 GLuint Session::forward_gpu_hidden(int token, int pos, bool want_logits){
         bool prof = env_set("LAYER_PROFILE");
         auto pt = Clock::now();
+        // The laps print the draw count as well as the time: on VC4 a pass costs
+        // a fixed ~1 ms of draw overhead before its arithmetic, so "which phase"
+        // and "how many draws" are the same question when the profile says
+        // attention is 45% of a block whose FLOPs are tiny.
+        long draws_at_last_mark = (long)gpu_.draws();
         auto mark = [&](const char* name, int l) {
             if (!prof) return;
             gpu_.sync();
             auto now = Clock::now();
-            cerr << "PROF l=" << l << " " << name << " " << elapsed_ms(pt, now) << "\n";
+            const long d = (long)gpu_.draws();
+            cerr << "PROF l=" << l << " " << name << " " << elapsed_ms(pt, now)
+                 << " draws=" << (d - draws_at_last_mark) << "\n";
+            draws_at_last_mark = d;
             pt = now;
         };
         vector<float> emb = embedding(token);
