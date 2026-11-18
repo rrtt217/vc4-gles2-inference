@@ -7795,3 +7795,53 @@ f32 store (it measured 0.00271), so the layer-0 quantisation and the layer-15
 saturation are two ends of one encoding's range problem, and the greedy fix is
 the saturation -- not the layer-0 factor.  The numbers above are the ones that
 decided it.
+
+## 2026-11-18 (addendum) — where a pocket token goes, and why it is already near the scaling law
+
+`LAYER_PROFILE` now prints each lap's **draw count** as well as its time (a pass
+costs a fixed draw overhead on VC4 before any arithmetic, so "which phase" and
+"how many draws" are the same question when attention is 45% of a block whose
+FLOPs are tiny).  MNN-Pocket qat on the board, `RMS_STORE=f32`, `SEQ=128
+KV=q16 KV_GRID=512`, `--gen 1`, one token:
+
+| phase | draws/token | draws/layer | note |
+|---|---:|---:|---|
+| attention | 224 | 8 | qkv, qknorm, qrot, kv_rope, scores, stats, v |
+| both rmsnorm passes | 112 | 4 | split + norm each (the reduce is fused on VC4) |
+| FFN gate | 56 | 2 | two chunks |
+| w2 | 56 | 2 | two chunks |
+| wo | 28 | 1 | |
+| **total** | **476** | **17** | (`DRAWCOUNT` in the decode loop reports 563/token including the embedding and logits laps) |
+
+**It is draw-bound, not FLOP-bound.** At ~1.2-1.5 s a token that is 2.5-3 ms a
+draw, and the repo's own cost model puts a VC4 draw plus its forced finish at
+~1 ms before any work.  Attention is 8 draws a layer for a block that computes
+14 heads x 128 positions x 64 -- trivial arithmetic.
+
+**Per layer it already matches the parameter count**, which is the scaling law
+the model implies rather than anything the engine is losing:
+
+| model | layers | dim | FFN | vocab | ms/token | ms/layer |
+|---|---:|---:|---:|---:|---:|---:|
+| MiniMind3 q4 | 8 | 768 | 2432 | 6400 | 304 | 38 |
+| pocket qat (i24) | 28 | 896 | 2560 | 65536 | 1235 | 44 |
+| pocket qat (f32 rms) | 28 | 896 | 2560 | 65536 | 1493 | 53 |
+
+44/38 = 1.16 per layer against a projection ratio of (896/768)^2 = 1.36 and an
+FFN ratio of 1.28 -- the same order, with the difference absorbed by the fixed
+per-pass cost.  The 65536-entry head is a one-off (embed 2.5 ms, logits read-back
+a few ms) and does not scale with depth.
+
+**What is left, honestly**: the only structural lever is fewer passes, and the
+two candidates are one draw a layer each -- folding `qknorm` into `qrot` (both
+read and write q; scale then rotate is exact) and the `wo` -> `rms_att` seam.
+28 draws a token is ~2% of the token, and **this board cannot resolve 2%**: two
+interleaved runs of the *same* configuration measured 1439 and 1191 ms
+(+/-20%), `LAYER_FAST_FINISH=1` measured 1236 and 1183 against those baselines,
+and `ATTN_DUP=1` did not even change the draw count.  A future attempt needs an
+interleaved >=6-run protocol per arm or a draw-count proxy, not a single A/B.
+
+The one speed number from this session that *is* solid, because it is a same-binary
+interleaved 2x2: the correctness fix costs **+21%** (1235 -> 1493 ms/token,
+`RMS_STORE=i24` -> `f32`).  Earlier single runs that suggested the opposite were
+warm-up noise.
