@@ -18,6 +18,10 @@
 
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
+
+#ifndef EGL_OPENGL_ES3_BIT_KHR
+#define EGL_OPENGL_ES3_BIT_KHR 0x00000040
+#endif
 #include <GLES2/gl2.h>
 
 vector<float> GPU::read_logits_full(const vector<Mat>& tiles){
@@ -174,16 +178,40 @@ void GPU::init_egl(){
         EGLint major = 0, minor = 0;
         if (!eglInitialize(dpy_, &major, &minor)) { cerr << "eglInitialize failed\n"; exit(1); }
         eglBindAPI(EGL_OPENGL_ES_API);
-        EGLint attrs[] = {
+        // Ask for an ES 3.0 context first, and fall back to 2.0.
+        //
+        // The ESSL 3.00 kernels (the bit-cast f32 streams, the q4 nibble split,
+        // bf16 when it lands) need an ES 3.00 compiler, and *requesting* one is
+        // the only portable way to get it: the Mesa version overrides above are
+        // a Mesa-only prerequisite (vc4 does not advertise ES 3.0 on its own),
+        // and on a driver that is not Mesa there is no such variable to lean on.
+        // An ES 3.0 context still accepts ESSL 1.00 shaders -- backward
+        // compatibility is in the specification -- so every kernel that does not
+        // ask for ES3 keeps its text and its numerics (measured: the context
+        // version alone costs nothing; docs/performance.md 2026-11-18).
+        EGLint attrs3[] = {
+            EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
+            EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT_KHR,
+            EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
+            EGL_NONE
+        };
+        EGLint attrs2[] = {
             EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
             EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
             EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
             EGL_NONE
         };
-        EGLConfig cfg; EGLint n = 0;
-        eglChooseConfig(dpy_, attrs, &cfg, 1, &n);
-        EGLint ctx_attrs[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
-        EGLContext ctx = eglCreateContext(dpy_, cfg, EGL_NO_CONTEXT, ctx_attrs);
+        EGLConfig cfg = nullptr; EGLint n = 0;
+        const EGLint want3[] = { EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE };
+        const EGLint want2[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
+        EGLContext ctx = EGL_NO_CONTEXT;
+        if (eglChooseConfig(dpy_, attrs3, &cfg, 1, &n) && n > 0)
+                ctx = eglCreateContext(dpy_, cfg, EGL_NO_CONTEXT, want3);
+        if (ctx == EGL_NO_CONTEXT) {
+                cfg = nullptr; n = 0;
+                eglChooseConfig(dpy_, attrs2, &cfg, 1, &n);
+                ctx = eglCreateContext(dpy_, cfg, EGL_NO_CONTEXT, want2);
+        }
         if (ctx == EGL_NO_CONTEXT || !eglMakeCurrent(dpy_, EGL_NO_SURFACE, EGL_NO_SURFACE, ctx)) {
             cerr << "EGL context creation failed\n"; exit(1);
         }
