@@ -63,7 +63,7 @@ same table with what *this* environment resolved to).
 | `Q16_DECODE` | value | the q16 decode: fast classifies the -32768 rail at 32767.5, exact is integer |
 | `EXP` <br><sub>`ATT_EXP`</sub> | `drv\|poly` | every exponential the shaders emit: drv (default) or a portable polynomial; VC4's SFU exp is 20x Xe's error |
 | `QKV_PAIR` | `=1` | two qkv rows per fragment (int8 only, default on); QKV_PAIR=0 disables |
-| `RMS_STORE` | `i24\|f32` | the rms partial sums: 24-bit fixed point (default, 1/4096 step) or a bit-cast f32 |
+| `RMS_STORE` | `i24\|f32` | the rms partial sums: 24-bit fixed point (default, 1/4096 step, pins at a lane sum of 2048) or a bit-cast f32; a residual above ~11 needs f32 |
 
 ### The attention block's fixed-point
 

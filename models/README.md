@@ -76,16 +76,26 @@ models/
                                  were written down in the assessment doc) and
                                  gguf_report.py, the tensor-type inspector
 
+  smollm2-135m/                  SmolLM2-135M (Llama-shaped, 30 layers, 576/1536,
+                                 9 heads / 3 kv, 49152 vocab, tied head)
+    model.safetensors            source (BF16)
+    smollm.tok                   tokenizer source (byte-level BPE, rebuilt
+                                 from tokenizer.json -- byte-identical)
+    smollm2-135m.q8q24.mmcf      164 MB, --res q24, template chatml, bos 1 eos 2
+                                 runs on Xe: 11.3 ms/token, PPL 7.7157 with
+                                 RMS_STORE=f32 (see the note at the end)
+
   survey_under_110m.csv          candidate survey
 ```
 
-`smollm2-135m/` is **not** what it looks like: the source weights, config and a
-`smollm.tok` built outside this line are still on disk, but nothing in it is
-validated and no container from it has ever passed the gate.  `smollm2-135m-instruct/`
-is gone.  SmolLM2 is declared unsupported (see the note at the end of this file),
-so deleting the rest is fine.  This paragraph used to say both directories had
-been deleted; they had not, and a stale "deleted" is exactly the kind of claim
-that makes the next reader trust the store.
+`smollm2-135m/` was source-only until 2026-11-18: weights, config and a
+`smollm.tok` that had never been rebuilt or checked.  The tokenizer is now
+reproducible (`make_tok.py` from `tokenizer.json` writes the same blob
+byte-for-byte) and the directory holds one validated container,
+`smollm2-135m.q8q24.mmcf`.  It answers correctly on the **GPU path** with
+`RMS_STORE=f32` and degenerates without it; the CPU path (`GPU_LAYER=0`) still
+degenerates either way, which is the supra2 defect, not this model's.  The note
+at the end of this file has the numbers.
 
 Rebuild MiniMind3 artifacts from the repository root:
 
@@ -111,11 +121,15 @@ Notes:
   q8 is never a source for q4.
 - q8 is not usable for `tinybrainbot` (the break is in the q8 runtime path, not
   the weights); use q4 or i16.
-- **SmolLM2-135M is not supported.**  The directories hold source weights and
-  containers that were built outside this line; nothing here validates them,
-  and the containers in them are not a claim that the model runs.  Its
-  embedding needs a grid this engine does not implement, and its `GPU_LAYER=1`
-  path is not correct on VC4.  Deleting or ignoring them is fine.
+- **SmolLM2-135M runs on the GPU path with `RMS_STORE=f32`.**  Its residual
+  reaches 26884 (210x the q16 rail, 82% of the q24 one) and that trips a
+  *different* limit: the rmsnorm's lane sums are squared quantities in a 24-bit
+  store that pins at 2048, so the 24-bit path answers with its end token.
+  `RMS_STORE=f32` fixes it and nothing else has to move (PPL 7.7157, against
+  7.6679 with every stream f32).  The q24 residual covers the value itself;
+  the FFN hidden's 3268 is handled by the per-layer `2^-k` store (key 15, k=5
+  at layers 11 and 28).  The CPU layer loop still degenerates -- that is the
+  supra2 defect and it is not fixed here.
 - `stories260K.bin` needs `tok512.bin` (not the 32k `tokenizer.bin`) when a
   legacy tool needs a tokenizer; the container embeds it.
 - The llama2.c `.bin` sources are packed directly (`--quant i16`); small
@@ -420,8 +434,34 @@ grid's +-128:
   the engine would need a wider format for the FFN intermediate as well, which
   is the activation-grid work, not the residual work.
 
-That is the honest status: TinyBrainBot is supported and now correct; SmolLM2 is
-one widening away, and the widening is named.
+That is the honest status of that measurement: TinyBrainBot is supported and
+now correct; SmolLM2 was "one widening away", and the widening was named wrong.
+
+**Correction, 2026-11-18: the widening is the rmsnorm's accumulator, not the
+FFN hidden.**  The FFN hidden was already handled by the per-layer `2^-k` store
+(key 15) when the note above was written -- the packer writes k=5 for Smol's
+layers 11 and 28 and the worst stored peak is 118.6, under the 128 rail.  What
+actually blocked the model is that the rmsnorm accumulates `sum(x^2)` per lane
+into **24-bit fixed point**, which pins at 2048: Smol's residual of 26884 makes
+a lane reach 1.3e10.  Six orders of magnitude over, and `inv_rms` is then wrong
+for every layer after the peak -- the container answers with its end token, exactly
+what the q16 residual used to do.  Isolated on one container, one switch each:
+
+| configuration | answer / PPL |
+|---|---|
+| container defaults (q24 residual, q16 acts, 24-bit rms) | `Assistant:` -- empty, 24-bit rms PPL 4.4e55 |
+| `FFN_HID=f32` alone | empty |
+| `RES=f32` alone | `%` |
+| **`RMS_STORE=f32` alone** | **"The capital of France is Paris. ..."**, PPL **7.7157** |
+| `RMS_STORE=f32 RES=f32 FFN_HID=f32` | PPL 7.6679 |
+| `RMS_STORE=f32 RES=bf16 FFN_HID=bf16` | PPL 7.6906 |
+
+So the q24 residual plus the q16 activation and FFN-hidden streams are within
+0.6% of an all-f32 container, and the model is supported on the GPU path at
+11.3 ms/token on Iris Xe.  The float32 numpy forward's first token for the same
+prompt is `'The'` (argmax 504), which is what the engine emits.
+`models/smollm2-135m/smollm2-135m.q8q24.mmcf` is the container; the CPU path
+(`GPU_LAYER=0`) is unaffected by this and still degenerates.
 
 ### TinyBrainBot: what the upstream repo actually says (2026-11-08)
 

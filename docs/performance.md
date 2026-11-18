@@ -7970,3 +7970,81 @@ on the board therefore stays `RES=i24 ACT=i16 RMS_STORE=f32`; bf16 is for a
 container that needs the range *or* the half-width stores, and its 0.4%
 relative precision is the right trade for a residual above the q16 rail but not
 for a small one (MiniMind3's 20).
+
+## 2026-11-18 — SmolLM2-135M runs on Xe: the limit was the rmsnorm, not the FFN hidden
+
+SmolLM2-135M was recorded as unsupported in 2026-11-08 with two limits: a
+residual of 25982 at layer 11 (204x the q16 rail) and an FFN hidden of 3164 that
+"still travels through an I16_2 texture".  Half of that was stale by the time it
+was next read -- the per-layer `2^-k` hidden store (metadata key 15) had already
+absorbed the FFN hidden -- and the other half named the wrong tensor.
+
+**What the packer measures today** (`--quant q8 --res q24 --seq 512`,
+`template chatml`, `bos 1 eos 2`, 164 MB, 188 tensors):
+
+- residual peak **26884.3** at layer 11, 82% of the q24 rail (32768);
+  per layer: 48 270 1060 1057 1054 1048 1042 1030 915 380 123 **26884** ...
+- FFN hidden peak **3268.2** at layer 11, but stored `*2^-5` there and `*2^-3` at
+  layer 29, so the worst *stored* peak is **118.6**, under the 128 rail.
+
+**The isolation, one switch at a time** (Xe, `SEQ=512`, greedy, one prompt:
+`What is the capital of France?`):
+
+| configuration | answer | PPL |
+|---|---|---:|
+| container defaults (q24 residual, 24-bit rms) | empty | 4.4e55 |
+| `FFN_HID=f32` alone | empty | -- |
+| `RES=f32` alone | `%` | -- |
+| **`RMS_STORE=f32` alone** | **`The capital of France is Paris. ...`** | **7.7157** |
+| `RMS_STORE=f32 RES=f32 FFN_HID=f32` | correct | 7.6679 |
+| `RMS_STORE=f32 RES=bf16 FFN_HID=bf16` | correct | 7.6906 |
+
+(The corpus is Chinese and SmolLM2's byte-level BPE chops it into 1.76
+bytes/token, so this PPL is only comparable against *itself*: a per-token
+perplexity over a different tokenizer is not a quality comparison, and it says
+nothing about SmolLM2 against MiniMind3's 270 on the same file.)
+
+So a q24 residual with q16 activation and q16 FFN-hidden streams is within
+**0.62%** of an all-f32 container, and the only thing that had to move is the
+one stream nobody suspected: the rmsnorm's `sum(x^2)` lane accumulators, which
+are squared quantities in a 24-bit fixed-point store that pins at 2048.  A lane
+holds `dim/32 = 18` values, so its sum is at most `18 * 26884^2 = 1.3e10` --
+6.4e6 times the rail.  With it pinned, `inv_rms` is wrong from layer 11 down and
+the model answers with its end token; nothing about the residual's *range* is
+involved (q24 holds 26884 at 82% of its rail).
+
+**Speed** (Xe, q8 q24 container, `GPU_LAYER=1 KV=q16 RMS_STORE=f32`):
+**11.3 ms/token** (88 tok/s), derived from two gen lengths (2.05 s at 32,
+4.59 s at 256, so (4.59-2.05)/224), and **515 draws/token** (`DRAWCOUNT=1`;
+30 layers x ~17).  Startup+prefill is ~1.7 s.
+
+**Cross-check against the source weights**: `ref_forward.py` on the same
+rendered chat prompt (float32 numpy) gives argmax 504 `'The'`, top5
+`The / Paris / As / Bon / I`; the engine's first token is `The`.  Greedy text
+is deterministic across two runs.
+
+**Two packer bugs this exposed**, both fixed in the same commit:
+
+- the residual rail check used the q16 rail even when `--res q24` was asked for,
+  so it *refused* SmolLM2 (26884 > 4x128) with the one flag that makes it
+  representable.  `--res q24` now means a 32768 rail, and the refusal names
+  `--res q24` as the first remedy;
+- nothing told the user about the rmsnorm's squared store.  The packer now
+  prints `rms store: a lane sum can reach 1.3e+10 against the 24-bit rail 2048
+  (6e+06 x over); run the engine with RMS_STORE=f32 ...` whenever
+  `dim/32 * peak^2` exceeds 2048.  MiniMind3 (~50), pocket (~2300) and SmolLM2
+  (26884) all trip it, which is the same fact from three directions: the
+  2048 rail is a ~11 residual.
+
+**Still broken**: the CPU layer loop (`GPU_LAYER=0`) degenerates on this model
+with `ACT_CPU=q16` and with `ACT_CPU=f32` alike -- the supra2 defect, not the
+format axes.  And the Pi Zero is unmeasured for it: 164 MB at q8 against a
+320 MB CMA, `RMS_STORE=f32` untested there for a model this size, and 515
+draws/token.
+
+**One packer trap worth writing down**: SmolLM2's terminator is `<|im_end|>`
+(id 2), and its `bos` is `<|im_start|>` (id 1).  The packer's name lists put
+`eos` on `<|endoftext|>` (0) -- harmless for generation because `stop` is
+`<|im_end|>`, but wrong metadata, so this container is packed with
+`--bos 1 --eos 2`.  A Llama-with-ChatML model will always need that line until
+the packer prefers the source's own `eos_token` declaration.

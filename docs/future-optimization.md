@@ -215,19 +215,31 @@ A thin local HTTP API may be more useful than full compatibility.
 
 ## P2: model and platform experiments
 
-### SmolLM2-135M / -Instruct — **not supported**
+### SmolLM2-135M / -Instruct — **runs on the GPU path, needs `RMS_STORE=f32`**
 
-Deliberately out of scope, not "worth testing later":
+Supported since 2026-11-18: `models/smollm2-135m/smollm2-135m.q8q24.mmcf`
+(164 MB, `--res q24`, chatml, `bos 1 eos 2`) answers correctly at 11.3 ms/token
+on Iris Xe -- `The capital of France is Paris.`, PPL 7.7157, `17*4 = 68`, and
+the numpy float32 forward's argmax is the same first token.
 
-- its residual stream needs an embedding grid this engine does not implement;
-  without it the first layers diverge and the argmax is wrong;
-- `GPU_LAYER=1` is additionally broken on VC4 for it, so even a checkpoint that
-  loads would run on the slow path;
-- the Pi Zero cost is ~1 s/token against MiniMind3's ~0.25 s.
+The limit that had to move was **not** the FFN hidden (the per-layer `2^-k`
+store covers its 3268): it is the rmsnorm, whose `sum(x^2)` lane sums pin a
+24-bit store at 2048 and a 26884 residual makes them reach 1.3e10.
 
-The weights stay in `models/smollm2-*` as source material.  Nothing in this
-repository validates them; do not treat a container in that directory as
-support.  MobileLLM-125M was not pursued either.
+Still open, in order of what a reader would want next:
+
+- the CPU layer loop (`GPU_LAYER=0`) degenerates on this model with either
+  `ACT_CPU` value -- the same defect supra2-100M has, and unfixed;
+- the Pi Zero cost is unmeasured.  Three things stand in the way: 164 MB at q8
+  against a 320 MB CMA, the `RMS_STORE=f32` path (untested on VC4 for a model
+  this size), and the 30-layer draw count (515/token on Xe).
+- `-Instruct` is the same weights with the same template; no separate container.
+
+What the engine *does* handle generically: GQA (`GROUP = heads/kv_heads`),
+rotate-half and interleaved rope, BF16/F16/F32 safetensors, and now the model's
+own Jinja chat template.  The rope theta, the tokenizer and the template are
+still per-checkpoint, so a new model is a conversion investigation.
+MobileLLM-125M was not pursued.
 
 What the engine *does* handle generically: GQA (`GROUP = heads/kv_heads`),
 rotate-half and interleaved rope, BF16/F16/F32 safetensors, and now the model's

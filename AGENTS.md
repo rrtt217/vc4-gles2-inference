@@ -64,11 +64,17 @@ on the fused path, a prompt longer than `SEQ`, digit-run tokenisation), and the
 two ways the engine was wrong in 2026-11 — no BOS in the chat template or in
 `--ppl`, and a matvec input that carried no scale.
 
-**SmolLM2-135M is not supported.**  Measured (2026-11-08): its residual reaches
-25982 at layer 11 (204x the q16 rail) *and* its FFN hidden reaches 3164, which
-still travels through an I16_2 texture.  `--res q24` fixes the first and the
-output then degenerates on the second.  The float32 reference is correct, so
-this is a format limit, not a weight problem; `models/README.md` has the table.
+**SmolLM2-135M runs on the GPU path with `RMS_STORE=f32`** (2026-11-18).  Its
+residual reaches 26884 at layer 11 (210x the q16 rail, 82% of the q24 one) and
+its FFN hidden 3268, which the per-layer `2^-k` store covers (key 15, worst
+stored peak 118.6).  What blocked it is the rmsnorm: its lane sums are
+`sum(x^2)`, squared quantities in a 24-bit store that pins at 2048, so a
+residual of 2.7e4 answers with the end token until `RMS_STORE=f32`.  With it,
+the q24 residual and the q16 activation/FFN-hidden streams are within 0.6% of
+an all-f32 container (PPL 7.7157 against 7.6679), and the shipped container is
+`models/smollm2-135m/smollm2-135m.q8q24.mmcf` (11.3 ms/token on Iris Xe).  The
+CPU layer loop still degenerates -- that is the supra2 defect, not a format
+limit of this model.  `models/README.md` has the per-switch isolation table.
 
 Engine modules are described in [`docs/engine-layout.md`](docs/engine-layout.md);
 the file format in [`docs/model-formats.md`](docs/model-formats.md) and
@@ -461,6 +467,12 @@ These were paid for; do not relearn them.
   1.07e6, 73% low); `RMS_STORE=f32` stores the same four bytes as a bit-cast
   float and fixes it.  Default stays i24 because MiniMind3 was baselined in the
   saturated state.
+  **A residual above ~11 saturates it by itself.**  The sum is a squared
+  quantity: a lane holds `dim/32` values, so its sum is at most
+  `dim/32 * peak^2`, and on a 512-wide model 2048 is reached at a peak of 11.
+  SmolLM2's 26884 is 6e6 times over, and the reply comes back *empty* -- not
+  truncated, empty.  The packer prints the bound at pack time; `RMS_STORE=f32`
+  is the fix (2026-11-18).
 - **The residual stream rails at ±128.**  It is q16 fixed point, so a model
   whose residual exceeds 128 cannot be represented on the default path
   (supra2-100M reaches 2300 at layer 4).  A per-layer power-of-two scale is the

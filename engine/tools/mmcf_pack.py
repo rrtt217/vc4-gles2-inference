@@ -35,7 +35,8 @@ import zlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from mmcf_grid import LOGITS_GRID
-from mmcf_hf import (ACTIVATION_RAIL, RESIDUAL_RAIL, RESIDUAL_WARN, is_llama2c,
+from mmcf_hf import (ACTIVATION_RAIL, RESIDUAL_RAIL, RESIDUAL_WARN, RMS_LANE_RAIL,
+                     is_llama2c,
                      load_llama2c, tensors_from_hf, tok_entry_count)
 
 # tensor table record: id, dtype, flags, group, pad, rows, cols, offset, bytes,
@@ -591,19 +592,44 @@ def main():
     # past the rail unless told otherwise.
     peaks = meta.get("res_peaks")
     if peaks:
-        rail = RESIDUAL_RAIL
+        # The rail the container will actually be *read* at.  --res q24 stores
+        # one value a texel at the same 1/256 step but +-32768 (key 12), so a
+        # model that only trips the q16 rail is representable; using the q16
+        # rail here refused SmolLM2 (peak 26884) with --res q24 asked for,
+        # which is the one case the flag exists for (2026-11-18).
+        rail = RESIDUAL_RAIL if args.res == "q16" else 32768.0
+        warn = RESIDUAL_WARN if args.res == "q16" else 0.75 * rail
         worst = max(peaks)
-        print("residual: peak %.1f at layer %d (rail %.1f), per layer %s"
-              % (worst, peaks.index(worst), rail, " ".join("%.0f" % v for v in peaks)))
+        print("residual: peak %.1f at layer %d (rail %.1f, res %s), per layer %s"
+              % (worst, peaks.index(worst), rail, args.res,
+                 " ".join("%.0f" % v for v in peaks)))
         if worst > 4 * rail and not args.allow_over_rail:
             raise SystemExit(
-                "this model's residual reaches %.0f, %.0fx the engine's q16 rail (%.1f).\n"
+                "this model's residual reaches %.0f, %.0fx the engine's %s rail (%.1f).\n"
                 "The forward pass will saturate and answer from a truncated state; see\n"
-                "models/README.md (supra2-100M).  Pack it anyway with --allow-over-rail."
-                % (worst, worst / rail, rail))
-        if worst > RESIDUAL_WARN:
+                "models/README.md (supra2-100M).  %s"
+                % (worst, worst / rail, args.res, rail,
+                   "Pack it anyway with --allow-over-rail." if args.res == "q24" else
+                   "Pack it with --res q24 (same 1/256 step, +-32768) if it fits, "
+                   "or with --allow-over-rail."))
+        if worst > warn:
             print("warning: residual peak %.1f is %.0f%% of the %.1f rail; expect degraded "
                   "answers" % (worst, 100.0 * worst / rail, rail))
+    # The residual's *format* is not the only thing a large residual breaks: the
+    # rmsnorm accumulates sum(x^2) per lane in 24-bit fixed point, and a lane
+    # sum grows with the square of the residual.  A model that q24 represents
+    # perfectly can still pin that store (SmolLM2: lane bound 1.3e10 against
+    # 2048), and then inv_rms is wrong for every layer after the peak -- the
+    # container answers with its end token, /not/ because the residual lost
+    # range (measured 2026-11-18: PPL 4.4e55 with the 24-bit store against
+    # 7.7157 with RMS_STORE=f32, same container, one switch).
+    if peaks:
+        lanebound = worst * worst * (int(meta.get('dim') or 0) / 32.0)
+        if lanebound > RMS_LANE_RAIL:
+            print("rms store: a lane sum can reach %.1e against the 24-bit rail %.0f "
+                  "(%.0e x over); run the engine with RMS_STORE=f32, or inv_rms is "
+                  "wrong for every layer after the peak"
+                  % (lanebound, RMS_LANE_RAIL, lanebound / RMS_LANE_RAIL))
     # The FFN SwiGLU hidden goes through the same q16 activation format and is
     # clamped at the same rail.  It is not the residual, so the check above
     # cannot see it: MiniMind3-MoE's expert hidden reaches 250 at the chat

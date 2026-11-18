@@ -1006,6 +1006,12 @@ RESIDUAL_WARN = 96.0             # 75% of the rail
 # so it clamps at the same rail.  Kept as its own name because the two streams
 # are different tensors with different fixes.
 ACTIVATION_RAIL = 32767.0 / 256.0
+# The rmsnorm reads the residual and accumulates sum(x^2) per lane (32 lanes,
+# dim/32 values each) into 24-bit fixed point: 1/4096 step biased by 2^23, so a
+# lane pins at 2048.  It is a *squared* quantity, which is why it rails long
+# before any residual format does: MiniMind3's residual of ~50 pins it (22x),
+# SmolLM2's 26884 pins it by 6e6.  Stored: shaders.cpp's S_ST / RMS_DUMP.
+RMS_LANE_RAIL = 2048.0
 
 
 def residual_peaks_lfm2(m, seq=8):
