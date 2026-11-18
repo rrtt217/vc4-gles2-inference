@@ -35,6 +35,7 @@
 
 #include <GLES2/gl2.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -60,6 +61,7 @@ enum class Kind {
     T3U,      // 2-bit, uint decode
     T3Fetch,  // 2-bit layout, fetches kept, unpack removed (pricing arm)
     T3E,      // the engine's own kernel: row-scale plane, q24 store, one fetch
+    T3T,      // the same, with the body folded into tiles of --tile rows
 };
 
 struct Variant {
@@ -75,6 +77,7 @@ static const Variant VARIANTS[] = {
     {"t3u (2-bit, uint)", Kind::T3U, 2, true},
     {"t3u_fetch (no unpack)", Kind::T3Fetch, 2, true},
     {"t3e (engine text, row scale)", Kind::T3E, 2, true},
+    {"t3t (engine text, tiled)", Kind::T3T, 2, true},
 };
 
 static GLuint compile(GLenum t, const string& src, string& log) {
@@ -94,13 +97,14 @@ static GLuint compile(GLenum t, const string& src, string& log) {
 
 int main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
-    int rows = 1024, cols = 1024, iters = 20;
+    int rows = 1024, cols = 1024, iters = 20, tile = 0;
     const char* only = nullptr;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--rows") && i + 1 < argc) rows = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--cols") && i + 1 < argc) cols = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--iters") && i + 1 < argc) iters = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--variant") && i + 1 < argc) only = argv[++i];
+        else if (!strcmp(argv[i], "--tile") && i + 1 < argc) tile = atoi(argv[++i]);
         else {
             printf("usage: %s [--rows N] [--cols M] [--iters K] [--variant NAME]\n", argv[0]);
             return 2;
@@ -156,6 +160,8 @@ int main(int argc, char** argv) {
            "ns/MAC", "MB/draw", "check");
     for (const Variant& v : VARIANTS) {
         if (only && !strstr(v.name, only)) continue;
+        const int TH = (tile > 0) ? std::min(tile, rows) : rows;
+        const int TILES = (rows + TH - 1) / TH;
         const int per = 32 / v.bits;                      // weights a texel
         const int nq = cols / per;                        // weight texels a row
         const int groups = per / 4;                       // activation texels an iteration
@@ -193,6 +199,14 @@ int main(int argc, char** argv) {
             }
         }
         GLuint wtex_id = 0;
+        std::vector<unsigned char> wtiled;
+        if (v.kind == Kind::T3T && TILES > 1) {
+            // The engine's upload: row r moves to (x + (r/TH)*W, r%TH).
+            wtiled.assign((size_t)nq * TILES * TH * 4, 0);
+            for (int r = 0; r < rows; ++r)
+                std::memcpy(&wtiled[((size_t)(r % TH) * nq * TILES + (size_t)(r / TH) * nq) * 4],
+                            &wtex[(size_t)r * nq * 4], (size_t)nq * 4);
+        }
         // The per-row scale plane the engine carries as part 3: two rows a texel,
         // 16 bits each, s_row / unit.  Only the t3e arm reads it, but every arm
         // gets the texture so the binding does not depend on the variant.
@@ -200,7 +214,9 @@ int main(int argc, char** argv) {
         std::vector<unsigned char> wsx((size_t)np * 4 * 4, 0);
         for (int r = 0; r < rows; ++r) {
             const float srow = 1.0f + (float) (r % 7) * 0.25f;
-            const long qv = (long) (srow / 3.0f * 65536.0);   // /unit, unit = 3
+            // The plane holds s_row/unit and the kernel multiplies `ws` back;
+            // both arms set ws = 3.0 below, so the plane carries s_row/3.
+            const long qv = (long) (srow / 3.0f * 65536.0);
             unsigned char* o = &wsx[(size_t)(r / 2) * 16];
             if ((r & 1) == 0) { o[0] = (unsigned char) (qv >> 8); o[1] = (unsigned char) qv; }
             else { o[2] = (unsigned char) (qv >> 8); o[3] = (unsigned char) qv; }
@@ -216,7 +232,12 @@ int main(int argc, char** argv) {
         glGenTextures(1, &wtex_id);
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_2D, wtex_id);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, nq, rows, 0, GL_RGBA, GL_UNSIGNED_BYTE, wtex.data());
+        if (v.kind == Kind::T3T)
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, nq * TILES, TH, 0, GL_RGBA,
+                         GL_UNSIGNED_BYTE, (TILES > 1 ? wtiled.data() : wtex.data()));
+        else
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, nq, rows, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                         wtex.data());
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         glActiveTexture(GL_TEXTURE0);
@@ -229,7 +250,38 @@ int main(int argc, char** argv) {
         string fs = ver + "precision highp float;\n";
         if (v.es3) fs += "precision highp int;\nout vec4 frag_color;\n";
         fs += "uniform sampler2D W,X;uniform float ws;\n";
-        if (v.kind == Kind::T3E) {
+        if (v.kind == Kind::T3T) {
+            // The engine's own tiled text: tile TH rows, `tiles` of them side by
+            // side, one weight fetch an iteration, plus the row-scale plane.
+            const int np = (rows + 1) / 2;
+            fs += "uniform sampler2D WS;\n";
+            fs += "vec4 dec(float bb){uint u=uint(floor(bb*255.0+0.5));"
+                  "return vec4(float(u&1u),float((u>>2)&1u),float((u>>4)&1u),float((u>>6)&1u))"
+                  "*(1.0-2.0*vec4(float((u>>1)&1u),float((u>>3)&1u),float((u>>5)&1u),"
+                  "float((u>>7)&1u)));}\n";
+            fs += "float wsr(int r){vec4 c=texture2D(WS,vec2(0.125,(float(r/2)+0.5)/float(" +
+                  std::to_string(np) + ")));"
+                  "return (mod(float(r),2.0)<0.5?c.r*65280.0+c.g*255.0"
+                  ":c.b*65280.0+c.a*255.0)*(1.0/65536.0);}\n";
+            fs += "void main(){int r=int(gl_FragCoord.x);float s=0.0;"
+                  "for(int q=0;q<" + std::to_string(cols / 4) + ";q++){"
+                  "vec4 c=texture2D(W,vec2((float(q/4)+float(int(float(r)/" +
+                  std::to_string(TH) + ".0))*float(" + std::to_string(nq) + ")+0.5)/float(" +
+                  std::to_string(nq * TILES) + ".0),(mod(float(r)," +
+                  std::to_string(TH) + ".0)+0.5)/" + std::to_string(TH) + ".0));"
+                  "vec4 x=texture2D(X,vec2((float(q)+0.5)/float(" +
+                  std::to_string(cols / 4) + "),0.5))*255.0-128.0;"
+                  "int j=q-4*(q/4);vec4 w4=vec4(0.0);"
+                  "vec4 d0=dec(c.r),d1=dec(c.g),d2=dec(c.b),d3=dec(c.a);"
+                  "w4=d0*step(abs(float(j)),0.5)+d1*step(abs(float(j)-1.0),0.5)+"
+                  "d2*step(abs(float(j)-2.0),0.5)+d3*step(abs(float(j)-3.0),0.5);"
+                  "s+=dot(w4,x);}"
+                  "float v=clamp(floor(s*wsr(r)*ws*256.0+0.5),-8388608.0,8388607.0)+8388608.0;"
+                  "float g=floor(v/65536.0);float b=floor(v/256.0)-g*256.0;"
+                  "float a=v-g*65536.0-b*256.0;"
+                  "frag_color=vec4(g/255.0,b/255.0,a/255.0,1.0);}\n";
+        }
+        else if (v.kind == Kind::T3E) {
             // The engine's kernel, transcribed, so the probe runs the exact text
             // the board runs: `q` walks activation texels, the weight texel is
             // q/4 and its byte is chosen by a compare chain, the per-row plane is
@@ -259,7 +311,7 @@ int main(int argc, char** argv) {
                   "float a=v-g*65536.0-b*256.0;"
                   "frag_color=vec4(g/255.0,b/255.0,a/255.0,1.0);}\n";
         }
-        if (v.kind != Kind::T3E) {
+        if (v.kind != Kind::T3E && v.kind != Kind::T3T) {
         fs += "void main(){int r=int(gl_FragCoord.x);float s=0.0;\n";
         fs += "for(int q=0;q<" + std::to_string(nq) + ";q++){\n";
         fs += "vec4 c=texture2D(W,vec2((float(q)+0.5)/float(" + std::to_string(nq) +
@@ -347,7 +399,7 @@ int main(int argc, char** argv) {
         glBindTexture(GL_TEXTURE_2D, wtex_id);
         glUniform1i(glGetUniformLocation(p, "W"), 1);
         glUniform1f(glGetUniformLocation(p, "ws"), 1.0f);
-        if (v.kind == Kind::T3E) {
+        if (v.kind == Kind::T3E || v.kind == Kind::T3T) {
             glActiveTexture(GL_TEXTURE2);
             glBindTexture(GL_TEXTURE_2D, wsx_id);
             glUniform1i(glGetUniformLocation(p, "WS"), 2);
@@ -395,7 +447,7 @@ int main(int argc, char** argv) {
         printf("%-24s %6d %9.3f %10.2f %9.2f %8s\n", v.name, nq, ms, 1e6 * ms / (rows * (double) cols),
                (double) nq * rows * 4 / 1e6, good ? "ok" : "MISMATCH");
         if (!good) printf("    row 0: got %.6f want %.6f (err %.6f)\n", got, ref, err);
-        if (v.kind == Kind::T3E) {
+        if (v.kind == Kind::T3E || v.kind == Kind::T3T) {
             // Every row: the row scale plane and the weight row change with r, so
             // "row 0 is right" says almost nothing (that was the wide kernel's
             // blind spot on the board).
