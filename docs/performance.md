@@ -7845,3 +7845,21 @@ The one speed number from this session that *is* solid, because it is a same-bin
 interleaved 2x2: the correctness fix costs **+21%** (1235 -> 1493 ms/token,
 `RMS_STORE=i24` -> `f32`).  Earlier single runs that suggested the opposite were
 warm-up noise.
+
+## 2026-11-18 (correction) — pocket runs at SEQ=512 on the board
+
+An earlier note in this log said the board can only take `SEQ=128` for this
+container.  That is wrong.  Measured on the board, MNN-Pocket qat with
+`RMS_STORE=f32 RES=i24 ACT=i16 KV=q16 KV_GRID=512`:
+
+```
+SEQ=512, --temp 0.7 --topp 0.9 --top-k 40 --repeat-penalty 1.1 --gen 256
+-> 256 tokens, 0.8 tok/s (1.25 s/token), prefill 27.55 s, ctx 279/512
+```
+
+A coherent 256-token answer, no truncation before the context ran out.  The
+constraint that bit earlier was the combination, not `SEQ` alone: with
+`RES=f32 ACT=f32` the session's targets are wider (and it is also 21% slower),
+and `SEQ=768` -- the container's own declaration -- is still untested here.  The
+5-minute watchdog warning in the same note is also moot: 27.55 s of prefill plus
+256 tokens at 1.25 s is about 5.9 minutes of wall time and it completed.
