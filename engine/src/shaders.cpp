@@ -511,7 +511,14 @@ string matvec_t3(int rows, int cols, XFormat xf, bool wrow, int t3_th, int t3_ti
            "void main(){int r=int(gl_FragCoord.x);float s=0.0;"
            "for(int q=0;q<" + to_string(cols / 4) + ";q++){"
            "vec4 c=texture2D(W," + WQ + ");"
-           "vec4 x=X4Q(X,q*4," + AXW + ".0);"
+           // ONE activation fetch a step.  X4Q is four texture2D calls on the
+           // one-value-a-texel formats, and VC4 returns undefined data from a
+           // fragment that samples one texture several times once it is tall --
+           // the rule wrow_scale() documents and probes/t3mv_probe now measures
+           // directly: the same kernel with one fetch is exact in 1280/1280 rows
+           // on the board and wrong in 1276/1280 with four (2026-11-18).
+           "vec4 xa=texture2D(X,vec2((float(q)+0.5)/" + AXW + ".0,0.5));"
+           "vec4 x=vec4(xa.r,xa.g,xa.b,xa.a)*255.0-128.0;"
            // The byte is selected without a dynamic index (GLSL ES has none):
            // four decodes and a mix, which compiles to the same four MACs and
            // keeps `c` definitely initialised (an if/else chain made Mesa warn
@@ -547,7 +554,14 @@ string matvec_t3_add(int rows, int cols, XFormat xf, XFormat rf, bool wrow, int 
            "void main(){int r=int(gl_FragCoord.x);float s=0.0;"
            "for(int q=0;q<" + to_string(cols / 4) + ";q++){"
            "vec4 c=texture2D(W," + WQ + ");"
-           "vec4 x=X4Q(X,q*4," + AXW + ".0);"
+           // ONE activation fetch a step.  X4Q is four texture2D calls on the
+           // one-value-a-texel formats, and VC4 returns undefined data from a
+           // fragment that samples one texture several times once it is tall --
+           // the rule wrow_scale() documents and probes/t3mv_probe now measures
+           // directly: the same kernel with one fetch is exact in 1280/1280 rows
+           // on the board and wrong in 1276/1280 with four (2026-11-18).
+           "vec4 xa=texture2D(X,vec2((float(q)+0.5)/" + AXW + ".0,0.5));"
+           "vec4 x=vec4(xa.r,xa.g,xa.b,xa.a)*255.0-128.0;"
            "int j=q-4*(q/4);"
            "vec4 d0=" + t3_byte("c.r") + ",d1=" + t3_byte("c.g") + ","
            "d2=" + t3_byte("c.b") + ",d3=" + t3_byte("c.a") + ";"

@@ -97,7 +97,7 @@ static GLuint compile(GLenum t, const string& src, string& log) {
 
 int main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
-    int rows = 1024, cols = 1024, iters = 20, tile = 0;
+    int rows = 1024, cols = 1024, iters = 20, tile = 0, x4 = 0;
     const char* only = nullptr;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--rows") && i + 1 < argc) rows = atoi(argv[++i]);
@@ -105,6 +105,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--iters") && i + 1 < argc) iters = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--variant") && i + 1 < argc) only = argv[++i];
         else if (!strcmp(argv[i], "--tile") && i + 1 < argc) tile = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--x4")) x4 = 1;
         else {
             printf("usage: %s [--rows N] [--cols M] [--iters K] [--variant NAME]\n", argv[0]);
             return 2;
@@ -269,8 +270,12 @@ int main(int argc, char** argv) {
                   std::to_string(TH) + ".0))*float(" + std::to_string(nq) + ")+0.5)/float(" +
                   std::to_string(nq * TILES) + ".0),(mod(float(r)," +
                   std::to_string(TH) + ".0)+0.5)/" + std::to_string(TH) + ".0));"
-                  "vec4 x=texture2D(X,vec2((float(q)+0.5)/float(" +
-                  std::to_string(cols / 4) + "),0.5))*255.0-128.0;"
+                  + std::string("vec4 x=") +
+                  (x4 ? "vec4(texture2D(X,vec2((float(q*4+0)+0.5)/float(" + std::to_string(cols) + "),0.5)).r,"
+                        "texture2D(X,vec2((float(q*4+1)+0.5)/float(" + std::to_string(cols) + "),0.5)).r,"
+                        "texture2D(X,vec2((float(q*4+2)+0.5)/float(" + std::to_string(cols) + "),0.5)).r,"
+                        "texture2D(X,vec2((float(q*4+3)+0.5)/float(" + std::to_string(cols) + "),0.5)).r)*255.0-128.0;"
+                      : "texture2D(X,vec2((float(q)+0.5)/float(" + std::to_string(cols / 4) + "),0.5))*255.0-128.0;") +
                   "int j=q-4*(q/4);vec4 w4=vec4(0.0);"
                   "vec4 d0=dec(c.r),d1=dec(c.g),d2=dec(c.b),d3=dec(c.a);"
                   "w4=d0*step(abs(float(j)),0.5)+d1*step(abs(float(j)-1.0),0.5)+"
@@ -300,8 +305,12 @@ int main(int argc, char** argv) {
                   "for(int q=0;q<" + std::to_string(cols / 4) + ";q++){"
                   "vec4 c=texture2D(W,vec2((float(q/4)+0.5)/float(" + std::to_string(nq) + "),"
                   "(float(r)+0.5)/float(" + std::to_string(rows) + ")));"
-                  "vec4 x=texture2D(X,vec2((float(q)+0.5)/float(" +
-                  std::to_string(cols / 4) + "),0.5))*255.0-128.0;"
+                  + std::string("vec4 x=") +
+                  (x4 ? "vec4(texture2D(X,vec2((float(q*4+0)+0.5)/float(" + std::to_string(cols) + "),0.5)).r,"
+                        "texture2D(X,vec2((float(q*4+1)+0.5)/float(" + std::to_string(cols) + "),0.5)).r,"
+                        "texture2D(X,vec2((float(q*4+2)+0.5)/float(" + std::to_string(cols) + "),0.5)).r,"
+                        "texture2D(X,vec2((float(q*4+3)+0.5)/float(" + std::to_string(cols) + "),0.5)).r)*255.0-128.0;"
+                      : "texture2D(X,vec2((float(q)+0.5)/float(" + std::to_string(cols / 4) + "),0.5))*255.0-128.0;") +
                   "int j=q-4*(q/4);vec4 w4=vec4(0.0);"
                   "if(j==0)w4=dec(c.r);else if(j==1)w4=dec(c.g);"
                   "else if(j==2)w4=dec(c.b);else w4=dec(c.a);"

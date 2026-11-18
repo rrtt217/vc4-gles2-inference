@@ -915,16 +915,19 @@ bool Model::read_tables() {
         // the upload is a straight copy and the 167 MB container is 167 MB of
         // texture, which is why the format exists at all.
         //
-        // `m.scale` carries the *magnitude* unit (the record's step x 127), so
-        // the kernel's `level(+-1) * ws * wsr(r)` is the weight and no kernel
-        // needs to know about the 127.  T3_EXPAND=1 restores the q8 expansion
-        // this path started as (the packer's acceptance route, 4x the RAM):
-        // same numbers, and the A/B that proved the layout.
+        // The weight a 2-bit level stands for, without a kernel change: the t3
+        // kernel computes `level * ws * wsr(r)` with `level` in {0, +-1} and
+        // `wsr(r)` = s_row/unit (the part-3 plane, which the packer writes
+        // relative to the matrix unit).  In the q8 body the same expression is
+        // `level(+127) * scale * wsr(r)` with `scale` = the record's step
+        // (s_row/127), so a q8 level and a 2-bit level differ by exactly 127.
+        // Leaving the step in `m.scale` therefore makes every 2-bit weight 127x
+        // too small; multiplying it by 127 here is what makes the two paths
+        // agree bit for bit, and that is the A/B this path was accepted on
+        // (t3 vs T3_EXPAND=1: KL 0.0035 before the tile fold).
         auto as_t3 = [&](const MmcfRec& r, Mat& m) {
                 m.rows = (int)r.rows; m.cols = (int)r.cols;
                 m.scale = r.scale * 127.0f;
-                m.prebiased = false;
-                const uint8_t* p = fbase_ + data_off_ + r.off;
                 if (!getenv("T3_EXPAND")) {
                         m.type = WeightType::T3;
                         const size_t bytes = (size_t)m.rows * (((m.cols + 15) / 16) * 4);
