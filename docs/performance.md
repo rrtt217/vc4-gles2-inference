@@ -7863,3 +7863,39 @@ constraint that bit earlier was the combination, not `SEQ` alone: with
 and `SEQ=768` -- the container's own declaration -- is still untested here.  The
 5-minute watchdog warning in the same note is also moot: 27.55 s of prefill plus
 256 tokens at 1.25 s is about 5.9 minutes of wall time and it completed.
+
+## 2026-11-18 — portability: request ES 3.0, and stop relying on Mesa's leniency
+
+Two things made the ESSL 3.00 paths **Mesa-only**, both fixed today.
+
+**The context was requested as version 2.**  The engine reached ESSL 3.00 only
+through `MESA_GLES_VERSION_OVERRIDE`/`MESA_GLSL_VERSION_OVERRIDE`, which vc4
+needs because it does not advertise ES 3.0 itself -- but on a driver that is not
+Mesa there is no such variable, so every f32 stream (and bf16, when it lands) was
+unreachable there.  `init_egl` now asks for a config renderable as ES 3.0 and a
+version-3 context, falling back to the ES 2.0 pair if either step fails.  An
+ES 3.0 context still accepts ESSL 1.00 shaders -- backward compatibility is in
+the specification -- and the kernels that do not opt into ES3 keep their text,
+their digests and their numbers: q8 PPL 270.3170, the q8 pin, 158 program
+digests, and the f32 rms path at 276.1542 all unchanged on Xe, with the board's
+q8 pin `271.2855` and pocket's sentence reproduced on the cross-built binary.
+The Mesa overrides stay: they make the *request* succeed on vc4, they are no
+longer what makes ES3 possible.  Measured separately: the context version alone
+costs nothing (ES2 1116/1188 ms a token against ES3 1217/1106, i.e. inside the
+board's noise), so the +21% of `RMS_STORE=f32` is the decode, not the context.
+
+**The shell used two constructs only Mesa accepts.**  `#define gl_FragColor
+frag_color` defines a `gl_`-prefixed macro, which the GLSL specification
+reserves; the identifier is now renamed in the text instead.  And every f32 decode
+calls `texture2D`, which ESSL 3.00 *removed*, so the shell now adds
+`#define texture2D texture` and the same for `textureCube` -- legal macros that
+leave the builders' text untouched.  Neither is visible to the gate, and that is
+expected: `SHADER_SRC` and `--dump-shaders` print the source *before* the shell,
+so the digests cover the pre-shell text.  What they are is the difference between
+"compiles on Mesa" and "compiles on anything that implements ESSL 3.00".
+
+Still not portable, and deliberately so: the q4 dma-buf import
+(`EGL_LINUX_DMA_BUF_EXT` + `glEGLImageTargetTexture2DOES` + the tiled pitch),
+which has a functional fallback in `Q4_FMT=0` (measured on the board to produce
+**bit-identical** numbers, 2026-11-18), and the `MESA_*` overrides themselves,
+which are a no-op elsewhere.
