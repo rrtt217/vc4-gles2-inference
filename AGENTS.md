@@ -12,6 +12,8 @@ disagree, the higher one wins:
    reason to work around an approval prompt.
 3. **`AGENTS.override.md`** — the Hermes/VLAB copy.  It **replaces this file
    entirely** rather than adding to it, so on those hosts this file is not read.
+   It exists on the VLAB host, not in this checkout; absent means "not that
+   host", not "no override applies".
 4. **`AGENTS.local.md`** — the DSH machine override.  It is read *in addition*
    to this file and owns host and machine facts: paths, sysroots, SSH aliases,
    pins, and local benchmark numbers.
@@ -57,7 +59,7 @@ replace working paths with demos or cosmetic rewrites.
 | `engine/probes/` | standalone VC4 feature/throughput probes (not linked into the engine); `README.md` is the map: one row per probe = the question it answers, its `_pi` target and where the answer is written down |
 | `server/` | OpenAI-compatible HTTP server, deterministic tools, self-test, eval suite.  `server.py` is the entry point; `http_api.py` (routes/SSE), `engine_bridge.py` (the worker protocol), `chat_render.py`, `tool_calls.py` and `sampling.py` are the parts it was split into on 2026-11-14, all stdlib only |
 | `models/` | central model store (gitignored), one `.mmcf` per precision |
-| `minimind3/` | MiniMind3 source config/tokenizer/reference; artifacts live in `models/` |
+| `minimind3/` | MiniMind3 source config, chat template, reference forward pass; artifacts live in `models/`.  `tokenizer.json` is **not** tracked (`.gitignore`): fetch it from the HF release into this directory before rebuilding a `.tok` |
 | `refs/` | untracked upstream reference material for MiniMind3 (gitignored) |
 | `docs/` | deep dives; keep READMEs short and link here |
 
@@ -364,9 +366,10 @@ TinyBrainBot q4's residual sign flip (Pi-vs-Xe cosine 0.7233 -> 0.9971).  Before
 that the Pi printed `我是一个AI助手，没有自我意识，也没有身体，所以我无法`
 (2026-11-03, when the fused FFN became the default); it moved again on
 2026-11-13, when the cheap q16 decode became the default (see the decode
-section of `docs/performance.md`).  `docs/performance.md` keeps both, and the
-old binary is still runnable as
-`bin/engine_mm3_pi.predecode` on the board.
+section of `docs/performance.md`).  `docs/performance.md` keeps both.  A
+pre-decode binary was kept on the board as `bin/engine_mm3_pi.predecode` when
+the decode changed (2026-11-13); it is not in this repository, so treat it as a
+board-local artifact and rebuild rather than count on it.
 
 **The string is a tripwire, not the acceptance criterion.**
 `engine/scripts/regression.sh` is the gate: determinism (same binary twice),
