@@ -539,7 +539,8 @@ string matvec_t3_add(int rows, int cols, XFormat xf, XFormat rf, bool wrow, int 
     // implicit int->float, and `float(mod(float(r),1280))` is a compile error
     // when the modulus is an int literal.
     const string TH = to_string(t3_th) + ".0", TILES = to_string(t3_tiles);
-    const string WQ = "vec2((float(q/4)+float(r/" + TH + ")*float(" + NQ + ")+0.5)/float(" +
+    const string TILE = "float(int(float(r)/" + TH + "))";
+    const string WQ = "vec2((float(q/4)+" + TILE + "*" + NQ + ".0+0.5)/(" +
                       NQ + ".0*" + TILES + ".0),(mod(float(r)," + TH + ")+0.5)/" + TH + ")";
     return "//T3\n" + head(xf) + "precision highp int;\n" + x_residual_glsl(rf) +
            "uniform sampler2D W,X,R;uniform float ws;" + WD +
