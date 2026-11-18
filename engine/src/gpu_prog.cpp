@@ -163,7 +163,18 @@ GLuint GPU::link_program(const string& fs_in){
         const bool q4_es3 = g_q4_shift_ok && fs_in.find("&15") != string::npos;
         const bool bc_es3 = g_es3_ok && (fs_in.find("uintBitsToFloat") != string::npos ||
                                          fs_in.find("floatBitsToUint") != string::npos);
-        const bool needs_es3 = q4_es3 || bc_es3;
+        // The 2-bit ternary matvec (dtype 7) decodes with shifts and masks, so
+        // it is ESSL 3.00 only and says so with a marker.  There is no ES2
+        // fallback in the kernel: a driver without ES3 runs the same container
+        // through T3_EXPAND=1 (the q8 expansion) instead.
+        const bool t3_es3 = g_es3_ok && fs_in.find("//T3") != string::npos;
+        if (!g_es3_ok && fs_in.find("//T3") != string::npos) {
+                cerr << "this kernel is the 2-bit ternary matvec and needs an ESSL 3.00 "
+                        "context;\n  run the container with T3_EXPAND=1 to use the q8 "
+                        "expansion (4x the RAM), or give the driver ES3\n";
+                exit(2);
+        }
+        const bool needs_es3 = q4_es3 || bc_es3 || t3_es3;
         const string fs = needs_es3 ? es3ify(fs_in, false) : fs_in;
         string vs = "attribute vec2 p; void main(){ gl_Position=vec4(p,0.,1.); }";
         // The vertex shader must match the fragment stage's language when that

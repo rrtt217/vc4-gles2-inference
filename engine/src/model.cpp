@@ -60,9 +60,14 @@ bool Model::load(const string& path){
             // 4x on the host is a fact the operator needs (the file is small,
             // the RAM is not), and it is also the signal that the kernel this
             // format was designed for is not in this build yet.
-            cerr << "t3 body: " << t3_mats << " matrices expanded to q8 on the host ("
-                 << (t3_disk_bytes >> 20) << " MB on disk -> " << (t3_ram_bytes >> 20)
-                 << " MB in RAM); the 2-bit kernel is Phase B2 (docs/bitcpm.md)\n";
+            if (t3_ram_bytes)
+                    cerr << "t3 body: " << t3_mats << " matrices expanded to q8 on the host ("
+                         << (t3_disk_bytes >> 20) << " MB on disk -> " << (t3_ram_bytes >> 20)
+                         << " MB in RAM) because T3_EXPAND is set\n";
+            else
+                    cerr << "t3 body: " << t3_mats << " matrices, 2-bit, borrowed from the "
+                         << "container and uploaded as they lie (" << (t3_disk_bytes >> 20)
+                         << " MB of texture)\n";
     }
     fbase_ = nullptr; fsize_ = fpos_ = 0;
     if (ok && !borrow_ && tok_blob && tok_blob_bytes) {
@@ -905,20 +910,37 @@ bool Model::read_tables() {
         };
 
         // A 2-bit ternary body (dtype 7, `--quant t3`): 16 weights an RGBA8
-        // texel, four a byte, bit 0 magnitude and bit 1 sign.  Until the GPU
-        // kernel exists (Phase B2, docs/bitcpm.md) the body is expanded here
-        // into the q8 levels the existing kernels already understand -- +-127
-        // with the per-row plane that arrives as part 3, which is the exact
-        // reversibility the format was built on: a per-row ternary matrix is
-        // lossless in q8, so this path is bit-identical to a q8 body that
-        // carried the same per-row scales.  It is the container's acceptance
-        // path, not the shipping one: it costs 4x the file's memory.
+        // texel, four a byte, bit 0 magnitude and bit 1 sign.  The body is used
+        // as it lies in the file -- the kernel fetches exactly these bytes, so
+        // the upload is a straight copy and the 167 MB container is 167 MB of
+        // texture, which is why the format exists at all.
+        //
+        // `m.scale` carries the *magnitude* unit (the record's step x 127), so
+        // the kernel's `level(+-1) * ws * wsr(r)` is the weight and no kernel
+        // needs to know about the 127.  T3_EXPAND=1 restores the q8 expansion
+        // this path started as (the packer's acceptance route, 4x the RAM):
+        // same numbers, and the A/B that proved the layout.
         auto as_t3 = [&](const MmcfRec& r, Mat& m) {
                 m.rows = (int)r.rows; m.cols = (int)r.cols;
-                m.type = WeightType::INT8;
-                m.scale = r.scale;             // the unit the plane divides by
-                m.prebiased = false;           // levels are signed int8
+                m.scale = r.scale * 127.0f;
+                m.prebiased = false;
                 const uint8_t* p = fbase_ + data_off_ + r.off;
+                if (!getenv("T3_EXPAND")) {
+                        m.type = WeightType::T3;
+                        const size_t bytes = (size_t)m.rows * (((m.cols + 15) / 16) * 4);
+                        if (borrow_) {
+                                m.ext3 = p;
+                        } else {
+                                // MODEL_BORROW=0 releases the mapping, so the
+                                // body has to be ours (the q8 path copies too).
+                                m.q3.assign(p, p + bytes);
+                        }
+                        t3_mats++;
+                        t3_disk_bytes += r.bytes;
+                        return;
+                }
+                m.type = WeightType::INT8;
+                m.scale = r.scale;                 // the q8 levels are +-127
                 const size_t stride = (size_t)((m.cols + 15) / 16) * 4;   // a row's bytes
                 m.q8.resize((size_t)m.rows * m.cols);
                 for (int y = 0; y < m.rows; ++y) {
@@ -1615,6 +1637,12 @@ Mat Model::slice_rows(const Mat& src, int r0, int r1){
         // silently fall back to one scale for the whole chunk.
         if (!src.row_scale.empty())
                 m.row_scale.assign(src.row_scale.begin() + r0, src.row_scale.begin() + r1);
+        if (src.type == WeightType::T3) {
+                // A row slice is a pointer offset: the body is row-major with a
+                // stride of ceil(cols/16)*4 bytes, so nothing has to move.
+                m.ext3 = src.w3() + (size_t)r0 * (((src.cols + 15) / 16) * 4);
+                return m;
+        }
         if (src.type == WeightType::INT8) {
             if (src.ext8) {
                 m.ext8 = src.ext8 + (size_t)r0 * m.cols;
@@ -1651,6 +1679,23 @@ Mat Model::slice_cols(const Mat& src, int c0, int c1){
         Mat m; m.rows = src.rows; m.cols = c1 - c0; m.type = src.type; m.scale = src.scale;
         m.prebiased = src.prebiased;
         m.row_scale = src.row_scale;   // a column slice keeps every row
+        if (src.type == WeightType::T3) {
+                // A column slice of a 2-bit body is not contiguous (16 columns
+                // share 4 bytes a row), so it is repacked: one memcpy a row,
+                // which is what the q8 column slice does too.
+                if ((c0 % 16) || ((c1 - c0) % 16)) {
+                        cerr << "mmcf: a 2-bit body can only be column-sliced on a 16-column "
+                                "boundary (" << c0 << ".." << c1 << ")\n";
+                        exit(2);
+                }
+                const size_t src_stride = ((src.cols + 15) / 16) * 4;
+                const size_t dst_stride = m.cols / 4;
+                m.q3.resize((size_t)m.rows * dst_stride);
+                for (int r = 0; r < m.rows; ++r)
+                        memcpy(m.q3.data() + (size_t)r * dst_stride,
+                               src.w3() + (size_t)r * src_stride + c0 / 4, dst_stride);
+                return m;
+        }
         if (src.type == WeightType::INT8) {
             m.q8.resize((size_t)m.rows * m.cols);
             for (int r = 0; r < m.rows; ++r)

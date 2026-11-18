@@ -231,8 +231,10 @@ void GPU::matvec_add(const Mat& m, GLuint x, GLuint residual, Target& out, XForm
         // weight format: a row-scale q8 matrix must still write the packed
         // texel the rmsnorm reads, so the paired kernel grows a wrow variant
         // rather than the writer switching layouts.
-        const bool wr = m.type == WeightType::INT8 && m.has_row_scale();
-        GLuint p = pair4 ? x_i4_add_pair(m.rows, m.cols, xf, m.fmt4)
+        const bool wr = (m.type == WeightType::INT8 || m.type == WeightType::T3) &&
+                        m.has_row_scale();
+        GLuint p = m.type == WeightType::T3 ? x_t3_add(m.rows, m.cols, xf, wr)
+                  : pair4 ? x_i4_add_pair(m.rows, m.cols, xf, m.fmt4)
                   : pair ? x_q8_add_pair(m.rows, m.cols, xf, wr)
                   : (m.type == WeightType::INT8) ? x_q8_add(m.rows, m.cols, xf, wr)
                   : (m.type == WeightType::INT4) ? x_i4_add(m.rows, m.cols, xf, m.fmt4)
@@ -470,6 +472,18 @@ GLuint GPU::x_q8(int rows, int cols, bool wrow){
         return x_prog("xq8_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(act_fmt_) +
                       (wrow ? "_wr" : ""),
                       matvec_q8(rows, cols, act_fmt_, wrow));
+    }
+
+GLuint GPU::x_t3(int rows, int cols, bool wrow){
+        return x_prog("xt3_" + to_string(rows) + "_" + to_string(cols) + "_" +
+                      x_format_name(act_fmt_) + (wrow ? "_wr" : ""),
+                      matvec_t3(rows, cols, act_fmt_, wrow));
+    }
+
+GLuint GPU::x_t3_add(int rows, int cols, XFormat rf, bool wrow){
+        return x_prog("xt3a_" + to_string(rows) + "_" + to_string(cols) + "_" +
+                      x_format_name(act_fmt_) + "_" + x_format_name(rf) + (wrow ? "_wr" : ""),
+                      matvec_t3_add(rows, cols, act_fmt_, rf, wrow));
     }
 
 GLuint GPU::x_q6(int rows, int cols, bool wrow){

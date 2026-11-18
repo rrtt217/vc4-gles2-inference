@@ -20,7 +20,7 @@ using Clock = chrono::steady_clock;
 static constexpr float ACT_SCALE = 256.0f;  // q16 activation scale
 
 
-enum class WeightType { INT8, INT16, INT4, INT6 };
+enum class WeightType { INT8, INT16, INT4, INT6, T3 };
 
 struct Mat {
     int rows = 0, cols = 0;
@@ -57,6 +57,13 @@ struct Mat {
     // go through the accessors below.
     const int16_t* ext16 = nullptr;
     const int8_t* ext8 = nullptr;
+    // A 2-bit ternary body (dtype 7): 16 weights a texel, four a byte, bit 0
+    // magnitude and bit 1 sign.  Borrowed from the container mapping -- the
+    // whole point of the format is that this is the texture's bytes already.
+    const uint8_t* ext3 = nullptr;
+    vector<uint8_t> q3;                 // only when the mapping is not borrowed
+    bool is_t3() const { return type == WeightType::T3; }
+    const uint8_t* w3() const { return ext3 ? ext3 : q3.data(); }
     const uint8_t* ext4 = nullptr;
     const int16_t* ext_scale4 = nullptr;
     const int16_t* ext_min4 = nullptr;

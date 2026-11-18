@@ -262,9 +262,10 @@ void GPU::init_gl(){
     }
 
 void GPU::draw(const Mat& m, GLuint x, Target& t, int row ){
-        const bool wr = (m.type == WeightType::INT8 || m.type == WeightType::INT6) &&
-                        m.has_row_scale();
-        GLuint p = (m.type == WeightType::INT8) ? x_q8(m.rows, m.cols, wr)
+        const bool wr = (m.type == WeightType::INT8 || m.type == WeightType::INT6 ||
+                         m.type == WeightType::T3) && m.has_row_scale();
+        GLuint p = (m.type == WeightType::T3) ? x_t3(m.rows, m.cols, wr)
+                  : (m.type == WeightType::INT8) ? x_q8(m.rows, m.cols, wr)
                   : (m.type == WeightType::INT4) ? x_i4(m.rows, m.cols, m.fmt4)
                   : (m.type == WeightType::INT6) ? x_q6(m.rows, m.cols, wr)
                                                  : x_i16(m.rows, m.cols);

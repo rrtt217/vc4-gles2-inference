@@ -435,6 +435,73 @@ string matvec_q8(int rows, int cols, XFormat xf, bool wrow) {
 // The texture height is the uniform `xh` rather than a literal so one program
 // serves every batch size (a literal would link a program per N); sampling is
 // GL_NEAREST at a pixel center, so the row select cannot be off by a texel.
+// ---- the 2-bit ternary matvec (dtype 7, `--quant t3`) ---------------------
+//
+// One RGBA8 texel holds 16 weights, four a byte, two bits a weight: bit 0
+// magnitude, bit 1 sign, so a weight is `mag * (1 - 2*sign)` with no compare and
+// no branch.  Byte j of a texel covers columns 16q + 4j .. 16q + 4j + 3, which is
+// exactly the activation texel the dot product multiplies it by, so the weight
+// fetch and the activation fetch advance together -- four weight bytes and four
+// activation quads an iteration, against q8's one and one.
+//
+// The decode needs integer bitwise ops, so these kernels are ESSL 3.00 and carry
+// a `//T3` marker that link_program() keys on (the q4 nibble split does the same
+// with "&15").  probes/t3mv_probe priced this against q8 on both machines: on
+// VC4 the uint decode is 2.44 ns/MAC against q8's 2.98 (the ES2 float decode is
+// 7.5, i.e. worse than q8), on Iris Xe it is no faster.  docs/performance.md
+// 2026-11-18.
+static string t3_decode(const char* chan, int group, const string& axw) {
+    // Four weights out of one channel byte, dotted with activation texel
+    // `4q + group`.  A local must not carry a precision qualifier in ESSL 3.00,
+    // so the qualifier lives on the shader's `precision highp int` line.
+    const string u = "u" + to_string(group);
+    return "uint " + u + "=uint(floor(" + chan + "*255.0+0.5));"
+           "s+=dot(vec4(float(" + u + "&1u),float((" + u + ">>2)&1u),"
+           "float((" + u + ">>4)&1u),float((" + u + ">>6)&1u))"
+           "*(1.0-2.0*vec4(float((" + u + ">>1)&1u),float((" + u + ">>3)&1u),"
+           "float((" + u + ">>5)&1u),float((" + u + ">>7)&1u))),"
+           "X4Q(X,q*16+" + to_string(4 * group) + "," + axw + ".0));";
+}
+
+string matvec_t3(int rows, int cols, XFormat xf, bool wrow) {
+    need_shape("matvec_t3", rows, cols, 4);
+    const int axw = x_texels(cols, xf);
+    const int nq = (cols + 15) / 16;                  // 16 weights a texel
+    const string ROWS = to_string(rows), NQ = to_string(nq), AXW = to_string(axw);
+    const string WD = wrow ? wrow_scale(rows) : "";
+    const string SC = wrow ? "wsr(r)" : "ws";
+    return "//T3\n" + head(xf) + "precision highp int;\n" + q24_helpers() +
+           "uniform sampler2D W,X;uniform float ws;" + WD +
+           "void main(){int r=int(gl_FragCoord.x);float s=0.0;"
+           "for(int q=0;q<" + NQ + ";q++){"
+           "vec4 c=texture2D(W,vec2((float(q)+0.5)/float(" + NQ + "),"
+           "(float(r)+0.5)/float(" + ROWS + ")));"
+           + t3_decode("c.r", 0, AXW) + t3_decode("c.g", 1, AXW) +
+             t3_decode("c.b", 2, AXW) + t3_decode("c.a", 3, AXW) +
+           "}"
+           "gl_FragColor=x_i24encq(s*" + SC + ");}";
+}
+
+string matvec_t3_add(int rows, int cols, XFormat xf, XFormat rf, bool wrow) {
+    need_shape("matvec_t3_add", rows, cols, 4);
+    const int axw = x_texels(cols, xf);
+    const int nq = (cols + 15) / 16;
+    const string ROWS = to_string(rows), NQ = to_string(nq), AXW = to_string(axw);
+    const string WD = wrow ? wrow_scale(rows) : "";
+    const string SC = wrow ? "wsr(r)" : "ws";
+    return "//T3\n" + head(xf) + "precision highp int;\n" + x_residual_glsl(rf) +
+           "uniform sampler2D W,X,R;uniform float ws;" + WD +
+           "void main(){int r=int(gl_FragCoord.x);float s=0.0;"
+           "for(int q=0;q<" + NQ + ";q++){"
+           "vec4 c=texture2D(W,vec2((float(q)+0.5)/float(" + NQ + "),"
+           "(float(r)+0.5)/float(" + ROWS + ")));"
+           + t3_decode("c.r", 0, AXW) + t3_decode("c.g", 1, AXW) +
+             t3_decode("c.b", 2, AXW) + t3_decode("c.a", 3, AXW) +
+           "}"
+           "float res=R1Q(R,r," + to_string(x_texels(rows, rf)) + ".0);"
+           "gl_FragColor=XST1Q(s*" + SC + "+res);}";
+}
+
 string matvec_q8_batch(int rows, int cols, XFormat xf, bool wrow) {
     need_shape("matvec_q8_batch", rows, cols, 4);
     const string ROWS = to_string(rows), COLS4 = to_string(cols / 4);

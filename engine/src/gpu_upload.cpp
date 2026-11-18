@@ -57,6 +57,14 @@ void GPU::upload(Mat& m){
                 }
                 m.row_scale_tex = make_texture(W, np, rs.data());
         }
+        if (m.type == WeightType::T3) {
+            // The container's bytes *are* the texture: 16 weights an RGBA8
+            // texel, four a byte.  No repack, no bias, no copy -- the upload is
+            // the one place the 2-bit kind pays off twice (167 MB of file
+            // becomes 167 MB of texture, where q8 needs 4x).
+            m.tex = make_texture((m.cols + 15) / 16, m.rows, m.w3());
+            return;
+        }
         if (m.type == WeightType::INT6) {
             // Two planes: nibbles (cols/2 bytes a row) and two-bit values
             // (cols/4 bytes a row).  `tex` carries the low plane so the generic

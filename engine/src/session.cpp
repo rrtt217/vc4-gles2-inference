@@ -1598,6 +1598,11 @@ bool Session::pair_ok() const {
         // second position has to see the first one's state (plan O31).  A pair
         // variant is P6's problem; the serial loop is correct today.
         if (m_.is_rwkv()) return false;
+        // A 2-bit ternary body has one kernel so far (the single-row matvec and
+        // its residual add); the two-position pair family does not, and a
+        // missing pair kernel is a wrong shader, not a slow one.  The serial
+        // prefill is correct and this is the switch that keeps it.
+        if (m_.has_t3()) return false;
         // The two-position prefill implements a dense transformer block: it
         // calls attention_block() for every layer, and a hybrid model's conv
         // layers carry no qkv (the LFM2-350M q8 container aborted in

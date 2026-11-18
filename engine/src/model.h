@@ -154,6 +154,7 @@ public:
     // that leaves it non-zero says so, because until the GPU kernel exists
     // (docs/bitcpm.md, Phase B2) the file's memory win does not reach the GPU.
     int t3_mats = 0;
+    bool has_t3() const { return t3_mats > 0; }
     uint64_t t3_disk_bytes = 0, t3_ram_bytes = 0;
     // Metadata key 11: the model's own RMSNorm epsilon.  The shaders used to
     // hardcode 1e-5, which is 10x MiniMind3's (and feng30m's, and supra2's)
