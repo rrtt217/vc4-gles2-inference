@@ -162,7 +162,12 @@ std::string x_bf16_glsl() {
     // Only the bf16 functions, no X1/X2 macros: a kernel that already carries
     // its own X-macros (the attention codec's activation format) still wants
     // these, and defining the macros twice is a preprocessor error.
-    return
+    //
+    // The include guard makes the emission idempotent, which matters because a
+    // kernel can want these from two directions at once -- an activation stream
+    // and a residual stream that are both bf16 each ask for them (found as
+    // "function x_bf16 redefined" with RES=bf16 ACT=bf16, 2026-11-18).
+    return std::string("\n#ifndef X_BF16_GLSL\n#define X_BF16_GLSL\n") +
         "uint x_bf16i(float v){uint u=floatBitsToUint(v);"
         "u=(u+0x7FFFu+((u>>16)&1u))>>16;return u&0xFFFFu;}\n"
         "float x_bf16(vec2 c){uint hi=uint(int(c.x*255.0+0.5)),"
@@ -172,7 +177,8 @@ std::string x_bf16_glsl() {
         "return vec4(float(u>>8)/255.0,float(u&255u)/255.0,0.0,1.0);}\n"
         "vec4 x_bf16enc2(float a,float b){uint ua=x_bf16i(a),ub=x_bf16i(b);"
         "return vec4(float(ua>>8)/255.0,float(ua&255u)/255.0,"
-        "float(ub>>8)/255.0,float(ub&255u)/255.0);}\n";
+        "float(ub>>8)/255.0,float(ub&255u)/255.0);}\n"
+        "#endif\n";
 }
 
 std::string x_glsl(XFormat f) {
@@ -401,8 +407,9 @@ std::string x_pair2_glsl(XFormat f) {
 // plus the read macros; a kernel with a fixed q16 *input* layout and an f32
 // *output* (the swiglu) emits this plus `head(XFormat::I16_2)`.
 std::string x_f32_store_glsl() {
-    return
+    return "\n#ifndef X_F32_STORE_GLSL\n#define X_F32_STORE_GLSL\n"
         "vec4 x_f32enc(float v){uint u=floatBitsToUint(v);"
         "return vec4(float(u>>24),float((u>>16)&255u),float((u>>8)&255u),"
-        "float(u&255u))/255.0;}\n";
+        "float(u&255u))/255.0;}\n"
+        "#endif\n";
 }

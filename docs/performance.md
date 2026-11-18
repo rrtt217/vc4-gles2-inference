@@ -7915,6 +7915,21 @@ it do:
 | activation streams | `ACT=bf16` | i16 | pocket **61.3250** (i16 62.3863, f32 61.8216) |
 | FFN hidden | `FFN_HID=bf16` | i16 | pocket **60.9346** (i16 62.3863, f32 59.0763) |
 
+Where the gain actually comes from, decomposed on pocket at SEQ=768:
+
+| configuration | PPL |
+|---|---:|
+| container defaults (q24 residual, q16 acts) | 62.3863 |
+| `RMS_STORE=f32` alone | **51.9263** |
+| `RES=bf16 ACT=bf16 FFN_HID=bf16` alone | 61.0463 |
+| bf16 streams *and* f32 rms | **51.1838** |
+
+So most of it is the rms saturation fix (-17% perplexity on this container),
+and bf16 adds a further 1.4% relative on top while halving three stores.  bf16
+is not magic: it is the format that happens to be wide enough for a residual of
+2300, and it is only better than q24 because q24's *range* was already fine but
+its companion rms sum was not.
+
 MiniMind3, same corpus: `ACT=bf16` 275.4097 against i16's 270.3170 and f32's
 272.2534; `FFN_HID=bf16` 275.1395.  That is the trade as designed -- bf16 has
 0.4% *relative* precision, so it beats q16 where the magnitudes are large
