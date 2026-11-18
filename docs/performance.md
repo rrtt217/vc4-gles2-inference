@@ -7955,3 +7955,18 @@ Three things this cost, each found by a wrong measurement rather than by reading
 - **The q6 tied head refused bf16 loudly** (`q6 head needs I16_2 or F32
   activations`) instead of computing garbage -- the closed-set rule working as
   intended on a *kernel* rather than a switch.
+
+Board, pocket qat, `SEQ=512 KV=q16 KV_GRID=512`, same binary, greedy:
+
+| streams | decode |
+|---|---:|
+| `RES=i24 ACT=i16` + `RMS_STORE=f32` (fastest correct) | **1279 ms/token** |
+| `RES/ACT/FFN_HID=bf16` + `RMS_STORE=f32` | 2072 ms/token |
+
+**bf16 is a quality knob on VC4, not a speed one**: it decodes through shifts
+and a bit-cast (the same ES3 integer path that makes the f32 streams cost 21%),
+so it buys range at about +60% decode.  The shipping recommendation for pocket
+on the board therefore stays `RES=i24 ACT=i16 RMS_STORE=f32`; bf16 is for a
+container that needs the range *or* the half-width stores, and its 0.4%
+relative precision is the right trade for a residual above the q16 rail but not
+for a small one (MiniMind3's 20).
