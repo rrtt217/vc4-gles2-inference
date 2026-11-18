@@ -8125,3 +8125,155 @@ answers, 164 MB in a 320 MB CMA with 209 MB of `CmaFree` left afterwards), but a
 Pi Zero answer is not the Xe answer for it, and the difference is 4x what
 MiniMind3 shows (0.36%).  Do not cite a Pi number for this model as the model's
 number.
+
+## 2026-11-18 — BitCPM-CANN-0.5B (MiniCPM4-0.5B, ternary QAT) on Iris Xe
+
+The first model in this tree whose weights are **per-row ternary** `{0, ±s}`:
+168 of 169 matrices, 358.6M parameters, 37.3% exact zeros; the embedding is
+bf16.  Two consequences, both measured here:
+
+- `q8mat`'s per-row scale maps `±s` to `±127` exactly, so the q8 body is a
+  **lossless** copy of those matrices (reconstruction error 0 over every
+  sampled matrix); `q4mat`'s 32-value min/max grid puts 0 half a step off, so
+  every zero becomes `±s/15` (max abs error 1.4e-2 on the widest row).
+- The 434 MB q8 container is therefore the "noise-free" reference for the
+  model, not a compromise.
+
+Container: `models/bitcpm-0.5b/bitcpm-0.5b.q8.mmcf`, 435368297 B, `--head-dedup`,
+`--seq 1024`, template `templates/minicpm4.jinja`, bos 1 eos 2 stop 73440.
+
+**The fold, and the trap in it.**  MiniCPM's three constants (`scale_emb` 12,
+`scale_depth/sqrt(layers)` 1.4/sqrt(24) = 0.285774, and the head's `/4`) were
+folded into the weights, since the block is RMSNorm-only and bias-free.  The
+first implementation folded the 12 into the embedding rows (`k = 1`), which for
+a **tied** head means the head's input has to divide by 48 instead of 4: the q16
+activation store (1/256 step) then holds 0.02 RMS in five steps, and the logits
+come out as noise.  Measured against the float32 forward:
+cosine **0.885** with k = 1, **0.9868** with k = 1/scale_emb (table kept as
+written, the 12 moved into the layer outputs), and the folded float32 model
+against the unfolded one **1.000000** (max|d| 0.0087).  The residual peak falls
+with it, 802 -> 41, so the default `RES=q16` is enough.
+
+**Agreement with the float reference** (f32 numpy forward over the same
+checkpoint, `models/bitcpm-0.5b/probe_forward.py`):
+
+| | |
+|---|---|
+| chat logits, one prompt | KL(engine‖ref) 0.018 nats, top-20 19/20, entropy 1.546 vs 1.512 |
+| per-token nll, 667-token mixed text, positions 60/150/300/500 | mean 3.107 against 3.024 |
+| the same at 500 tokens of context (the low-frequency rope pairs) | 0.0001 against 0.0003 |
+
+**Quality and timing** (Iris Xe, `RMS_STORE=f32 GPU_LAYER=1 KV=q16`, greedy):
+
+| | |
+|---|---|
+| `bench_mc.py`, 100 items | **acc 0.690**, acc_cal 0.660, fmt 0.690, p_gold 0.637 (null 0.254) |
+| for scale | pocket qat 0.480, LFM2.5-230M 0.380, MiniMind3 q8 0.220 |
+| decode, `--gen 64`, three runs | 46.3 / 53.8 / 52.5 ms/token (median **52.5**) |
+| prefill, 34-token prompt | 0.92 / 0.96 / 1.17 s |
+| `--ppl` `engine/data/ppl_test.txt` SEQ=768 | **36.0302** (nll 3.5844, 247 tokens) |
+| `--ppl` with `--res q24` (the first container) | 36.5246 — the residual format does not matter here |
+
+The PPL is a within-model pin, not a ranking: the `--ppl` path encodes without
+the leading space marker and this model pays 16 nats on its first token when the
+marker is missing, and the 73448-entry Chinese-first vocabulary is not
+comparable with SmolLM2's 49152 byte-level one.
+
+**Nothing else moved**: `engine/scripts/regression.sh` is ACCEPT with the
+machine's pins unchanged (MiniMind3 q8 PPL 270.3170, q4 326.1483, both golden
+strings, RWKV 9.2919, determinism, poem behaviour, 45 containers round-tripped),
+and `gate/shader_hashes.sh` is untouched -- the rope table and the tokenizer
+prefix live in C++ and metadata, not in GLSL.  The tokenizer refactor is
+invisible to the byte-level models because their containers do not set the new
+byte (`sp_prefix 0`).
+
+**What is not measured**: the Pi Zero (q8 434 MB and q4 337 MB against ~180 MB
+of usable CMA, so the 2-bit ternary kind in
+`docs/bitcpm-assessment.zh-CN.md` is the only route), q4 quality, and SEQ above
+1024.
+
+### The ternary container (same day, after the pricing probe)
+
+`--quant t3` landed as dtype 7: 16 weights an RGBA8 texel, four a byte, bit 0
+magnitude and bit 1 sign, plus a per-row scale plane (the existing part-3
+convention).  The packer certifies per-row ternary per matrix and decodes what
+it wrote before moving on.
+
+| | q8 container | t3 container |
+|---|---:|---:|
+| bytes | 435,368,297 | **167,520,233** |
+| KL against the float32 forward (one chat prompt) | 0.0288 | 0.0278 |
+| argmax / top-20 | 23523, 19/20 | 23523, 19/20 |
+| chat answer, 20 tokens greedy | `你好，我是AI助手，我的名字是李华…` | identical |
+| multiple choice, first 10 English items | -- | acc 0.900, fmt 1.000 |
+| RAM to run it today | 435 MB | 342 MB of expanded q8 (+ 167 MB of file) |
+
+Two things this makes explicit.  First, the t3 body is *not* a lossy step: it
+carries a per-row scale where the q8 path carries one scale a matrix, so it is
+the more accurate of the two (0.0278 against 0.0288).  Second, the format's
+memory win is not available until the kernel exists -- the loader expands the
+body to q8 on the host and prints
+`t3 body: 120 matrices expanded to q8 on the host (85 MB on disk -> 342 MB in
+RAM)`, which is the packer's acceptance path and 4x the file.  The board needs
+Phase B2 for the 167 MB, and B2's ceiling is the 1.22x the probe priced.
+
+## 2026-11-18 — ternary (2-bit) matvec pricing, Iris Xe and Pi Zero
+
+`engine/probes/t3mv_probe` (new): the engine's q8 matvec body against the same
+loop with **16 weights in one RGBA8 texel**, decoded three ways, each variant's
+row 0 checked against a CPU dot product before it is timed.  The question is the
+one Phase B of `docs/bitcpm-assessment.zh-CN.md` depends on: BitCPM-CANN-0.5B's
+weights are per-row ternary, and a 2-bit kind is what would let the board hold
+it at all (90.8 MB of body instead of 358.6 MB).
+
+The decode, because ESSL 1.00 has no integer bitwise ops:
+
+| arm | decode |
+|---|---|
+| `q8` | `c*255.0-128.0`, four int8 a texel -- the baseline |
+| `t3f` | `mod()`/`floor()` on the byte (ESSL 1.00, any driver) |
+| `t3u` | `>>`/`&` on the byte (ESSL 3.00, the `Q4_SHIFT` route) |
+| `t3u_fetch` | the same loop and fetches, unpack removed (the pricing arm) |
+
+Bit layout is bit0 magnitude, bit1 sign (`w = mag*(1-2*sign)`), so no decode
+needs a compare or a branch.
+
+| ns per MAC | q8 | t3f | t3u | fetch only |
+|---|---:|---:|---:|---:|
+| **Pi Zero (VC4)**, 1024x1024 | 2.97 | 7.53 | **2.45** | 0.66 |
+| Pi Zero, 1024x4096 | 2.99 | 7.52 | 2.42 | 0.66 |
+| **Iris Xe**, 1024x1024 | 0.063 | 0.115 | 0.109 | 0.032 |
+| Iris Xe, 4096x1024 | 0.058 | 0.084 | 0.054 | 0.018 |
+| Iris Xe, 1024x4096 | 0.031 | 0.049 | 0.034 | 0.012 |
+
+(ms/draw divided by rows*cols; 100-200 draws a variant after one warm-up.  VC4
+refuses a 4096-wide render target -- GL_MAX_TEXTURE_SIZE 2048 -- which is the
+same ceiling the engine's FFN chunking is built around.)
+
+Four findings, and the fourth is the one that matters:
+
+1. **On VC4 the uint decode wins, and only by 1.22x** (2.98 -> 2.44 ns/MAC).
+2. **The ES2 float decode is 2.5x slower than q8** (7.53 ns/MAC): `mod`/`floor`
+   on VC4 are several instructions each, and 16 of them a texel is more than the
+   four MACs they feed.  A ternary kind without ESSL 3.00 is not worth writing.
+3. **Iris Xe gains nothing** (0.109 against 0.063 at 1024x1024): it has the
+   bandwidth, so the extra ALU is pure cost.  A 2-bit kind is a VC4 feature.
+4. **The fetch-only arm is 22% of the q8 time on VC4** (0.66 against 2.98), i.e.
+   the matvec is *ALU/issue-bound, not bandwidth-bound*.  Packing the weights 4x
+   tighter therefore buys a quarter, not four times -- the remaining 78% is the
+   q8 decode plus the MACs, and a cheaper decode is where the next factor of
+   four would have to come from.
+
+Model-level, at 434M weight MACs a token (358.6M body + 75.2M head, head still
+q8 because the embedding stays q8): **q8 1.29 s/token against 2-bit 1.10 s** of
+pure matvec time, before attention, norms and syncs.  Cross-check: SmolLM2-135M
+measures 630 ms/token on this board for ~163M MACs, i.e. 3.9 ns/MAC including
+every overhead, against the probe's 2.98 for the kernel alone -- the probe is
+in the engine's regime.
+
+So Phase B's justification is **memory, not speed**: 2-bit is what makes the
+0.5B fit (165 MB against 434 MB), and the decode is worth 1.2x on top of that.
+One more measured detail: on VC4 the q8 arm's row-0 result comes back 0.04% low
+while both 2-bit arms are exact, because the board's UNORM8 -> float conversion
+is `(b+0.5)/256` rather than `b/255` and only the 2-bit decoders add the 0.5
+back (`floor(c*255.0+0.5)`).  The probe's tolerance is relative for that reason.

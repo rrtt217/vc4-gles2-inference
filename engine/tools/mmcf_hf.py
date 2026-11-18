@@ -33,7 +33,7 @@ from mmcf_format import (  # noqa: E402
     K_RWKV_OUT_NORM, K_RWKV_SCALE, K_RWKV_TOK_NORM, K_RWKV_V1, K_RWKV_V2,
     K_RWKV_W1, K_RWKV_W2)
 
-DT_F32, DT_I16, DT_Q8I8, DT_Q4, DT_Q6 = 0, 1, 3, 4, 6
+DT_F32, DT_I16, DT_Q8I8, DT_Q4, DT_Q6, DT_T3 = 0, 1, 3, 4, 6, 7
 T_EMB, T_EMB_SCALE, T_RMS_ATT, T_RMS_FFN, T_RMS_FINAL = 1, 2, 3, 4, 5
 T_Q_NORM, T_K_NORM = 6, 7
 T_QKV, T_WO, T_W1, T_W3, T_W13, T_W2 = 0x10, 0x11, 0x12, 0x13, 0x14, 0x15
@@ -91,6 +91,78 @@ def q4mat(w):
     return packed, s16, m16, ps, groups
 
 
+def row_ternary(w, rtol=1e-3):
+    """(is every row {0, +-s}, worst relative residual) for a 2-D matrix.
+
+    `q8mat` is exact on a per-row ternary matrix (the row scale IS the row's
+    magnitude, so +-s maps to +-127); a 2-bit body is what makes it small.  The
+    check is per row because the scale is per row: a matrix whose rows carry
+    different magnitudes is fine, one whose *row* holds two magnitudes is not
+    ternary at all.
+    """
+    a = np.abs(np.asarray(w, np.float32))
+    mx = a.max(axis=1, keepdims=True)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        rel = np.abs(a - mx) / np.maximum(mx, 1e-30)
+    ok = (a == 0) | (rel <= rtol)
+    worst = float(np.where(a == 0, 0.0, rel).max()) if a.size else 0.0
+    return bool(ok.all()), worst
+
+
+def t3mat(w):
+    """A per-row ternary matrix -> 2-bit codes, with the decode checked.
+
+    Layout: 16 weights an RGBA8 texel, four a byte, two bits a weight, bit 0
+    magnitude and bit 1 sign, so a weight is `mag * (1 - 2*sign)` and a decode
+    needs no compare and no branch.  Byte j of a texel carries the four columns
+    `16g + 4j .. 16g + 4j + 3`, which is exactly the activation texel the dot
+    product multiplies it by (four values a texel): the weight fetch and the
+    activation fetch advance together, one texel each.  A `cols` that is not a
+    multiple of 16 is padded with zeros, which decode to zero weights.
+
+    Returns (packed bytes, unit, per-row plane).  `unit` is the matrix's largest
+    row scale and the plane is `srow / unit` -- the same convention `q8_per_row`
+    writes, so the engine's existing per-row scale path reads it unchanged.
+    """
+    w = np.asarray(w, np.float32)
+    ok, worst = row_ternary(w)
+    if not ok:
+        raise SystemExit("t3mat: this matrix is not per-row ternary (worst row "
+                         "residual %.4g of its own max); a 2-bit body is only "
+                         "written for weights that already are" % worst)
+    rows, cols = w.shape
+    # The container's scale is the *step* a q8 level multiplies (max_row/127),
+    # not the row's magnitude: the levels are the same +-127 a q8 body carries,
+    # and the engine's kernels reconstruct `level * scale * plane`.  Writing the
+    # magnitude here instead made every weight 127x too large.
+    s = np.abs(w).max(axis=1) / 127.0
+    s[s == 0] = 1.0
+    lev = np.rint(w / (s[:, None] * 127.0))
+    code = (np.abs(lev) > 0.5).astype(np.uint8) | ((lev < -0.5).astype(np.uint8) << 1)
+    pad = (-cols) % 16
+    if pad:
+        code = np.pad(code, ((0, 0), (0, pad)))
+    c = code.reshape(rows, -1, 4, 4)                 # groups, byte, 2-bit slot
+    packed = (c[..., 0] | (c[..., 1] << 2) | (c[..., 2] << 4) | (c[..., 3] << 6)).astype(np.uint8)
+    unit = float(s.max())
+    back = unpack_t3(packed.tobytes(), rows, cols) * (s[:, None] * 127.0)
+    err = float(np.abs(back - w).max()) if w.size else 0.0
+    if err > 1e-6 * max(1.0, float(np.abs(w).max())):
+        raise SystemExit("t3mat: pack/unpack is not exact (max |diff| %.3g): this "
+                         "matrix is not representable as 2-bit ternary" % err)
+    return packed.tobytes(), unit, (s / unit).astype(np.float32)
+
+
+def unpack_t3(packed, rows, cols):
+    """The decode, for t3mat's self-check; the engine's copy is model.cpp's as_t3."""
+    p = np.frombuffer(packed, np.uint8).reshape(rows, -1, 4)
+    code = np.stack([(p >> (2 * k)) & 3 for k in range(4)], axis=-1).reshape(rows, -1)
+    flat = code[:, :cols].astype(np.float32)
+    mag = flat % 2.0
+    sgn = np.floor(flat * 0.5) % 2.0
+    return mag * (1.0 - 2.0 * sgn)
+
+
 def q6mat(w):
     """Signed 6-bit, per-row symmetric, as two planes.
 
@@ -140,6 +212,95 @@ def rope_of(cfg):
             theta = float(rs["rope_theta"])
     half = 0 if cfg.get("rope_interleaved") or cfg.get("rope_layout") == "interleaved" else 1
     return theta, half
+
+
+def rope_factors(cfg):
+    """The per-dimension rope frequency table a `longrope` model needs, or None.
+
+    MiniCPM4 (and the BitCPM ternary QAT releases of it) divides rope pair i's
+    frequency by `factor[i]`: 32 different bases on a 64-wide head, which a
+    single theta cannot express, so the table travels in metadata key 18.
+
+    Only the *static* table is representable.  The class computes
+    `scaling_factor = sqrt(1 + log(max_pos/orig_max_pos)/log(orig_max_pos))` and
+    picks short_factor up to `original_max_position_embeddings`, long_factor past
+    it, so the container can carry it only when the model does not stretch
+    (max_position == original_max_position, i.e. scaling_factor 1) and the two
+    tables agree.  Everything else is refused here rather than silently packed
+    with the wrong angles: a rope that changes with the sequence length is a
+    lookup the container has no room for.
+
+    BitCPM-CANN-0.5B states both conditions (short == long, 32768 == 32768), so
+    its table is 32 fixed numbers.
+    """
+    rs = cfg.get("rope_scaling") or {}
+    if not isinstance(rs, dict):
+        return None
+    if (rs.get("rope_type") or rs.get("type")) != "longrope":
+        return None
+    short = rs.get("short_factor")
+    longf = rs.get("long_factor")
+    if not short or not longf:
+        raise SystemExit("rope_scaling longrope without short_factor/long_factor")
+    if len(short) != len(longf):
+        raise SystemExit("rope_scaling longrope: short_factor is %d long, long_factor %d"
+                         % (len(short), len(longf)))
+    if any(abs(float(a) - float(b)) > 1e-6 * max(1.0, abs(float(a)))
+           for a, b in zip(short, longf)):
+        raise SystemExit(
+            "rope_scaling longrope: the short and long tables differ, so the rope "
+            "angles change with the sequence length.  The container carries one "
+            "static table (metadata key 18); this model needs two.")
+    orig = rs.get("original_max_position_embeddings")
+    mx = cfg.get("max_position_embeddings")
+    if orig and mx and int(mx) != int(orig):
+        raise SystemExit(
+            "rope_scaling longrope: max_position_embeddings %s != "
+            "original_max_position_embeddings %s, so the model also multiplies "
+            "cos/sin by a length-dependent scaling_factor; the container carries "
+            "one static table." % (mx, orig))
+    return [float(x) for x in short]
+
+
+def sp_prefix_of(model_dir):
+    """True when the tokenizer's word marker is SentencePiece's `\u2581`.
+
+    That decides how the prompt is tokenised.  The reference normalizer runs on
+    *every* text run between added tokens, so each run starts with the marker,
+    while the engine's historical behaviour puts one at the front of the whole
+    prompt.  On a chat prompt the difference is real -- "user" instead of
+    "\u2581user" after the first `<|im_start|>`, measured as logits cosine 0.912
+    -- so the container records the mode (metadata key 10, third byte) instead
+    of the engine guessing.
+
+    Detection is from the tokenizer's own pieces, not from the model name: a
+    normalizer that prepends or substitutes the marker, a decoder that turns it
+    back into a space, or a SentencePiece `.model` next to the weights.
+    """
+    def has_marker(o):
+        if isinstance(o, str):
+            return '\u2581' in o
+        if isinstance(o, dict):
+            return any(has_marker(v) for v in o.values())
+        if isinstance(o, list):
+            return any(has_marker(v) for v in o)
+        return False
+
+    path = model_dir + '/tokenizer.json'
+    if os.path.exists(path):
+        try:
+            with open(path) as f:
+                tj = json.load(f)
+        except (ValueError, OSError):
+            tj = None
+        if tj:
+            for key in ('normalizer', 'pre_tokenizer', 'decoder'):
+                if has_marker(tj.get(key)):
+                    return True
+            pieces = list((tj.get('model') or {}).get('vocab') or {})
+            if any('\u2581' in tok for tok in pieces[:2000]):
+                return True
+    return os.path.exists(model_dir + '/tokenizer.model')
 
 
 def st_dtype(e):
@@ -254,10 +415,24 @@ def check_source(cfg, hdr):
     rs = cfg.get('rope_scaling')
     if rs:
         kind = rs.get('rope_type') or rs.get('type')
-        if kind not in (None, 'default'):
+        if kind == 'longrope':
+            # Accepted only as a static table: rope_factors() is where the
+            # "static" conditions are enforced, and the length is checked
+            # against the head width below.
+            rf = rope_factors(cfg)
+            if rf and (len(rf) * 2) != (int(cfg.get('hidden_size') or 0) //
+                                        int(cfg.get('num_attention_heads') or 1)):
+                raise SystemExit(
+                    "%s: rope_scaling longrope has %d factors, the head is %d wide, "
+                    "so the table needs %d." % (arch, len(rf),
+                                                int(cfg['hidden_size']) //
+                                                int(cfg['num_attention_heads']),
+                                                len(rf) * 2))
+        elif kind not in (None, 'default'):
             raise SystemExit(
                 "%s: rope_scaling %r is not representable; the container carries a "
-                "theta and a half/plain convention, nothing else." % (arch, kind))
+                "theta, a static per-dimension table (key 18) and a half/plain "
+                "convention, nothing else." % (arch, kind))
     dim = cfg.get('hidden_size') or cfg.get('n_embd')
     heads = cfg.get('num_attention_heads') or cfg.get('n_head')
     hd = cfg.get('head_dim')
@@ -697,13 +872,33 @@ def load_minimind(model_dir, seq=512):
     """Read a HF Llama/Qwen-shaped directory into float arrays."""
     with open(model_dir + '/config.json') as f:
         cfg = json.load(f)
-    with open(model_dir + '/model.safetensors', 'rb') as f:
-        n = struct.unpack('<Q', f.read(8))[0]
-        hdr = json.loads(f.read(n))
-        data = f.read()
+    st_path = model_dir + '/model.safetensors'
+    pth_path = model_dir + '/pytorch_model.bin'
+    tensors = {}
+    have_st = os.path.exists(st_path)
+    if have_st:
+        with open(st_path, 'rb') as f:
+            n = struct.unpack('<Q', f.read(8))[0]
+            hdr = json.loads(f.read(n))
+            data = f.read()
+    elif os.path.exists(pth_path):
+        # Some releases ship only a torch zip (`pytorch_model.bin`): the BitCPM
+        # family does, and so does anything older than safetensors.  pth_reader
+        # reads its pickle and storages directly, so no torch is needed and no
+        # 870 MB intermediate file is written.
+        import pth_reader
+        tensors = pth_reader.load(pth_path)
+        hdr = {k: {'dtype': 'F32', 'shape': list(v.shape),
+                   'data_offsets': [0, 0]} for k, v in tensors.items()}
+        data = b''
+    else:
+        raise SystemExit("%s has neither model.safetensors nor pytorch_model.bin"
+                         % model_dir)
     check_source(cfg, hdr)
 
     def get(name):
+        if not have_st and name in tensors:
+            return tensors[name].astype(np.float32)
         e = hdr[name]
         a, b = e['data_offsets']
         dt = st_dtype(e)
@@ -782,6 +977,7 @@ def load_minimind(model_dir, seq=512):
     q_norm = np.stack([get(f'model.layers.{l}.self_attn.q_norm.weight') for l in range(layers)]) if qk else None
     k_norm = np.stack([get(f'model.layers.{l}.self_attn.k_norm.weight') for l in range(layers)]) if qk else None
     theta, half = rope_of(cfg)
+    rfac = rope_factors(cfg)
     # The template's special tokens are where a chat prompt's activation peaks
     # live (MiniMind3-MoE reaches 250 in the expert hidden at <|im_start|>).
     # tokenizer.json lists them with their ids, so the rail calibration can
@@ -800,7 +996,11 @@ def load_minimind(model_dir, seq=512):
     return dict(dim=dim, hidden=hidden, layers=layers, heads=heads, kv=kv, vocab=vocab, seq=seq,
                 emb=emb, rms_att=rms_att, rms_ffn=rms_ffn, rms_final=rms_final,
                 wq=wq, wk=wk, wv=wv, wo=wo, w1=w1, w2=w2, w3=w3, wcls=wcls,
-                theta=theta, half=half, qk_norm=1 if qk else 0,
+                theta=theta, half=half, rope_factors=rfac, qk_norm=1 if qk else 0,
+                scale_emb=float(cfg.get('scale_emb') or 1.0),
+                scale_depth=float(cfg.get('scale_depth') or 1.0),
+                dim_model_base=float(cfg.get('dim_model_base') or 1.0),
+                sp_prefix=1 if sp_prefix_of(model_dir) else 0,
                 q_norm=q_norm, k_norm=k_norm, untied='lm_head.weight' in hdr,
                 moe=moe, router=router, expert_w1=expert_w1, expert_w2=expert_w2,
                 expert_w3=expert_w3, added_ids=added_ids)
@@ -1251,6 +1451,7 @@ def rail_peaks(m, seq=8):
     hd = dim // heads
     theta = float(m['theta'])
     half = bool(m['half'])
+    rfac = m.get('rope_factors') or [1.0] * (hd // 2)
     eps = float(m.get('rms_eps') or 1e-5)
     qk = bool(m.get('qk_norm'))
     emb = m['emb']
@@ -1267,12 +1468,12 @@ def rail_peaks(m, seq=8):
         o = np.empty_like(a)
         for i in range(hd // 2):
             if half:
-                ang = np.arange(T)[:, None] / (theta ** (2.0 * i / hd))
+                ang = np.arange(T)[:, None] / (theta ** (2.0 * i / hd)) / float(rfac[i])
                 c, s = np.cos(ang), np.sin(ang)
                 o[:, :, i] = a[:, :, i] * c - a[:, :, i + hd // 2] * s
                 o[:, :, i + hd // 2] = a[:, :, i + hd // 2] * c + a[:, :, i] * s
             else:
-                ang = np.arange(T)[:, None] / (theta ** (2.0 * i / hd))
+                ang = np.arange(T)[:, None] / (theta ** (2.0 * i / hd)) / float(rfac[i])
                 c, s = np.cos(ang), np.sin(ang)
                 o[:, :, 2 * i] = a[:, :, 2 * i] * c - a[:, :, 2 * i + 1] * s
                 o[:, :, 2 * i + 1] = a[:, :, 2 * i + 1] * c + a[:, :, 2 * i] * s
@@ -1360,6 +1561,64 @@ def tok_entry_count(path):
     return n
 
 
+def fold_scale_constants(m):
+    """Fold MiniCPM's scale_emb / scale_depth / dim_model_base into the weights.
+
+    MiniCPM4 (and BitCPM-CANN, its ternary QAT release) applies three model-wide
+    constants around a block the engine already implements:
+
+        x0      = scale_emb * E[t]                                       (12)
+        x_{l+1} = x_l + c * block(x_l),  c = scale_depth/sqrt(layers)     (1.4/sqrt(24))
+        logits  = E_head . rms_final(x) / (hidden / dim_model_base)       (/4)
+
+    Every sublayer input is an RMSNorm and nothing carries a bias, so the block
+    output is exactly invariant to a positive rescaling of the residual stream
+    (`rms(kx) = k*rms(x)`, and the norm eats the k).  That makes the residual
+    stream's *absolute* scale a free parameter, and the three constants can be
+    folded into the weights instead of becoming three engine features:
+
+        E'        = k*scale_emb * E      (k is free; see below)
+        wo', w2'  = k*c * wo, c * w2
+        g'        = g * (dim_model_base/hidden) / (k*scale_emb)   [tied head]
+        g'        = g * (dim_model_base/hidden)                  [untied]
+
+    `k` is chosen as 1/scale_emb, i.e. the embedding table stays exactly as the
+    checkpoint writes it and the 12 moves into the layer outputs.  With the
+    natural choice (fold the 12 into the table) the residual would carry it --
+    peak 802 on real text -- and, worse, the *head* would have to divide by 48
+    instead of 4, because a tied head reads the same rows the lookup does.  The
+    engine stores the head's input in the q16 activation format (1/256 step,
+    +-128): at 1/4 the input sits at 0.25 RMS, which is fine, and at 1/48 it
+    would sit at 0.02 RMS -- five steps -- and the logits would be noise.  This
+    is why k is 1/scale_emb and not 1: measured, cosine 0.88 against a float32
+    forward with k = 1, 1.000000 with k = 1/scale_emb (2026-11-18).
+
+    It stays exact because every one of these paths stores an f32 scale of its
+    own (embedding rows, projection rows, a plain f32 vector for rms_final).
+
+    A model that states none of the three returns unchanged, so this is a no-op
+    for every checkpoint packed before 2026-11-18.
+    """
+    se = float(m.get('scale_emb') or 1.0)
+    sd = float(m.get('scale_depth') or 1.0)
+    db = float(m.get('dim_model_base') or 1.0)
+    if se == 1.0 and sd == 1.0 and db == 1.0:
+        return m
+    layers, dim = int(m['layers']), int(m['dim'])
+    tied = not m.get('untied')
+    k = 1.0 / se                     # the table stays as the checkpoint states it
+    c = sd / math.sqrt(layers)
+    m['wo'] = [w * (k * c) for w in m['wo']]
+    m['w2'] = [w * (k * c) for w in m['w2']]
+    g = ((db / dim) / (k * se)) if tied else (db / dim)
+    m['rms_final'] = m['rms_final'] * g
+    print("fold: scale_emb %g -> layer outputs x%.6f, table kept as written "
+          "(k=1/scale_emb) | scale_depth %g -> o_proj/down_proj x%.6f | "
+          "dim_model_base %g -> rms_final x%.6f (%s head)"
+          % (se, k * c, sd, k * c, db, g, "tied" if tied else "untied"))
+    return m
+
+
 def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit=None,
                     q8_row=False, head_dedup=False, head_q6=False):
     """Build the tensor list directly from an HF safetensors directory.
@@ -1393,6 +1652,8 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
             if k in m and m[k] is not None:
                 m[k] = m[k][:vocab_limit]
         m['vocab'] = vocab_limit
+    # MiniCPM's three constants (a no-op for every other checkpoint).
+    m = fold_scale_constants(m)
     (dim, hidden, layers, heads, kv, vocab, seq) = (
         m['dim'], m['hidden'], m['layers'], m['heads'], m['kv'], m['vocab'], m['seq'])
     head_dim = dim // heads
@@ -1414,7 +1675,11 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
     meta = dict(dim=dim, hidden=hidden, layers=layers, heads=heads, kv_heads=kv,
                 vocab=vocab, seq=seq, head_dim=head_dim,
                 theta=float(m['theta']), half=bool(m['half']), qk_norm=bool(qk),
-                scheme=scheme, group=(32 if scheme == 'q4' else 0), split=bool(split))
+                scheme=scheme, group=(32 if scheme == 'q4' else 0), split=bool(split),
+                # key 18: a longrope model's static per-dimension table, and
+                # key 10's third byte: the tokenizer's per-run space marker.
+                rope_factors=m.get('rope_factors'),
+                sp_prefix=int(m.get('sp_prefix') or 0))
     if m.get('layer_types'):
         meta['layer_types'] = list(m['layer_types'])
     if moe:
@@ -1612,6 +1877,14 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
         elif scheme == 'q8':
             q, s = q8_from_i16(w)
             T.append((base, DT_Q8I8, rows, cols, 0, q.tobytes(), float(s), aux))
+        elif scheme == 't3':
+            # A 2-bit ternary body plus the per-row plane the q8 path already
+            # uses (part 3), so the engine reads a t3 matrix with the same row
+            # scale code it reads a --q8-row-scale one.
+            packed, unit, plane = t3mat(w)
+            T.append((base, DT_T3, rows, cols, 0, packed, float(unit), aux))
+            T.append((base | (3 << 14), DT_F32, rows, 1, 0,
+                      plane.astype('<f4').tobytes(), 0.0, aux))
         else:
             packed, s16, mn, ps, groups = q4mat(np.asarray(w, np.float32))
             # The record's group byte is the q4 group size for the body

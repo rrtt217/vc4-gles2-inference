@@ -55,6 +55,15 @@ bool Model::load(const string& path){
             return false;
     }
     ok = load_mmcf();
+    if (ok && t3_mats) {
+            // One line, not a debug switch: a container whose body was expanded
+            // 4x on the host is a fact the operator needs (the file is small,
+            // the RAM is not), and it is also the signal that the kernel this
+            // format was designed for is not in this build yet.
+            cerr << "t3 body: " << t3_mats << " matrices expanded to q8 on the host ("
+                 << (t3_disk_bytes >> 20) << " MB on disk -> " << (t3_ram_bytes >> 20)
+                 << " MB in RAM); the 2-bit kernel is Phase B2 (docs/bitcpm.md)\n";
+    }
     fbase_ = nullptr; fsize_ = fpos_ = 0;
     if (ok && !borrow_ && tok_blob && tok_blob_bytes) {
             // load_mmcf() borrows the tokenizer blob from the mapping that
@@ -731,6 +740,20 @@ bool Model::parse_metadata() {
                 } else if (key == 10 && type == 1 && len >= 2) {
                         add_bos = payload[0] == 255 ? -1 : (int)payload[0];
                         add_eos = payload[1] == 255 ? -1 : (int)payload[1];
+                        // Third byte (2026-11-18): the tokenizer's prefix policy.
+                        // Two-byte payloads keep the historical behaviour.
+                        sp_prefix = len >= 3 && payload[2] == 1;
+                } else if (key == 18 && type == 1 && len >= 4 && (len % 4) == 0) {
+                        // A longrope model's static per-dimension rope table.
+                        rope_factors.resize(len / 4);
+                        for (size_t i = 0; i < rope_factors.size(); ++i) {
+                                float f; memcpy(&f, payload + 4 * i, 4);
+                                if (!(f > 0.0f) || !std::isfinite(f)) {
+                                        cerr << "mmcf: rope factor " << i << " is " << f << "\n";
+                                        return false;
+                                }
+                                rope_factors[i] = f;
+                        }
                 } else if (key == 17 && type == 1 && len >= 1) {
                         // The head input's store exponent (see model.h).
                         logit_shift = (int)payload[0];
@@ -762,6 +785,14 @@ bool Model::parse_metadata() {
         if (getenv("SEQ")) seq = atoi(getenv("SEQ"));
         head_dim = dim / heads;
         kv_dim = kv_heads * head_dim;
+        // The rope table indexes rope pairs, so its length is head_dim/2 and
+        // nothing else: a table of the wrong length would rotate with the wrong
+        // angles silently, which is worse than refusing to load.
+        if (!rope_factors.empty() && (int)rope_factors.size() * 2 != head_dim) {
+                cerr << "mmcf: " << rope_factors.size() << " rope factors but a "
+                     << head_dim << "-wide head needs " << head_dim / 2 << "\n";
+                return false;
+        }
         // RWKV-7: the version and the metadata have to agree, and the head
         // width the WKV state is indexed by is stated twice (key 1's
         // dim/heads and key 16's head_size), so the reader checks them
@@ -873,6 +904,36 @@ bool Model::read_tables() {
                 else { m.q8.assign(p, p + (size_t)r.rows * r.cols); }
         };
 
+        // A 2-bit ternary body (dtype 7, `--quant t3`): 16 weights an RGBA8
+        // texel, four a byte, bit 0 magnitude and bit 1 sign.  Until the GPU
+        // kernel exists (Phase B2, docs/bitcpm.md) the body is expanded here
+        // into the q8 levels the existing kernels already understand -- +-127
+        // with the per-row plane that arrives as part 3, which is the exact
+        // reversibility the format was built on: a per-row ternary matrix is
+        // lossless in q8, so this path is bit-identical to a q8 body that
+        // carried the same per-row scales.  It is the container's acceptance
+        // path, not the shipping one: it costs 4x the file's memory.
+        auto as_t3 = [&](const MmcfRec& r, Mat& m) {
+                m.rows = (int)r.rows; m.cols = (int)r.cols;
+                m.type = WeightType::INT8;
+                m.scale = r.scale;             // the unit the plane divides by
+                m.prebiased = false;           // levels are signed int8
+                const uint8_t* p = fbase_ + data_off_ + r.off;
+                const size_t stride = (size_t)((m.cols + 15) / 16) * 4;   // a row's bytes
+                m.q8.resize((size_t)m.rows * m.cols);
+                for (int y = 0; y < m.rows; ++y) {
+                        const uint8_t* row = p + (size_t)y * stride;
+                        int8_t* dst = m.q8.data() + (size_t)y * m.cols;
+                        for (int x = 0; x < m.cols; ++x) {
+                                const unsigned code = (row[x >> 2] >> (2 * (x & 3))) & 3u;
+                                dst[x] = (code & 1u) ? ((code & 2u) ? -127 : 127) : 0;
+                        }
+                }
+                t3_mats++;
+                t3_disk_bytes += r.bytes;
+                t3_ram_bytes += (uint64_t)((size_t)m.rows * m.cols);
+        };
+
         // q4 matrices arrive as three tensors (nibbles, quant_group_ scale, quant_group_ min)
         // sharing one id with `part` in the top two bits.  `aux` (the expert) is
         // part of the key: without it four experts would resolve to one Mat.
@@ -886,7 +947,11 @@ bool Model::read_tables() {
                 return ((uint32_t)r.aux << 16) | (uint32_t)(r.id & 0x3FFF);
         };
 
-        auto as_mat = [&](const MmcfRec& r, Mat& m) { if (r.dtype == 1) as_i16(r, m); else as_q8(r, m); };
+        auto as_mat = [&](const MmcfRec& r, Mat& m) {
+                if (r.dtype == 1) as_i16(r, m);
+                else if (r.dtype == 7) as_t3(r, m);
+                else as_q8(r, m);
+        };
 
         // RWKV-7's per-channel vectors arrive as f32 rows: one record per kind,
         // `rows` layers wide (1 for the two model-wide norms) and
@@ -957,7 +1022,7 @@ bool Model::read_tables() {
                         continue;
                 }
                 if (r.dtype != 0 && r.dtype != 1 && r.dtype != 2 && r.dtype != 3 &&
-                    r.dtype != 4 && r.dtype != 5 && r.dtype != 6) {
+                    r.dtype != 4 && r.dtype != 5 && r.dtype != 6 && r.dtype != 7) {
                         cerr << "mmcf: tensor 0x" << std::hex << r.id << std::dec
                              << " has unknown dtype " << (int)r.dtype << "\n";
                         return false;
@@ -1416,6 +1481,8 @@ bool Model::read_tables() {
                 cerr << "MMCF dim=" << dim << " layers=" << layers << " hidden=" << hidden
                      << " heads=" << heads << " kv=" << kv_heads << " vocab=" << vocab
                      << " seq=" << seq << " theta=" << rope_theta << " half=" << rope_half
+                     << " ropef=" << rope_factors.size()
+                     << " segprefix=" << (sp_prefix ? 1 : 0)
                      << " qknorm=" << qk_norm << " quant_split_=" << quant_split_
                      << " experts=" << experts << " top_k=" << top_k
                      << " moe_hidden=" << moe_hidden << "\n";

@@ -70,9 +70,20 @@ void Tokenizer::set_qwen(bool q){ qwen_ = q; }
 
 void Tokenizer::set_bytelevel(bool b){ bytelevel_ = b; }
 
+bool Tokenizer::is_special_id(int id) const{
+        for (auto& sp : specials_) if (sp.second == id) return true;
+        return false;
+}
+
 void Tokenizer::set_rwkv(bool r){ rwkv_ = r; }
 
-void Tokenizer::encode_into(const string& text, bool allow_specials, vector<int>& t) const {
+void Tokenizer::encode_into(const string& text, bool allow_specials, vector<int>& t,
+                           bool* run_start) const {
+        // The marker is pushed as its own token and the merge pass joins it to
+        // the word that follows (the blob spells the word as " user"), which is
+        // exactly what writing " " + text would do -- without copying the text
+        // once per run.
+        bool pending = run_start ? *run_start : false;
         for (size_t i = 0; i < text.size();) {
             bool matched = false;
             if (allow_specials) {
@@ -82,7 +93,19 @@ void Tokenizer::encode_into(const string& text, bool allow_specials, vector<int>
                     }
                 }
             }
-            if (matched) continue;
+            if (matched) {
+                // A special token ends the text run: whatever follows starts a
+                // new one and gets its own marker.
+                if (run_start) *run_start = true;
+                pending = run_start != nullptr;
+                continue;
+            }
+            if (pending) {
+                auto sp = lookup_.find(" ");
+                if (sp != lookup_.end()) t.push_back(sp->second);
+                pending = false;
+            }
+            if (run_start) *run_start = false;
             unsigned char c = text[i];
             if (bytelevel_) {
                 string bs(1, (char)c);
@@ -203,14 +226,16 @@ vector<int> Tokenizer::encode(const string& text, bool bos , bool dummy_prefix )
         static const bool no_prefix = env_flag("TOK_NO_PREFIX");
         if (no_prefix) dummy_prefix = false;
         string body = text;
-        if (dummy_prefix && !text.empty()) {
+        const bool per_run = seg_prefix_ && dummy_prefix && !bytelevel_;
+        if (dummy_prefix && !text.empty() && !per_run) {
             if (fold) body = " " + text;
             else {
                 auto it = lookup_.find(" ");
                 if (it != lookup_.end()) t.push_back(it->second);
             }
         }
-        encode_into(body, /*allow_specials=*/true, t);
+        bool at_run = per_run;
+        encode_into(body, /*allow_specials=*/true, t, per_run ? &at_run : nullptr);
         bpe_merge(t);
         return t;
     }
@@ -231,14 +256,24 @@ vector<int> Tokenizer::encode_parts(const vector<PromptPart>& parts, bool bos, b
         }
         bool nonempty = false;
         for (auto& p : parts) if (!p.text.empty()) { nonempty = true; break; }
-        if (dummy_prefix && nonempty) {
+        // A SentencePiece vocabulary wants the marker on *every* text run: the
+        // reference normalizer prefixes each split separately, so the text after
+        // a template marker starts a word ("\u2581user") and dropping the marker
+        // there tokenises a word-continuation instead (measured on BitCPM:
+        // "user" 3060 vs 1836, assistant 16434 vs 43686, logits cosine 0.912).
+        // The container says which convention it wants (metadata key 10's third
+        // byte), so a byte-level model keeps the single-marker behaviour its
+        // gates were baselined with; on those the two produce the same tokens.
+        const bool per_run = seg_prefix_ && dummy_prefix && !bytelevel_;
+        if (dummy_prefix && nonempty && !per_run) {
             auto it = lookup_.find(" ");
             if (it != lookup_.end()) t.push_back(it->second);
         }
+        bool at_run = per_run;
         for (auto& p : parts) {
             if (p.text.empty()) continue;
             // Caller text never becomes a special token.
-            encode_into(p.text, /*allow_specials=*/!p.is_input, t);
+            encode_into(p.text, /*allow_specials=*/!p.is_input, t, per_run ? &at_run : nullptr);
         }
         bpe_merge(t);
         return t;

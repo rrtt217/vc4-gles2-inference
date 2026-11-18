@@ -18,6 +18,12 @@ public:
     void set_bos(int id) { bos_id_ = id; }
     void set_qwen(bool q);
     void set_bytelevel(bool b);
+    // Metadata key 10's third byte: prefix *every* text run between special
+    // tokens with the space marker, not just the prompt.  That is what the
+    // reference tokenizer does (its normalizer runs per split), and on a
+    // SentencePiece vocabulary it changes tokens -- "user" vs "\u2581user" --
+    // so a model trained that way sees a different prompt without it.
+    void set_seg_prefix(bool b) { seg_prefix_ = b; }
     // RWKV World vocabulary (rwkv_vocab_v20230424): greedy longest match over
     // the entries' raw bytes, no BPE merge pass, and decode emits the entry's
     // bytes verbatim.  Set it *after* load(), like set_qwen() -- reset()
@@ -41,10 +47,16 @@ public:
     string id_text(int id) const;
 
 private:
-    void encode_into(const string& text, bool allow_specials, vector<int>& out) const;
+    // `run_start` tracks the SentencePiece per-run space marker (seg_prefix_):
+    // true means the next *text* character begins a run and needs the marker.
+    // A special token ends the run, so the flag comes back true after it.  A
+    // null pointer is the plain behaviour (no marker bookkeeping).
+    void encode_into(const string& text, bool allow_specials, vector<int>& out,
+                     bool* run_start = nullptr) const;
     void bpe_merge(vector<int>& t) const;
     // RWKV mode: longest entry that fits, at every position.
     void encode_greedy(const string& text, vector<int>& out) const;
+    bool is_special_id(int id) const;
     vector<string> vocab_;
     vector<float> scores_;
     unordered_map<string, int> lookup_;
@@ -57,6 +69,7 @@ public:
 private:
     bool qwen_ = false;
     bool bytelevel_ = false;
+    bool seg_prefix_ = false;
     bool rwkv_ = false;
     // Longest entry in the blob.  Greedy matching scans downwards from
     // min(maxlen, bytes left); taken from the entries themselves, not from the

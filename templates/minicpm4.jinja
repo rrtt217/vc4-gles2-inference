@@ -1,0 +1,7 @@
+{# MiniCPM4's own template, verbatim from openbmb/MiniCPM4-0.5B
+   (tokenizer_config.json, `chat_template`) -- BitCPM-CANN-0.5B is that
+   model's ternary QAT release and ships no tokenizer_config.json at all,
+   so the template has to come from the parent.  There is no system
+   special case: a system turn is an ordinary message, which is why the
+   container's default system prompt is empty. #}
+{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}

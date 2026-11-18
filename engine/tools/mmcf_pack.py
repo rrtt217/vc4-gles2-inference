@@ -52,7 +52,8 @@ from mmcf_format import (MAGIC, REC_SIZE_V2, REC_SIZE_V3, HEADER_SIZE, TEMPLATE_
                          rec_unpack, pack_rec, tlv, crc32,
                          DT_F32, DT_I16, DT_Q8U8, DT_Q8I8, DT_Q4, DT_BLOB,
                          VERSION_DENSE, VERSION_MOE, VERSION_RWKV7,
-                         KEY_RWKV, KEY_LOGIT_SHIFT, RWKV_FLAG_GATE, pack_rwkv_meta)
+                         KEY_RWKV, KEY_LOGIT_SHIFT, KEY_ROPE_FACTORS,
+                         RWKV_FLAG_GATE, pack_rwkv_meta, pack_rope_factors)
 from mmcf_hf import T_EMB, T_EMB_I16, T_LOGITS  # noqa: E402
 
 # Tensor ids the extract left behind (2ca97cf); the values are the format's.
@@ -286,7 +287,7 @@ def build(meta, tensors, tok_blob, args):
     rope = struct.pack("<fBBH", float(meta.get("theta", 10000.0)),
                        1 if meta.get("half") else 0,
                        1 if meta.get("qk_norm") else 0, 0)
-    scheme = {"i16": 0, "q8": 1, "q4": 2}[meta["scheme"]]
+    scheme = {"i16": 0, "q8": 1, "q4": 2, "t3": 3}[meta["scheme"]]
     quant = struct.pack("<BBBB", scheme, meta.get("group", 0),
                         1,  # q8u8 pre-biased
                         1 if meta.get("split") else 0)
@@ -328,9 +329,17 @@ def build(meta, tensors, tok_blob, args):
         md += tlv(12, 1, struct.pack("<B", 1))
     if args.rms_eps is not None:
         md += tlv(11, 1, struct.pack("<f", args.rms_eps))
-    if args.add_bos is not None or args.add_eos is not None:
-        md += tlv(10, 1, struct.pack("<BB", 255 if args.add_bos is None else args.add_bos,
-                                     255 if args.add_eos is None else args.add_eos))
+    # key 10: the BOS/EOS policy, and (third byte, added 2026-11-18) whether the
+    # tokenizer prefixes *every* text run with its space marker.  A reader that
+    # only looks at two bytes sees the old policy, which is why the byte is
+    # appended rather than put in a key of its own.
+    if (args.add_bos is not None or args.add_eos is not None
+            or meta.get("sp_prefix")):
+        body = struct.pack("<BB", 255 if args.add_bos is None else args.add_bos,
+                           255 if args.add_eos is None else args.add_eos)
+        if meta.get("sp_prefix"):
+            body += struct.pack("<B", 1)
+        md += tlv(10, 1, body)
     # key 14: one byte per layer, 0 = attention, 1 = the LFM2 conv block.
     # Absent means "every layer is attention", which is every other model.
     if meta.get('layer_types'):
@@ -363,6 +372,12 @@ def build(meta, tensors, tok_blob, args):
     # already carry the *2^k (mmcf_hf.py folds it in).  Absent = k = 0.
     if meta.get("logit_shift"):
         md += tlv(KEY_LOGIT_SHIFT, 1, struct.pack("<B", int(meta["logit_shift"])))
+    # key 18: the rope table a `longrope` model needs (BitCPM-CANN-0.5B, i.e.
+    # MiniCPM4-0.5B, is the first).  Absent = plain theta, every container
+    # packed before 2026-11-18, and the factor list is validated against the
+    # head width by the engine as well as by the packer.
+    if meta.get("rope_factors"):
+        md += tlv(KEY_ROPE_FACTORS, 1, pack_rope_factors(meta["rope_factors"]))
     specials = (-1, -1, -1, -1, -1, -1)
     if tok_blob is not None:
         vocab = vocab_of(tok_blob, len(tok_blob) and 200000 or 0)
@@ -532,7 +547,7 @@ def main():
                     help="q8 with one scale per output row (a plane per matrix) "
                          "instead of one per matrix; for a model whose weight "
                          "rows span more than ~100:1")
-    ap.add_argument("--quant", choices=["i16", "q8", "q4"], default="i16",
+    ap.add_argument("--quant", choices=["i16", "q8", "q4", "t3"], default="i16",
                     help="precision to build when --in is a HuggingFace directory (default i16)")
     ap.add_argument("--seq", type=int, default=512,
                     help="KV length to record for a HuggingFace source (default 512)")
@@ -558,6 +573,11 @@ def main():
         _ntok = tok_entry_count(args.tok) if args.tok else 0
         if args.q8_row_scale and args.quant != "q8":
             raise SystemExit("--q8-row-scale only applies to --quant q8")
+        if args.quant == "t3" and args.head_q6:
+            # The head/embedding stays q8 either way; q6 would be the sixth
+            # combination and it is not written.
+            raise SystemExit("--head-q6 with --quant t3 is not supported; the "
+                             "embedding is q8 in a t3 container")
         meta, tensors = tensors_from_hf(args.src, args.quant, args.seq,
                                         rail_check=not args.no_rail_check,
                                         vocab_limit=_ntok or None,
@@ -708,8 +728,11 @@ def main():
         meta["theta"], meta["half"] = 10000.0, False
     if args.qk_norm:
         meta["qk_norm"] = True
-    print("rope: theta=%g half=%s qk_norm=%s" % (meta.get("theta", 10000.0),
-          bool(meta.get("half")), bool(meta.get("qk_norm"))))
+    rf = meta.get("rope_factors")
+    print("rope: theta=%g half=%s qk_norm=%s%s"
+          % (meta.get("theta", 10000.0), bool(meta.get("half")), bool(meta.get("qk_norm")),
+             "" if not rf else " table=%d factors (%.4f..%.4f, freq_i/=factor_i)"
+             % (len(rf), rf[0], rf[-1])))
     # Chat templates: explicit flag, else the HF source next to the checkpoint.
     templates = []
     tpath = args.chat_template

@@ -59,6 +59,44 @@ def flavour(items):
     return "bytelevel"
 
 
+def is_byte_token(tok):
+    return len(tok) == 6 and tok.startswith("<0x") and tok.endswith(">")
+
+
+def dedupe(items, raw_tokens):
+    """Make one id per byte string; the others become empty entries.
+
+    Two ids can spell the same bytes, and the engine's map is *last wins* while
+    its blob index must stay equal to the token id, so the winner has to be
+    decided here and the loser written as an entry that can never match:
+
+    * a SentencePiece vocabulary carries both the marker piece `\u2581` and a
+      literal space; rewriting the marker to a space makes them identical, and
+      the reference tokenizer only ever emits the marker (BitCPM-CANN-0.5B: the
+      real space id 72181 is unreachable, so every word boundary has to be
+      59320 -- measured 47 of 124 prompts wrong without this);
+    * byte fallback spells a byte as `<0x3F>`, which after the raw write above
+      collides with the real `?` piece.  A real piece always wins.
+
+    Priority is (is a byte-fallback entry, id): a real piece before a fallback
+    byte, then the lowest id.  Emptying the loser keeps `vocab_[id]` indexed by
+    id, so nothing shifts.
+    """
+    winner = {}
+    for (tok, idx), rb in zip(items, raw_tokens):
+        if not rb:
+            continue
+        key = (1 if is_byte_token(tok) else 0, idx)
+        if rb not in winner or key < winner[rb]:
+            winner[rb] = key
+    out = []
+    for (tok, idx), rb in zip(items, raw_tokens):
+        if rb and winner.get(rb) != (1 if is_byte_token(tok) else 0, idx):
+            rb = b""
+        out.append(rb)
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True,
@@ -100,6 +138,16 @@ def main():
 
     if kind == "sentencepiece":
         def raw(tok):
+            # Byte fallback: the vocabulary spells the byte 0x41 as "<0x41>",
+            # but the engine matches raw bytes, so the entry has to *be* that
+            # byte.  Written as text it never matches, and the engine's
+            # fallback then emits `byte + 3` -- an id it guessed (BitCPM's
+            # rare CJK came out as 243 163 131 131 instead of 1329 1249 1217).
+            if len(tok) == 6 and tok.startswith("<0x") and tok.endswith(">"):
+                try:
+                    return bytes([int(tok[3:5], 16)])
+                except ValueError:
+                    pass
             return tok.replace("\u2581", " ").encode("utf-8")
     else:
         b2u = bytes_to_unicode()
@@ -118,6 +166,7 @@ def main():
     # An added token's text is literal, not alphabet text; a tokenizer that
     # lists every entry in added_tokens keeps its BPE entries byte-level.
     raw_tokens = [t.encode("utf-8") if i not in bpe_ids else raw(t) for t, i in items]
+    raw_tokens = dedupe(items, raw_tokens)
     maxlen = max(len(x) for x in raw_tokens)
     with open(a.output, "wb") as f:
         f.write(struct.pack("<i", maxlen))

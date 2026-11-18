@@ -102,6 +102,10 @@ bool App::setup_from_model() {
     eos_str = tokenizer.id_text(model.id_eos);
     tokenizer.set_qwen(opt.qwen_template || opt.minimind3_template);
     tokenizer.set_bytelevel(opt.minimind3_template);
+    // ... and the container's prefix policy (metadata key 10's third byte):
+    // a SentencePiece vocabulary needs the space marker on every run between
+    // template markers, which the byte-level models were never sensitive to.
+    tokenizer.set_seg_prefix(model.sp_prefix);
     // RWKV-7's World vocabulary is greedy longest match over raw bytes: no BPE
     // merges, no <0xNN> spelling (docs/rwkv7-plan.zh-CN.md, A1-A3).  The mode
     // belongs to the container, so it is set here where the tokenizer is built

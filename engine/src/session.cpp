@@ -191,6 +191,10 @@ Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
             for (int p = 0; p < m_.seq; ++p) {
                 for (int i = 0; i < half; ++i) {
                     float freq = 1.0f / powf(m_.rope_theta, (2.0f * i) / m_.head_dim);
+                    // A `longrope` model scales pair i's angle by 1/factor_i
+                    // (metadata key 18): 32 different bases on a 64-wide head.
+                    // Empty for every plain-theta container.
+                    if (!m_.rope_factors.empty()) freq /= m_.rope_factors[(size_t) i];
                     float a = p * freq;
                     rope_cos_[(size_t)p * half + i] = cosf(a);
                     rope_sin_[(size_t)p * half + i] = sinf(a);

@@ -88,6 +88,29 @@ models/
                                  further from f32 than Xe's (see the note)
 
   survey_under_110m.csv          candidate survey
+
+  bitcpm-0.5b/                   BitCPM-CANN-0.5B (MiniCPM4-0.5B, ternary QAT)
+    config.json, modeling_minicpm.py, tokenizer.json   source (upstream)
+    pytorch_model.bin            source: the only weight file upstream ships
+                                 (868 MB torch zip, bf16 fake-quant, no
+                                 safetensors)
+    probe_forward.py             numpy f32 forward (residual/FFN peaks, greedy
+                                 text, logits); imports the packer's
+                                 engine/tools/pth_reader.py
+    bitcpm.tok                   tokenizer blob, 73448 entries; make_tok.py now
+                                 resolves the `▁`/space collision and writes the
+                                 byte fallback as raw bytes (both fixed
+                                 2026-11-18, see docs/bitcpm.md)
+    bitcpm-0.5b.q8.mmcf          434 MB, --head-dedup, template minicpm4,
+                                 bos 1 eos 2 stop 73440; run with
+                                 RMS_STORE=f32 (lane sums 5.4e4).  Iris Xe:
+                                 52.5 ms/token, MC acc 0.690.  Docs: docs/bitcpm.md
+    bitcpm-0.5b.t3.mmcf          167.5 MB: the same model with a 2-bit ternary
+                                 body (dtype 7, --quant t3, per-row scales).
+                                 The runtime has no t3 kernel yet, so the loader
+                                 expands the body to q8 on the host +-4x RAM and
+                                 says so; same text and KL 0.0278 against the
+                                 float32 reference.  The Pi needs Phase B2
 ```
 
 `smollm2-135m/` was source-only until 2026-11-18: weights, config and a

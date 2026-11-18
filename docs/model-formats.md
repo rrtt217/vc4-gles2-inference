@@ -27,6 +27,9 @@ container and the packer.
 | Feng30M | Llama-shaped | see `models/feng30m` |
 | TinyBrainBot-100M-v5.1 | Llama-shaped, tied embedding | `<\|user\|>`/`<\|assistant\|>` markers, no system turn; **q8 is not usable, use q4 or i16** |
 | TinyChat15M, stories15M/42M/260K | llama2.c TinyStories family | base completion models, not chat models |
+| SmolLM2-135M | Llama-shaped, tied embedding, 30 layers | `RMS_STORE=f32` required (lane sums 26884); `docs/model-formats.md`'s rail section and `models/README.md` |
+| LFM2.5-230M | hybrid: 8 conv + 6 attention layers | key 14, conv tensors `0x17`-`0x19`; `docs/lfm2.5-230m.md` |
+| BitCPM-CANN-0.5B | MiniCPM4-0.5B, **per-row ternary** weights | the only container with a rope table (key 18) and a tokenizer prefix byte (key 10); the source is a torch zip, not safetensors; `docs/bitcpm.md` |
 
 Every one of them is converted to `.mmcf` before use; `models/` keeps the
 legacy source next to the container so a re-pack is possible.
@@ -49,6 +52,8 @@ be re-packed without going back to HuggingFace:
 | `templates/chatml.jinja` | MiniMind2 / Qwen-family | written here to be byte-identical to the renderer it replaces |
 | `templates/tinybrainbot.jinja` | TinyBrainBot-100M | verbatim from the model's `tokenizer_config.json` |
 | `templates/rwkv7-g1.jinja` | RWKV-7 G1 (0.1B first) | written from the official `RWKV-v7/RWKV7-G1x-templates.txt`; emits token 0's text first and ends with `Assistant: <think` when the template asks for a generation prompt |
+| `templates/minicpm4.jinja` | BitCPM-CANN-0.5B (MiniCPM4-0.5B) | verbatim from `openbmb/MiniCPM4-0.5B`'s `tokenizer_config.json`; the BitCPM release ships no `tokenizer_config.json`, so the parent's template is the only source |
+| `templates/smollm2.jinja`, `templates/supra2*.jinja` | SmolLM2-135M, supra2 | verbatim from each model's own `tokenizer_config.json` |
 
 The packer also accepts a `tokenizer_config.json` directly
 (`--chat-template models/<m>/tokenizer_config.json`), which is what most HF

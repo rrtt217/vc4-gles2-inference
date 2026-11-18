@@ -88,6 +88,22 @@ and it is open.  The CPU layer loop degenerates too -- that is the supra2
 defect, not a format limit of this model.  `models/README.md` has the per-switch
 isolation table; `docs/performance.md` (2026-11-18) has both machines.
 
+**BitCPM-CANN-0.5B is the one model with ternary weights and its own rope table**
+(2026-11-18).  It is MiniCPM4-0.5B's 1.58-bit QAT release: 168 of 169 matrices
+are per-row `{0, ±s}` (37.3% exact zeros), so its q8 body is *lossless*, while
+`q4mat`'s block min/max turns every zero into `±s/15`.  It is also the only
+container carrying a rope table (metadata key 18, `longrope` with static
+per-dimension factors) and the only one needing the tokenizer's per-run space
+marker (metadata key 10's third byte): without it the prompt tokenises as
+`user` instead of `▁user` and the logits move by cosine 0.912.  MiniCPM's three
+model-wide constants (`scale_emb`, `scale_depth`, `dim_model_base`) are folded
+at pack time, and the choice `k = 1/scale_emb` is load-bearing -- `k = 1`
+divides the tied head's input by 48 instead of 4 and the q16 store destroys it
+(cosine 0.885 against 0.9868).  `RMS_STORE=f32` is required (lane sums 5.4e4).
+Read [`docs/bitcpm.md`](docs/bitcpm.md) before touching any of that; the
+assessment with the work list is
+[`docs/bitcpm-assessment.zh-CN.md`](docs/bitcpm-assessment.zh-CN.md).
+
 Engine modules are described in [`docs/engine-layout.md`](docs/engine-layout.md);
 the file format in [`docs/model-formats.md`](docs/model-formats.md) and
 [`docs/checkpoint-container.md`](docs/checkpoint-container.md).
@@ -101,7 +117,8 @@ the file format in [`docs/model-formats.md`](docs/model-formats.md) and
 | `mmcf_dump.py` | answering "what does the engine actually read from this file" — the whole metadata block, from the file alone (`--check` verifies every CRC) |
 | `mmcf_requant_q8.py` | rebuilding the q8 matrices of a container from its i16 sibling (`--clip P` for a percentile scale) |
 | `ref_forward.py` | a numpy forward pass over an HF safetensors source: separates "bad conversion / bad tokenizer / engine bug" |
-| `make_tok.py` | building the `.tok` blob from a HF `tokenizer.json` — ByteLevel or SentencePiece, with added tokens laid onto their ids (a blob built from `model["vocab"]` alone ends at the wrong id and the engine splits `<\|im_start\|>` into characters) |
+| `make_tok.py` | building the `.tok` blob from a HF `tokenizer.json` — ByteLevel or SentencePiece, with added tokens laid onto their ids (a blob built from `model["vocab"]` alone ends at the wrong id and the engine splits `<\|im_start\|>` into characters), byte fallback written as raw bytes, and one id per byte string (`dedupe()`: a real piece beats a `<0xNN>` fallback, the lower id wins a tie) |
+| `pth_reader.py` | reading a torch zip (`pytorch_model.bin`) without torch, for a release that ships no safetensors (the BitCPM family and anything older); `mmcf_hf.load_minimind` falls back to it, so `--in <dir>` works on the directory as downloaded |
 | `make_tok_byte.py` | the same blob from a *pure byte* `byte_vocab.json` (259 entries, no merges — `void.1`): `<0xNN>` becomes the raw byte, not six characters. `make_tok.py` writes the text `<0x41>` for that vocab, which still gives every id a home, so nothing fails loudly |
 
 ### The four non-engine directories — split by what a file *needs*

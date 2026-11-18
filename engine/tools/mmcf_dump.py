@@ -24,7 +24,8 @@ import zlib
 # the reverse of the packer's name -> kind.
 from mmcf_format import (KINDS, DTYPES, SCHEMES, CAPS,  # noqa: E402
                          PER_LAYER_KINDS, RWKV_ARCH_NAMES, RWKV_MATS,
-                         RWKV_VECTORS, parse_rwkv_meta,
+                         RWKV_VECTORS, parse_rwkv_meta, KEY_ROPE_FACTORS,
+                         unpack_rope_factors,
                          TEMPLATE_KIND_NAMES as TEMPLATE_KINDS)
 
 
@@ -84,6 +85,11 @@ def main():
         elif key == 2 and ln >= 8:
             theta, half, qk, _ = struct.unpack_from("<fBBH", payload)
             print(f"rope        theta {theta:g} half {bool(half)} qk_norm {bool(qk)}")
+        elif key == KEY_ROPE_FACTORS and ln >= 4 and (ln % 4) == 0:
+            # A longrope model's static per-dimension table.
+            rf = unpack_rope_factors(bytes(payload))
+            print(f"rope table  {len(rf)} factors, pair 0..{len(rf)-1} = "
+                  f"{rf[0]:.4f} .. {rf[-1]:.4f} (freq_i /= factor_i)")
         elif key == 3 and ln >= 4:
             scheme, group, preb, split = struct.unpack_from("<BBBB", payload)
             print(f"quant       {SCHEMES.get(scheme, scheme)} group {group} "
@@ -157,7 +163,11 @@ def main():
         elif key == 10 and ln >= 2:
             ab, ae = payload[0], payload[1]
             fmt = lambda v: "unset" if v == 255 else str(v)
-            print(f"bos/eos     add_bos {fmt(ab)} add_eos {fmt(ae)}")
+            extra = ""
+            if ln >= 3:
+                # Third byte (2026-11-18): the tokenizer's prefix policy.
+                extra = f" seg_prefix {int(payload[2])}"
+            print(f"bos/eos     add_bos {fmt(ab)} add_eos {fmt(ae)}{extra}")
         p += 8 + ln
 
     if not have_eps:

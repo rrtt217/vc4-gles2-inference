@@ -114,12 +114,65 @@ Each record is `<HHI>` (key, type, length) followed by the payload; `type` is 1
 | 7 | `<i` tokenizer blob length |
 | 8 | `<6i` bos, eos, stop, pad, unk, im_start (all `-1` = absent) |
 | 9 | `u8 n`, then n × (`name\0`, `u32 len`, **Jinja template text**).  The default variant is stored with an empty name and read as `default` |
-| 10 | `<BB` add_bos, add_eos (`255` = not stated; `-1` in memory) |
+| 10 | `<BB`, then optionally a third byte: add_bos, add_eos (`255` = not stated; `-1` in memory), `sp_prefix` (1 = the tokenizer prefixes every text run with its space marker, see below) |
 | 12 | `<B` residual width: absent or 0 = q16 (the historical grid), 1 = q24 |
 | 11 | `<f` `rms_norm_eps`.  Absent = the engine's historical 1e-5, compiled as a literal.  A file that states one switches the norm shader to a uniform, which is **not** numerically neutral on this driver (MiniMind3 PPL 270.3170 -> 269.9303 with the same value), so the default path stays literal |
 | 14 | one byte per layer: `0` attention, `1` the LFM2 conv block.  Absent = every layer is attention.  A file with conv tensors and no key 14 is refused, not guessed |
 | 13 | `<4i` mixture of experts: `n_experts`, `top_k`, `expert_hidden`, flags.  Absent = dense.  Flags bit 0 = `norm_topk_prob`.  Present means the container is version 3 and every layer is sparse (see "MoE") |
+| 18 | one f32 per rope pair (`head_dim/2` of them), a `longrope` model's static per-dimension frequency table: `freq_i = theta^(-2i/head_dim) / factor_i`.  Absent = every factor is 1, which is every container packed before 2026-11-18 |
 | 15 | one byte per layer: the FFN hidden store scale exponent `k`.  Layer `k` means the SwiGLU hidden is written `*2^-k` (the activation rail becomes `127.996 * 2^k`) and w2's read-back multiplies by `2^k` (folded into its scale after load).  Absent = every layer 0, which is every container packed before 2026-11-12.  The loader refuses a length that is not `layers` or a value over 5 |
+
+### Metadata keys 10 (third byte) and 18: the tokenizer's marker, the rope table
+
+Two facts that used to be implicit in the packer and are now stated in the file.
+
+**Key 18 — a rope table.**  MiniCPM4 (and BitCPM-CANN, its ternary QAT release)
+divides rope pair `i`'s frequency by `factor[i]`: 32 different bases on a 64-wide
+head, which one theta cannot express.  The payload is `head_dim/2` little-endian
+f32s; the engine divides the angle it builds in `Session` and validates the
+length against `head_dim/2` (a table of the wrong length is refused, because the
+angles would be wrong *silently*).  Only a *static* table is representable: the
+packer accepts `rope_type: longrope` when the short and long tables agree and
+`max_position_embeddings == original_max_position_embeddings` (the model then
+computes `scaling_factor = 1`), and refuses the rest by name.
+
+**Key 10's third byte — the prefix policy.**  The reference tokenizers run their
+normalizer on *every* text run between added tokens, so each one starts with the
+space marker (`\u2581user`), while the engine's historical behaviour puts one
+marker at the front of the whole prompt.  On a SentencePiece vocabulary the two
+produce different ids -- "user" 1836 vs "\u2581user" 3060 on BitCPM, logits
+cosine 0.912 -- so the container states which one it wants instead of the engine
+guessing from the template.  A two-byte payload keeps the historical behaviour,
+which is why the byte was appended rather than put in a key of its own.
+
+Neither key changes the tensor table, so both are version-2 additions that an
+older reader skips.
+
+### The t3 body: 2-bit ternary, and what reads it today
+
+`mmcf_pack.py --quant t3` writes a body whose matrices are 2 bits a weight.  It
+is only written for a matrix that **is** per-row ternary -- `t3mat()` certifies
+every row is `{0, +s, -s}`, decodes what it wrote and refuses if the round trip
+is not exact to float32 -- so the format is lossless by construction: the same
+claim `q8mat` makes on such a matrix, at a quarter of the bytes.
+
+The runtime has **two** readers, and the difference matters:
+
+- **The GPU kernel does not exist yet** (Phase B2, `docs/bitcpm-assessment.zh-CN.md`).
+- Until it does, `Model::read_tables()` expands a t3 body into q8 levels
+  (`model.cpp`, `as_t3`): +-127 for a nonzero weight, with the part-3 per-row
+  plane attached, which is the exact dequantisation a q8 body would have
+  carried with `--q8-row-scale`.  The load then prints
+
+  ```text
+  t3 body: 120 matrices expanded to q8 on the host (85 MB on disk -> 342 MB in RAM);
+  the 2-bit kernel is Phase B2 (docs/bitcpm.md)
+  ```
+
+  That path is the container's acceptance test -- it makes a t3 file *runnable*
+  against the same kernels as everything else, so the packer can be validated by
+  logits and PPL before a line of new GLSL exists -- and it forfeits the memory
+  win (4x the file).  A t3 container on the Pi is therefore still B2 away.
 
 Key 9 is the model's own `chat_template` from HuggingFace, stored **verbatim**:
 the same text a GGUF file carries in `tokenizer.chat_template`.  A reader that
@@ -168,6 +221,17 @@ The `group` byte of a q4 body is **32** in files written since 2026-11-12 and
 **0** in every file written before that (the writer never set it; the engine has
 always used 32 from metadata key 3 and never read the record's copy).  Both
 parse; a reader should take the group size from key 3.
+
+Dtypes: `0` f32, `1` i16, `2` q8u8 (biased by 128), `3` q8i8 (signed), `4` q4
+(nibbles, plus a scale plane as part 1 and a min plane as part 2), `5` blob
+(the tokenizer), `6` q6 (two planes, `--head-q6`) and `7` **t3**: a 2-bit
+ternary body, 16 weights an RGBA8 texel, four a byte, two bits a weight -- bit 0
+magnitude, bit 1 sign, so a weight is `mag * (1 - 2*sign)` -- written only for a
+matrix that *is* per-row ternary, with a per-row scale plane as part 3 exactly
+like `--q8-row-scale`.  Byte `j` of a texel carries the four columns
+`16g + 4j .. 16g + 4j + 3`, which is the activation texel the dot product
+multiplies it by; a `cols` that is not a multiple of 16 is padded with zeros
+(they decode to zero weights).
 
 Tensor ids: `1` embedding, `2` embedding scale, `3` rms_att, `4` rms_ffn,
 `5` rms_final, `6` q_norm, `7` k_norm, `8` embedding_i16, `0x10` qkv, `0x11`

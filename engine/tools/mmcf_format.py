@@ -65,9 +65,15 @@ def rec_size(version):
 # --- dtypes -------------------------------------------------------------
 # 6 is the 6-bit embedding body `mmcf_pack.py --head-q6` writes: two planes per row
 # (dim/2 bytes of 4 bits, dim/4 bytes of 2) plus a per-row scale tensor.
-DT_F32, DT_I16, DT_Q8U8, DT_Q8I8, DT_Q4, DT_BLOB, DT_Q6 = range(7)
+#
+# 7 is the 2-bit ternary body `--quant t3` writes: 16 weights an RGBA8 texel,
+# four a byte, two bits a weight (bit 0 magnitude, bit 1 sign, so a weight is
+# `mag * (1 - 2*sign)`), plus a per-row scale plane (part 3) exactly like
+# `--q8-row-scale`.  It is only ever written for a matrix that *is* per-row
+# ternary -- the packer certifies that before it packs (docs/checkpoint-container.md).
+DT_F32, DT_I16, DT_Q8U8, DT_Q8I8, DT_Q4, DT_BLOB, DT_Q6, DT_T3 = range(8)
 DTYPES = {DT_F32: "f32", DT_I16: "i16", DT_Q8U8: "q8u8", DT_Q8I8: "q8i8",
-          DT_Q4: "q4", DT_BLOB: "blob", DT_Q6: "q6"}
+          DT_Q4: "q4", DT_BLOB: "blob", DT_Q6: "q6", DT_T3: "t3"}
 
 # --- tensor ids ---------------------------------------------------------
 # The id is kind(8) | layer(6) | part(2); part 0 is the tensor, parts 1/2 are a
@@ -162,6 +168,35 @@ KEY_RWKV = 16
 # in the model's own units with no kernel change.  Absent (or 0) = the input is
 # written unscaled, which is every container packed before 2026-11-16.
 KEY_LOGIT_SHIFT = 17
+
+# Metadata key 18: the per-dimension rope frequency factors, `head_dim/2`
+# little-endian f32s in ascending pair order.
+#
+# MiniCPM4 (and the BitCPM ternary QAT releases of it) scale rope pair i's
+# angle by 1/factor[i] -- 32 different bases for a 64-wide head, which one
+# theta cannot express:
+#
+#     freq_i = theta^(-2i/head_dim) / factor_i
+#
+# Only the *static* table is representable: the packer accepts it when the
+# model's short and long tables agree and it does not stretch (see
+# mmcf_hf.rope_factors).  Absent = every factor is 1.0, which is every
+# container packed before 2026-11-18.
+KEY_ROPE_FACTORS = 18
+
+
+def pack_rope_factors(factors):
+    """Metadata key 18's payload: one f32 per rope pair, pair 0 first."""
+    return struct.pack("<%df" % len(factors), *[float(x) for x in factors])
+
+
+def unpack_rope_factors(payload):
+    """The inverse; a length that is not a multiple of 4 is a corrupt file."""
+    if len(payload) % 4:
+        raise ValueError("rope factor payload is %d bytes" % len(payload))
+    return list(struct.unpack("<%df" % (len(payload) // 4), payload))
+
+
 RWKV_META_FMT = "<BBBBfHHHH"    # arch, head_size, flags, pad, norm_eps, r_w, r_a, r_v, r_g
 RWKV_META_SIZE = struct.calcsize(RWKV_META_FMT)
 RWKV_ARCH_RWKV7 = 1
@@ -188,7 +223,7 @@ def parse_rwkv_meta(payload):
                 r_w=r_w, r_a=r_a, r_v=r_v, r_g=r_g,
                 gate=bool(flags & RWKV_FLAG_GATE))
 
-SCHEMES = {0: "i16", 1: "q8", 2: "q4"}
+SCHEMES = {0: "i16", 1: "q8", 2: "q4", 3: "t3"}
 
 # kind byte -> the name `mmcf_dump.py` prints.  Kind 1 covers both chatml and
 # qwen, which is why the display name carries both.

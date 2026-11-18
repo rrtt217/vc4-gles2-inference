@@ -12,6 +12,10 @@ public:
     int vocab = 0, seq = 0, kv_dim = 0, head_dim = 0;
     float rope_theta = 10000.0f;
     bool rope_half = false;
+    // Metadata key 18: a `longrope` model's *static* per-dimension frequency
+    // table (head_dim/2 entries, pair i divides pair i's frequency).  Empty
+    // means plain theta, which is every container packed before 2026-11-18.
+    vector<float> rope_factors;
     bool shared_embeddings = true;
     bool qk_norm = false;
     // The container carries per-row q8 scale planes (tensor id part 3).  The
@@ -140,6 +144,17 @@ public:
     // Metadata key 10: whether the template expects a BOS/EOS around the
     // prompt.  -1 = not stated (derive from template_kind, the historical rule).
     int add_bos = -1, add_eos = -1;
+    // Metadata key 10's third byte: the tokenizer runs its space marker on
+    // every text run between special tokens, not once per prompt.  A
+    // SentencePiece vocabulary needs this ("user" and "\u2581user" are
+    // different tokens); a byte-level one does not notice either way.
+    bool sp_prefix = false;
+    // How much of the body arrived as a 2-bit ternary record (dtype 7) and had
+    // to be expanded to q8 on the host.  Zero for every other container; a load
+    // that leaves it non-zero says so, because until the GPU kernel exists
+    // (docs/bitcpm.md, Phase B2) the file's memory win does not reach the GPU.
+    int t3_mats = 0;
+    uint64_t t3_disk_bytes = 0, t3_ram_bytes = 0;
     // Metadata key 11: the model's own RMSNorm epsilon.  The shaders used to
     // hardcode 1e-5, which is 10x MiniMind3's (and feng30m's, and supra2's)
     // 1e-6; that was invisible until a model turned out to be sensitive to it.

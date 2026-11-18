@@ -208,6 +208,14 @@ probes/q4fmt_probe_pi: probes/q4fmt_probe.cpp | check-cross
 # probe that answers this on the board rather than from the driver's format
 # table.  The board has gcc and the Mesa headers, so the native recipe is the
 # one usually used: g++ -O2 -std=c++17 -o rgba4444_probe ... -lEGL -lGLESv2.
+# The ternary matvec pricing probe: 2-bit weights against the q8 baseline, with
+# the ES3 uint decode Q4_SHIFT already uses.  EGL + GLES2 only, so it builds and
+# runs on the board natively (g++ + the Mesa headers) as well as here.
+probes/t3mv_probe: probes/t3mv_probe.cpp probes/egl_surfaceless.h
+	$(CXX) $(ALL_CXXFLAGS) -o $@ $< $(LDLIBS)
+probes/t3mv_probe_pi: probes/t3mv_probe.cpp probes/egl_surfaceless.h | check-cross
+	$(CROSS_CXX) $(CROSS_CXXFLAGS) -o $@ $< $(CROSS_LDLIBS)
+
 probes/rgba4444_probe: probes/rgba4444_probe.cpp probes/egl_surfaceless.h
 	$(CXX) $(ALL_CXXFLAGS) -o $@ $< $(LDLIBS)
 probes/rgba4444_probe_pi: probes/rgba4444_probe.cpp probes/egl_surfaceless.h | check-cross
@@ -254,7 +262,7 @@ test_lineedit: tests/test_lineedit.cpp $(SRC)/lineedit.cpp $(SRC)/lineedit_layou
 clean:
 	rm -f engine engine_mm3 engine_mm3_pi test_lineedit
 	rm -f probes/vc4_probe probes/vc4_ffn_probe probes/vc4_topk_probe probes/load_probe_pi
-	rm -f probes/matvec_probe probes/texsize_probe probes/q4fmt_probe_pi probes/glsl_probe_pi probes/q4mv_probe_pi probes/draw_probe_pi probes/packunpack_probe probes/packunpack_probe_pi probes/logits_grid_probe probes/wrow_probe probes/wrow_probe_pi probes/conv_probe probes/conv_probe_pi \
+	rm -f probes/matvec_probe probes/texsize_probe probes/q4fmt_probe_pi probes/glsl_probe_pi probes/q4mv_probe_pi probes/draw_probe_pi probes/packunpack_probe probes/packunpack_probe_pi probes/logits_grid_probe probes/wrow_probe probes/wrow_probe_pi probes/conv_probe probes/conv_probe_pi probes/t3mv_probe probes/t3mv_probe_pi \
 	rm -f probes/sumorder_probe probes/sumorder_probe_pi probes/q4mv_probe probes/progbinary_probe_pi probes/ffn2_probe_pi probes/rgba4444_probe probes/rgba4444_probe_pi
 
 probes/glsl_probe_pi: probes/glsl_probe.cpp | check-cross
