@@ -438,8 +438,13 @@ These were paid for; do not relearn them.
 
 - **Container only**: the engine loads the MMCF family (v2, v3, v4) and nothing
   else (see above).
-- **Q4 draw** output is 24-bit; **Q4 residual-add** output is q16. Do not
-  merge these encodings.
+- **Q4 draw and q4 residual-add do not share a layout.**  A matvec writes its
+  output in the *activation* format (`act_fmt_`, the `ACT` axis) and an
+  add-into-residual writes in the *residual* format (`res_fmt_`, the `RES`
+  axis), so the two are different textures whenever those axes differ.  On the
+  shipped q4 containers that is 24-bit (I24_1) for the draw and the packed q16
+  pair (I16_2) for the add.  Do not merge the two encodings, and do not assume
+  one axis's format for the other.
 - **Q4 source**: quantize from F16/I16, not from q8. q8 → q4 is a second
   quantization and loses quality.
 - **KV cache**: Pi and laptop caches are not byte-identical. Build disk cache
@@ -449,9 +454,12 @@ These were paid for; do not relearn them.
   capacity pre-check (see "Switching models without restarting the engine").
 - **Prefix cache** header flags include the KV axis and its grid; loading with
   another `KV` value or `KV_GRID` must be rejected.
-- **FFN**: hidden 2432 is split into 1216-wide chunks because VC4 FBO width is
-  2048, and there are exactly two chunks -- so the ceiling is 2x the GL target
-  width (4096 on VC4, 4608 for LFM2-350M on Xe).  q4 slicing must copy block
+- **FFN**: the hidden width is split in **two** chunks and no more
+  (`split_ffn`), because the kernels carry two chunk slots; a hidden wider than
+  `2 * chunk_limit` is refused by name rather than split again.  The limit is
+  the GL target width (2048 on VC4, so 4096 there; passed in for Xe, 4608 for
+  LFM2-350M), and the chunk is `(hidden + 1) / 2` -- 1216 for MiniMind3's 2432.
+  A MoE expert hidden has its own 4096 ceiling.  q4 slicing must copy block
   scale/min and repack nibbles.
 - **The rms partial sums saturate at 2048.**  They travel in 24-bit fixed point
   with a fixed 1/4096 step biased by 2^23, so a lane sum above 2048 pins and
