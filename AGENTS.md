@@ -1,6 +1,47 @@
 # AGENTS.md
 
-## Absolute prohibitions (these override every other rule in this file)
+## Scope and precedence
+
+This file is for agents changing this repository.  When two instructions
+disagree, the higher one wins:
+
+1. **The user's current, direct instruction.**  It outranks everything below,
+   including the prohibitions in this file: if the user says stop, stop.
+2. **Platform policy** — the permission preset, approvals, and the sandbox.
+   This file cannot grant access they refuse, and "keep going" is never a
+   reason to work around an approval prompt.
+3. **`AGENTS.override.md`** — the Hermes/VLAB copy.  It **replaces this file
+   entirely** rather than adding to it, so on those hosts this file is not read.
+4. **`AGENTS.local.md`** — the DSH machine override.  It is read *in addition*
+   to this file and owns host and machine facts: paths, sysroots, SSH aliases,
+   pins, and local benchmark numbers.
+5. **This file** — the portable rules and the component map.
+6. **`README.md`, `docs/`, and the component READMEs** — the authoritative
+   description of each subject; "Documentation rules" below says which one owns
+   which fact.
+
+Both override files are local and gitignored, so they are not portable project
+rules in either direction: do not copy a host name, sysroot, deploy path or
+local-only benchmark number from them into this file, and do not assume a
+machine's pins or paths from this file.
+
+**This file does not own facts.**  It says which component exists, what it is
+for, and what a change to it affects.  The number, the field layout and the
+exact check belong to the document named in "Documentation rules"; when this
+file and that document disagree, that document is right and this file is the
+bug.
+
+**What "now" means in a sentence.**  A statement containing a date, "used to",
+or a four-decimal measurement is a record of what was true then, not a rule
+now.  The rules in this file carry no dates; the history is in
+[`docs/performance.md`](docs/performance.md).
+
+## Absolute prohibitions
+
+These are not about judgement, so there is no case in which they are a matter of
+taste.  They are also not absolute *in scope*: item 1 of "Scope and precedence"
+still wins, and the stop conditions below are part of the rule, not an
+exception to it.
 
 1. **Never revert without being told to.** Unless the user explicitly asks for a
    specific revert in the current conversation, do not run `git checkout --
@@ -19,16 +60,20 @@
    steps" instead of the finished thing.  Find another route and keep going; the
    report comes after the task is done.
 
-Instructions for coding agents working in this repository.  Machine-specific
-details live in local override files, not here:
+**When stopping is correct.**  Stopping is required, and is not "abandoning the
+task", when:
 
-- `AGENTS.local.md` — DSH local override (this laptop).
-- `AGENTS.override.md` — Hermes/VLAB full override; it replaces this file.
+- the next step needs an approval, a credential or a device that is not
+  available — report the block, do not route around it;
+- the work needs a decision only the user can make (scope, compatibility, a
+  deliberate numeric change that re-baselines a pin);
+- continuing would destroy uncommitted work or move the tree backwards (the
+  prohibitions above);
+- the user changes the goal, or says stop.
 
-Those files are local/personal and are gitignored.  Do not copy host names,
-sysroots, deploy paths, or local-only benchmark numbers from them into this
-file.  Target reference timings are allowed when explicitly labeled with the
-target (for example Pi Zero).
+In those cases say what is done, what is blocked, and what the options are — that
+is a report of a real block, which is what prohibition 3 forbids substituting
+for finished work.
 
 ## Mission
 
@@ -600,10 +645,3 @@ text-neutral change must leave `gate/shader_hashes.txt` untouched.  A single
 golden string is a tripwire, not the gate: it is chaotic across GPUs and across
 reassociations, so pin it per machine and re-baseline it deliberately when the
 numbers move on purpose.
-
-## Local overrides
-
-- DSH reads `AGENTS.local.md` in addition to this file.
-- Hermes/VLAB reads `AGENTS.override.md`, which **fully replaces** this file;
-  keep that copy self-contained.
-- Both files are gitignored and must not be treated as portable project rules.
