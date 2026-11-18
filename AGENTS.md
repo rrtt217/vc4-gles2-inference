@@ -215,8 +215,10 @@ both precisions, a round trip, an i16 and a hybrid chain; needs the GPU).
 
 ## The container is the only format
 
-Since `fcc4095` the engine reads **only** MMCF v2.  `Model::load()` refuses
-anything else and names the packer.  A `.q8` / `.q4` / `.i16` / `.bin` file in
+Since `fcc4095` the engine reads **only** the MMCF container family: v2 (dense),
+v3 (mixture of experts) and v4 (RWKV-7).  `Model::load()` refuses any other
+version and names the packer.  Because the version is dispatched on, a v2 reader
+cannot half-load a v4 checkpoint.  A `.q8` / `.q4` / `.i16` / `.bin` file in
 `models/` is an *input to the packer*, never a model the engine can run:
 
 ```bash
@@ -279,8 +281,8 @@ to be undocumented (`FFN_PAIR`, `TOK_NO_PREFIX`, `TOK_SPACE_FOLD`).  Check a fil
 ## Canonical smoke tests
 
 Run from `engine/`.  The system prompt is pinned on the command line: the
-compiled default changed in `c1bb4f6` (Chinese persona → neutral English), so a
-gate that omits `--system` silently changes meaning and stops reproducing.
+container supplies a default, so a run that omits `--system` silently tests that
+prompt instead of the one the gate names, and stops reproducing.
 
 q8:
 
@@ -341,7 +343,8 @@ against the values it is about to replace, which used to make it exit at the
 first mismatch and never print anything.
 
 The same command **without** `--system` must print the same text; that is the
-check that the container's default system prompt (metadata key 6) and the packer
+check that the container's default system prompt (metadata key 4, alongside the
+u8 template kind and the template name; key 6 is the model name) and the packer
 that wrote it agree with the gate.  There is no compiled default any more --
 `kDefaultSystem` was dead code and is gone since 2026-11-14; the engine uses the
 container's prompt and `--system` overrides it.  If it differs, change the
@@ -433,7 +436,8 @@ These were paid for; do not relearn them.
   top-k>1 or shared-expert block is refused, never emulated, and the pair
   prefill path is refused because two positions route independently.
 
-- **Container only**: the engine loads MMCF v2 and nothing else (see above).
+- **Container only**: the engine loads the MMCF family (v2, v3, v4) and nothing
+  else (see above).
 - **Q4 draw** output is 24-bit; **Q4 residual-add** output is q16. Do not
   merge these encodings.
 - **Q4 source**: quantize from F16/I16, not from q8. q8 → q4 is a second

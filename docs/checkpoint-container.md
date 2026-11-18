@@ -82,7 +82,7 @@ per-tensor `scale`.  See "Tensor record" below.)
 | offset | size | field | notes |
 |---:|---:|---|---|
 | 0 | 4 | `magic` | `"MMCF"` |
-| 4 | 2 | `version` | 2 (dense) or 3 (mixture of experts, "MoE" below) |
+| 4 | 2 | `version` | 2 (dense), 3 (mixture of experts, "MoE" below) or 4 (RWKV-7, see "v4" at the end).  The reader refuses anything else |
 | 6 | 2 | `header_size` | 64, so a future header can grow |
 | 8 | 4 | `n_tensors` | |
 | 12 | 4 | `capability flags` | bit 0 chat, bit 1 tools, bit 2 vision, bit 3 reserved |
