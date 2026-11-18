@@ -18,6 +18,35 @@ string head(XFormat xf) {
 
 
 
+// ---- how the rmsnorm's partial sums travel (RMS_STORE=i24|f32) --------------
+// Each of the 32 lanes holds a sum of squares whose magnitude follows the row's
+// rms: ~0.013 for pocket's layer 0 (|x| ~ 0.02, measured 2026-11-18) and ~1e8
+// for a 2300-magnitude residual.  The 24-bit encoding below has a *fixed*
+// 1/4096 step, so at layer 0 the lane sums land at 55-91 LSB -- about seven
+// bits -- and one LSB is 0.9% of a lane.  That is exactly the 0.212% scale
+// difference the board shows against Xe on layer 0's normalised row, which then
+// compounds over 28 layers.  `f32` stores the same four bytes as a bit-cast
+// float: exact at every magnitude.  `i24` stays the default so no pin moves.
+static std::string rms_store_glsl() {
+    static const bool f32 = [] {
+        const char* v = sw_str("RMS_STORE");
+        return v && !strcmp(v, "f32");
+    }();
+    if (f32) {
+        return std::string(
+            "float s_ld(vec4 c){uint u=(uint(int(c.x*255.0+0.5))<<24)|"
+            "(uint(int(c.y*255.0+0.5))<<16)|(uint(int(c.z*255.0+0.5))<<8)|"
+            "uint(int(c.w*255.0+0.5));return uintBitsToFloat(u);}\n"
+            "vec4 s_st(float v){uint u=floatBitsToUint(v);"
+            "return vec4(float(u>>24),float((u>>16)&255u),float((u>>8)&255u),"
+            "float(u&255u))/255.0;}\n"
+            "\n#define S_ST(V) s_st(V)\n"
+            "#define S_LD(C) s_ld(C)\n");
+    }
+    return "\n#define S_ST(V) encs(V)\n"
+           "#define S_LD(C) (x_i24raw(C)/4096.0)\n";
+}
+
 string q24_helpers() {
     return
         "float x_i24raw(vec4 c){return float(int(c.r*255.0+0.5))*16777216.0+"
@@ -122,6 +151,9 @@ const string kEncs4096 =
     "float r0=floor(q/16777216.0),g=floor(q/65536.0)-r0*256.0,"
     "b=floor(q/256.0)-r0*65536.0-g*256.0,a=q-r0*16777216.0-g*65536.0-b*256.0;"
     "return vec4(r0/255.0,g/255.0,b/255.0,a/255.0);}";
+// The 24-bit encoder plus the S_ST/S_LD pair `RMS_STORE` selects: every builder
+// that writes or reads an rms partial sum emits this, once.
+static string encs_glsl() { return kEncs4096 + rms_store_glsl(); }
 
 // Shape contract.  The q8 kernels step the column loop by four; the q4 kernels
 // take eight weights per texel in groups of 32.  A width that is not a multiple
@@ -715,13 +747,13 @@ string rms_stats2(int dim, XFormat rf) {
     const string RW = to_string(x_texels(dim, rf));
     return head(XFormat::I16_2) + x_residual_glsl(rf) + q24_helpers() +
         "uniform sampler2D XA,XB;"
-               + kEncs4096 +
+               + encs_glsl() +
         "void main(){int pid=int(gl_FragCoord.x);int per=(" + D + "+31)/32;"
         "int i0=(pid-(pid/32)*32)*per;"
         "float s=0.0;"
         "for(int k=0;k<per;k++){int i=i0+k;if(i<" + D + "){"
         "float v=(pid<32)?R1(XA,i," + RW + ".0):R1(XB,i," + RW + ".0);s+=v*v;}}"
-        "gl_FragColor=encs(s);}";
+        "gl_FragColor=S_ST(s);}";
 }
 
 string rms_norm_pair2(int dim, XFormat rf, bool use_eps_uniform) {
@@ -730,14 +762,14 @@ string rms_norm_pair2(int dim, XFormat rf, bool use_eps_uniform) {
     const string D = to_string(dim);
     const string RW = to_string(x_texels(dim, rf));
     const string DW = to_string(x_texels(dim, XFormat::I16_2));
-    return head(XFormat::I16_2) + x_residual_glsl(rf) + x_pair2_glsl() + q24_helpers() +
+    return head(XFormat::I16_2) + rms_store_glsl() + x_residual_glsl(rf) + x_pair2_glsl() + q24_helpers() +
         (use_eps_uniform ? "uniform sampler2D XA,XB,W,S;uniform float eps;"
                          : "uniform sampler2D XA,XB,W,S;") +
         "void main(){int k=int(gl_FragCoord.x);"
         "float ssa=0.0,ssb=0.0;"
         "for(int p=0;p<32;p++){"
-        "ssa+=x_i24raw(texture2D(S,vec2((float(p)+0.5)/64.0,0.5)))/4096.0;"
-        "ssb+=x_i24raw(texture2D(S,vec2((float(p+32)+0.5)/64.0,0.5)))/4096.0;}"
+        "ssa+=S_LD(texture2D(S,vec2((float(p)+0.5)/64.0,0.5)));"
+        "ssb+=S_LD(texture2D(S,vec2((float(p+32)+0.5)/64.0,0.5)));}"
         "float inva=inversesqrt(ssa/float(" + D + ")+" + eps_src + ");"
         "float invb=inversesqrt(ssb/float(" + D + ")+" + eps_src + ");"
         "vec4 wc=texture2D(W,vec2((float(k/2)+0.5)/float(" + DW + "),0.5));"
@@ -1715,24 +1747,24 @@ string rms_stats_split(int dim, XFormat residual) {
     const string RW = to_string(x_texels(dim, residual));
     return head(residual) + x_residual_glsl(residual) +
         "uniform sampler2D X;"
-               + kEncs4096 +
+               + encs_glsl() +
         "void main(){int pid=int(gl_FragCoord.x);int per=(" + D + "+31)/32;"
         "int i0=pid*per;float s=0.0;"
         "for(int k=0;k<per;k++){int i=i0+k;if(i<" + D + "){"
         "float v=R1(X,i," + RW + ".0);s+=v*v;}}"
-        "gl_FragColor=encs(s);}";
+        "gl_FragColor=S_ST(s);}";
 }
 
 string rms_stats_reduce() {
-    return "precision highp float;\n"
-        "uniform sampler2D S;"
-        "float raw(vec4 c){return floor(c.r*255.0+0.5)*16777216.0+"
-        "floor(c.g*255.0+0.5)*65536.0+floor(c.b*255.0+0.5)*256.0+"
-        "floor(c.a*255.0+0.5)-8388608.0;}"
-               + kEncs4096 +
+    // The 32 partial sums are read through S_LD, not a local 24-bit decoder:
+    // RMS_STORE=f32 changes what is in those texels, and a hardcoded decoder
+    // here silently read the float bytes as fixed point (PPL 6399 instead of
+    // 270.32, found 2026-11-18).
+    return std::string("precision highp float;\n") + q24_helpers() +
+        "uniform sampler2D S;" + encs_glsl() +
         "void main(){float s=0.0;for(int p=0;p<32;p++){"
-        "s+=raw(texture2D(S,vec2((float(p)+0.5)/32.0,0.5)))/4096.0;}"
-        "gl_FragColor=encs(s);}";
+        "s+=S_LD(texture2D(S,vec2((float(p)+0.5)/32.0,0.5)));}"
+        "gl_FragColor=S_ST(s);}";
 }
 
 // One elementwise multiply of two conv-block activations, two values per
@@ -1815,8 +1847,8 @@ string rms_norm(int dim, XFormat residual, XFormat out, bool fused_reduce,
     // trades one draw for 32 texture reads per output fragment.
     const string ss_read = fused_reduce
         ? "float ss=0.0;for(int p=0;p<32;p++){"
-          "ss+=x_i24raw(texture2D(S,vec2((float(p)+0.5)/32.0,0.5)))/4096.0;}"
-        : "float ss=x_i24raw(texture2D(S,vec2(0.5,0.5)))/4096.0;";
+          "ss+=S_LD(texture2D(S,vec2((float(p)+0.5)/32.0,0.5)));}"
+        : "float ss=S_LD(texture2D(S,vec2(0.5,0.5)));";
     const string D = to_string(dim);
     const string RW = to_string(x_texels(dim, residual));
     const string DW = to_string(x_texels(dim, XFormat::I16_2));
@@ -1860,7 +1892,7 @@ string rms_norm(int dim, XFormat residual, XFormat out, bool fused_reduce,
             "float v1=0.0;if(i1<" + D + ")v1=R1(X,i1," + RW + ".0)*inv*w1;"
             "gl_FragColor=x_st2(v0,v1);}";
     }
-    return head(residual) + x_residual_glsl(residual) + q24_helpers() +
+    return head(residual) + rms_store_glsl() + x_residual_glsl(residual) + q24_helpers() +
         "uniform sampler2D X,W,S;uniform float dummy;" + (use_eps_uniform ? "uniform float eps;" : string()) + body;
 }
 

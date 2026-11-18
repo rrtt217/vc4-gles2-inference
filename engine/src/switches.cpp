@@ -121,6 +121,8 @@ static const SwitchDef kSwitches[] = {
     // ---- Att: the attention block's own fixed-point ------------------------
     {"ATT_SCORE_GRID", "ATT_SCALE", SwKind::Num, "", SwStatus::Permanent, SwAxis::Att,
      "score/(max) grid: round(score*N), so +-32768/N range and 1/N step (1024)"},
+    {"RMS_STORE", "", SwKind::Str, "i24|f32", SwStatus::Probe, SwAxis::Act,
+     "the rms partial sums: 24-bit fixed point (default, 1/4096 step) or a bit-cast f32"},
     {"EXP", "ATT_EXP", SwKind::Str, "drv|poly", SwStatus::Probe, SwAxis::Act,
      "every exponential the shaders emit: drv (default) or a portable polynomial; VC4's SFU exp is 20x Xe's error"},
     {"ATT_SUM", "", SwKind::Str, "linear|log2", SwStatus::Permanent, SwAxis::Att,

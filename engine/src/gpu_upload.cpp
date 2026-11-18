@@ -6,6 +6,7 @@
 // keeps the scene ledger complete for `release_scene()`.
 
 #include "gpu.h"
+#include "switches.h"
 #include "gpu_internal.h"
 #include "shaders.h"
 #include "xformat.h"
@@ -208,6 +209,43 @@ GLuint GPU::rmsnorm(GLuint x, GLuint w, Target& out){
             glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         }
         layer_finish("NF_RMS");
+        // RMS_DUMP=1: the two scalars every layer's normalisation divides by.
+        // A cross-machine difference that is a *pure scale* on the normalised
+        // row (measured 1.00212 on layer 0, 2026-11-18) can only come from here
+        // or from the weight vector, and the weight is the same bytes.
+        if (const char* rd = getenv("RMS_DUMP")) {
+                // The 32 lane sums as the shader wrote them (24-bit fixed point,
+                // step 1/4096, biased by 2^23) -- the finest thing the rmsnorm
+                // produces.  `RMS_DUMP=<layer>` keeps the log to one layer.
+                static int layer_no = 0;
+                const bool want = !*rd || atoi(rd) == layer_no;
+                if (want) {
+                        sync();
+                        const vector<uint8_t> b = read_bytes(rms_partial_, RMS_PARTIALS, 1);
+                        fprintf(stderr, "RMSD %d %d", layer_no, RMS_PARTIALS);
+                        static const bool f32_store = [] {
+                                const char* v = sw_str("RMS_STORE");
+                                return v && !strcmp(v, "f32");
+                        }();
+                        for (int i = 0; i < RMS_PARTIALS && (size_t)(i * 4 + 3) < b.size(); ++i) {
+                                if (f32_store) {
+                                        const uint32_t u = ((uint32_t)b[i * 4] << 24) |
+                                                           ((uint32_t)b[i * 4 + 1] << 16) |
+                                                           ((uint32_t)b[i * 4 + 2] << 8) |
+                                                           (uint32_t)b[i * 4 + 3];
+                                        float f = 0;
+                                        memcpy(&f, &u, 4);
+                                        fprintf(stderr, " %.6g", (double)f);
+                                } else {
+                                        const long q = (long)b[i * 4] * 16777216L + (long)b[i * 4 + 1] * 65536L +
+                                                       (long)b[i * 4 + 2] * 256L + (long)b[i * 4 + 3] - 8388608L;
+                                        fprintf(stderr, " %ld", q);
+                                }
+                        }
+                        fprintf(stderr, "\n");
+                }
+                ++layer_no;
+        }
 
         GLuint pn = x_rms_norm(rms_eps_stated_);
         bind_fbo(out.fbo);

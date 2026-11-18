@@ -162,8 +162,9 @@ void GPU::init_egl(){
         const char* rf = sw_enum("RES");
         const char* af = sw_enum("ACT");
         const char* hf = sw_enum("FFN_HID");
+        const char* rs = sw_enum("RMS_STORE");
         const bool f32_res = (rf && !strcmp(rf, "f32")) || (af && !strcmp(af, "f32")) ||
-                             (hf && !strcmp(hf, "f32"));
+                             (hf && !strcmp(hf, "f32")) || (rs && !strcmp(rs, "f32"));
         if ((q4_shift_wanted() || env_flag("RWKV_GPU") || f32_res) && !getenv("Q4_SHIFT_NO_MESA")) {
                 setenv("MESA_GLES_VERSION_OVERRIDE", "3.0", 0);
                 setenv("MESA_GLSL_VERSION_OVERRIDE", "300", 0);

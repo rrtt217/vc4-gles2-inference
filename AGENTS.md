@@ -1,5 +1,24 @@
 # AGENTS.md
 
+## Absolute prohibitions (these override every other rule in this file)
+
+1. **Never revert without being told to.** Unless the user explicitly asks for a
+   specific revert in the current conversation, do not run `git checkout --
+   <path>`, `git restore`, `git reset`, `git stash` or `git clean`, do not delete
+   or overwrite uncommitted work, and do not move the working tree back to any
+   earlier state.  The moment the thought "revert and start over" appears is the
+   moment to stop and ask.
+2. **Never use "I should not leave half-finished work in the tree" as a reason to
+   revert.**  Half-finished work may stay in the tree; deleting it unasked may
+   not.  Either finish it in one pass, or leave it in place and write down
+   exactly how far it got and what is missing.
+3. **Never abandon a task halfway on your own.**  "continue", "you may continue"
+   and "keep going" all mean: drive the task to completion.  Do not stop because
+   a build fails, a test fails or an approach runs into a wall, do not downgrade
+   the work into a status report, and do not end a turn with a list of "next
+   steps" instead of the finished thing.  Find another route and keep going; the
+   report comes after the task is done.
+
 Instructions for coding agents working in this repository.  Machine-specific
 details live in local override files, not here:
 
