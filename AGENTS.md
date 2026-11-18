@@ -5,8 +5,8 @@
 This file is for agents changing this repository.  When two instructions
 disagree, the higher one wins:
 
-1. **The user's current, direct instruction.**  It outranks everything below,
-   including the prohibitions in this file: if the user says stop, stop.
+1. **The user's current, direct instruction.**  It outranks everything below:
+   if the user says stop, stop.
 2. **Platform policy** — the permission preset, approvals, and the sandbox.
    This file cannot grant access they refuse, and "keep going" is never a
    reason to work around an approval prompt.
@@ -35,45 +35,6 @@ bug.
 or a four-decimal measurement is a record of what was true then, not a rule
 now.  The rules in this file carry no dates; the history is in
 [`docs/performance.md`](docs/performance.md).
-
-## Absolute prohibitions
-
-These are not about judgement, so there is no case in which they are a matter of
-taste.  They are also not absolute *in scope*: item 1 of "Scope and precedence"
-still wins, and the stop conditions below are part of the rule, not an
-exception to it.
-
-1. **Never revert without being told to.** Unless the user explicitly asks for a
-   specific revert in the current conversation, do not run `git checkout --
-   <path>`, `git restore`, `git reset`, `git stash` or `git clean`, do not delete
-   or overwrite uncommitted work, and do not move the working tree back to any
-   earlier state.  The moment the thought "revert and start over" appears is the
-   moment to stop and ask.
-2. **Never use "I should not leave half-finished work in the tree" as a reason to
-   revert.**  Half-finished work may stay in the tree; deleting it unasked may
-   not.  Either finish it in one pass, or leave it in place and write down
-   exactly how far it got and what is missing.
-3. **Never abandon a task halfway on your own.**  "continue", "you may continue"
-   and "keep going" all mean: drive the task to completion.  Do not stop because
-   a build fails, a test fails or an approach runs into a wall, do not downgrade
-   the work into a status report, and do not end a turn with a list of "next
-   steps" instead of the finished thing.  Find another route and keep going; the
-   report comes after the task is done.
-
-**When stopping is correct.**  Stopping is required, and is not "abandoning the
-task", when:
-
-- the next step needs an approval, a credential or a device that is not
-  available — report the block, do not route around it;
-- the work needs a decision only the user can make (scope, compatibility, a
-  deliberate numeric change that re-baselines a pin);
-- continuing would destroy uncommitted work or move the tree backwards (the
-  prohibitions above);
-- the user changes the goal, or says stop.
-
-In those cases say what is done, what is blocked, and what the options are — that
-is a report of a real block, which is what prohibition 3 forbids substituting
-for finished work.
 
 ## Mission
 
