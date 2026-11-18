@@ -7641,3 +7641,59 @@ repetition penalty is the usable mode (`--temp 0.7 --topp 0.9 --top-k 64
 batteries at `--limit`, not from a greedy string.  On Xe the same container is
 fine; the divergence is the board's arithmetic plus this model's activation
 magnitudes, accumulated over 28 layers.
+
+## 2026-11-18 — the fine-grained layer comparison: no clean layer, and the oracle passes on both machines
+
+Everything above used a per-stage **cosine** on `HIDDEN_DUMP`, which said layer 0
+was identical to five decimals and the loss appeared around layer 7.  That
+reading was wrong for the purpose: on a residual of magnitude 2300 a cosine of
+0.99999 hides differences that matter, and it averages over 896 values.  The
+finer instrument is `ATT_DUMP` — the q16/q24 **integers** each of the five
+attention passes consumed and produced, for one position, every layer — plus
+`scripts/cmp_att.py` (new) to diff two such logs.
+
+Configuration: `ATT_SUM=log2 ATT_DUMP=12`, `SEQ=128 KV=q16 KV_GRID=512 RES=f32
+ACT=f32`, the same prompt and container on both machines.  `ATT_SUM=log2` because
+that is the domain `check_att.py` oracles; the comparison itself would work in
+either.
+
+**Both machines are integer-consistent with the specification.**
+`check_att.py --sum log2` reports `FAILURES: 0` for all 28 layers on Xe
+(`sum dev 0.000`, `att_out dev 0`) and on the board (`scores dev<=1`,
+`att_out dev=1`).  So no attention kernel is wrong on either driver -- the
+divergence is in what feeds the block.
+
+**And it is already there at layer 0.**  max |difference| per pass, Xe against
+the board, with the number of differing elements of 896 (q) / 1536 (k) / 182
+(scores over 14 heads x 13 positions) / 896 (att_out):
+
+| layer | qrot | k | score | att_out |
+|---|---:|---:|---:|---:|
+| 0 | 75 / 281 | 368 / 944 | 215 / 168 | 1 / 42 |
+| 1 | 116 / 728 | 116 / 1252 | 770 / 163 | 1 / 110 |
+| 6 | 72 / 817 | 179 / 1426 | 470 / 177 | 4 / 249 |
+| 7 | 181 / 862 | 233 / 1608 | 649 / 182 | **33** / 782 |
+| 8 | 667 / 891 | 789 / 1659 | 2322 / 182 | 242 / 863 |
+| 10 | 45 / 760 | 1938 / 1638 | 4480 / 179 | 1114 / 884 |
+| 23 | 504 / 892 | 3635 / 1660 | **13808** / 182 | 556 / 887 |
+| 27 | 442 / 887 | 3037 / 1659 | 6897 / 182 | 446 / 895 |
+
+Scores are on the 1/1024 grid, so layer 0's 215 is **0.21 natural units** and
+layer 23's 13808 is **13.5 nats** -- enough to reshape a softmax.  q and k (post
+rope, grids 1/256 and 1/kv_scale) grow the same way, and `att_out` only follows
+after layer 6.
+
+The layer-0 row is the result that changes the picture: qrot differs by up to 75
+LSB = **0.29** while the hidden state it was computed from agrees to five
+decimals.  Rope is a rotation with a host-uploaded table, so it cannot amplify a
+1e-5 input difference into 0.29 -- **the qkv matvec itself already differs on the
+first layer**.  That is consistent with q4 weights decoding a handful of nibbles
+differently on VC4 (each off-by-one nibble moves one product by 1/15 of an
+activation), which is the many-texel round-trip check that has *not* been run:
+`Q4_IMPORT_CHECK=1` only samples texel (0,0).  That check is now the top
+suspect again, with the integer dump as its evidence rather than a hypothesis.
+
+Tooling: `scripts/cmp_att.py` added (with a README row); `check_att.py` stays
+log2-only -- the linear domain's sum packing (`SMSI = 256/sum_scale`) did not
+match its formula in one pass, so the default configuration still has **no**
+oracle and that gap is recorded here rather than papered over.

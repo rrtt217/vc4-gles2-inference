@@ -24,4 +24,5 @@ the load guard and the statistics.
 | `dump_diff.awk` | the per-stage comparison itself | `STAGE_DUMP` files | called by `diff_paths.sh` |
 | `dump_stats.py` | per-row max/mean/clamp count of a dump (is a row saturating) | a `DUMP` file | manual |
 | `check_att.py` | the attention block's score/softmax/output recomputed from the integers it consumed | an `ATT_DUMP` log | manual, the offline oracle |
+| `cmp_att.py` | where do two machines stop agreeing, at the finest resolution the engine prints?  Compares two `ATT_DUMP` logs element by element, layer by layer, per attention pass; `check_att.py` is the one-machine oracle, this is the cross-machine diff |
 | `cmp_logits.py` | two `LOGITS_OUT` dumps, tile by tile | two dumps | manual |
