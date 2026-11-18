@@ -641,20 +641,27 @@ GLuint GPU::x_q8_add_pair(int rows, int cols, XFormat xf, bool wrow){
         // interleaved without a second build.
         const char* v = getenv("Q8AP_INLINE");
         const bool inl = !(v && strcmp(v, "0") == 0);
+        // The residual's format belongs in the key as well as in the text: a
+        // bf16 residual takes the generic path even when the fast I16_2 one is
+        // available, and the two are different programs.
         return x_prog("xq8ap_" + to_string(rows) + "_" + to_string(cols) + "_" +
-                      x_format_name(xf) + (inl ? "" : "_gen") + (wrow ? "_wr" : ""),
-                      matvec_q8_add_pair(rows, cols, xf, inl, wrow));
+                      x_format_name(xf) + (inl ? "" : "_gen") + (wrow ? "_wr" : "") +
+                      (res_fmt_ == XFormat::I16_2 ? std::string() : std::string("_") + x_format_name(res_fmt_)),
+                      matvec_q8_add_pair(rows, cols, xf, res_fmt_, inl, wrow));
     }
 
 GLuint GPU::x_i4_add_pair(int rows, int cols, XFormat xf, bool fmt4){
         const bool inl = q4_inline("w2");
+        // The residual's format is part of the key: this kernel writes two rows
+        // into one texel, so a bf16 residual and a q16 one are different texts.
         const string key = string(fmt4 ? "xi4ap4_" : "xi4ap_") + to_string(rows) + "_" +
-                           to_string(cols) + "_" + x_format_name(xf) + (inl ? "" : "_gen");
+                           to_string(cols) + "_" + x_format_name(xf) + "_" +
+                           x_format_name(res_fmt_) + (inl ? "" : "_gen");
         auto it = programs_.find(key);
         if (it != programs_.end()) return it->second;
         g_prog_key = key;
-        GLuint p = link_program(fmt4 ? matvec_i4_add_pair_4x4(rows, cols, xf, inl)
-                                     : matvec_i4_add_pair(rows, cols, xf, inl));
+        GLuint p = link_program(fmt4 ? matvec_i4_add_pair_4x4(rows, cols, xf, res_fmt_, inl)
+                                     : matvec_i4_add_pair(rows, cols, xf, res_fmt_, inl));
         programs_[key] = p;
         return p;
     }

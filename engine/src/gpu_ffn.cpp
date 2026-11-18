@@ -75,7 +75,10 @@ void GPU::ffn_split_chunked(const Mat& w1a, const Mat& w3a, const Mat& w1b, cons
         // two-buffer path below (`swiglu_2row`, which has an f32 output).
         // Without this condition FFN_HID=f32 produced a garbage half-width
         // buffer and the model answered in one repeated token (2026-11-17).
-        const bool pair = pair_env && ffn_fmt_ != XFormat::F32 &&
+        // The pair path's buffer is a q16 pair layout by construction; f32 and
+        // bf16 both take the two-buffer path below (bf16 measured 60.93 against
+        // 7148610 on pocket when it was let through, 2026-11-18).
+        const bool pair = pair_env && ffn_fmt_ == XFormat::I16_2 &&
                           ((w1a.type == WeightType::INT8 && w3a.type == WeightType::INT8) ||
                            (w1a.type == WeightType::INT4 && w3a.type == WeightType::INT4));
         if (pair) {

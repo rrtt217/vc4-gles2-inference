@@ -216,6 +216,7 @@ Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
             // decision is made in exactly one place.
             if (const char* a = sw_enum("ACT")) {
                 if (!strcmp(a, "f32")) gpu_.act_fmt_ = XFormat::F32;
+                else if (!strcmp(a, "bf16")) gpu_.act_fmt_ = XFormat::BF16;
                 else if (!strcmp(a, "i8")) {
                     if (q8_model) gpu_.act_fmt_ = XFormat::I8_4;
                     else cerr << "ACT=i8 needs an all-q8 model; keeping the q16 streams\n";
@@ -232,6 +233,10 @@ Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
                     else cerr << "FFN_HID=i8 needs an all-q8 model; keeping the q16 hidden\n";
                 } else if (!strcmp(fh, "f32")) {
                     gpu_.ffn_fmt_ = XFormat::F32;
+                } else if (!strcmp(fh, "bf16")) {
+                    // The middle rung again: pocket's hidden reaches 1005, which
+                    // q16 rails at +-128, and f32 doubles the store.
+                    gpu_.ffn_fmt_ = XFormat::BF16;
                 }
             }
             // Residual stream packed two int16 per texel: halves the fetch count in
@@ -260,12 +265,16 @@ Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
             // the residual-consuming kernels store q16, so a container's own
             // declaration wins over the default but not over an explicit RES.
             const char* res = sw_enum("RES");
-            if (res && !strcmp(res, "f32")) gpu_.res_fmt_ = XFormat::F32;
+            // bf16: f32's exponent range at q16's two bytes a value -- the rung
+            // between "q16 rails at +-128" and "f32 costs 21% more decode"
+            // (docs/performance.md, 2026-11-18).
+            if (res && !strcmp(res, "bf16")) gpu_.res_fmt_ = XFormat::BF16;
+            else if (res && !strcmp(res, "f32")) gpu_.res_fmt_ = XFormat::F32;
             else if (res && !strcmp(res, "i24")) gpu_.res_fmt_ = XFormat::I24_1;
             else if (res && !strcmp(res, "i16_1")) gpu_.res_fmt_ = XFormat::I16_1;
             else if (m_.res_q24) gpu_.res_fmt_ = XFormat::I24_1;
             else gpu_.res_fmt_ = wo_packs ? XFormat::I16_2 : XFormat::I16_1;
-            gpu_.res_pack_ = gpu_.res_fmt_ == XFormat::I16_2;
+            gpu_.res_pack_ = x_per_texel(gpu_.res_fmt_) == 2;
             if (res && strcmp(res, "i16") && m_.res_q24 && strcmp(res, "i24"))
                 cerr << "RES overrides the container's q24 residual\n";
         }

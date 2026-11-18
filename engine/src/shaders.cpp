@@ -762,7 +762,7 @@ string rms_norm_pair2(int dim, XFormat rf, bool use_eps_uniform) {
     const string D = to_string(dim);
     const string RW = to_string(x_texels(dim, rf));
     const string DW = to_string(x_texels(dim, XFormat::I16_2));
-    return head(XFormat::I16_2) + rms_store_glsl() + x_residual_glsl(rf) + x_pair2_glsl() + q24_helpers() +
+    return head(XFormat::I16_2) + rms_store_glsl() + x_residual_glsl(rf) + x_pair2_glsl(rf) + q24_helpers() +
         (use_eps_uniform ? "uniform sampler2D XA,XB,W,S;uniform float eps;"
                          : "uniform sampler2D XA,XB,W,S;") +
         "void main(){int k=int(gl_FragCoord.x);"
@@ -861,7 +861,7 @@ string matvec_q8_p2_add(int rows, int cols, XFormat rf, bool wrow) {
     const string WD = wrow ? wrow_scale(rows) : "";
     const string SP = wrow ? "float s0=wsr(r);" : "";
     const string SC = wrow ? "s0" : "ws";
-    return head(XFormat::I16_2) + x_pair2_glsl() + x_residual_glsl(rf) +
+    return head(XFormat::I16_2) + x_pair2_glsl(rf) + x_residual_glsl(rf) +
         "uniform sampler2D W,X,RA,RB;uniform float ws;"
         + (wrow ? "\n" : "") + WD +
         "void main(){int r=int(gl_FragCoord.x);" + SP + "float sa=0.0,sb=0.0;"
@@ -994,7 +994,7 @@ string matvec_q8_add(int rows, int cols, XFormat xf, XFormat rf, bool wrow) {
         "gl_FragColor=XST1Q(s*" + SC + "+res);}";
 }
 
-string matvec_q8_add_pair(int rows, int cols, XFormat xf, bool inl, bool wrow) {
+string matvec_q8_add_pair(int rows, int cols, XFormat xf, XFormat rf, bool inl, bool wrow) {
     need_shape("matvec_q8_add_pair", rows, cols, 4);
     const int axw = x_texels(cols, xf);
     const int rw = (rows + 1) / 2;
@@ -1009,7 +1009,7 @@ string matvec_q8_add_pair(int rows, int cols, XFormat xf, bool inl, bool wrow) {
     // that loop measurably slower.  r0 is always even and r1 always odd, so the
     // two residuals are the halves of one I16_2 texel.  Accumulation order and
     // the q16 rounding are unchanged, so the packed output is bit-identical.
-    if (inl && xf == XFormat::I16_2) {
+    if (inl && xf == XFormat::I16_2 && rf == XFormat::I16_2) {
         return "precision highp float;uniform sampler2D W,X,R;uniform float ws;" + WD +
                kDec16A + kDec16B
                + kEnc16Raw +
@@ -1031,7 +1031,7 @@ string matvec_q8_add_pair(int rows, int cols, XFormat xf, bool inl, bool wrow) {
                "vec2 p1=enc16(s0*" + SC0 + "+res0),p2=enc16(s1*" + SC1 + "+res1);"
                "gl_FragColor=vec4(p1.x,p1.y,p2.x,p2.y);}";
     }
-    return head(xf) + x_residual_glsl(XFormat::I16_2) +
+    return head(xf) + x_pair2_glsl(rf) + x_residual_glsl(rf) +
         "uniform sampler2D W,X,R;uniform float ws;" + WD +
         "void main(){int t=int(gl_FragCoord.x);int r0=2*t;int r1=r0+1;" + SP +
         "float res0=R1Q(R,r0," + to_string(rw) + ".0);"
@@ -1046,7 +1046,7 @@ string matvec_q8_add_pair(int rows, int cols, XFormat xf, bool inl, bool wrow) {
         "vec4 x=X4Q(X,q*4," + to_string(axw) + ".0);"
         "s0+=w0.x*x.x+w0.y*x.y+w0.z*x.z+w0.w*x.w;"
         "s1+=w1.x*x.x+w1.y*x.y+w1.z*x.z+w1.w*x.w;}"
-        "gl_FragColor=x_st2q(s0*" + SC0 + "+res0,s1*" + SC1 + "+res1);}";
+        "gl_FragColor=x_p2_stq(s0*" + SC0 + "+res0,s1*" + SC1 + "+res1);}";
 }
 
 string matvec_i16(int rows, int cols, XFormat xf) {
@@ -1113,8 +1113,8 @@ string matvec_i6(int rows, int cols, XFormat xf, bool wrow) {
     need_shape("matvec_i6", rows, cols, 8);
     // X4Q is format-generic, so a float32 activation row works here too; the
     // q16 pair grid is only what the VC4 fast path was tuned for.
-    if (xf != XFormat::I16_2 && xf != XFormat::F32)
-        { fprintf(stderr, "shader matvec_i6: q6 head needs I16_2 or F32 activations\n"); exit(2); }
+    if (xf != XFormat::I16_2 && xf != XFormat::F32 && xf != XFormat::BF16)
+        { fprintf(stderr, "shader matvec_i6: q6 head needs I16_2, BF16 or F32 activations\n"); exit(2); }
     const int axw = x_texels(cols, xf);
     const int lo_w = cols / 8;    // one texel = 4 bytes = 8 nibbles
     const int hi_w = cols / 16;   // one texel = 4 bytes = 16 two-bit values
@@ -1155,12 +1155,12 @@ string matvec_i6(int rows, int cols, XFormat xf, bool wrow) {
 // q4 residual-add, two rows per fragment: rows 2t and 2t+1 share one activation
 // decode and one residual fetch, and are written as a raw q16 pair (x_st2q, since
 // the q4 accumulator works in raw q16 units, not activation units).
-string matvec_i4_add_pair(int rows, int cols, XFormat xf, bool inl) {
+string matvec_i4_add_pair(int rows, int cols, XFormat xf, XFormat rf, bool inl) {
     need_shape("matvec_i4_add_pair", rows, cols, 32);
     const int texw = cols / 8;
     const int groups = (cols + 31) / 32;
     const int rw = (rows + 1) / 2;
-    return q4_head(xf, inl) + x_residual_glsl(XFormat::I16_2) +
+    return q4_head(xf, inl) + x_pair2_glsl(rf) + x_residual_glsl(rf) +
         "uniform sampler2D W,P,X,R;uniform float ps;"
         "float dot4(vec4 w0,vec4 xa,vec4 xb){"
         + q4_taps("w0") +
@@ -1186,20 +1186,20 @@ string matvec_i4_add_pair(int rows, int cols, XFormat xf, bool inl) {
         "dotb+=dot4(w0,xa,xb);}"
         "s0+=sa*dota+ma*xsum;s1+=sb*dotb+mb*xsum;}"
         "float res0=R1Q(R,r0," + to_string(rw) + ".0),res1=R1Q(R,r1," + to_string(rw) + ".0);"
-        "gl_FragColor=x_st2q(s0+res0,s1+res1);}";
+        "gl_FragColor=x_p2_stq(s0+res0,s1+res1);}";
 }
 
 // Q4_FMT=rgba4 residual-add: w2 (and wo) with the weights bound as 4-bit
 // texels, two per eight weights, no decode, and the group scale folded as in
 // the gate.  The nibble reversal at upload (make_q4_texture) is what lets the
 // dot read the texel in natural column order.
-string matvec_i4_add_pair_4x4(int rows, int cols, XFormat xf, bool inl) {
+string matvec_i4_add_pair_4x4(int rows, int cols, XFormat xf, XFormat rf, bool inl) {
     need_shape("matvec_i4_add_pair_4x4", rows, cols, 32);
     const int texw = cols / 4;
     const int groups = (cols + 31) / 32;
     const int rw = (rows + 1) / 2;
     const string ROWS = to_string(rows), GROUPS = to_string(groups), TEXW = to_string(texw);
-    return q4_head(xf, inl) + x_residual_glsl(XFormat::I16_2) +
+    return q4_head(xf, inl) + x_pair2_glsl(rf) + x_residual_glsl(rf) +
         "uniform sampler2D W,P,X,R;uniform float ps;"
         "void main(){int t=int(gl_FragCoord.x);int r0=2*t;int r1=r0+1;"
         "float s0=0.0,s1=0.0;"
@@ -1221,7 +1221,7 @@ string matvec_i4_add_pair_4x4(int rows, int cols, XFormat xf, bool inl) {
         "dotb+=wr0.x*xa.x+wr0.y*xa.y+wr0.z*xa.z+wr0.w*xa.w+wr1.x*xb.x+wr1.y*xb.y+wr1.z*xb.z+wr1.w*xb.w;}"
         "s0+=sa*dota+ma*xsum;s1+=sb*dotb+mb*xsum;}"
         "float res0=R1Q(R,r0," + to_string(rw) + ".0),res1=R1Q(R,r1," + to_string(rw) + ".0);"
-        "gl_FragColor=x_st2q(s0+res0,s1+res1);}";
+        "gl_FragColor=x_p2_stq(s0+res0,s1+res1);}";
 }
 
 // q4 FFN gate, paired: one fragment computes w1[r] and w3[r], sharing the
@@ -1662,7 +1662,15 @@ string swiglu_pair(int hidden, XFormat out, int hs) {
                "gl_FragColor=x_f32enc(actv(i)" + HM + ");}";
         // head(I16_2), not head(F32): the pair buffer A holds two q16 values a
         // texel and actv() reads it with X2.  Only the *store* is f32.
-        return head(XFormat::I16_2) + poly_src() + x_f32_store_glsl() + HD + "uniform sampler2D A;" + act + body;
+        return head(XFormat::I16_2) + poly_src() + x_f32_store_glsl() + x_bf16_glsl() + HD +
+           "uniform sampler2D A;" + act + body;
+    }
+    if (out == XFormat::BF16) {
+        // Two values a texel, same pair index as the q16 form; the store is bf16.
+        body = "void main(){int t=int(gl_FragCoord.x);int i0=2*t;"
+               "gl_FragColor=x_bf16enc2(actv(i0)" + HM + ",actv(i0+1)" + HM + ");}";
+        return head(XFormat::I16_2) + poly_src() + x_bf16_glsl() + HD +
+               "uniform sampler2D A;" + act + body;
     }
     if (out == XFormat::I8_4) {
         body = "void main(){int t=int(gl_FragCoord.x);int i0=4*t;"
@@ -1671,7 +1679,8 @@ string swiglu_pair(int hidden, XFormat out, int hs) {
         body = "void main(){int t=int(gl_FragCoord.x);int i0=2*t;"
                "gl_FragColor=x_st2(actv(i0)" + HM + ",actv(i0+1)" + HM + ");}";
     }
-    return head(XFormat::I16_2) + poly_src() + HD + "uniform sampler2D A;" + act + body;
+    return head(XFormat::I16_2) + poly_src() + x_bf16_glsl() + HD +
+           "uniform sampler2D A;" + act + body;
 }
 
 string swiglu_2row(int hidden, XFormat out, int hs) {
@@ -1692,7 +1701,14 @@ string swiglu_2row(int hidden, XFormat out, int hs) {
         // pocket's peaks at 1005 (probe_residuals.py).
         body = "void main(){int i=int(gl_FragCoord.x);"
                "gl_FragColor=x_f32enc(yat(i)" + HM + ");}";
-        return head(XFormat::I16_2) + poly_src() + x_f32_store_glsl() + HD + q24_helpers() +
+        return head(XFormat::I16_2) + poly_src() + x_f32_store_glsl() + x_bf16_glsl() +
+               HD + q24_helpers() +
+               "uniform sampler2D A;" + read + body;
+    }
+    if (out == XFormat::BF16) {
+        body = "void main(){int t=int(gl_FragCoord.x);int i0=2*t;"
+               "gl_FragColor=x_bf16enc2(yat(i0)" + HM + ",yat(i0+1)" + HM + ");}";
+        return head(XFormat::I16_2) + poly_src() + x_bf16_glsl() + HD + q24_helpers() +
                "uniform sampler2D A;" + read + body;
     }
     if (out == XFormat::I8_4) {
@@ -1731,6 +1747,11 @@ string swiglu(int hidden, bool fused, XFormat out, int hs) {
                "gl_FragColor=x_f32enc(yat(i)" + HM + ");}";
         return head(XFormat::I16_2) + x_f32_store_glsl() + HD + q24_helpers() + read + body;
     }
+    if (out == XFormat::BF16) {
+        body = "void main(){int t=int(gl_FragCoord.x);int i0=2*t;"
+               "gl_FragColor=x_bf16enc2(yat(i0)" + HM + ",yat(i0+1)" + HM + ");}";
+        return head(XFormat::I16_2) + x_bf16_glsl() + HD + q24_helpers() + read + body;
+    }
     if (out == XFormat::I8_4) {
         body = "void main(){int t=int(gl_FragCoord.x);int i0=4*t;"
                "gl_FragColor=x_i8enc4(yat(i0)" + HM + ",yat(i0+1)" + HM + ",yat(i0+2)" + HM + ",yat(i0+3)" + HM + ");}";
@@ -1738,7 +1759,7 @@ string swiglu(int hidden, bool fused, XFormat out, int hs) {
         body = "void main(){int t=int(gl_FragCoord.x);int i0=2*t;"
                "gl_FragColor=x_st2(yat(i0)" + HM + ",yat(i0+1)" + HM + ");}";
     }
-    return head(XFormat::I16_2) + poly_src() + HD + q24_helpers() + read + body;
+    return head(XFormat::I16_2) + poly_src() + x_bf16_glsl() + HD + q24_helpers() + read + body;
 }
 
 string rms_stats_split(int dim, XFormat residual) {
@@ -1889,10 +1910,12 @@ string rms_norm(int dim, XFormat residual, XFormat out, bool fused_reduce,
             + ss_read +
             "float inv=inversesqrt(ss/float(" + D + ")+" + eps_src + ");" + wsplit +
             "float v0=R1(X,i0," + RW + ".0)*inv*w0;"
-            "float v1=0.0;if(i1<" + D + ")v1=R1(X,i1," + RW + ".0)*inv*w1;"
-            "gl_FragColor=x_st2(v0,v1);}";
+            "float v1=0.0;if(i1<" + D + ")v1=R1(X,i1," + RW + ".0)*inv*w1;" +
+            (out == XFormat::BF16 ? string("gl_FragColor=x_bf16enc2(v0,v1);}")
+                                  : string("gl_FragColor=x_st2(v0,v1);}"));
     }
-    return head(residual) + rms_store_glsl() + x_residual_glsl(residual) + q24_helpers() +
+    return head(residual) + rms_store_glsl() + x_residual_glsl(residual) +
+           (residual == XFormat::BF16 ? string() : x_bf16_glsl()) + q24_helpers() +
         "uniform sampler2D X,W,S;uniform float dummy;" + (use_eps_uniform ? "uniform float eps;" : string()) + body;
 }
 

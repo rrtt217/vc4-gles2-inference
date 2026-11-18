@@ -117,9 +117,9 @@ vector<Case> cases() {
     add(v, "matvec_q8_add_768x768_i8_4_i16_1",
         [] { return matvec_q8_add(768, 768, I8_4, I16_1); });
     add(v, "matvec_q8_add_pair_768x768_i16_2_inl",
-        [] { return matvec_q8_add_pair(768, 768, I16_2, true); });
+        [] { return matvec_q8_add_pair(768, 768, I16_2, I16_2, true); });
     add(v, "matvec_q8_add_pair_768x768_i16_2_gen",
-        [] { return matvec_q8_add_pair(768, 768, I16_2, false); });
+        [] { return matvec_q8_add_pair(768, 768, I16_2, I16_2, false); });
 
     // --- i16 weights (legacy precision, still loadable)
     add(v, "matvec_i16_6400x768_i16_2", [] { return matvec_i16(6400, 768, I16_2); });
@@ -138,9 +138,9 @@ vector<Case> cases() {
     add(v, "matvec_i4_pair_swiglu_2432x768_i16_2_gen",
         [] { return matvec_i4_pair_swiglu(2432, 768, I16_2, false); });
     add(v, "matvec_i4_add_pair_768x768_i16_2_inl",
-        [] { return matvec_i4_add_pair(768, 768, I16_2, true); });
+        [] { return matvec_i4_add_pair(768, 768, I16_2, I16_2, true); });
     add(v, "matvec_i4_add_pair_768x768_i16_2_gen",
-        [] { return matvec_i4_add_pair(768, 768, I16_2, false); });
+        [] { return matvec_i4_add_pair(768, 768, I16_2, I16_2, false); });
     // The 4-bit (Q4_FMT=rgba4) kernels, the default q4 path.  The gate is the
     // flat 8-wide form (byte-identical to the nested, ~43% faster on VC4).
     add(v, "matvec_i4_pair_swiglu_4x4_1216x768_i16_2",

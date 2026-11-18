@@ -15,6 +15,7 @@ const char* x_format_name(XFormat f) {
         case XFormat::I8_4: return "x8_4";
         case XFormat::I24_1: return "x24_1";
         case XFormat::F32: return "f32";
+        case XFormat::BF16: return "bf16";
     }
     return "x?";
 }
@@ -26,6 +27,7 @@ int x_per_texel(XFormat f) {
         case XFormat::I8_4: return 4;
         case XFormat::I24_1: return 1;
         case XFormat::F32: return 1;
+        case XFormat::BF16: return 2;
     }
     return 0;
 }
@@ -38,6 +40,7 @@ int x_texels(int count, XFormat f) {
 bool x_is_int8(XFormat f) { return f == XFormat::I8_4; }
 bool x_is_int24(XFormat f) { return f == XFormat::I24_1; }
 bool x_is_f32(XFormat f) { return f == XFormat::F32; }
+bool x_is_bf16(XFormat f) { return f == XFormat::BF16; }
 
 std::vector<uint8_t> x_pack(const float* values, int count, XFormat f) {
     const int texels = x_texels(count, f);
@@ -68,6 +71,19 @@ std::vector<uint8_t> x_pack(const float* values, int count, XFormat f) {
             p[1] = (uint8_t)(u >> 16);
             p[2] = (uint8_t)(u >> 8);
             p[3] = (uint8_t)u;
+        } else if (f == XFormat::BF16) {
+            // Two bfloat16 values a texel, round-to-nearest-even: the top 16
+            // bits of the float after adding 0x7FFF + the bit that makes ties
+            // even.  Matches x_bf16i in the GLSL below, so a host-packed row and
+            // a shader-written row decode the same way.
+            for (int k = 0; k < 2; ++k) {
+                const int i = 2 * t + k;
+                uint32_t u = 0;
+                if (i < count) memcpy(&u, &values[i], 4);
+                const uint32_t r = (u + 0x7FFFu + ((u >> 16) & 1u)) >> 16;
+                p[2 * k] = (uint8_t)(r >> 8);
+                p[2 * k + 1] = (uint8_t)(r & 0xFF);
+            }
         } else if (f == XFormat::I16_2) {
             const int16_t q0 = quantize_act(values[2 * t]);
             const int16_t q1 = 2 * t + 1 < count ? quantize_act(values[2 * t + 1]) : 0;
@@ -142,6 +158,23 @@ static const char* q16_pair_glsl() {
             "if(u3>=32767.5)u3-=65536.0;return vec4(u0,u1,u2,u3);}\n";
 }
 
+std::string x_bf16_glsl() {
+    // Only the bf16 functions, no X1/X2 macros: a kernel that already carries
+    // its own X-macros (the attention codec's activation format) still wants
+    // these, and defining the macros twice is a preprocessor error.
+    return
+        "uint x_bf16i(float v){uint u=floatBitsToUint(v);"
+        "u=(u+0x7FFFu+((u>>16)&1u))>>16;return u&0xFFFFu;}\n"
+        "float x_bf16(vec2 c){uint hi=uint(int(c.x*255.0+0.5)),"
+        "lo=uint(int(c.y*255.0+0.5));return uintBitsToFloat((hi<<24)|(lo<<16));}\n"
+        "vec2 x_bf16pair(vec4 c){return vec2(x_bf16(c.rg),x_bf16(c.ba));}\n"
+        "vec4 x_bf16enc(float v){uint u=x_bf16i(v);"
+        "return vec4(float(u>>8)/255.0,float(u&255u)/255.0,0.0,1.0);}\n"
+        "vec4 x_bf16enc2(float a,float b){uint ua=x_bf16i(a),ub=x_bf16i(b);"
+        "return vec4(float(ua>>8)/255.0,float(ua&255u)/255.0,"
+        "float(ub>>8)/255.0,float(ub&255u)/255.0);}\n";
+}
+
 std::string x_glsl(XFormat f) {
     // Values crossing this boundary are real activations.  XST* converts to
     // q16/q8 on write.  X1/X2/X4 return real values; the Q-suffixed variants
@@ -207,6 +240,25 @@ std::string x_glsl(XFormat f) {
                 "#define X1Q(T,I,TW) x_q24raw(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)))\n"
                 "#define X2Q(T,B,TW) vec2(X1Q(T,(B),TW),X1Q(T,(B)+1,TW))\n"
                 "#define X4Q(T,B,TW) vec4(X1Q(T,(B),TW),X1Q(T,(B)+1,TW),X1Q(T,(B)+2,TW),X1Q(T,(B)+3,TW))\n";
+            break;
+        case XFormat::BF16:
+            // bfloat16, two values a texel: the top 16 bits of the f32, so the
+            // exponent is float32's and the mantissa is 8 bits.  No grid, no
+            // scale, and the Q variants return value*256 like every other
+            // format's do (the matvec kernels carry the 1/256 in their scale).
+            s +=
+                x_bf16_glsl() +
+                "#define X1(T,I,TW) ((((I)/2)*2)==(I) ? "
+                "x_bf16(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).rg) : "
+                "x_bf16(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).ba))\n"
+                "#define X2(T,BASE,TW) x_bf16pair(texture2D(T,vec2((float((BASE)/2)+0.5)/(TW),0.5)))\n"
+                "#define X4(T,BASE,TW) vec4(X2(T,(BASE),TW),X2(T,(BASE)+2,TW))\n"
+                "#define XST1(V) x_bf16enc(V)\n"
+                "#define XST2(A,B) x_bf16enc2(A,B)\n"
+                "#define XST4(A,B,C,D) vec4(0.0)\n"
+                "#define X1Q(T,I,TW) (X1(T,(I),(TW))*256.0)\n"
+                "#define X2Q(T,B,TW) (X2(T,(B),(TW))*256.0)\n"
+                "#define X4Q(T,B,TW) vec4(X2(T,(B),(TW))*256.0,X2(T,(B)+2,(TW))*256.0)\n";
             break;
         case XFormat::I16_1:
             s +=
@@ -305,15 +357,36 @@ std::string x_residual_glsl(XFormat f) {
                 "#define R2(T,BASE,TW) vec2(R1(T,(BASE),TW),R1(T,(BASE)+1,TW))\n"
                 "#define R1Q(T,I,TW) (R1(T,(I),TW)*256.0)\n"
                 "#define XST1Q(Q) x_f32renc((Q)/256.0)\n";
+        case XFormat::BF16:
+            // Same two-halves-a-texel layout; the residual add stores one value
+            // a texel (XST1Q) so the pair is only used for reads.
+            return
+                "#define R1(T,I,TW) ((((I)/2)*2)==(I) ? "
+                "x_bf16(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).rg) : "
+                "x_bf16(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).ba))\n"
+                "#define R2(T,BASE,TW) vec2(R1(T,(BASE),TW),R1(T,(BASE)+1,TW))\n"
+                "#define R1Q(T,I,TW) (R1(T,(I),(TW))*256.0)\n"
+                "#define XST1Q(Q) x_bf16enc((Q)/256.0)\n";
         case XFormat::I8_4:
             return {};
     }
+
     return {};
 }
 
 int x_pair2_texels(int count) { return count; }
 
-std::string x_pair2_glsl() {
+std::string x_pair2_glsl(XFormat f) {
+    // Two values a texel, as the paired prefill kernels read and write them.
+    // The default is the q16 pair; bf16 uses the same layout with its own
+    // rounding, so a residual stream can be bf16 without a second pair kernel.
+    if (f == XFormat::BF16) {
+        return x_bf16_glsl() +
+            "float x_p2_a(vec4 c){return x_bf16(c.rg);}\n"
+            "float x_p2_b(vec4 c){return x_bf16(c.ba);}\n"
+            "vec4 x_p2_st(float a,float b){return x_bf16enc2(a,b);}\n"
+            "vec4 x_p2_stq(float qa,float qb){return x_bf16enc2(qa/256.0,qb/256.0);}\n";
+    }
     return
         "float x_p2_a(vec4 c){float u=c.r*65280.0+c.g*255.0;"
         "if(u>=32768.0)u-=65536.0;return u;}\n"

@@ -7899,3 +7899,44 @@ Still not portable, and deliberately so: the q4 dma-buf import
 which has a functional fallback in `Q4_FMT=0` (measured on the board to produce
 **bit-identical** numbers, 2026-11-18), and the `MESA_*` overrides themselves,
 which are a no-op elsewhere.
+
+## 2026-11-18 — `XFormat::BF16`, and the three streams that can use it
+
+bfloat16 is the top half of an f32: float32's exponent, an 8-bit mantissa, two
+bytes a value.  It is now a first-class `XFormat` (`BF16 = 5`, two values a
+texel, round-to-nearest-even in both the GLSL and the host packer) rather than a
+private codec inside the attention block, and all three streams that could use
+it do:
+
+| stream | axis | default | bf16 measured |
+|---|---|---|---|
+| KV cache | `KV=bf16` | q16/i24 | **270.3891**, bit-identical to the codec it replaced |
+| residual | `RES=bf16` | container's q24 | pocket **58.9558** (i24 62.3863, f32 59.3594) |
+| activation streams | `ACT=bf16` | i16 | pocket **61.3250** (i16 62.3863, f32 61.8216) |
+| FFN hidden | `FFN_HID=bf16` | i16 | pocket **60.9346** (i16 62.3863, f32 59.0763) |
+
+MiniMind3, same corpus: `ACT=bf16` 275.4097 against i16's 270.3170 and f32's
+272.2534; `FFN_HID=bf16` 275.1395.  That is the trade as designed -- bf16 has
+0.4% *relative* precision, so it beats q16 where the magnitudes are large
+(pocket's residual reaches 2300, its FFN hidden 1005) and loses to q16 where they
+are small (MiniMind3's residual is ~20, where q16's absolute 1/256 is finer).
+It is the rung between "q16 rails at ±128" and "f32 costs twice the store and
+21% of the decode".
+
+**Defaults do not move**: q8 PPL 270.3170, q4 326.1483 and the q8 golden string
+are unchanged, and 23 programs' digests moved only because their text now
+carries the bf16 helpers (re-baselined in the same commit, with that evidence).
+
+Three things this cost, each found by a wrong measurement rather than by reading:
+
+- **The pair paths pack two *positions*, not two values.**  `x_p2_*` is the
+  prefill pair layout, so teaching it bf16 is not the same as teaching the
+  per-position pair kernels; `RES=bf16` produced 1e80 until `matvec_q8_add_pair`,
+  `matvec_i4_add_pair` and their wrappers took the residual's format *and* the
+  q8 inline fast path was guarded on `rf == I16_2`.
+- **The FFN pair path is q16 by construction.**  `ffn_fmt_` bf16 has to take the
+  two-buffer path, exactly as f32 does: it measured 7148610 with the pair path
+  and 60.93 without.
+- **The q6 tied head refused bf16 loudly** (`q6 head needs I16_2 or F32
+  activations`) instead of computing garbage -- the closed-set rule working as
+  intended on a *kernel* rather than a switch.

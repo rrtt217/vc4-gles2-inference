@@ -81,7 +81,8 @@ std::string p2_split(int rows, XFormat rf);
 std::string matvec_q8_pair_fused(int rows, int cols, XFormat xf, bool wrow = false);
 std::string matvec_q8_pair_logits(int rows, int cols, XFormat xf, bool wrow = false);
 std::string matvec_q8_add(int rows, int cols, XFormat xf, XFormat rf, bool wrow = false);
-std::string matvec_q8_add_pair(int rows, int cols, XFormat xf, bool inl = true, bool wrow = false);
+std::string matvec_q8_add_pair(int rows, int cols, XFormat xf, XFormat rf = XFormat::I16_2,
+                               bool inl = true, bool wrow = false);
 std::string matvec_i16(int rows, int cols, XFormat xf);
 std::string matvec_i16_add(int rows, int cols, XFormat xf, XFormat rf);
 std::string matvec_i4(int rows, int cols, XFormat xf, bool inl = true);
@@ -98,8 +99,10 @@ std::string matvec_i4_pair_swiglu(int rows, int cols, XFormat xf, bool inl = tru
 // texel and zero decode.  A separate builder so the packed text (and its
 // shader hash) cannot move.
 std::string matvec_i4_pair_swiglu_4x4(int rows, int cols, XFormat xf, bool inl = true, int hs = 0);
-std::string matvec_i4_add_pair(int rows, int cols, XFormat xf, bool inl = true);
-std::string matvec_i4_add_pair_4x4(int rows, int cols, XFormat xf, bool inl = true);
+std::string matvec_i4_add_pair(int rows, int cols, XFormat xf, XFormat rf,
+                               bool inl = true);
+std::string matvec_i4_add_pair_4x4(int rows, int cols, XFormat xf, XFormat rf,
+                                   bool inl = true);
 
 // `hs` is the container's per-layer FFN-hidden scale exponent (metadata key
 // 15): the hidden is written as value * 2^-hs so it fits the q16 activation

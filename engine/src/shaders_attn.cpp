@@ -127,16 +127,14 @@ string att_helpers(const AttnConfig& c) {
                "vec4 encKV(float v0,float v1){return encKV1(v1);}\n"
                "float decKV(vec4 c,int odd){return decKV1(c);}\n")
         : c.kv_fmt == 1 ?
+        // bf16 comes from XFormat now, not from a private codec here: the
+        // layout is the two-values-a-texel one and the rounding is
+        // round-to-nearest-even, both of which xformat already owns.
         string("vec4 encKV1(float v){return enc24s(v,KVSCALE);}\n"
-               "float decKV1(vec4 c){return dec24s(c,KVSCALE);}\n"
-               "uint bf16of(float v){uint u=floatBitsToUint(v);"
-               "u=(u+0x7FFFu+((u>>16)&1u))>>16;return u&0xFFFFu;}\n"
-               "float bf16dec(float hi,float lo){uint u=(uint(int(hi*255.0+0.5))<<8)"
-               "|uint(int(lo*255.0+0.5));return uintBitsToFloat(u<<16);}\n"
-               "vec4 encKV(float v0,float v1){uint a=bf16of(v0),b=bf16of(v1);"
-               "return vec4(float(a>>8)/255.0,float(a&255u)/255.0,float(b>>8)/255.0,"
-               "float(b&255u)/255.0);}\n"
-               "float decKV(vec4 c,int odd){return bf16dec((odd==1)?c.b:c.r,(odd==1)?c.a:c.g);}\n")
+               "float decKV1(vec4 c){return dec24s(c,KVSCALE);}\n") +
+        x_bf16_glsl() +
+        "vec4 encKV(float v0,float v1){return x_bf16enc2(v0,v1);}\n"
+        "float decKV(vec4 c,int odd){return (odd==1)?x_bf16(c.ba):x_bf16(c.rg);}\n"
         : string("vec4 encKV1(float v){return enc24s(v,KVSCALE);}\n"
                  "float decKV1(vec4 c){return dec24s(c,KVSCALE);}\n"
                  "vec4 encKV(float v0,float v1){if(KVPACK==16){float q0=clamp(floor(v0*KVSCALE+0.5),-32768.0,32767.0);"
@@ -413,9 +411,12 @@ string att_v(const AttnConfig& c, XFormat out) {
     for (int k = 0; k < N; ++k) init += "float a" + to_string(k) + "=0.0;";
     string enc = (N == 4) ? "gl_FragColor=x_i8enc4(" + accs + ");}"
                           : (N == 1) ? "gl_FragColor=XST1(" + accs + ");}"
+                          : (out == XFormat::BF16) ? "gl_FragColor=x_bf16enc2(" + accs + ");}"
                           : "gl_FragColor=x_st2(" + accs + ");}";
 
-    string fs = "precision highp float;\n" + x_glsl(out) + att_defs(c) + att_helpers(c) +
+    string fs = "precision highp float;\n" + x_glsl(out) +
+                (out == XFormat::BF16 ? string() : x_bf16_glsl()) +
+                att_defs(c) + att_helpers(c) +
         "uniform sampler2D " + prob_bind + ";uniform float pos;"
         "void main(){int t=int(gl_FragCoord.x);int x0=" + to_string(N) + "*t;"
         "int h=x0/HEADDIM;int i0=x0-h*HEADDIM;int kvh=h/GROUP;" + init + heads_idx +

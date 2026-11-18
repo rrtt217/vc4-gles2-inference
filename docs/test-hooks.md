@@ -57,9 +57,9 @@ same table with what *this* environment resolved to).
 
 | Switch | Takes | What it moves |
 |---|---|---|
-| `ACT` <br><sub>`ACT_FMT`</sub> | `i16\|i8\|f32` | the GPU activation streams' format: i16 q16 grid (default), i8, or bit-cast f32 |
+| `ACT` <br><sub>`ACT_FMT`</sub> | `i16\|i8\|bf16\|f32` | the GPU activation streams' format: i16 q16 grid (default), i8, or bit-cast f32 |
 | `ACT_CPU` <br><sub>`ACT_F32`</sub> | `q16\|f32` | the CPU layer loop's activation grid (ACT_F32 meant f32, whatever its value) |
-| `FFN_HID` | `i16\|i8\|f32` | the FFN hidden stream's format: q16 (default), i8, or f32 past the q16 rail |
+| `FFN_HID` | `i16\|i8\|bf16\|f32` | the FFN hidden stream's format: q16 (default), i8, or f32 past the q16 rail |
 | `Q16_DECODE` | value | the q16 decode: fast classifies the -32768 rail at 32767.5, exact is integer |
 | `EXP` <br><sub>`ATT_EXP`</sub> | `drv\|poly` | every exponential the shaders emit: drv (default) or a portable polynomial; VC4's SFU exp is 20x Xe's error |
 | `QKV_PAIR` | `=1` | two qkv rows per fragment (int8 only, default on); QKV_PAIR=0 disables |
@@ -88,7 +88,7 @@ same table with what *this* environment resolved to).
 
 | Switch | Takes | What it moves |
 |---|---|---|
-| `RES` <br><sub>`RES_FMT`</sub> | `i16\|i16_1\|i24\|f32` | residual format: i16 packed pairs (default), i16_1 one a texel, i24, or f32 |
+| `RES` <br><sub>`RES_FMT`</sub> | `i16\|i16_1\|i24\|bf16\|f32` | residual format: i16 packed pairs (default), i16_1 one a texel, i24, or f32 |
 
 ### The FFN hidden stream and kernel shape
 

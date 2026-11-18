@@ -30,6 +30,14 @@ enum class XFormat : uint8_t {
     // already use (g_es3_ok, which the Q4_SHIFT MESA override makes the default
     // on both drivers).
     F32 = 4,
+    // bfloat16, two values a texel: the top 16 bits of the IEEE-754 float, so
+    // the exponent is float32's and the mantissa is 8 bits (0.4% relative).
+    // Unlike I16_2 it has no absolute rail -- the same two bytes a texel buy
+    // range instead of precision -- which is the band between "q16 overflows"
+    // (the residual above +-128) and "f32 costs twice the memory and 21% of the
+    // decode" (docs/performance.md, 2026-11-18).  ESSL 3.00 for the bit-cast,
+    // like F32.
+    BF16 = 5,
 };
 
 struct XLayout {
@@ -44,6 +52,10 @@ int x_texels(int count, XFormat f);
 bool x_is_int8(XFormat f);
 bool x_is_int24(XFormat f);
 bool x_is_f32(XFormat f);
+bool x_is_bf16(XFormat f);
+// The bf16 helper functions without the X1/X2 macros, for a kernel that already
+// defines those for another format (the attention codec).
+std::string x_bf16_glsl();
 
 // CPU side packing.  Values are real activations; q16 is applied here.
 std::vector<uint8_t> x_pack(const float* values, int count, XFormat f);
@@ -73,4 +85,4 @@ int x_pair2_texels(int count);
 // x_p2_a/x_p2_b return raw q16 units (what a matvec accumulates).  x_p2_st packs
 // two *real* values as one P2 texel (x_st2 multiplies by 256), x_p2_stq packs two
 // values already in q16 units.  Call after x_glsl(): both use its encoders.
-std::string x_pair2_glsl();
+std::string x_pair2_glsl(XFormat f = XFormat::I16_2);
