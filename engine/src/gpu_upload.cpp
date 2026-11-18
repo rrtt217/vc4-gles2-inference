@@ -11,6 +11,7 @@
 #include "shaders.h"
 #include "xformat.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <string>
@@ -72,14 +73,38 @@ void GPU::upload(Mat& m){
             // of 2048 rows at 2048 (2026-11-18).
             const int W = (m.cols + 15) / 16;
             int TH = m.rows;
-            const int lim = max_target_dim() > 0 ? max_target_dim() : 2048;
+            // 1024, not the driver's 2048: the probe's edge is at exactly 2048
+            // rows (exact at 1792, 1692 of 2048 rows wrong at 2048), which is the
+            // same limit kDrawCap encodes for the draw strips.  A tile of 1024
+            // rows keeps every texture at half the ceiling.
+            const int lim = std::min(1024, max_target_dim() > 0 ? max_target_dim() : 2048);
             if (TH > lim) TH = lim;
             m.t3_tile_w = W;
             m.t3_tile_h = TH;
+            const int tiles = m.t3_tiles();
             if (getenv("T3_DEBUG"))
                 fprintf(stderr, "T3TEX %dx%d rows=%d cols=%d tile=%dx%d\n",
-                        W * m.t3_tiles(), TH, m.rows, m.cols, W, TH);
-            m.tex = make_texture(W * m.t3_tiles(), TH, m.w3());
+                        W * tiles, TH, m.rows, m.cols, W, TH);
+            if (tiles == 1) {
+                    // One tile is the body itself: no reshuffle, which is every
+                    // matrix but the FFN gate.
+                    m.tex = make_texture(W, m.rows, m.w3());
+            } else {
+                    // The body is a row-major W x rows block; the tile wants
+                    // row r at (x + (r/TH)*W, r%TH), so consecutive tiles sit
+                    // side by side and each row has to move.  Uploading the
+                    // block as W*tiles wide instead reads the next row's texels
+                    // for every row past the first tile (cost: a wrong model
+                    // with no error anywhere).
+                    vector<uint8_t> tile((size_t)W * tiles * TH * 4, 0);
+                    for (int r = 0; r < m.rows; ++r) {
+                            const uint8_t* src = m.w3() + (size_t)r * W * 4;
+                            uint8_t* dst = &tile[((size_t)(r % TH) * W * tiles +
+                                                  (size_t)(r / TH) * W) * 4];
+                            memcpy(dst, src, (size_t)W * 4);
+                    }
+                    m.tex = make_texture(W * tiles, TH, tile.data());
+            }
             return;
         }
         if (m.type == WeightType::INT6) {
