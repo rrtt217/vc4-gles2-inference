@@ -38,6 +38,7 @@ Deep dives:
 | [rwkv7-plan.zh-CN.md](rwkv7-plan.zh-CN.md) | **RWKV-7 实施计划与逐算子清单**（目标文档）：28 个算子 + 20 项配套（文本/状态/容器/验证）的数学/形状/现状/归属/阶段、数值格式决策点、验收门、任务板映射 |
 | [bitcpm.md](bitcpm.md) | **BitCPM-CANN-0.5B, the ternary model**: the container, its two new metadata fields (rope table, tokenizer prefix), the three folded constants and why `k = 1/scale_emb`, `RMS_STORE=f32`, the quality numbers, and what is not done (the Pi) |
 | [bitcpm-assessment.zh-CN.md](bitcpm-assessment.zh-CN.md) | BitCPM-CANN-0.5B（MiniCPM4 的三值 QAT）支持评估：逐行三值权重的实测结构、`longrope`/`scale_emb` 两个缺口、残差峰值与 lane 和、容器大小与 Pi 预算、分阶段工作量（评估文档） |
+| [smollm2-135m.md](smollm2-135m.md) | **SmolLM2-135M, the model that needs `RMS_STORE=f32`**: the container, why the rmsnorm accumulator (not the residual) was the limit, the per-switch isolation, the cost on both machines, and the open Pi-vs-Xe divergence |
 
 Working on a numerics question?  `AGENTS.md` has the "Debugging protocol"
 table that maps a question to the tool that answers it — `mmcf_dump.py`,

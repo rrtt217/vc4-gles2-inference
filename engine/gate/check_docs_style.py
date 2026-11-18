@@ -42,6 +42,7 @@ STATE = [
     "docs/prefix-cache.md", "docs/long-context.md", "docs/test-hooks.md",
     "docs/evaluation.md", "docs/future-optimization.md", "docs/lfm2.5-230m.md",
     "docs/vc4-glsl-costs.md", "docs/vc4-mesa-debug-build.md",
+    "docs/bitcpm.md", "docs/smollm2-135m.md",
 ]
 
 # Documents whose job is the record.  Never rewritten, so never checked.
