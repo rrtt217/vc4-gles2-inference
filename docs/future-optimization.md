@@ -230,9 +230,15 @@ Still open, in order of what a reader would want next:
 
 - the CPU layer loop (`GPU_LAYER=0`) degenerates on this model with either
   `ACT_CPU` value -- the same defect supra2-100M has, and unfixed;
-- the Pi Zero cost is unmeasured.  Three things stand in the way: 164 MB at q8
-  against a 320 MB CMA, the `RMS_STORE=f32` path (untested on VC4 for a model
-  this size), and the 30-layer draw count (515/token on Xe).
+- the Pi Zero **runs it**: 630 ms/token decode, 23 s to the first token (5.7 s
+  container read, 16.9 s upload of 182 textures), ~590 ms/token prefill, 454
+  draws/token, and 209 MB of `CmaFree` left afterwards -- the 164 MB container
+  fits the 320 MB CMA.  What is open is its *numerics* there: logits 3.49 from
+  the float32 reference against Xe's 1.08, PPL 14.29 against 7.72, `17*4 = 220`
+  against 68, and the format axes are excluded because widening them makes the
+  board worse.  See `docs/performance.md` (2026-11-18); the lead is
+  `MATVEC_STRIP`, which is a no-op on Xe and moves this model's board logits by
+  12.7 while leaving MiniMind3 identical.
 - `-Instruct` is the same weights with the same template; no separate container.
 
 What the engine *does* handle generically: GQA (`GROUP = heads/kv_heads`),

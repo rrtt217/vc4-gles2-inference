@@ -83,7 +83,9 @@ models/
                                  from tokenizer.json -- byte-identical)
     smollm2-135m.q8q24.mmcf      164 MB, --res q24, template chatml, bos 1 eos 2
                                  runs on Xe: 11.3 ms/token, PPL 7.7157 with
-                                 RMS_STORE=f32 (see the note at the end)
+                                 RMS_STORE=f32; runs on the Pi Zero too:
+                                 630 ms/token, but its board numerics are 3x
+                                 further from f32 than Xe's (see the note)
 
   survey_under_110m.csv          candidate survey
 ```

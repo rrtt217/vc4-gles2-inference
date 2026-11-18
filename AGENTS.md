@@ -72,9 +72,21 @@ stored peak 118.6).  What blocked it is the rmsnorm: its lane sums are
 residual of 2.7e4 answers with the end token until `RMS_STORE=f32`.  With it,
 the q24 residual and the q16 activation/FFN-hidden streams are within 0.6% of
 an all-f32 container (PPL 7.7157 against 7.6679), and the shipped container is
-`models/smollm2-135m/smollm2-135m.q8q24.mmcf` (11.3 ms/token on Iris Xe).  The
-CPU layer loop still degenerates -- that is the supra2 defect, not a format
-limit of this model.  `models/README.md` has the per-switch isolation table.
+`models/smollm2-135m/smollm2-135m.q8q24.mmcf` (11.3 ms/token on Iris Xe, and
+**630 ms/token on the Pi Zero** with the same container: 23 s to first token,
+`454` draws/token, correct answers, 164 MB of it in the 320 MB CMA).
+
+**But a Pi answer is not the Xe answer for this model.**  On the board its logits
+sit `3.490` from the float32 numpy reference (Xe: `1.079`), PPL `14.2941` where
+Xe says `7.7157`, and `17*4` comes out `220` against Xe's `68`, deterministically
+and unchanged by `EXP=poly`.  The format axes are *excluded* -- widening every
+stream to f32 makes the board **worse** (12.49 -> 13.48) while it helps Xe -- and
+so is `Q16_DECODE=exact`.  The one measured lead is `MATVEC_STRIP`: a no-op on
+Xe, and on the Pi it moves this model's logits by 12.7 (argmax flips) while
+leaving MiniMind3 byte-identical.  That is precision at magnitude, not wiring,
+and it is open.  The CPU layer loop degenerates too -- that is the supra2
+defect, not a format limit of this model.  `models/README.md` has the per-switch
+isolation table; `docs/performance.md` (2026-11-18) has both machines.
 
 Engine modules are described in [`docs/engine-layout.md`](docs/engine-layout.md);
 the file format in [`docs/model-formats.md`](docs/model-formats.md) and

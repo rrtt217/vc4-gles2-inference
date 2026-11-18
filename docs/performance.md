@@ -8048,3 +8048,80 @@ draws/token.
 `<|im_end|>`, but wrong metadata, so this container is packed with
 `--bos 1 --eos 2`.  A Llama-with-ChatML model will always need that line until
 the packer prefers the source's own `eos_token` declaration.
+
+## 2026-11-18 — SmolLM2-135M on the Pi Zero: it runs, and VC4 is 3x further from f32 than Xe
+
+Same container as the Xe section above (`smollm2-135m.q8q24.mmcf`, 164 MB, q8 +
+q24 residual, sha256 `ffa2163f...`), on the board with the bf16-final build
+(`engine_mm3_pi`, 2070896 B, 2026-11-18 12:40).
+
+**It answers, and the answer is right:**
+
+```
+$ RMS_STORE=f32 GPU_LAYER=1 KV=q16 SEQ=512  engine_mm3_pi --chat \
+    --prompt "What is the capital of France?" --gen 24 --greedy
+Assistant: The capital of France is Paris, a city known for its rich history, art, and culture.
+```
+
+and it stops on `<|im_end|>` by itself.  **Without `RMS_STORE=f32` it answers with
+24 tokens of raw bytes** -- the same failure the Xe section isolates, reproduced
+on VC4, so the rmsnorm accumulator is not a driver quirk.
+
+**Cost** (`TIMING=1`, `SEQ=512`, one prompt):
+
+| phase | measured |
+|---|---:|
+| container read (`STARTUP model loaded`) | 5.66 s |
+| upload (`182 textures`, `UPLOAD ... wall` 16.89 s, of which `texture time` 2.22 s) | 16.89 s |
+| session ready | 23.04 s |
+| prefill, ~40-token prompt | 22.86 / 23.58 / 24.05 s |
+| **decode** (three runs, median) | **630.72 ms/token** (624.79, 630.72, 716.49) |
+| draws | 454/token (Xe: 515) |
+
+1.59 tok/s against pocket's 0.78 at `SEQ=512`, which is what the cost law
+predicts (135M vs 361M).  Prefill is ~590 ms/token, i.e. as expensive per token
+as decode: a prefill pass is a decode pass over two positions, so a 40-token
+prompt is 20 of them, and the attention pass's width grows with `SEQ`
+(a 720-token PPL file at `SEQ=512` took 26 minutes).
+
+**Where it is wrong.**  `17*4` answers **220** on the board and 68 on Xe, twice,
+deterministically; `EXP=poly` does not change it.  So this is arithmetic, and the
+logits say how much:
+
+| logits vs the float32 numpy reference | mean abs diff | cosine |
+|---|---:|---:|
+| Xe, same container, same prompt | **1.079** | 0.996120 |
+| Pi Zero | **3.490** | 0.981316 |
+
+Both keep argmax 504 `'The'`; the Pi is 3.2x further from f32.  PPL agrees:
+**14.2941 on the board against 7.7157 on Xe** (720 tokens, `SEQ=512`), and on a
+236-token slice at `SEQ=256`, 12.4945 against 8.7143.
+
+**The format axes are excluded** -- which is the surprising part.  On the board,
+widening the streams makes the model *worse*, the opposite of Xe:
+
+| config (`RMS_STORE=f32` always) | Pi | Xe |
+|---|---:|---:|
+| q24 residual, q16 act, q16 FFN hid | **12.4945** | **8.7143** |
+| `RES=f32 FFN_HID=f32` | 13.4776 | 8.5863 |
+| `RES=bf16 FFN_HID=bf16` | 13.2558 | 8.5892 |
+
+Also excluded: the q16 decode (`Q16_DECODE=exact` moves the Pi's logits 3.490 ->
+3.400) and the exponentials (`EXP=poly`, above).  What is left is the shared
+fixed-point path on VC4 itself.
+
+**One lead, measured**: `MATVEC_STRIP` (the matvec draws' fragment budget, which
+reassociates the dot product) is a **no-op on Xe** (mean|d| = 0.000) and moves
+Smol's Pi logits by **12.677** with the argmax flipping to 48236 and a cosine of
+0.021 against the reference -- while MiniMind3 q8 on the same board with the same
+switch prints its pin **byte for byte**.  So the reassociation is not broken (it
+is exact on a residual of ~50); it loses the model when the residual is 26884.
+That is the shape of a *precision-at-magnitude* problem, not a wiring bug, and
+the next experiment is a per-layer `HIDDEN_DUMP` diff between the two machines
+to find where the 3.5-logit divergence enters.
+
+**What this changes**: the model is usable on the board (`630 ms/token`, correct
+answers, 164 MB in a 320 MB CMA with 209 MB of `CmaFree` left afterwards), but a
+Pi Zero answer is not the Xe answer for it, and the difference is 4x what
+MiniMind3 shows (0.36%).  Do not cite a Pi number for this model as the model's
+number.
