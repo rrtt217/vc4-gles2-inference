@@ -51,9 +51,16 @@
 #                      says so on stderr and the gate stops: a green ACCEPT from a
 #                      software run would be a lie (2026-11-15).
 #
-#   4. ppl           - printed for the q8 baseline/ACT8=2/ACT8=1 and for the
-#                      q4 baseline; compared against PPL_EXPECT /
-#                      Q4_PPL_EXPECT (default 1% tolerance) when set.
+#   4. ppl           - the q8 baseline and the q4 baseline are compared against
+#                      PPL_EXPECT / Q4_PPL_EXPECT (default 1% tolerance) when
+#                      set.  The ACT8=2/ACT8=1 runs are a diagnostic A/B, not
+#                      part of the gate: they only run with ACT_PPL_DIAG=1.
+#
+#   RWKV_GPU selects a different layer loop and so changes the answers.  This
+#   script holds no RWKV pins: RWKV_EXPECT / RWKV_PPL_EXPECT come from the
+#   environment, so whoever exports them decides which loop they describe.  The
+#   run does not refuse RWKV_GPU; it records the loop it used in the manifest so
+#   a result is not misread as covering the other one.
 #
 # Env:
 #   SYS          system prompt to pin (default: You are a helpful assistant.)
@@ -89,6 +96,8 @@
 #   PPL_SEQ      SEQ used for the ppl runs (default 768; values are not
 #                comparable across SEQ)
 #   NO_PPL=1     skip the perplexity pass (it is the slow part)
+#   ACT_PPL_DIAG=1  ALSO run the ACT8=2/ACT8=1 perplexity A/B.  Printed only,
+#                never compared: it is a diagnostic, not an acceptance check.
 set -eu
 cd "$(dirname "$0")/.."
 
@@ -102,6 +111,28 @@ ALLOW_UNPINNED="${ALLOW_UNPINNED:-0}"
 BIN="${1:-${BIN:-./engine_mm3}}"
 TOK="${TOKENIZER:-}"   # optional: the container embeds its tokenizer
 if [ -n "$TOK" ]; then export TOKENIZER="$TOK"; fi
+# RWKV_GPU picks a different layer loop, so it changes the answers RWKV_EXPECT /
+# RWKV_PPL_EXPECT are compared with.  Those pins are not in this script (it only
+# reads the environment); whoever sets them owns which path they describe.  So do
+# not refuse the run -- record which loop it was, and let the pins decide.  A
+# mismatch under RWKV_GPU is a pin problem, not evidence about the GPU path.
+RWKV_LOOP="cpu"
+if [ "${RWKV_GPU:-0}" != 0 ] && [ "${RWKV_GPU:-0}" != "" ]; then
+    RWKV_LOOP="gpu"
+    echo "note: RWKV_GPU is set; the rwkv checks below compare against the pins" >&2
+    echo "      you exported, which must be the GPU loop's own values." >&2
+fi
+# The coverage manifest is printed at the end; record every skip as it happens
+# so a green ACCEPT cannot be read as "every supported path was compared".
+COVERED=""
+SKIPPED=""
+covered() { COVERED="$COVERED $1"; }
+# Keep each skip as a line, not as word-split text: the reason contains spaces.
+skipped() {
+    SKIPPED="$SKIPPED$1($2)
+"
+    echo "$1: skipped ($2)"
+}
 Q8="${Q8:-../models/minimind3/minimind3.q8.mmcf}"
 Q4="${Q4:-../models/minimind3/minimind3.q4.mmcf}"
 CORPUS="${PPL_FILE:-data/ppl_test.txt}"
@@ -143,40 +174,69 @@ if [ "${NO_PPL:-0}" != 1 ]; then
     [ -f "$CORPUS" ] || { echo "missing PPL corpus: $CORPUS" >&2; exit 1; }
 fi
 
-# $1 model, $2 prompt, $3 gen, $4 system ("" = compiled default)
-answer() {
-    if [ -n "$4" ]; then
-        MODEL="$1" GPU_LAYER=1 KV_PACK=16 \
-            "$BIN" --chat --system "$4" \
-            --prompt "$2" --gen "$3" --greedy 2>&1
+# The engine's exit status is part of the measurement: before this the answer
+# came through `engine | sed | head`, so a crash that printed no "Assistant:"
+# line was an empty string and the pipeline still exited 0.  A run is kept in a
+# file and its status checked before anything judges the text (fail closed).
+# $1 the file to capture into, $2 model, $3 prompt, $4 gen, $5 system ("" = the
+# container's default prompt)
+answer_to() {
+    dst="$1" model="$2" prompt="$3" gen="$4" system="$5"
+    if [ -n "$system" ]; then
+        MODEL="$model" GPU_LAYER=1 KV_PACK=16 \
+            "$BIN" --chat --system "$system" \
+            --prompt "$prompt" --gen "$gen" --greedy > "$dst" 2>&1
     else
-        MODEL="$1" GPU_LAYER=1 KV_PACK=16 \
+        MODEL="$model" GPU_LAYER=1 KV_PACK=16 \
             "$BIN" --chat \
-            --prompt "$2" --gen "$3" --greedy 2>&1
+            --prompt "$prompt" --gen "$gen" --greedy > "$dst" 2>&1
     fi
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        echo "engine FAILED (rc=$rc): model=$model gen=$gen system=${system:-<container default>}" >&2
+        sed 's/^/  /' "$dst" >&2
+        return 1
+    fi
+    return 0
 }
 
 # The engine appends its "[stopped at the --gen limit ...]" note to the same
 # line, so a run that does not emit EOS would otherwise fail the terminator
 # check; strip it before anything judges the text.
-text() { answer "$@" | sed -n 's/^Assistant: //p' | head -1 | sed 's/\[stopped.*//'; }
+text() {
+    f=$(mktemp "${TMPDIR:-/tmp}/regression.XXXXXX") || return 1
+    if ! answer_to "$f" "$@"; then rm -f "$f"; return 1; fi
+    sed -n 's/^Assistant: //p' "$f" | head -1 | sed 's/\[stopped.*//'
+    rm -f "$f"
+}
 
 # The RWKV reply spans lines (g1d answers with a leading marker line and then
 # prose, in either template mode), so keep everything from the Assistant marker
 # to the end, strip the marker on the first line and the gen-limit note wherever
 # it landed.
 rwkv_text() {
-    answer "$@" | sed -n '/^Assistant: /,$p' | sed '1s/^Assistant: //' | sed 's/\[stopped.*//'
+    f=$(mktemp "${TMPDIR:-/tmp}/regression.XXXXXX") || return 1
+    if ! answer_to "$f" "$@"; then rm -f "$f"; return 1; fi
+    sed -n '/^Assistant: /,$p' "$f" | sed '1s/^Assistant: //' | sed 's/\[stopped.*//'
+    rm -f "$f"
 }
 
 # A software rasteriser invalidates every pin below it, so stop before them.
-if MODEL="$Q8" GPU_LAYER=1 KV_PACK=16 "$BIN" --prompt x --gen 1 2>&1 >/dev/null \
-        | grep -q "software rasteriser"; then
+# The stderr of this probe is the evidence for the verdict, so it is captured
+# rather than grepped out of a pipeline: a pipeline here also hid the engine's
+# own failure (a broken binary simply did not match the string).
+probe=$(mktemp "${TMPDIR:-/tmp}/regression.XXXXXX") || exit 1
+MODEL="$Q8" GPU_LAYER=1 KV_PACK=16 "$BIN" --prompt x --gen 1 >/dev/null 2>"$probe" || true
+if grep -q "software rasteriser" "$probe"; then
+    rm -f "$probe"
     echo "FAIL  the renderer is a software rasteriser (no /dev/dri?); pins and PPL" >&2
     echo "      do not apply to it, so this run cannot accept the tree.  Use the board" >&2
     echo "      or a machine with a GPU, or the no-GPU half: make -C engine check." >&2
     exit 1
 fi
+# The probe's exit status is otherwise not a gate input: a binary that cannot
+# run this at all fails on the determinism text below, with a better message.
+rm -f "$probe"
 
 # $1 tag, $2 expected prefix, $3 got, $4 the environment variable that holds it
 check_prefix() {
@@ -292,15 +352,19 @@ q8_def=$(text "$Q8" "$PROMPT" 16 "")
 echo "default system prompt OK"
 
 check_prefix q8 "$Q8_EXPECT" "$q8" Q8_EXPECT
+covered "text-q8"
 q4=$(text "$Q4" "$PROMPT" 16 "$SYS")
 check_prefix q4 "$Q4_EXPECT" "$q4" Q4_EXPECT
+covered "text-q4"
 poem=$(text "$Q8" "$PROMPT2" 48 "$SYS")
 behaviour poem "$poem"
+covered "behaviour"
 
 # Mixture of experts: the route is a host-side argmax over a read-back, so the
 # thing to gate is that it is *deterministic* and that the answer is a sentence.
 # A route flip changes the whole text, which is why this is not compared with
 # the dense string.
+m1=""
 if [ -n "$MOE" ]; then
     m1=$(text "$MOE" "$PROMPT" 24 "$SYS")
     m2=$(text "$MOE" "$PROMPT" 24 "$SYS")
@@ -325,23 +389,44 @@ if [ -n "$MOE" ]; then
     #
     # then set MOE_ROUTES=moe_routes.txt.
     if [ -n "$MOE_ROUTES" ]; then
+        # An empty baseline used to compare equal to an empty capture, so a
+        # route dump that failed (or that produced nothing) printed OK.  Require
+        # a baseline with lines and a capture with lines, and check the status.
+        [ -s "$MOE_ROUTES" ] || {
+            echo "moe routes FAIL: the baseline $MOE_ROUTES is empty; regenerate it" >&2
+            exit 1
+        }
+        routes_out=$(mktemp "${TMPDIR:-/tmp}/moe_routes.XXXXXX") || exit 1
         MODEL="$MOE" GPU_LAYER=1 KV_PACK=16 MOE_DUMP=1 "$BIN" --chat --system "$SYS" \
-            --prompt "$PROMPT" --gen 8 --greedy 2>&1 \
-            | sed -n 's/^MOE //p' | sed 's/ gate=.*//' > /tmp/moe_routes.$$
-        if diff -q "$MOE_ROUTES" /tmp/moe_routes.$$ >/dev/null 2>&1; then
-            echo "moe routes OK ($(wc -l < /tmp/moe_routes.$$) lines)"
-        else
-            echo "moe routes FAIL: the per-layer route sequence moved" >&2
-            diff "$MOE_ROUTES" /tmp/moe_routes.$$ | head -10 >&2
-            rm -f /tmp/moe_routes.$$
+            --prompt "$PROMPT" --gen 8 --greedy > "$routes_out" 2>&1 || {
+            echo "moe routes FAIL: the route dump exited nonzero" >&2
+            sed 's/^/  /' "$routes_out" >&2
+            rm -f "$routes_out"
+            exit 1
+        }
+        sed -n 's/^MOE //p' "$routes_out" | sed 's/ gate=.*//' > "$routes_out.routes"
+        rm -f "$routes_out"
+        if [ ! -s "$routes_out.routes" ]; then
+            echo "moe routes FAIL: the run printed no MOE route lines (MOE_DUMP=1)" >&2
+            rm -f "$routes_out.routes"
             exit 1
         fi
-        rm -f /tmp/moe_routes.$$
+        if diff -q "$MOE_ROUTES" "$routes_out.routes" >/dev/null 2>&1; then
+            echo "moe routes OK ($(wc -l < "$routes_out.routes") lines)"
+            covered "moe-routes"
+        else
+            echo "moe routes FAIL: the per-layer route sequence moved" >&2
+            diff "$MOE_ROUTES" "$routes_out.routes" | head -10 >&2
+            rm -f "$routes_out.routes"
+            exit 1
+        fi
+        rm -f "$routes_out.routes"
     else
-        echo "moe routes: skipped (set MOE_ROUTES=<baseline> to pin them)"
+        skipped "moe-routes" "MOE_ROUTES unset"
     fi
+    covered "moe-text"
 else
-    echo "moe: skipped (set MOE=<container> to check a v3 model)"
+    skipped "moe" "MOE unset"
 fi
 
 # RWKV-7: the third layer loop (docs/rwkv7-plan.zh-CN.md, P2/P4).  Same contract
@@ -386,21 +471,32 @@ if bad:
     sys.exit(1)
 print("rwkv behaviour OK")
 PY
+    covered "rwkv-$RWKV_LOOP-text"
 elif [ -n "$RWKV" ]; then
-    echo "rwkv: skipped (no container at $RWKV)"
+    skipped "rwkv-$RWKV_LOOP" "no container at $RWKV"
     RWKV=""
 else
-    echo "rwkv: skipped (RWKV= empty)"
+    skipped "rwkv-$RWKV_LOOP" "RWKV= empty"
 fi
 
 # SEQ is pinned: the ppl path chunks the corpus per window, so the token count
 # and the value both move with SEQ and are not comparable across settings.
-# $1 model, $2 ACT8 mode.  ACT8 only rewrites the all-INT8 activation feed,
-# so the q4 model is measured once, with ACT8=0.
+# $1 model, $2 SEQUENCE.  The engine's status is checked before the number is
+# read: `engine | sed` used to turn a crash into an empty string that the
+# comparison below then reported as a very confusing ValueError.
 ppl() {
-    MODEL="$1" GPU_LAYER=1 KV_PACK=16 SEQ="$PPL_SEQ" ACT8="$2" \
-        "$BIN" --ppl "$CORPUS" 2>&1 \
-        | sed -n 's/^PPL \([0-9.]*\).*/\1/p' | head -1
+    f=$(mktemp "${TMPDIR:-/tmp}/regression.XXXXXX") || return 1
+    MODEL="$1" GPU_LAYER=1 KV_PACK=16 SEQ="$2" \
+        "$BIN" --ppl "$CORPUS" > "$f" 2>&1
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        echo "ppl FAILED (rc=$rc): model=$1 SEQ=$2" >&2
+        sed 's/^/  /' "$f" >&2
+        rm -f "$f"
+        return 1
+    fi
+    sed -n 's/^PPL \([0-9.]*\).*/\1/p' "$f" | head -1
+    rm -f "$f"
 }
 
 check_ppl() {
@@ -425,28 +521,39 @@ PY
 p0=""
 q4p=""
 if [ "${NO_PPL:-0}" != 1 ]; then
-    p0=$(ppl "$Q8" 0); p2=$(ppl "$Q8" 2); p1=$(ppl "$Q8" 1)
-    q4p=$(ppl "$Q4" 0)
+    p0=$(ppl "$Q8" "$PPL_SEQ")
+    q4p=$(ppl "$Q4" "$PPL_SEQ")
     echo "PPL baseline: $p0"
-    echo "PPL ACT8=2:   $p2"
-    echo "PPL ACT8=1:   $p1"
     echo "PPL q4:       $q4p"
     check_ppl PPL "$PPL_EXPECT" "$p0" PPL_EXPECT
+    covered "ppl-q8"
     check_ppl "PPL q4" "$Q4_PPL_EXPECT" "$q4p" Q4_PPL_EXPECT
+    covered "ppl-q4"
     if [ -n "$MOE" ] && [ "$MOE_PPL" = 1 ]; then
-        moep=$(ppl "$MOE" 0)
+        moep=$(ppl "$MOE" "$PPL_SEQ")
         echo "PPL moe:      $moep"
         check_ppl "PPL moe" "$MOE_PPL_EXPECT" "$moep" MOE_PPL_EXPECT
+        covered "ppl-moe"
     fi
     if [ -n "$RWKV" ]; then
         # The RWKV container's own SEQ, not PPL_SEQ: the window protocol moves
         # with SEQ and the two models' numbers are not comparable anyway.
-        rwkvp=$(MODEL="$RWKV" GPU_LAYER=1 KV_PACK=16 SEQ="$RWKV_PPL_SEQ" \
-            "$BIN" --ppl "$CORPUS" 2>&1 \
-            | sed -n 's/^PPL \([0-9.]*\).*/\1/p' | head -1)
+        rwkvp=$(ppl "$RWKV" "$RWKV_PPL_SEQ")
         echo "PPL rwkv:     $rwkvp"
         check_ppl "PPL rwkv" "$RWKV_PPL_EXPECT" "$rwkvp" RWKV_PPL_EXPECT
+        covered "ppl-rwkv-$RWKV_LOOP"
     fi
+else
+    skipped ppl NO_PPL=1
+fi
+
+# ACT8=1/2 are a diagnostic A/B, not acceptance: the two runs are printed and
+# never compared, so they cannot fail the gate and are not counted as coverage.
+# They are off by default because a broken arm used to be silently ignored.
+if [ "${ACT_PPL_DIAG:-0}" = 1 ] && [ "${NO_PPL:-0}" != 1 ]; then
+    echo "PPL ACT8=2:   $(ppl "$Q8" 2)" || true
+    echo "PPL ACT8=1:   $(ppl "$Q8" 1)" || true
+    echo "  (ACT8 diagnostics only: not compared, not covered)"
 fi
 
 if [ "$REBASE" = 1 ]; then
@@ -463,4 +570,16 @@ RWKV_PPL_EXPECT='${rwkvp:-}'
 EOF
 fi
 
+# What this run actually compared, so a green ACCEPT is not read as "every
+# supported path passed".  Skips are listed with their reason.
+echo "covered: $COVERED"
+if [ -n "$SKIPPED" ]; then
+    # Already one item per line; quote so the shell does not split the reasons.
+    printf 'skipped: %s' "$SKIPPED"
+else
+    echo "skipped: -"
+fi
+# Fixed-scope statements: these are not gated here, whatever the flags say.
+echo "rwkv loop:  $RWKV_LOOP (the RWKV pins are whoever exported them)"
+echo "not covered: ACT8 arms (diagnostic only)"
 echo "ACCEPT"

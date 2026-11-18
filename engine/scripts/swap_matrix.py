@@ -78,6 +78,20 @@ def fresh(model):
     assert rc == 0 and a, f"fresh {model}: rc={rc} answers={a} err={err[-300:]}"
     return a[0]
 
+
+# The chains the matrix actually ran, and the ones it skipped (with a reason).
+# Printed with the result: "PASS" below is not a claim about a skipped chain.
+COVERED, SKIPPED = [], []
+
+
+def cover(tag):
+    COVERED.append(tag)
+
+
+def skip(tag, why):
+    SKIPPED.append(f"{tag}({why})")
+    print(f"== {tag} chain: skipped ({why}) ==")
+
 def chain(models):
     lines, want = [], []
     for i, m in enumerate(models):
@@ -143,7 +157,11 @@ def main():
     if os.path.exists(rwkv[1]):
         chains.append(("rwkv", rwkv))
     else:
-        print("== rwkv chain: skipped (no RWKV container under ../models/rwkv7) ==")
+        skip("rwkv", "no RWKV container under ../models/rwkv7")
+    # The RWKV chain runs whichever loop RWKV_GPU selects.  Say which one this
+    # run exercised: the pins in regression.sh are the CPU path's only.
+    if os.environ.get("RWKV_GPU", "") not in ("", "0"):
+        print("note: RWKV_GPU is set; the rwkv chain exercises the GPU loop")
     fail = 0
     for tag, seq in chains:
         print(f"== {tag} chain: {len(seq)-1} swaps ==")
@@ -160,6 +178,7 @@ def main():
             print(f"  {'ok  ' if ok else 'FAIL'} turn {i+1} {os.path.basename(m):26s} {g[:32]}")
             fail += 0 if ok else 1
         if "RELEASE: gl error" in err: print("  FAIL: GL error after release"); fail += 1
+        cover(tag)
     # a line that starts with / but is not a command must still be a prompt
     print("== a slash line that is not a command ==")
     slash = "/etc/hostname 是什么意思？"
@@ -167,19 +186,26 @@ def main():
     p = subprocess.run([BIN, "--chat", "--system", SYS, "--gen", "8", "--greedy"],
                        input=slash + "\n/exit\n", capture_output=True, text=True, env=e, timeout=600)
     a = answers(p.stdout)
-    print(f"  {'ok  ' if a else 'FAIL'} answered as a prompt: {a[0][:40] if a else '(none)'}")
-    fail += 0 if a else 1
+    # The answer existing is not enough: a process that printed it and then
+    # crashed must not read as a pass.
+    ok_slash = bool(a) and p.returncode == 0
+    print(f"  {'ok  ' if ok_slash else 'FAIL'} answered as a prompt: "
+          f"{a[0][:40] if a else '(none)'} (rc={p.returncode})")
+    fail += 0 if ok_slash else 1
+    if ok_slash:
+        cover("slash-prompt")
     # determinism: the same chain twice
     print("== determinism (chain run twice) ==")
     g1, _ = chain(q8); g2, _ = chain(q8)
     print(f"  {'ok  ' if g1 == g2 else 'FAIL'} identical")
     fail += 0 if g1 == g2 else 1
+    if g1 == g2: cover("determinism")
     print("== worker protocol load op ==")
     def wrun(lines, model):
         e = dict(ENV, MODEL=model)
-        out = subprocess.run([BIN, "--worker"], input="".join(lines), capture_output=True,
-                             text=True, env=e, timeout=900).stdout
-        return out
+        p = subprocess.run([BIN, "--worker"], input="".join(lines), capture_output=True,
+                           text=True, env=e, timeout=900)
+        return p.stdout, p.returncode
     def wreq(msg, n=16, seed=42):
         doc = {"messages": [{"role": "user", "content": msg}]}
         b = base64.b64encode(json.dumps(doc, ensure_ascii=False,
@@ -194,24 +220,43 @@ def main():
         return segs
     wq = "用一句话介绍你自己。"
     wa, wb, wc = (q8[0], q8[4], q4[0])          # minimind3.q8, minimind2-small.q8, minimind3.q4
-    fa = wsegs(wrun([wreq(wq)], wa))[0]
-    fb = wsegs(wrun([wreq(wq)], wb))[0]
-    fc = wsegs(wrun([wreq(wq)], wc))[0]
-    mixed = wrun([wreq(wq),
-                  json.dumps({"op": "load", "model": wb}) + "\n", wreq(wq),
-                  json.dumps({"op": "load", "model": wc}) + "\n", wreq(wq)], wa)
-    got = wsegs(mixed)
-    ok = got == [fa, fb, fc]
-    print(f"  {'ok  ' if ok else 'FAIL'} load op: {len(got)} answers across 2 loads "
-          f"(q8 -> q8 -> q4), byte-identical to fresh workers")
-    fail += 0 if ok else 1
-    # a bad op must be an error event, not a crash
-    bad_out = wrun(['{"op":"nope"}\n'], wa)
-    errs = [json.loads(l) for l in bad_out.splitlines() if '"error"' in l]
-    ok2 = bool(errs) and "unknown op" in errs[0].get("message", "")
-    print(f"  {'ok  ' if ok2 else 'FAIL'} unknown op reported as an error event")
-    fail += 0 if ok2 else 1
+    def fresh_worker(model):
+        """(first answer, returncode) from a worker that generates once."""
+        out, rc = wrun([wreq(wq)], model)
+        segs = wsegs(out)
+        assert segs, f"fresh worker {model}: no answer (rc={rc})"
+        return segs[0], rc
 
+    fa, fa_rc = fresh_worker(wa)
+    fb, fb_rc = fresh_worker(wb)
+    fc, fc_rc = fresh_worker(wc)
+    mixed_out = wrun([wreq(wq),
+                      json.dumps({"op": "load", "model": wb}) + "\n", wreq(wq),
+                      json.dumps({"op": "load", "model": wc}) + "\n", wreq(wq)], wa)
+    got = wsegs(mixed_out[0])
+    ok = got == [fa, fb, fc] and mixed_out[1] == 0 and (fa_rc, fb_rc, fc_rc) == (0, 0, 0)
+    print(f"  {'ok  ' if ok else 'FAIL'} load op: {len(got)} answers across 2 loads "
+          f"(q8 -> q8 -> q4), byte-identical to fresh workers (rc={mixed_out[1]})")
+    fail += 0 if ok else 1
+    if ok: cover("worker-load")
+    # A bad op must be an error event, not a crash: the worker answers an
+    # unknown control line with an error event and keeps serving (worker.cpp
+    # `continue`s), so it has to exit 0 on EOF AND still answer the next
+    # request.  Only the event used to be checked, which a worker that died
+    # right after printing it would also pass.
+    bad_out, bad_rc = wrun(['{"op":"nope"}\n', wreq(wq)], wa)
+    errs = [json.loads(l) for l in bad_out.splitlines() if '"error"' in l]
+    after = wsegs(bad_out)
+    ok2 = (bool(errs) and "unknown op" in errs[0].get("message", "")
+           and bad_rc == 0 and after == [fa])
+    print(f"  {'ok  ' if ok2 else 'FAIL'} unknown op reported as an error event "
+          f"and the next request still answered (rc={bad_rc})")
+    fail += 0 if ok2 else 1
+    if ok2:
+        cover("worker-bad-op")
+
+    print("covered:", " ".join(sorted(COVERED)) or "-")
+    print("skipped:", " ".join(sorted(SKIPPED)) or "-")
     print("RESULT:", "PASS" if fail == 0 else f"{fail} FAILURES")
     if fail:
         print("Each line named FAIL above prints the post-swap answer next to the\n"
