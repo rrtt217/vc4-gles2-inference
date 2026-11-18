@@ -8277,3 +8277,20 @@ One more measured detail: on VC4 the q8 arm's row-0 result comes back 0.04% low
 while both 2-bit arms are exact, because the board's UNORM8 -> float conversion
 is `(b+0.5)/256` rather than `b/255` and only the 2-bit decoders add the 0.5
 back (`floor(c*255.0+0.5)`).  The probe's tolerance is relative for that reason.
+
+### The t3 container on the Pi Zero (same day)
+
+The board parses it and cannot run it, which is exactly what Phase B2 is for:
+
+| | |
+|---|---|
+| `mmcf_dump.py` on the board | 167,520,233 B, 246 tensors, version 2, header CRC ok, `quant t3` |
+| SD read | 167 MB in 12.8 s (13 MB/s) |
+| the engine *without* the kind | `mmcf: tensor 0x10 has unknown dtype 7` -- refused by name, not misread |
+| the engine *with* it (host expansion) | killed by the kernel: `Out of memory: Killed process ... anon-rss:286704kB` |
+| what the expansion wants | 342 MB of q8 (85 MB of t3 body), against 474 MB of board and 308 MB available |
+
+So the 167 MB file buys nothing on the board until the matvec exists: the
+acceptance path is 4x the file in RAM and the Pi has room for neither 342 MB nor
+the 434 MB the q8 container needs.  It is a *file* format and a *packer* until
+B2 lands, and B2's ceiling is the 1.22x the probe priced.

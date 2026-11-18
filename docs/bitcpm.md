@@ -100,6 +100,7 @@ Iris Xe, 2026-11-18, `RMS_STORE=f32`, greedy:
 | | |
 |---|---|
 | multiple choice, 100 items (`engine/eval/bench_mc.py`) | **acc 0.690**, acc_cal 0.660, fmt 0.690, p_gold 0.637 (null 0.254) |
+| the same battery on the **t3 container** | acc 0.680, acc_cal 0.670, fmt 0.670, p_gold 0.640 — the two containers agree |
 | same battery, for scale | pocket qat 0.480, LFM2.5-230M 0.380, MiniMind3 q8 0.220 |
 | `--ppl` on `engine/data/ppl_test.txt`, SEQ=768 | 36.0302 (nll 3.5844, 247 tokens) |
 | logits vs the float32 numpy forward (`models/bitcpm-0.5b/probe_forward.py`) | KL 0.018 nats, top-20 19/20, entropy 1.546 vs 1.512 |
@@ -149,8 +150,12 @@ t3 body: 120 matrices expanded to q8 on the host (85 MB on disk -> 342 MB in RAM
 ```
 
 That is the packer's acceptance path, not the shipping one: it costs 4x the
-file's memory, which is precisely why the board cannot run this container yet
-(342 MB of heap against ~190 MB of free RAM after the CMA).
+file's memory, which is precisely why the board cannot run this container yet.
+Measured on the Pi Zero (2026-11-18, `docs/performance.md`): the board parses the
+file (`mmcf_dump.py`: 246 tensors, CRCs ok, `quant t3`) and reads it at 13 MB/s,
+the engine that predates the kind refuses it by name (`unknown dtype 7`), and the
+engine that reads it is OOM-killed at 280 MB of the 342 MB the expansion needs.
+A t3 container is a *file* until the matvec exists.
 
 ## Not done
 
