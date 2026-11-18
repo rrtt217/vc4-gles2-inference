@@ -377,7 +377,7 @@ template, key 8 bos 0 / eos 261 / stop 261, key 17 logit_shift 2, seq 512).
 The layer loop's faithfulness is verified separately (engine ↔ oracle-on-
 container-weights cos 0.9976–0.9990 across four prompts, top-1 4/4; the R-1
 residual-grid PPL study and the Xe pins are in
-[performance.md](performance.md)'s 2026-11-16 sections) — the numbers below
+[benchmarks.md](benchmarks.md)'s 2026-11-16 sections) — the numbers below
 measure the model, not the engine.
 
 **Protocol — three things differ from the 2026-11-12 rows, all deliberate:**
@@ -507,7 +507,7 @@ quoted below the old table (dense 0.085, MoE 0.130, LFM 0.335).
 ### What the RWKV rows say overall
 
 * **The quality ceiling is the model's, not the engine's.**  The engine runs
-  g1d faithfully (the cos/PPL evidence in performance.md), and the three
+  g1d faithfully (the cos/PPL evidence in benchmarks.md), and the three
   batteries still place it with the MiniMind pair: MC at the null, ifeval
   0.25, no translation.  The LFM2.5-230M is the only model in the table with
   a resolved MC signal, real instruction following and usable translation.
@@ -517,10 +517,10 @@ quoted below the old table (dense 0.085, MoE 0.130, LFM 0.335).
   0.32 > zh 0.16) with Chinese instruction format following better than
   English (ifeval zh 0.40 > en 0.14).  Read the two batteries together.
 * **Perplexity context** (gate corpus, SEQ=512 warm window, measured
-  2026-11-16 on Xe, `docs/performance.md`): engine q8r
+  2026-11-16 on Xe, `docs/benchmarks.md`): engine q8r
   9.2919 against the f32 oracle's 8.1014 on the same token stream; per-row
   scales are worth −23% PPL over per-matrix (12.0831), and the q16 residual
-  grid costs ~0.05 nats/token (the R-1 study in performance.md decided q16
+  grid costs ~0.05 nats/token (the R-1 study in benchmarks.md decided q16
   stays the default — q24's wider range is unused at a 37.4 residual peak).
 
 ### Reproducing the RWKV rows
@@ -594,7 +594,7 @@ position.  Raw matrix (50 runs) and the per-prompt side-by-side against the
 
 Machine: laptop, Intel Iris Xe (ADL GT2), Mesa 26.2.5, `GPU_LAYER=1 SEQ=512
 KV=q16 KV_GRID=512 RES=f32 ACT=f32` — the best fixed-grid configuration from
-the fidelity campaign (`performance.md`, same date).  Two containers of the
+the fidelity campaign (`benchmarks.md`, same date).  Two containers of the
 same shape, 198,007,797 B each:
 
 | | container | sha256 (first 16) | source |
@@ -604,7 +604,7 @@ same shape, 198,007,797 B each:
 
 The engine's fidelity against a float32 numpy forward is 0.9552 cosine (qat,
 f32 streams + KV f32) and 0.9415 with q16 streams — measured, not asserted, and
-in `performance.md`.  **The two containers are different checkpoints**, not two
+in `benchmarks.md`.  **The two containers are different checkpoints**, not two
 packagings of one: their weights are 0.9955 cosine apart and their logits against
 the BF16 reference only 0.9261, which is why they are measured separately below.
 

@@ -88,7 +88,7 @@ rms_final         x (dim_model_base/hidden) / (k*scale_emb)  = x 0.25
 0.02, five steps of the store -- the logits come out as noise).  Measured
 against a float32 forward of the same checkpoint: cosine 0.885 with `k = 1`,
 0.9868 with `k = 1/scale_emb`, and the folded model against the unfolded one
-1.000000 (`docs/performance.md`, 2026-11-18).
+1.000000 (`docs/benchmarks.md`, 2026-11-18).
 
 The fold is also what makes `RES=q16` enough: the residual peak is 41 in these
 units instead of 802.
@@ -151,7 +151,7 @@ t3 body: 120 matrices expanded to q8 on the host (85 MB on disk -> 342 MB in RAM
 
 That is the packer's acceptance path, not the shipping one: it costs 4x the
 file's memory, which is precisely why the board cannot run this container yet.
-Measured on the Pi Zero (2026-11-18, `docs/performance.md`): the board parses the
+Measured on the Pi Zero (2026-11-18, `docs/benchmarks.md`): the board parses the
 file (`mmcf_dump.py`: 246 tensors, CRCs ok, `quant t3`) and reads it at 13 MB/s,
 the engine that predates the kind refuses it by name (`unknown dtype 7`), and the
 engine that reads it is OOM-killed at 280 MB of the 342 MB the expansion needs.
@@ -164,7 +164,7 @@ A t3 container is a *file* until the matvec exists.
   The route is Phase B in `docs/bitcpm-assessment.zh-CN.md`: a 2-bit ternary
   kind (90.8 MB) plus a q8 embedding (75.2 MB), which is SmolLM2's footprint.
   The **pricing is now measured** (`engine/probes/t3mv_probe`, both machines,
-  `docs/performance.md` 2026-11-18): a 2-bit matvec costs 2.44 ns/MAC on VC4
+  `docs/benchmarks.md` 2026-11-18): a 2-bit matvec costs 2.44 ns/MAC on VC4
   against q8's 2.98, i.e. **1.22x**, and the ES2 float decode is 2.5x *slower*
   than q8, so the kind is only worth writing on the ESSL 3.00 path.  Model-level
   that is 1.10 s/token of matvec against 1.29 -- 2-bit buys the *fit*, and a

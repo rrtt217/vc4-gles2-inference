@@ -161,7 +161,7 @@ World 系列含 0.1B/0.4B/1.5B/2.9B/7.2B。下表数值来自各 repo 的 `confi
   `attention_block`）；prefix cache 的 `!kv_cache_.empty()` 闸（`session.cpp:212,273`）要么放宽、
   要么明确报"RWKV 不支持"。
 - 形状：0.1B 的 FFN 3072 → 2×1536 安全；**0.4B 的 4096 → 2×2048 正好落在"2048 行的 draw
-  会静默出错"那条线上**（`docs/performance.md:2757-2763`），需要 3 块，而 `split_ffn` 只有
+  会静默出错"那条线上**（`docs/benchmarks.md:2757-2763`），需要 3 块，而 `split_ffn` 只有
   a/b 两块（`model.cpp:111-155`）；1.5B 的 8192 要 4 块，引擎结构不支持。
 
 ### 4.3 GPU 核
@@ -254,7 +254,7 @@ WKV7 GPU（VC4 上性价比最低）、prefix cache 状态快照、q6 head。
   （q8 191–206 MB、层 q4 119 MB / 157 MB），也独立说明 **0.4B 在 Pi 上无解**。
 - **prefill**：递推**不必**废掉 `PREFILL_PAIR`——matvec/FFN 没有跨位置依赖，只有 WKV 与 token
   shift 逐位置；正确做法是 matvec 走 pair、WKV 在 pair 之后跑两遍。把整条 pair 路径拒掉才损失
-  +15–26%（MoE 实测 +26%，`docs/performance.md:4542-4544`）。
+  +15–26%（MoE 实测 +26%，`docs/benchmarks.md:4542-4544`）。
   0.1B 在 Pi 上 512 token 的 prefill：优化后 2.5–3.7 min，串行 6–11 min（含 3–12 s 固定项）。
 - **长上下文**：decode 与深度无关（0 KV、state 固定 2.36 MB）；Xe 上 4k prompt 70–95 s、
   之后每 token 30–37 ms，这是 RWKV 相对现有 transformer 的真正优势所在。
@@ -266,9 +266,9 @@ WKV7 GPU（VC4 上性价比最低）、prefix cache 状态快照、q6 head。
 | # | 风险 | 证据 | 缓解 |
 |---|---|---|---|
 | 1 | **WKV state 的定点精度**：state 是对 k⊗v 的衰减累加，动态范围未测；VC4 无浮点纹理 | `xformat.h:18-26`、`engine-internals.md:188-197` | Phase 0 用 numpy 量 state 幅值；先用 CPU f32 state 保正确性；GPU 用 I24_1 或 per-head scale |
-| 2 | **Pi 上"无限上下文"兑现不了**：prefill 逐 token | 本评估 §6；`docs/performance.md:3530-3536` 的 prefill 固定项 | 桌面优先；Pi 只做 ≤512 token 的演示；文档写清 prefill 墙 |
-| 3 | 0.4B 的 FFN 4096 = 2×2048 正好踩中 VC4 静默出错的行数 | `docs/performance.md:2757-2763`、`model.cpp:111-155` | 0.4B 只做桌面（Xe 上限 16384）；或先给 `split_ffn` 加 3 块 |
-| 4 | Pi CMA 预算本身是 ±20 MB 的估计 | `docs/performance.md:4658-4661` 记过同一容器跑完还有 195–201 MB free | 以实测为准；先试 q8，再退层 q4 |
+| 2 | **Pi 上"无限上下文"兑现不了**：prefill 逐 token | 本评估 §6；`docs/benchmarks.md:3530-3536` 的 prefill 固定项 | 桌面优先；Pi 只做 ≤512 token 的演示；文档写清 prefill 墙 |
+| 3 | 0.4B 的 FFN 4096 = 2×2048 正好踩中 VC4 静默出错的行数 | `docs/benchmarks.md:2757-2763`、`model.cpp:111-155` | 0.4B 只做桌面（Xe 上限 16384）；或先给 `split_ffn` 加 3 块 |
+| 4 | Pi CMA 预算本身是 ±20 MB 的估计 | `docs/benchmarks.md:4658-4661` 记过同一容器跑完还有 195–201 MB free | 以实测为准；先试 q8，再退层 q4 |
 | 5 | q4 更慢，可能"省内存换速度"不划算 | MiniMind3 q4 388 vs q8 252 ms | Pi 上优先 q8 + 缩词表头（q6 head，需重测 Pi 上是否仍更慢） |
 | 6 | 分词器无 merge 旁路会静默乱合并 | `tokenizer.cpp:102-125,148-149` | 先加显式模式；用 HF `RwkvTokenizer` 逐 id 对拍 |
 | 7 | 模板未实跑（只静态核对） | §4.6 | Phase 0 用 `apply_chat_template` 做 render-diff |

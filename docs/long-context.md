@@ -40,7 +40,7 @@ cache, but the session used to allocate one for every layer.  At SEQ 2048 those
 8 dead entries were 33.5 MB of CMA and the board failed at SEQ 1280 with
 `FBO incomplete`; `init_attention()` now takes the layer types and skips them,
 which puts 2048 back within reach at `KV=q16` (measured 2026-11-13, see
-`docs/performance.md`).  `KV=q8` fits too but costs fused PPL 126.89 ->
+`docs/benchmarks.md`).  `KV=q8` fits too but costs fused PPL 126.89 ->
 194.07, so it is not needed for context any more.
 
 ## 2. Why "just split the rows" is not a one-liner

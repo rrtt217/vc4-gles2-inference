@@ -35,8 +35,8 @@ bug.
 
 **What "now" means in a sentence.**  A statement containing a date, "used to",
 or a four-decimal measurement is a record of what was true then, not a rule
-now.  The rules in this file carry no dates; the history is in
-[`docs/performance.md`](docs/performance.md).
+now.  Such a sentence earns its place only by carrying the commit that
+established it; the record itself is Git, not a file in this tree.
 
 ## Mission
 
@@ -144,7 +144,7 @@ belong in `AGENTS.local.md` (DSH) or `AGENTS.override.md` (Hermes/VLAB).
 followed by three timed runs (median).  Decode only; prefill is prompt-specific
 and moves with the board's SD card and background load.  The protocol, the
 prefill ranges and the rows that were not re-measured are in
-[`docs/performance.md`](docs/performance.md), which is the authority.
+[`docs/benchmarks.md`](docs/benchmarks.md), which is the authority.
 
 | model | decode (2026-11-13) |
 |---|---:|
@@ -165,7 +165,7 @@ prefill ranges and the rows that were not re-measured are in
 
 Ordered by speed.  **Not re-measured**: MiniMind3 q8, LFM2.5-230M q4,
 TinyBrainBot q4, picolm85 q4q24 and void1 q8r (their last numbers are in
-`docs/performance.md` with their own dates), and MiniMind3-MoE q8 (203.5 MB does
+`docs/benchmarks.md` with their own dates), and MiniMind3-MoE q8 (203.5 MB does
 not fit the CMA).
 
 The i16 row used to be 41% slower than its 2026-11-02 number; a board bisect
@@ -174,7 +174,7 @@ to amortise the decode).  The default decode now classifies the negative rail
 at 32767.5 and costs two multiplies, which is the row above; it reconstructs
 every q16 value on VC4 with a small error, so the board's q8 pin moved with it.
 `Q16_DECODE=exact` restores `6234328`'s decode and the older pins
-(i16 289.7 ms/token); `docs/performance.md` has both tables and the
+(i16 289.7 ms/token); `docs/benchmarks.md` has both tables and the
 TinyBrainBot cosine evidence.
 
 A native ARMv6 build on a Pi Zero takes about 8–10 minutes; never run two
@@ -254,7 +254,7 @@ is the dense model's, because only one expert is read.  The Pi Zero runs the
 2026-11-11 24-token run gave 342).  At q8 it was **tried and failed** (204 MB:
 the weights take the CMA and the session's FBOs fail) -- that is an observed
 outcome on that board and configuration, not a size bound to apply elsewhere.
-`docs/performance.md` has the table; `MOE_DUMP=1` prints the routes and
+`docs/benchmarks.md` has the table; `MOE_DUMP=1` prints the routes and
 `MOE_FIXED=<e>` prices them.
 
 A legacy checkpoint (`Q8M1/Q8M2`, `Q4M1`, `I16M1/I16M2`) or a llama2.c `.bin`
@@ -320,7 +320,7 @@ TinyBrainBot q4's residual sign flip (Pi-vs-Xe cosine 0.7233 -> 0.9971).  Before
 that the Pi printed `我是一个AI助手，没有自我意识，也没有身体，所以我无法`
 (2026-11-03, when the fused FFN became the default); it moved again on
 2026-11-13, when the cheap q16 decode became the default (see the decode
-section of `docs/performance.md`).  `docs/performance.md` keeps both.  A
+section of `docs/benchmarks.md`).  `docs/benchmarks.md` keeps both.  A
 pre-decode binary was kept on the board as `bin/engine_mm3_pi.predecode` when
 the decode changed (2026-11-13); it is not in this repository, so treat it as a
 board-local artifact and rebuild rather than count on it.
@@ -349,7 +349,7 @@ u8 template kind and the template name; key 6 is the model name) and the packer
 that wrote it agree with the gate.  There is no compiled default any more --
 `kDefaultSystem` was dead code and is gone since 2026-11-14; the engine uses the
 container's prompt and `--system` overrides it.  If it differs, change the
-container, this gate, `engine/scripts/regression.sh` and `docs/performance.md`
+container, this gate, `engine/scripts/regression.sh` and `docs/benchmarks.md`
 together, never one of them alone.
 
 The older strings (`MiniMind是一个高效的小...` for q8,
@@ -515,7 +515,7 @@ disagree on logits and on the greedy answer, the format axes are excluded as the
 cause (widening every stream to f32 makes the board worse), and the cause is
 open.  `MATVEC_STRIP` is the one measured lead; the per-switch isolation table is
 in `models/README.md` and both machines are in
-[`docs/performance.md`](docs/performance.md).
+[`docs/benchmarks.md`](docs/benchmarks.md).
 
 ## Documentation rules
 
@@ -531,22 +531,28 @@ Update the document that owns the fact:
 | the container layout, metadata keys, capability bits | `docs/checkpoint-container.md`, `mmcf_dump.py`, `docs/model-formats.md` |
 | a checkpoint format or the loader | `docs/model-formats.md` |
 | a converter or the q4/q8 numerics | `docs/quantization.md` |
-| a timing or a regression baseline | `docs/performance.md` |
+| a timing or a regression baseline | `docs/benchmarks.md` |
 | an environment switch | its row in `engine/src/switches.cpp` **and** `docs/test-hooks.md` |
 | a command a human will copy | the README for that component **and** this file |
 | a GPU or format change | `docs/engine-internals.md`, `docs/engine-layout.md` |
 
-**A document records the present, or it records the past — never both.**  Three
+**A document records the present, or it records the past — never both.**  Two
 tiers, and a sentence belongs to exactly one of them:
 
 | Tier | Answers | Lives in | May contain |
 |---|---|---|---|
-| state | what is true now | the READMEs, `docs/*.md` (except the log), `--help`, `--dump-switches` | commands in the canonical spelling, no dates, no "used to" |
-| evidence | why it is this way, and not the other way | one paragraph next to the thing it protects, dated, linking to the log | the *one* measurement that prevents a wrong decision |
-| history | what was tried, measured, abandoned | `docs/performance.md` (append-only) and the commit message | everything else |
+| state | what is true now | the READMEs, `docs/*.md`, `--help`, `--dump-switches` | commands in the canonical spelling, no dates, no "used to" |
+| evidence | why it is this way, and not the other way | one paragraph next to the thing it protects | one dated line and a commit reference (`git log -S` finds it) |
+
+**There is no history tier.**  Git is the record: what was tried, measured and
+abandoned lives in the commit that did it, and a document that needs to say why
+points at that commit instead of retelling it.  Nothing in this tree is
+append-only, and no file is a log — a measure-and-append document grows without
+bound and buries the present under its own past.
 
 The test for a sentence: delete it — does someone make a wrong decision
-tomorrow?  No → it is history.  Yes → keep it as one dated line with a link.
+tomorrow?  No → it is history, and it belongs in a commit message.  Yes → keep
+it as one dated line that names the commit which established it.
 `engine/gate/check_docs_style.py` is the mechanical half: a **command** in a
 state document uses the axis spelling (`KV=q16`, not `KV_PACK=16` — the alias
 still works, but the document is the teaching copy), and a **four-decimal
@@ -573,11 +579,12 @@ When a flag is removed, grep the whole tree for it: `--template` survived in
 five scripts and two READMEs after the engine dropped it, and `docs_check.sh`
 only catches the paths it knows about.
 
-`docs/performance.md` is append-only history: new measurements go at the
-bottom with the date and the machine, and the current Pi matrix is the newest
-dated campaign there (2026-11-13 today).  The matrix near the top is the
-2026-11-02 history, kept so the cost model stays auditable.  Do not rewrite old
-entries; correct them with a new section that says what was wrong.
+`docs/benchmarks.md` is the Pi Zero decode matrix and its measurement protocol —
+a reference table, not a log.  New measurements **replace** the row they
+supersede and carry the commit that produced them; a run that overturns an older
+number replaces it, and the old value stays reachable through Git.  Do not append
+a dated section for each campaign: that is how a reference table becomes an
+archive.
 
 ## Source split policy
 

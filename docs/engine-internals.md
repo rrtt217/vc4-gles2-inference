@@ -134,7 +134,7 @@ against the pre-packing engine byte for byte.
 
 The residual is fixed point at 1/256, so it cannot hold a value beyond **±128**;
 `add_q16` clamps there.  That is invisible for the models here (MiniMind3's
-residual peaks around 40, see `docs/performance.md`), and it is the hard limit
+residual peaks around 40, see `docs/benchmarks.md`), and it is the hard limit
 for a model whose residual is larger: supra2-100M reaches **2300** at layer 4
 and saturates, which reproduces exactly as a wrong argmax
 (`models/README.md` has the measurement, including the clamped-simulation

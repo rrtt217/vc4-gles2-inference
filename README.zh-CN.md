@@ -14,7 +14,7 @@ OpenAI 兼容 HTTP 服务器和磁盘 KV prefix cache。
 大部分内容，由 AI 编程智能体（DeepSeek Harness 驱动的多智能体协作）在人类的
 方向、审查与实测约束下完成。使用前须知两点：
 
-- **数字是实测的，文字是生成的。**  `docs/performance.md` 与
+- **数字是实测的，文字是生成的。**  `docs/benchmarks.md` 与
   `docs/evaluation.md` 里的每个数字都对应本仓库中一条可执行命令，数值由
   `engine/scripts/regression.sh` 与 `engine/gate/shader_hashes.sh` 钉住。
   解释不是证据——要跑门禁。
@@ -139,7 +139,7 @@ python3 server.py --seq 768 --kv-pack 16 \
 Pi 一列是 2026-11-13 在 HEAD `71cb1e0` 上的测试（`GPU_LAYER=1 KV=q16`、
 greedy、`--gen 16`，先丢弃一次预热、再 3 次计时取中位数），只含 decode。
 标"未重测"/"板上没有"的行沿用
-[performance.md](docs/performance.md) 里带日期的最后数据，协议、prefill 范围和
+[benchmarks.md](docs/benchmarks.md) 里带日期的最后数据，协议、prefill 范围和
 q16 解码开关也在那里。prefill 受板子 SD 卡和后台负载影响，不要当作常数引用。
 
 ## 文档
@@ -150,7 +150,7 @@ q16 解码开关也在那里。prefill 受板子 SD 卡和后台负载影响，�
 - [量化与 Q4M1](docs/quantization.md)
 - [VC4 / 引擎内部](docs/engine-internals.md)
 - [Prefix cache](docs/prefix-cache.md)
-- [性能](docs/performance.md)
+- [性能](docs/benchmarks.md)
 - [测试开关](docs/test-hooks.md)
 - [模型质量评测](docs/evaluation.md)：多选知识题、指令遵循、翻译三项基准
 - [源码布局 / 拆分建议](docs/engine-layout.md)

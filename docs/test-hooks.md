@@ -381,7 +381,7 @@ conclusion from its output.
   two small 16-bound reduce passes; one texel per tile read back) instead of
   reading the whole vocabulary back.  **Opt-in: measured a net loss on VC4**
   (the read-back is ~6 ms a token on the hybrid, the reduction ~14 ms; see
-  `docs/performance.md`, 2026-11-15), kept as a byte-identical measurement
+  `docs/benchmarks.md`, 2026-11-15), kept as a byte-identical measurement
   arm.  The reduction compares the exact stored integers and keeps the first
   maximum at every level, which is `std::max_element`'s tie rule, so the
   winner is byte-identical to the read-back.  Only greedy turns without
@@ -474,7 +474,7 @@ conclusion from its output.
   texture sample's small VC4 error, so the board's PPL pins move with it
   (MiniMind3 q8 271.2855, q4 325.3751, LFM2 warm 29.1588; TinyBrainBot q4
   against Xe: cosine 0.9983, mean of five prompts — board, 2026-11-13,
-  `docs/performance.md`).  `Q16_DECODE=exact`
+  `docs/benchmarks.md`).  `Q16_DECODE=exact`
   restores `6234328`'s integer decode (`float(int(c*255+0.5))`, bit-identical
   to floor for these positive arguments): MiniMind3 q8 271.6420 and the older
   pinned strings, at the cost of the board's i16 model (326.8 against 216.0
@@ -549,7 +549,7 @@ conclusion from its output.
   rows on Xe and VC4) and ~43% faster at the engine's 1216-row chunk
   (6.55 -> 3.74 ms/draw).  The nine `Q4_4X4_*` arms that priced that road are
   gone (see Retired below): the flat 8-wide body is the default, so what is left
-  of them is the measurement, in `docs/performance.md`.
+  of them is the measurement, in `docs/benchmarks.md`.
 
 - `Q4_QKV_FLAT=1`, `Q4_W2_FLAT=1` — opt into the flat-loop form of the qkv
   (`matvec_i4_4x4`) and w2/wo (`matvec_i4_add_4x4`) 4-bit kernels.  **Default
@@ -664,7 +664,7 @@ conclusion from its output.
 ### Placement
 
 - `GPU_LAYER=1` — hidden state, attention, RMSNorm and FFN all on the GPU.  The
-  fast path; not correct for every model on VC4 (see `docs/performance.md`).
+  fast path; not correct for every model on VC4 (see `docs/benchmarks.md`).
 
 - `GPU_ATTN=1` — GPU RoPE + KV cache + attention, CPU FFN.
 
@@ -763,7 +763,7 @@ what it did.  Three things about the removals are still worth a sentence:
   was a second kernel text to keep verified for a conclusion already in the
   code.  `shader_hashes.txt` did not move when they went, which is what makes
   the deletion safe to believe.  What they measured stays in
-  `docs/performance.md`: `NOOUT` is not a price (0.8 ms against 8.2, the driver
+  `docs/benchmarks.md`: `NOOUT` is not a price (0.8 ms against 8.2, the driver
   deletes the kernel), one matrix 8.18 -> 6.31 ms, one row 5.71, and the group
   plane 84 of the gate's 159 ms on the Pi.
 - `--kv-pack` and `--seq` are **server** flags, never engine flags: the server

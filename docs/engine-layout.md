@@ -91,7 +91,7 @@ position B in `.ba`, so `x_per_texel()` does not apply and the width is
 The builders are pure functions — `(rows, cols, XFormat) -> std::string` — and
 the text they emit *is* the numerics. Wrapping a decode in a GLSL helper cost
 VC4 177 against 283 MMAC/s and moved PPL with the same arithmetic
-(`docs/performance.md`, "The refactor's 12% regression"), so the emitted bytes
+(`docs/benchmarks.md`, "The refactor's 12% regression"), so the emitted bytes
 are the contract, not the builder's source. Two tools read them:
 
 | Question | Tool |

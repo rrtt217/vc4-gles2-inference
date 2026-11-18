@@ -13,7 +13,7 @@
 #     . "$(dirname "$0")/lib.sh"
 #
 # Every value is overridable from the environment, and every function keeps the
-# behaviour the scripts had, because these numbers are cited in docs/performance.md
+# behaviour the scripts had, because these numbers are cited in docs/benchmarks.md
 # and an accidental change of protocol would invalidate the history.
 
 # --- where we are -------------------------------------------------------
@@ -38,7 +38,7 @@ if [ ! -d ../models/minimind3 ] && [ -d models/minimind3 ]; then
 fi
 
 # --- the environment a measurement needs -------------------------------
-# GPU_LAYER=1 and TIMING=1 are the protocol every number in docs/performance.md
+# GPU_LAYER=1 and TIMING=1 are the protocol every number in docs/benchmarks.md
 # was measured under; KV_PACK=16 is the default the gate pins.
 require_bin() {
     [ -x "$1" ] || { echo "missing engine binary: $1" >&2; exit 2; }

@@ -5,7 +5,7 @@ request it finds the longest common token prefix, reuses the KV entries before
 that point, and pre-fills only the suffix.  A fully cached prompt costs one
 token to re-seat the final logits.
 The CLI `--prefix-cache` path clamps the skip the same way; before step 10 it
-could skip every token and sample from an empty logits vector (docs/performance.md).
+could skip every token and sample from an empty logits vector (docs/benchmarks.md).
 
 The chat REPL is a third chain, in memory only.  It keeps the tokens of the
 previous turn, re-renders the whole exchange through the container's template,

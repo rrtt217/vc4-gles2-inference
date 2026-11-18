@@ -5,7 +5,7 @@
 （PPL 111.83，`The capital of France is` → `Paris`）；GPU conv 链已搭好但输出仍
 与串行参考不一致（早期记录写作 `CONV_GPU=1`，但该开关从未被引擎读取；融合路径由
 `GPU_LAYER=1` 选择，见 2026-11-13 的审查结论与 `lfm2.5-230m.md`。本文的状态与结论
-停留在 2026-11-11，实现现状以 `lfm2.5-230m.md` 为准）。详见 `docs/performance.md` 末尾。本文件回答"把 LFM2.5-230M 跑在本引擎上要做多少
+停留在 2026-11-11，实现现状以 `lfm2.5-230m.md` 为准）。详见 `docs/benchmarks.md` 末尾。本文件回答"把 LFM2.5-230M 跑在本引擎上要做多少
 工作、卡在哪里"。文中数字分三类，不可混读：
 
 - **来源事实**：来自 HF 配置、参考实现源码或本仓库源码，已标注出处；
@@ -121,7 +121,7 @@
 - tokenizer 编解码往返；两 prompt 行为检查（非空、不崩）。
 - `regression.sh` + `shader_hashes.sh` 必须过；MiniMind3 q8/q4 引脚不得移动。
 - Pi 交叉编译、部署、计时矩阵；文档更新（`model-formats.md` 新 tensor id、
-  `checkpoint-container.md` 新 key、`test-hooks.md`、`performance.md`）。
+  `checkpoint-container.md` 新 key、`test-hooks.md`、`benchmarks.md`）。
 
 ## 四、工作量分解
 

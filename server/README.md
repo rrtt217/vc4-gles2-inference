@@ -78,7 +78,7 @@ is stripped and the neutral default is filled in when the client sends none.
 | `plain` / unknown | falls back to chatml and prints one warning |
 
 TinyBrainBot also needs `--no-gpu-layer`: its full texture-resident GPU layer
-path is not correct on VC4 yet (docs/performance.md, item 12), so the CPU path
+path is not correct on VC4 yet (docs/benchmarks.md, item 12), so the CPU path
 is the deployable one.
 
 ## Endpoints
@@ -140,7 +140,7 @@ its container file name.  A request's `model` field selects the container, and
 keeps its EGL context and compiled programs across the switch, so a switch costs
 a container read plus an upload (6.12 s + 2.99 s on the board) instead of a
 process start (which would also pay 4.23 s of context and 1.89 s of program
-links -- `docs/performance.md`).  The switch happens on the first request that
+links -- `docs/benchmarks.md`).  The switch happens on the first request that
 names a different model and is logged as `[model] <id> resident, load <ms> ms`;
 the resident model is not reloaded per request.  The container's chat template
 travels with it, so `/health`'s `template` and the chat-template refusal follow
@@ -540,7 +540,7 @@ confused.  Three operations exist:
 The first one replaces the model while keeping the EGL
 context and its compiled programs (on a Pi Zero that is 4.23 s of context and
 1.89 s of program links, against 6.12 s to read a container and 2.99 s to
-upload it -- `docs/performance.md`, "Where the first token goes"):
+upload it -- `docs/benchmarks.md`, "Where the first token goes"):
 
 ```json
 {"op": "load", "model": "../models/minimind3/minimind3.q4.mmcf"}

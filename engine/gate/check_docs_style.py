@@ -10,16 +10,17 @@ reference document that carries history instead of state:
   there writes the superseded name.  So inside a fenced code block, or on a line
   that is a shell command, only the axis spelling is allowed.  The legacy table
   in `docs/test-hooks.md` is generated from the registry and is exempt, and so
-  are the history documents (`performance.md` and the dated reports), because
-  rewriting those would edit the record.
+  are the frozen pre-rule documents (the dated reports and the accumulated
+  `benchmarks.md` entries), because rewriting those would edit the record.
 
   **R2 -- a measurement in a state document carries its date.**  A four-decimal
   number in a state document is a measurement, and a measurement is a fact about
   a moment, not about now: PPL is re-baselined deliberately (`regression.sh
   --rebaseline`) and the value that is true today is in the machine's pin file,
   not in a document.  So the number has to sit under a dated heading or in a
-  dated paragraph, which makes it read as what it is.  `docs/performance.md` is
-  the log and needs no such mark: every section in it is dated by construction.
+  dated paragraph, which makes it read as what it is.  The pre-rule sections of
+  `docs/benchmarks.md` are exempt: they are dated by construction and frozen;
+  the reference table at its top is a *state* document and is checked.
 
 Run from anywhere: `engine/gate/check_docs_style.py [-v]`.  Exit 1 on drift.
 Called by `gate/docs_check.sh`, so it is step 0 of the gate.
@@ -45,8 +46,13 @@ STATE = [
     "docs/bitcpm.md", "docs/smollm2-135m.md",
 ]
 
-# Documents whose job is the record.  Never rewritten, so never checked.
-HISTORY = ("docs/performance.md", "docs/swap-drift.md")
+# Pre-rule documents: the accumulated record, frozen rather than maintained.
+# Nothing new is appended to them (Git is the record), so they are not checked.
+# `benchmarks.md` is here because its body is 120 dated sections written under
+# the old append-only rule; the rule its top states forbids adding more, and the
+# reference table it should become is a separate job.  Listing it keeps it from
+# silently falling out of every check.
+HISTORY = ("docs/swap-drift.md", "docs/benchmarks.md")
 HISTORY_PREFIX = ("docs/vc4-1536-repro.md",)
 
 LEGACY = re.compile(r'\b(KV_PACK|KV_FMT|KV_SCALE|ACT8|ACT_FMT|ACT_F32|RES_PACK|RES_FMT|'
@@ -155,7 +161,7 @@ def main():
               % (len(STATE), len(HISTORY + HISTORY_PREFIX)))
     if fail:
         print("\nsee the header of engine/gate/check_docs_style.py: a state "
-              "document records the present; the record is docs/performance.md.")
+              "document records the present; the record is Git.")
         return 1
     print("doc style: ok (%d state documents: canonical commands, dated "
           "measurements)" % len(STATE))

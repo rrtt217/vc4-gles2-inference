@@ -11,7 +11,7 @@
 - [模型格式](../docs/model-formats.md)
 - [VC4 / 引擎内部](../docs/engine-internals.md)
 - [量化与 Q4M1](../docs/quantization.md)
-- [性能](../docs/performance.md)
+- [性能](../docs/benchmarks.md)
 - [测试开关](../docs/test-hooks.md)
 - [源码布局与拆分建议](../docs/engine-layout.md)
 
@@ -140,7 +140,7 @@ TinyChat15M 是 llama-2 chat 格式的 15M 模型，不是补全模型：容器�
 
 `/model PATH`：后者在
 不重建 GL 上下文的前提下换一个容器（板上上下文 4.23 s + 13 个程序链接 1.89 s 是省下来的
-那部分，见 `docs/performance.md`）。权重、分词器、聊天模板和 session 的 target 会被替换，
+那部分，见 `docs/benchmarks.md`）。权重、分词器、聊天模板和 session 的 target 会被替换，
 已编译程序保留，对话历史清空。路径不可读、不是容器、或不是 chat 模型的情况在**释放当前模型之前**
 就被拒绝（只读头部和元数据就够了），所以打错路径不用付代价。这里没有容量预检：内核报的 free CMA
 并不是新场景真正能拿到的量，桌面内核又没有 CMA，装不下的容器由上传阶段发现，而不是靠猜。精度与模板类型都可以换（q8 <-> q4 <-> i16、dense <-> hybrid），
@@ -225,7 +225,7 @@ head_dim 96、vocab 6400、RoPE theta 1e6、tied embedding、per-head Q/K RMSNor
 加 `TIMING=1` 打印 prefill/decode 时间。
 
 Pi Zero，16 token 生成（2026-11-13 在 HEAD `71cb1e0` 上的 campaign：先丢弃一次预热，
-再 3 次计时取中位数；协议与未重测的行见 `docs/performance.md`）：
+再 3 次计时取中位数；协议与未重测的行见 `docs/benchmarks.md`）：
 
 | 模型 | prefill | decode |
 |---|---:|---:|
@@ -311,7 +311,7 @@ GPU_LAYER=1 KV=q16 ./engine_mm3  --ppl data/ppl_test.txt
 个（输出里的 `stride=`；`PPL_STRIDE=n` 可改）。热身不是可选的：起点落在正文
 中间的窗口是"冷"的，在真实文档上每个 token 贵约 1.8 nats —— 2026-11-11 那次
 "逐窗口退化"就是这么把一个正确的引擎测成了坏的（见
-[`docs/performance.md`](../docs/performance.md)）。`PPL_STRIDE=0` 复原旧的冷
+[`docs/benchmarks.md`](../docs/benchmarks.md)）。`PPL_STRIDE=0` 复原旧的冷
 窗口，两者不可比。`PPL_DUMP=path` 在两种协议下都会写出每个 token 的 NLL。
 
 ## 排查一个错误答案
@@ -341,7 +341,7 @@ GPU_LAYER=1 KV=q16 ./engine_mm3  --ppl data/ppl_test.txt
 | [model-formats.md](../docs/model-formats.md) | 打包器消费的 legacy 布局 |
 | [quantization.md](../docs/quantization.md) | q4/q6、Q4M1、packed KV、质量 |
 | [engine-internals.md](../docs/engine-internals.md) | VC4 shader/FBO 细节 |
-| [performance.md](../docs/performance.md) | Pi/笔记本数据 |
+| [benchmarks.md](../docs/benchmarks.md) | Pi/笔记本数据 |
 | [prefix-cache.md](../docs/prefix-cache.md) | worker 和磁盘 KV cache |
 | [engine-layout.md](../docs/engine-layout.md) | 源码模块、X 格式和回归规则 |
 | [evaluation.md](../docs/evaluation.md) | 多选知识、指令遵循与翻译三项基准 |

@@ -8,7 +8,7 @@ which containers exist, how to run it, what the numbers are, and what is still
 broken.  The packing/feasibility study (residual amplitudes, quant recipes,
 vendor GGUF analysis, work estimate) is
 [`lfm2.5-230m-assessment.zh-CN.md`](lfm2.5-230m-assessment.zh-CN.md); the
-chronological measurements are in [`performance.md`](performance.md).
+chronological measurements are in [`benchmarks.md`](benchmarks.md).
 
 ## The model
 
@@ -133,7 +133,7 @@ Board (Pi Zero, `SEQ=256`, QAD q4, 24 tokens, greedy):
 | 17\*23 with the `calculate_math` tool | **"Answer: 391"** |
 
 Board PPL at `SEQ=256` — measured 2026-11-12/13, the rows themselves are in
-[`performance.md`](performance.md) — same corpus (two windows, not comparable
+[`benchmarks.md`](benchmarks.md) — same corpus (two windows, not comparable
 with the `SEQ=512` rows above).  The two rows this page used to carry -- fused **45.52**,
 serial **43.91** -- are *cold-window* sums, the only protocol the board binary
 had; both protocols now exist, and the cold one still prints them on the board
@@ -149,7 +149,7 @@ measurement:
 
 Two things to read there.  The protocol alone moves the number ~35% (43.91 ->
 28.62 on the board), which is the correction recorded in
-[`performance.md`](performance.md) -- compare warm with warm or cold with cold,
+[`benchmarks.md`](benchmarks.md) -- compare warm with warm or cold with cold,
 never one with the other.  The board's rows are `Q16_DECODE=exact` values, the
 2026-11-12 binary's decode; the default cheap q16 decode (2026-11-13) reads
 serial warm **29.1588** (fused not re-measured), so compare board PPL with the
@@ -241,7 +241,7 @@ chunks, and the guard was a literal 4096.  The real ceiling is 2x the driver's
 GL target width, so `Model::split_ffn` now takes `gpu.max_target_dim()`:
 unchanged on VC4 (2048 -> 4096), and on Xe the 4608 hidden runs as two
 2304-wide chunks.  `scripts/regression.sh` still ACCEPTs with the gate's pins
-unchanged (`docs/performance.md`) -- the change only relaxes a refusal.
+unchanged (`docs/benchmarks.md`) -- the change only relaxes a refusal.
 
 Numbers, 9 short sentences (5 ja->en, 4 en->ja; greedy; chrF against one
 reference translation, the same metric as [evaluation.md](evaluation.md)):
@@ -356,7 +356,7 @@ are described in [`deterministic-tools.md`](deterministic-tools.md).
 | 2 | **i16 container + fused path is wrong**: PPL 1.4e7 against 15.97 on the serial path; pre-existing at `f22bb76` | not fixed; the i16 container is serial-only |
 | 3 | **tokenizer splits digit runs differently** from llama.cpp (`6789` → `6`+`789` here, `678`+`9` there, because `tokenizer.ggml.pre = lfm2` means the llama-3 pre-tokenizer with `\p{N}{1,3}`); prose is identical (334/335 ids on the PPL corpus), 5 of 20 probe strings differ | not fixed; matters for arithmetic prompts |
 | 4 | **the fused path's I16_2 targets have no per-tensor scale** (`matvec_s` is serial-only), so the board's fused quality is 3.7% behind its own serial path | next step |
-| 5 | ~~`--ppl` degrades window by window~~ — **was our metric, not the engine**: a window that starts mid-text is cold and costs ~1.8 nats/token (f32 3.80 against 5.61 on the same text), and llama.cpp's chunked number is a full-context estimate.  `--ppl` now warms each window up (`PPL_STRIDE=0` for the old behaviour) | fixed 2026-11-12 in `--ppl`; correction and numbers in `performance.md` |
+| 5 | ~~`--ppl` degrades window by window~~ — **was our metric, not the engine**: a window that starts mid-text is cold and costs ~1.8 nats/token (f32 3.80 against 5.61 on the same text), and llama.cpp's chunked number is a full-context estimate.  `--ppl` now warms each window up (`PPL_STRIDE=0` for the old behaviour) | fixed 2026-11-12 in `--ppl`; correction and numbers in `benchmarks.md` |
 | 6 | **`--thinking` is plumbed but unobserved** — the model did not emit `<think>` in three probes; an unclosed `<think>` is kept as text.  **Why (2026-11-17):** no 230M thinking checkpoint exists (the Hub's is 1.2B), and neither vendor template opens the block — a thinking checkpoint emits `<think>` itself as its first tokens.  `--thinking` prefils a block this checkpoint was never trained to fill, and the engine also wires it to the vendor's *different* `preserve_thinking` variable (`chattmpl.cpp:66`), so the flag means two things at once | plumbed; needs the 1.2B-Thinking container to test |
 | 7 | ~~q8 LFM2 containers die in `matvec_q8_pair_logits: rows=0 cols=0`~~ — the **pair prefill called `attention_block` for conv layers**, which carry no qkv.  `pair_ok()` now refuses a hybrid model (there is no conv pair kernel), so a hybrid model always prefills through the serial loop; the q8 container itself is correct there | fixed 2026-11-12 |
 | 8 | ~~the fused layer loop (`GPU_LAYER=1`) was wrong for hybrid q8 and i16~~ — two independent bugs, both fixed 2026-11-12.  **(a) i16**: `res_pack_` was decided from `wo[0]`, and a hybrid model's layer 0 is a conv layer with an empty `wo` whose type defaults to INT8, so the i16 container got the packed I16_2 residual while its i16 add kernels wrote one q16 per texel -- every hidden state read back as 0.996 constants.  **(b) q8**: `matvec_q8`'s I16_2 fast path encoded its result as unsigned-then-biased (+65536 for a negative sum before adding 2^23), so **every negative matvec output came back 256 too large**; the conv block is the only user of that non-pair q8 path, which is why dense q8 models never showed it.  Evidence per stage: conv `gated` 55.98/127.99 against the CPU reference 0.07; after the fix it matches to the last q16 step.  Both hybrid containers now run either loop; the shader-hash file was re-baselined for the one changed program (`matvec_q8_6400x768_i16_2`, 839 -> 748 B) and the dense PPL pins did not move | fixed 2026-11-12 |

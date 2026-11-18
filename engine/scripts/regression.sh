@@ -346,7 +346,7 @@ q8_def=$(text "$Q8" "$PROMPT" 16 "")
 [ "$q8_def" = "$q8" ] || {
     echo "system prompt drift: --system '$SYS' gives '$q8'" >&2
     echo "  but the compiled default gives '$q8_def'" >&2
-    echo "  update kDefaultSystem, AGENTS.md, this script and docs/performance.md" >&2
+    echo "  update kDefaultSystem, AGENTS.md, this script and docs/benchmarks.md" >&2
     exit 1
 }
 echo "default system prompt OK"
@@ -450,7 +450,7 @@ if [ -n "$RWKV" ] && [ -f "$RWKV" ]; then
     [ "$rdef" = "$r1" ] || {
         echo "rwkv system prompt drift: --system '$SYS' gives '$r1'" >&2
         echo "  but the container default gives '$rdef'" >&2
-        echo "  update the container, this gate and docs/performance.md together" >&2
+        echo "  update the container, this gate and docs/benchmarks.md together" >&2
         exit 1
     }
     echo "rwkv default system prompt OK"

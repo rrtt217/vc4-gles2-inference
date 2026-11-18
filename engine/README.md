@@ -11,7 +11,7 @@ This README is the quick start. Deep notes are in [../docs/](../docs/):
 - [model formats](../docs/model-formats.md)
 - [VC4 / engine internals](../docs/engine-internals.md)
 - [quantization and Q4M1](../docs/quantization.md)
-- [performance](../docs/performance.md)
+- [performance](../docs/benchmarks.md)
 - [test hooks](../docs/test-hooks.md)
 - [source layout](../docs/engine-layout.md)
 
@@ -197,7 +197,7 @@ so it would need one plus a call into `kCmd`.
 `/model PATH` loads another container without rebuilding the GL context, which
 is the expensive part: on the Pi Zero the context costs 4.23 s and the 13
 program links 1.89 s per process, against 6.12 s to read a container and 2.99 s
-to upload it (`docs/performance.md`, "Where the first token goes").  A path that
+to upload it (`docs/benchmarks.md`, "Where the first token goes").  A path that
 is unreadable, not a container, or not a chat model is refused **before** the
 current model is released -- the header and the metadata are enough to decide that
 -- so a typo costs nothing.  There is no capacity pre-check: the kernel's free-CMA
@@ -400,7 +400,7 @@ the same short English default system prompt as the other chat templates
 for prefill/decode timing.
 
 Pi Zero, 16 generated tokens (2026-11-13 campaign on HEAD `71cb1e0`: a discarded
-warm-up plus three timed runs, median; `docs/performance.md` has the protocol
+warm-up plus three timed runs, median; `docs/benchmarks.md` has the protocol
 and the rows not re-measured):
 
 | model | prefill | decode |
@@ -498,7 +498,7 @@ tokens of context (`stride=` in the output, `PPL_STRIDE=n` to change it).  The
 warm-up matters: a window that starts mid-text is cold and costs ~1.8 nats per
 token on a real document, which is how a 2026-11-11 measurement turned a correct
 engine into a "window-by-window degradation" (see
-[`docs/performance.md`](../docs/performance.md)).  `PPL_STRIDE=0` gives the old
+[`docs/benchmarks.md`](../docs/benchmarks.md)).  `PPL_STRIDE=0` gives the old
 cold windows back; do not compare one with the other.  `PPL_DUMP=path` writes
 the per-token NLL either way.
 
@@ -530,7 +530,7 @@ before concluding anything from it.
 | [model-formats.md](../docs/model-formats.md) | the legacy layouts the packer consumes |
 | [quantization.md](../docs/quantization.md) | q4/q6, Q4M1, packed KV, quality |
 | [engine-internals.md](../docs/engine-internals.md) | VC4 shader/FBO quirks |
-| [performance.md](../docs/performance.md) | Pi/laptop numbers |
+| [benchmarks.md](../docs/benchmarks.md) | Pi/laptop numbers |
 | [prefix-cache.md](../docs/prefix-cache.md) | worker and disk KV cache |
 | [engine-layout.md](../docs/engine-layout.md) | source modules, X formats, regression rule |
 | [evaluation.md](../docs/evaluation.md) | the multiple-choice, instruction-following and translation batteries |

@@ -255,7 +255,7 @@ wrote bitcpm.tok: vocab=73448 merges=57977 maxlen=48 added=8 (sentencepiece)
   但会掉质量）；这里 q8 只是把 {−1,0,1} 原样存下来。
 - **q4 的代价全部落在 0 上**：37% 的精确 0 变成 ±s/15 的噪声，相当于给每个零加了一个
   ~4% 行幅值的扰动。这对 PPL 有多大影响**必须实测**（本仓库的 q4 PPL 是格式 pin，见
-  `docs/performance.md` 的 2026-11-15 条目），不能假设"三值模型 q4 也没事"。
+  `docs/benchmarks.md` 的 2026-11-15 条目），不能假设"三值模型 q4 也没事"。
 - 因此真正合适的表示是**新的 2-bit 三值种类**：0.25 B/参数、精确、并且 matvec 的纹理读取
   量是 q8 的 1/4、q4 的 1/2。这不是优化，它是这个模型在 Pi 上**能不能放下**的分界线（3.3）。
 
@@ -288,7 +288,7 @@ wrote bitcpm.tok: vocab=73448 merges=57977 maxlen=48 added=8 (sentencepiece)
   （SmolLM2 是 23 s 到首 token，这里估 60–100 s）。同一个数量级里最接近的锚点是
   LFM2.5-230M 的 1133 ms/token（169 MB q4）。
 
-这些是外推，不是承诺；真正的数只能按 `docs/performance.md` 的规程（丢弃 warm-up + 三次中位）
+这些是外推，不是承诺；真正的数只能按 `docs/benchmarks.md` 的规程（丢弃 warm-up + 三次中位）
 在板上测。
 
 ## 四、工作量
@@ -302,7 +302,7 @@ wrote bitcpm.tok: vocab=73448 merges=57977 maxlen=48 added=8 (sentencepiece)
 | A3 | 分词器：`▁`/空格优先级、`<0xNN>` 裸字节、一个可对拍入口（例如 `--dump-tokens`）+ 用 `engine/eval/data` 做回归 | `engine/tools/make_tok.py`、`engine/src/cli.cpp`、`engine/gate/` | 1–2 |
 | A4 | 模板 + 特殊 token + 打包命令（`--chat --system "" --bos 1 --add-bos 1 --eos 2 --stop 73440 --head-dedup`） | `templates/`、`engine/tools/mmcf_pack.py` 命令行 | 0.25 |
 | A5 | pth → safetensors（本次已有可复用的读取器） | `models/bitcpm-0.5b/pth_reader.py`（未跟踪）→ 一个正式转换脚本 | 0.25 |
-| A6 | 验收：与 numpy f32 前向对 logits、PPL、`bench_mc`/`eval_ifeval` 基线、文档 | `engine/scripts/`、`engine/eval/`、`docs/performance.md`（追加） | 1.5–2 |
+| A6 | 验收：与 numpy f32 前向对 logits、PPL、`bench_mc`/`eval_ifeval` 基线、文档 | `engine/scripts/`、`engine/eval/`、`docs/benchmarks.md`（追加） | 1.5–2 |
 
 验收门沿用现有规矩：`engine/scripts/regression.sh`（确定性 + 行为 + pin + PPL）、
 `gate/shader_hashes.sh` 必须**不变**（Phase A 不动 shader）、`bench_mc.py` 的分数落在
@@ -312,10 +312,10 @@ wrote bitcpm.tok: vocab=73448 merges=57977 maxlen=48 added=8 (sentencepiece)
 
 | # | 工作 | 落点 | 人日 |
 |---|---|---|---:|
-| B0 | **已做（2026-11-18）**：`engine/probes/t3mv_probe` 把 2-bit 的三种解包写法与 q8 主体一起定价，两机器都测；结论与模型级外推见 8.4 与 `docs/performance.md` | `engine/probes/t3mv_probe` | 0.5（已完成） |
+| B0 | **已做（2026-11-18）**：`engine/probes/t3mv_probe` 把 2-bit 的三种解包写法与 q8 主体一起定价，两机器都测；结论与模型级外推见 8.4 与 `docs/benchmarks.md` | `engine/probes/t3mv_probe` | 0.5（已完成） |
 | B1 | 新的 2-bit 三值张量种类（容器 record 的 dtype、packer 检测"逐行三值"、q4 切片等价物、dump、`test_mmcf_format.py`、`checkpoint-container.md`） | `engine/tools/mmcf_format.py`、`engine/tools/mmcf_hf.py`、`engine/tools/mmcf_dump.py`、`engine/src/model.cpp` | 1.5–2 |
 | B2 | matvec kernel：解包写法已由 B0 定下（ES3 整数移位、16 权重一 texel），剩下 pair / fused-swiglu / logits 三个变体与逐行 scale | `engine/src/shaders.cpp`、`engine/src/gpu_matvec.cpp`、`engine/src/gpu_ffn.cpp` | 4–6 |
-| B3 | 板上 bring-up：CMA 实测、SEQ、`scripts/swap_matrix.py`、Pi 与 Xe 的 PPL 对照 | `engine/scripts/`、`docs/performance.md` | 2–4 |
+| B3 | 板上 bring-up：CMA 实测、SEQ、`scripts/swap_matrix.py`、Pi 与 Xe 的 PPL 对照 | `engine/scripts/`、`docs/benchmarks.md` | 2–4 |
 
 B2 是唯一有真实技术风险的部分：`q6` 当年要拆成两个纹理是因为"VC4 一个 fragment 不能从
 同一个 sampler 取两个 texel"（`engine/tools/mmcf_hf.py` 的 `q6mat` 注释），2-bit 的三值
@@ -441,7 +441,7 @@ cd models/bitcpm-0.5b && python3 probe_forward.py --measure --prompt "The Transf
 
 `engine/probes/t3mv_probe` 把引擎的 q8 matvec 主体和"一个 texel 装 16 个三值权重"的
 同一段循环放在一起量，三个写法（ES2 浮点 `mod`/`floor`、ES3 整数移位、以及把解包去掉的
-取纹理对照），每个先与 CPU 点积对拍再计时（`docs/performance.md` 2026-11-18）：
+取纹理对照），每个先与 CPU 点积对拍再计时（`docs/benchmarks.md` 2026-11-18）：
 
 | ns/MAC | q8 | ES2 浮点 | ES3 整数 | 只取纹理 |
 |---|---:|---:|---:|---:|

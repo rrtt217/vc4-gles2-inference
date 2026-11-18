@@ -197,5 +197,5 @@ default flags; override `ARMV6_CXXFLAGS` instead.
 | build works, board faults immediately | the binary is ARMv7; run the verification above |
 | `check-cross` cannot find a runtime, but `ls` shows one | `CROSS_SYSROOT` points at the wrong level (it must contain `usr/lib/arm-linux-gnueabihf`) |
 
-`docs/vc4-1536-repro.md` and `docs/performance.md` contain historical build
+`docs/vc4-1536-repro.md` and `docs/benchmarks.md` contain historical build
 lines for specific hosts; those are records of runs, not the supported commands.

@@ -1,12 +1,16 @@
-# Performance
+# Benchmarks
 
-Measurements are from the Pi Zero and the local Xe/GLES2 machine. Treat them
-as regression baselines, not portable benchmarks.
+Decode timings per model and machine, plus the protocol that produced them.
+These are regression baselines for the machines named, not portable benchmarks.
 
-This file is append-only history.  Commands inside the entries are reproduced
-as they were run, so historical ones may use flags that no longer exist
-(`--template`, `TOKENIZER=`, `ROPE_THETA=`, `ROPE_HALF=`, legacy `.q8`/`.q4`
-paths); the current invocation is in `AGENTS.md` and `engine/README.md`.
+**This is a reference table, not a log.**  A new measurement replaces the row it
+supersedes, with the commit that produced it; the old value stays reachable
+through Git, and no dated section is appended per campaign.  Where a number moved
+because the engine changed, the row says what changed and when, in one line.
+
+The entries accumulated since 2026-11-01 are still chronological below.  They
+predate this rule and are not a model for new additions: treat them as the source
+the current matrix was distilled from, and add nothing after them.
 
 ## Historical model matrix (2026-11-02 run)
 

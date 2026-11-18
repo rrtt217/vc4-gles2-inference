@@ -3,7 +3,7 @@
 状态：研究笔记，2026-11-02。本文回答两个问题：
 
 > 文中的延迟基线来自 2026-11-01 的引擎；2026-11-02 当前模型矩阵见
-> [performance.md](performance.md)。架构结论不受这些数字更新影响。
+> [benchmarks.md](benchmarks.md)。架构结论不受这些数字更新影响。
 
 1. 20–150M 参数区间里，哪些翻译模型和“类 Jev”判断模型相对适合当前引擎？
 2. 要把它们跑起来，还需要补哪些适配？
@@ -37,7 +37,7 @@
 | Q4 要求 `cols % 32 == 0` | [model.cpp:48](../engine/src/model.cpp) | Marian 512、BERT 768/3072 都满足 |
 | tokenizer 只有 BPE | 无 SentencePiece unigram、无 WordPiece | OPUS/BERT 的 tokenizer 都要补 |
 
-已经测过的基线（Pi Zero，q8，greedy，见 [performance.md](performance.md)）：
+已经测过的基线（Pi Zero，q8，greedy，见 [benchmarks.md](benchmarks.md)）：
 
 | 模型 | 规模 | 每 token | 说明 |
 |---|---:|---:|---|
@@ -346,7 +346,7 @@ KV：OPUS decoder self-attn 6 层 × 512 × 512 × 2 × 4 B ≈ 12.6 MB；cross-
 
 ## 参考
 
-- 引擎性能基线：[performance.md](performance.md)
+- 引擎性能基线：[benchmarks.md](benchmarks.md)
 - 引擎内部/VC4 限制：[engine-internals.md](engine-internals.md)
 - 格式与 Q4：[model-formats.md](model-formats.md)、[quantization.md](quantization.md)
 - 未来优化（batch prefill 等）：[future-optimization.md](future-optimization.md)

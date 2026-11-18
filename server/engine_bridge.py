@@ -207,7 +207,7 @@ class EngineWorker:
         The engine keeps its EGL context and its compiled programs, so this is a
         container read plus an upload instead of a process start: 4.23 s of
         context and 1.89 s of program links are the part that survives (docs/
-        performance.md, "Replacing a model without rebuilding the GL context").
+        benchmarks.md, "Replacing a model without rebuilding the GL context").
         The template and the chat-template flag belong to the container, so they
         are replaced with it -- a server that kept the old ones would render the
         new model's prompt with the old model's markers.

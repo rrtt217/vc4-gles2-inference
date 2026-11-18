@@ -296,11 +296,11 @@ quantization (cosine 0.998-0.9999, per-row median error 2.14% against 1.10% for
 the MiniMind3 q8 that works), and a re-quantization at a clipped p99.9 scale
 (0.92%) still degenerates while this model's q4, at 7.83% weight error, answers
 normally.  The break is in the q8 runtime path, not the weights; see
-docs/performance.md, "q8 precision is not why TinyBrainBot degrades".  Use
+docs/benchmarks.md, "q8 precision is not why TinyBrainBot degrades".  Use
 **q4 or i16** for this model.
 
 It also needs the CPU layer: its `GPU_LAYER=1` path is not correct on VC4
-(docs/performance.md, item 12), so `--no-gpu-layer` is the deployable setting.
+(docs/benchmarks.md, item 12), so `--no-gpu-layer` is the deployable setting.
 
 ### With its real template (2026-11-07)
 

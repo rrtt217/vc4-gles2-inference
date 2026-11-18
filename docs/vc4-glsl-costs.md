@@ -138,7 +138,7 @@ reachable through `packHalf2x16`; it is not.
   breaks the pairing (a conditional, a `floor`, a `sign`) doubles it.
 - `floor`/`fract`/`sign` are not free: a q4 or q8 decode that uses them pays
   5–6 instructions where a saturation modifier would have cost 0.  That is the
-  measured difference between the q4 decode variants in `docs/performance.md`.
+  measured difference between the q4 decode variants in `docs/benchmarks.md`.
 - Never put `sin`/`cos`/`pow`/`mod` in a per-fragment path.
 - `int * int` is 7 instructions: the q8 scale arithmetic is written in floats on
   purpose.
@@ -146,7 +146,7 @@ reachable through `packHalf2x16`; it is not.
   operations; there is no `packHalf2x16`, and there are no half-float textures
   either (`OES_texture_half_float` is not exposed).
 - **A loop the compiler does not unroll loses conditional index updates.**
-  Measured 2026-11-15 (`ARGMAX_DUMP`, `docs/performance.md`): in a scan that
+  Measured 2026-11-15 (`ARGMAX_DUMP`, `docs/benchmarks.md`): in a scan that
   keeps a running (max, index) pair, the float max stays correct but the
   index sticks at its first-iteration value — with the index carried as int
   or float, in the single-branch or the two-branch form.  A 96-iteration loop
@@ -157,7 +157,7 @@ reachable through `packHalf2x16`; it is not.
   `break`.  Xe compiles all of these forms correctly, so only a board run
   catches this.
 - **Flattening a nested group loop is shape-specific, not a free win.**
-  Measured 2026-11-16 (`docs/performance.md`): rewriting the q4 FFN *gate*
+  Measured 2026-11-16 (`docs/benchmarks.md`): rewriting the q4 FFN *gate*
   from a nested group loop to a flat 8-wide loop (per-group state via
   conditional float updates) was byte-identical and **-43%** — the gate is a
   *pair* kernel, eight weight fetches and four accumulators per inner

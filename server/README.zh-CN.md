@@ -22,7 +22,7 @@ python3 server.py --host 127.0.0.1 --port 8000
 以 `{` 开头的一行是**控制行**而不是请求（请求第一列是 base64 的 prompt，base64 没有 `{`）。
 目前只支持一个操作：`{"op":"load","model":"..."}`，它不重建 EGL 上下文与已编译程序地换模型
 （板上省下 4.23 s 上下文 + 1.89 s 程序链接，代价是 6.12 s 读容器 + 2.99 s 上载，见
-`docs/performance.md`）。回复一个 `loaded` 事件（含 `load_ms`）或一个 `error` 事件；容器读不出来
+`docs/benchmarks.md`）。回复一个 `loaded` 事件（含 `load_ms`）或一个 `error` 事件；容器读不出来
 时进程直接退出，滚动前缀缓存随模型一起丢弃。验收见 `engine/scripts/swap_matrix.py`。
 
 默认：
@@ -59,7 +59,7 @@ system 轮仍是服务器的策略：Chatbox 的运行时元数据会被剥掉�
 所以引擎收到的永远是一份具体的 messages。
 
 TinyBrainBot 还需要 `--no-gpu-layer`：它在 VC4 上的整层 GPU 路径目前不正确
-（见 docs/performance.md 的 item 12），可部署的是 CPU 路径。
+（见 docs/benchmarks.md 的 item 12），可部署的是 CPU 路径。
 
 ## logprobs
 
@@ -78,7 +78,7 @@ TinyBrainBot 还需要 `--no-gpu-layer`：它在 VC4 上的整层 GPU 路径目�
 `--model-id` 按顺序对应 `--model`，没给就用容器文件名。请求里的 `model` 字段选择容器，
 **同一时刻只驻留一个**：Pi Zero 的 CMA 只放得下一个，而引擎换模型时保留 EGL 上下文和已编译程序，
 所以切换的代价是一次容器读取加上载（板上 6.12 s + 2.99 s），而不是重启进程（那还要再付 4.23 s 上下文
-和 1.89 s 程序链接，见 `docs/performance.md`）。切换发生在第一个指定了另一个模型的请求上，并打印
+和 1.89 s 程序链接，见 `docs/benchmarks.md`）。切换发生在第一个指定了另一个模型的请求上，并打印
 `[model] <id> resident, load <ms> ms`；已驻留的模型不会每请求重载。容器自带的聊天模板随之切换，
 所以 `/health` 的 `template` 与"无模板即 400"的判定都跟着当前模型走。未知模型名返回 400 并列出可用的 id。
 

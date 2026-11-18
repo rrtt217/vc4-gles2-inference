@@ -54,13 +54,13 @@ models/
                                  Xe: 172-180 ms/token serial, 24 ms fused.
                                  Every PPL quoted for this model before
                                  2026-11-11 was measured without a BOS and is
-                                 5x too high (docs/performance.md has the
+                                 5x too high (docs/benchmarks.md has the
                                  correction).  With the BOS the engine is
                                  15.97 on the i16 base and 18.73 on qad q4
                                  (float32 numpy reference 14.71), so it is
                                  within 9% of the reference.
                                  Pi Zero: dedup 1133 ms/token, q6 1371 ms, both
-                                 run (docs/performance.md, 2026-11-11); those
+                                 run (docs/benchmarks.md, 2026-11-11); those
                                  timings stand, the PPL that chose qad over
                                  base does not -- re-measure before trusting
                                  the container choice.
@@ -228,7 +228,7 @@ Ruled out by measurement, each one a single change:
 | no qk-norm | reference then says `st`, not `Introdu` |
 | `eps 1e-6` | reference still says `I` |
 | `eps 1e-6` **in the engine** (key 11, repacked) | engine reports `rmsnorm eps: 1e-06 (container-stated)` and its logits are **bit-identical** to the 1e-5 run: the sum of squares is computed in fixed point, so a 1e-5-vs-1e-6 epsilon is below its resolution |
-| the epsilon as a *uniform* instead of a literal | moves MiniMind3's PPL 270.3170 -> 269.9303 (2026-11-14, Xe; `docs/performance.md`) with the same numeric value, so the shader keeps the literal unless the container states an epsilon |
+| the epsilon as a *uniform* instead of a literal | moves MiniMind3's PPL 270.3170 -> 269.9303 (2026-11-14, Xe; `docs/benchmarks.md`) with the same numeric value, so the shader keeps the literal unless the container states an epsilon |
 
 So the divergence is inside the engine's maths for this checkpoint shape, and
 none of the config fields above explains it.
@@ -527,7 +527,7 @@ Checked against `nkthebass/tinybrainbot-100m-v5.1-instruct`:
 
 The reading below ("the two runs simply take different paths from a near-tie")
 was measured on a build whose q16 decode rebuilt every value from an 8-bit
-texture sample, which VC4 does not return exactly (see docs/performance.md,
+texture sample, which VC4 does not return exactly (see docs/benchmarks.md,
 2026-11-09).  With the integer decode (`6234328`) the same container and prompt
 give logits cosine 0.9971 and top-5 5/5 against Xe, where it was 0.7233 and 1 of
 5, and the card sampler now produces the same text on both machines:

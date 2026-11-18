@@ -18,7 +18,7 @@ direction, review and measurement.  Two consequences are worth knowing before
 you build on it:
 
 - **The measurements are real; the prose is generated.**  Every number in
-  `docs/performance.md` and `docs/evaluation.md` comes from a command that
+  `docs/benchmarks.md` and `docs/evaluation.md` comes from a command that
   exists in this tree, and `engine/scripts/regression.sh` /
   `engine/gate/shader_hashes.sh` pin the numerics.  An explanation is not
   evidence: run the gate.
@@ -151,7 +151,7 @@ next to it in `models/` as a re-pack source.
 The Pi column is the 2026-11-13 campaign on HEAD `71cb1e0` (`GPU_LAYER=1
 KV=q16`, greedy, `--gen 16`, a discarded warm-up plus three timed runs,
 median), decode only.  Rows marked "not re-measured" / "not on the board" keep
-their last number in [performance.md](docs/performance.md), which also has the
+their last number in [benchmarks.md](docs/benchmarks.md), which also has the
 protocol, the prefill ranges and the q16-decode switch.  Prefill moves with the
 board's SD card and background load; do not quote it as a constant.
 
@@ -163,7 +163,7 @@ board's SD card and background load; do not quote it as a constant.
 - [Quantization and Q4M1](docs/quantization.md)
 - [VC4 / engine internals](docs/engine-internals.md)
 - [Prefix cache](docs/prefix-cache.md)
-- [Performance](docs/performance.md)
+- [Performance](docs/benchmarks.md)
 - [Test hooks](docs/test-hooks.md)
 - [Evaluation: model quality](docs/evaluation.md) — the multiple-choice, instruction-following and translation batteries
 - [Source layout / split decision](docs/engine-layout.md)

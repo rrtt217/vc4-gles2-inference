@@ -1,7 +1,7 @@
 #!/bin/sh
 # Shader-text regression gate.
 #
-# The emitted GLSL *is* the numerics on this target: docs/performance.md records
+# The emitted GLSL *is* the numerics on this target: docs/benchmarks.md records
 # that "semantically identical" text (an inline decode turned into a helper)
 # moved VC4 from 283 to 177 MMAC/s and the perplexity with it.  So a change to
 # the builders has to be shown to emit the same bytes, not argued to.

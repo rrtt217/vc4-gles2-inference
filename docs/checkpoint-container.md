@@ -5,7 +5,7 @@ converts q8, q4 and i16 checkpoints, `Model::load_mmcf()` loads them, and since
 `fcc4095` the engine has no other reader — `Model::load()` refuses anything that
 is not `"MMCF"` and names the packer in the message.  All three precisions print
 the same greedy text and the same PPL as their legacy source (measured
-2026-11-14 on Xe, `docs/performance.md`):
+2026-11-14 on Xe, `docs/benchmarks.md`):
 
 | model | legacy | `.mmcf` |
 |---|---:|---:|
@@ -401,7 +401,7 @@ F16, ~204 MB as q8, ~138 MB as q4) against the dense 64M model's 66 MB at q8.
 Per token it reads one expert, so decode is dense-speed; what MoE costs on this
 stack is *memory*, and the engine keeps every expert resident.  A board whose
 CMA cannot hold all of them needs a smaller expert count or width — not a
-different kernel.  `docs/performance.md` has the measurements.
+different kernel.  `docs/benchmarks.md` has the measurements.
 
 ## Loader rules
 

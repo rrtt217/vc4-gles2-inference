@@ -5,14 +5,14 @@ implemented, what is worth doing next, and what should not be attempted on the
 current Pi Zero / VC4 target.
 
 Last updated: 2026-11-07.  Items that landed carry a **landed** marker and the
-commit-level note; the rest is still a backlog.  `docs/performance.md` is the
+commit-level note; the rest is still a backlog.  `docs/benchmarks.md` is the
 measurement record this file summarizes.
 
 ## Current baseline
 
 **Stale as of 2026-11-13.**  The Pi rows below are 2026-11-03 measurements on an
 older build.  The current Pi matrix is the 2026-11-13 campaign in
-`docs/performance.md` (HEAD `71cb1e0`, warm-up plus three timed runs); use its
+`docs/benchmarks.md` (HEAD `71cb1e0`, warm-up plus three timed runs); use its
 numbers with their protocol, and do not read the rows below as current.
 
 | Area | Current state |
@@ -97,7 +97,7 @@ reachable through `tool_choice` and `POST /v1/tool`.  Remaining: `set_timer`
 
 ### 2b. Where the remaining matvec time goes
 
-Current per-phase numbers live in `performance.md` ("where the remaining matvec
+Current per-phase numbers live in `benchmarks.md` ("where the remaining matvec
 time goes"); after activation packing the split is w1+w3 33%, w2 22%, attention
 20%, wo 8.5%, norms 9%, logits 6%.  Prefill costs ~470 ms/token and decode ~480
 ms/token — the same per token, which rules out draw-call overhead as the driver
@@ -236,7 +236,7 @@ Still open, in order of what a reader would want next:
   fits the 320 MB CMA.  What is open is its *numerics* there: logits 3.49 from
   the float32 reference against Xe's 1.08, PPL 14.29 against 7.72, `17*4 = 220`
   against 68, and the format axes are excluded because widening them makes the
-  board worse.  See `docs/performance.md` (2026-11-18); the lead is
+  board worse.  See `docs/benchmarks.md` (2026-11-18); the lead is
   `MATVEC_STRIP`, which is a no-op on Xe and moves this model's board logits by
   12.7 while leaving MiniMind3 identical.
 - `-Instruct` is the same weights with the same template; no separate container.
@@ -311,7 +311,7 @@ blind to this failure mode; the enforced rule stays the 1024-fragment cap.*
 ## Do not retry (measured, 2026-11-04 .. 06)
 
 The second wave, from the q4-parity and prefill work.  Each entry has a section
-in `docs/performance.md` with the numbers.
+in `docs/benchmarks.md` with the numbers.
 
 | Do not | Why (measured) |
 |---|---|
@@ -371,7 +371,7 @@ Do not compare a laptop run with a Pi run as if they were the same machine.
 > so they price the drain rather than the pass.  `ATTN_DUP` (replay one pass,
 > bit-exact) puts the whole attention block at **~39 ms/token**, qkv alone at 23,
 > and the three passes this section blames at ~9 ms together.  See
-> `docs/performance.md` ("Decode loop campaign summary").
+> `docs/benchmarks.md` ("Decode loop campaign summary").
 
 The block is eight draws per layer: qkv matvec, qk-norm factor, rotated q, KV
 rope write, scores, softmax stats, probabilities, p·V.  Per-call profile after
@@ -409,7 +409,7 @@ per head).  That is a redesign of the KV cache, not a tuning change.
 > baseline and the pass-count premise above.  Of the four items, row pairing
 > (logits, qkv) and the fused FFN all landed, and the four-row widening was
 > measured to be impossible on this hardware (one texel per fragment, no MRT).
-> The live list is in `docs/performance.md` and the dead ends in
+> The live list is in `docs/benchmarks.md` and the dead ends in
 > "Do not retry" above.
 
 **1. Pair the logits rows (~2%).** The vocabulary pass runs as 5 tiles of
@@ -445,7 +445,7 @@ otherwise.
 > weight textures, so a merged 2432-row matrix needs `GL_MAX_TEXTURE_SIZE >= 2432`,
 > over the board limit.  The same draw reduction is reached without any repack by
 > the fused gate+swiglu kernel (`FFN_FUSE`, still -20 ms but not yet bit-exact — see
-> `docs/performance.md`).
+> `docs/benchmarks.md`).
 
 > **Superseded measurement (2026-11-03).** The "~0.5 ms per draw" below was an
 > estimate; the direct measurement (`RMS_SPLIT=1`, which re-inserts one draw) is
