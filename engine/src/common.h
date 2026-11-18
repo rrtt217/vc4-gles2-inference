@@ -61,7 +61,13 @@ struct Mat {
     // magnitude and bit 1 sign.  Borrowed from the container mapping -- the
     // whole point of the format is that this is the texture's bytes already.
     const uint8_t* ext3 = nullptr;
-    vector<uint8_t> q3;                 // only when the mapping is not borrowed
+    vector<uint8_t> q3;
+    // The 2-bit body reaches the GPU as a 2D tile of at most `t3_tile_h` rows
+    // (VC4's GL_MAX_TEXTURE_SIZE is 2048 and the FFN gate is 4096 rows): matrix
+    // texel (x, y) lives at (x + (y/t3_tile_h)*t3_tile_w, y % t3_tile_h).  A body
+    // that fits is one tile, which is the whole model except those two matrices.
+    int t3_tile_w = 0, t3_tile_h = 0;
+    int t3_tiles() const { return t3_tile_h > 0 ? (rows + t3_tile_h - 1) / t3_tile_h : 1; }                 // only when the mapping is not borrowed
     bool is_t3() const { return type == WeightType::T3; }
     const uint8_t* w3() const { return ext3 ? ext3 : q3.data(); }
     const uint8_t* ext4 = nullptr;

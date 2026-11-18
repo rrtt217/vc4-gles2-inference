@@ -1639,8 +1639,11 @@ Mat Model::slice_rows(const Mat& src, int r0, int r1){
                 m.row_scale.assign(src.row_scale.begin() + r0, src.row_scale.begin() + r1);
         if (src.type == WeightType::T3) {
                 // A row slice is a pointer offset: the body is row-major with a
-                // stride of ceil(cols/16)*4 bytes, so nothing has to move.
+                // stride of ceil(cols/16)*4 bytes, so nothing has to move.  The
+                // tile shape is recomputed by the uploader (a slice of 2048 rows
+                // is one tile even when its parent's 4096 was two).
                 m.ext3 = src.w3() + (size_t)r0 * (((src.cols + 15) / 16) * 4);
+                m.t3_tile_w = m.t3_tile_h = 0;
                 return m;
         }
         if (src.type == WeightType::INT8) {
@@ -1690,6 +1693,8 @@ Mat Model::slice_cols(const Mat& src, int c0, int c1){
                 }
                 const size_t src_stride = ((src.cols + 15) / 16) * 4;
                 const size_t dst_stride = m.cols / 4;
+                m.ext3 = nullptr;
+                m.t3_tile_w = m.t3_tile_h = 0;
                 m.q3.resize((size_t)m.rows * dst_stride);
                 for (int r = 0; r < m.rows; ++r)
                         memcpy(m.q3.data() + (size_t)r * dst_stride,

@@ -233,7 +233,7 @@ void GPU::matvec_add(const Mat& m, GLuint x, GLuint residual, Target& out, XForm
         // rather than the writer switching layouts.
         const bool wr = (m.type == WeightType::INT8 || m.type == WeightType::T3) &&
                         m.has_row_scale();
-        GLuint p = m.type == WeightType::T3 ? x_t3_add(m.rows, m.cols, xf, wr)
+        GLuint p = m.type == WeightType::T3 ? x_t3_add(m, xf, wr)
                   : pair4 ? x_i4_add_pair(m.rows, m.cols, xf, m.fmt4)
                   : pair ? x_q8_add_pair(m.rows, m.cols, xf, wr)
                   : (m.type == WeightType::INT8) ? x_q8_add(m.rows, m.cols, xf, wr)
@@ -474,16 +474,26 @@ GLuint GPU::x_q8(int rows, int cols, bool wrow){
                       matvec_q8(rows, cols, act_fmt_, wrow));
     }
 
-GLuint GPU::x_t3(int rows, int cols, bool wrow){
-        return x_prog("xt3_" + to_string(rows) + "_" + to_string(cols) + "_" +
-                      x_format_name(act_fmt_) + (wrow ? "_wr" : ""),
-                      matvec_t3(rows, cols, act_fmt_, wrow));
+GLuint GPU::x_t3(const Mat& m, bool wrow){
+        // The tile shape is part of the program key: a 4096-row body folds into
+        // two tiles of 2048 and the same (rows, cols) drawn as one tile is a
+        // different shader.
+        // A Mat that has not been through the uploader has no tile shape yet;
+        // one tile is the fallback and is what every fitting body uses.
+        const int th = m.t3_tile_h > 0 ? m.t3_tile_h : m.rows;
+        const int tiles = m.t3_tile_h > 0 ? m.t3_tiles() : 1;
+        return x_prog("xt3_" + to_string(m.rows) + "_" + to_string(m.cols) + "_" +
+                      x_format_name(act_fmt_) + "_" + to_string(th) + (wrow ? "_wr" : ""),
+                      matvec_t3(m.rows, m.cols, act_fmt_, wrow, th, tiles));
     }
 
-GLuint GPU::x_t3_add(int rows, int cols, XFormat rf, bool wrow){
-        return x_prog("xt3a_" + to_string(rows) + "_" + to_string(cols) + "_" +
-                      x_format_name(act_fmt_) + "_" + x_format_name(rf) + (wrow ? "_wr" : ""),
-                      matvec_t3_add(rows, cols, act_fmt_, rf, wrow));
+GLuint GPU::x_t3_add(const Mat& m, XFormat rf, bool wrow){
+        const int th = m.t3_tile_h > 0 ? m.t3_tile_h : m.rows;
+        const int tiles = m.t3_tile_h > 0 ? m.t3_tiles() : 1;
+        return x_prog("xt3a_" + to_string(m.rows) + "_" + to_string(m.cols) + "_" +
+                      x_format_name(act_fmt_) + "_" + x_format_name(rf) + "_" +
+                      to_string(th) + (wrow ? "_wr" : ""),
+                      matvec_t3_add(m.rows, m.cols, act_fmt_, rf, wrow, th, tiles));
     }
 
 GLuint GPU::x_q6(int rows, int cols, bool wrow){

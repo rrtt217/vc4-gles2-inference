@@ -62,7 +62,24 @@ void GPU::upload(Mat& m){
             // texel, four a byte.  No repack, no bias, no copy -- the upload is
             // the one place the 2-bit kind pays off twice (167 MB of file
             // becomes 167 MB of texture, where q8 needs 4x).
-            m.tex = make_texture((m.cols + 15) / 16, m.rows, m.w3());
+            // GL_MAX_TEXTURE_SIZE is 2048 on VC4 and the FFN gate is 4096 rows.
+            // A taller body is folded into a 2D tile -- texel (x, y) of the
+            // matrix lives at (x + (y/TH)*TW, y % TH) -- because the alternative
+            // is what the board actually did: glTexImage2D at 4096 rows fails,
+            // the texture keeps its previous contents, and the model answers
+            // `ovarian` twelve times.  probes/t3mv_probe reproduces the edge: the
+            // engine's own text is exact at 1024/1536/1792 rows and wrong in 1692
+            // of 2048 rows at 2048 (2026-11-18).
+            const int W = (m.cols + 15) / 16;
+            int TH = m.rows;
+            const int lim = max_target_dim() > 0 ? max_target_dim() : 2048;
+            if (TH > lim) TH = lim;
+            m.t3_tile_w = W;
+            m.t3_tile_h = TH;
+            if (getenv("T3_DEBUG"))
+                fprintf(stderr, "T3TEX %dx%d rows=%d cols=%d tile=%dx%d\n",
+                        W * m.t3_tiles(), TH, m.rows, m.cols, W, TH);
+            m.tex = make_texture(W * m.t3_tiles(), TH, m.w3());
             return;
         }
         if (m.type == WeightType::INT6) {

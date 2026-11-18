@@ -59,6 +59,7 @@ enum class Kind {
     T3F,      // 2-bit, float decode
     T3U,      // 2-bit, uint decode
     T3Fetch,  // 2-bit layout, fetches kept, unpack removed (pricing arm)
+    T3E,      // the engine's own kernel: row-scale plane, q24 store, one fetch
 };
 
 struct Variant {
@@ -73,6 +74,7 @@ static const Variant VARIANTS[] = {
     {"t3f (2-bit, float)", Kind::T3F, 2, false},
     {"t3u (2-bit, uint)", Kind::T3U, 2, true},
     {"t3u_fetch (no unpack)", Kind::T3Fetch, 2, true},
+    {"t3e (engine text, row scale)", Kind::T3E, 2, true},
 };
 
 static GLuint compile(GLenum t, const string& src, string& log) {
@@ -191,6 +193,26 @@ int main(int argc, char** argv) {
             }
         }
         GLuint wtex_id = 0;
+        // The per-row scale plane the engine carries as part 3: two rows a texel,
+        // 16 bits each, s_row / unit.  Only the t3e arm reads it, but every arm
+        // gets the texture so the binding does not depend on the variant.
+        const int np = (rows + 1) / 2;
+        std::vector<unsigned char> wsx((size_t)np * 4 * 4, 0);
+        for (int r = 0; r < rows; ++r) {
+            const float srow = 1.0f + (float) (r % 7) * 0.25f;
+            const long qv = (long) (srow / 3.0f * 65536.0);   // /unit, unit = 3
+            unsigned char* o = &wsx[(size_t)(r / 2) * 16];
+            if ((r & 1) == 0) { o[0] = (unsigned char) (qv >> 8); o[1] = (unsigned char) qv; }
+            else { o[2] = (unsigned char) (qv >> 8); o[3] = (unsigned char) qv; }
+        }
+        GLuint wsx_id = 0;
+        glGenTextures(1, &wsx_id);
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_2D, wsx_id);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 4, np, 0, GL_RGBA, GL_UNSIGNED_BYTE, wsx.data());
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glActiveTexture(GL_TEXTURE0);
         glGenTextures(1, &wtex_id);
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_2D, wtex_id);
@@ -207,6 +229,37 @@ int main(int argc, char** argv) {
         string fs = ver + "precision highp float;\n";
         if (v.es3) fs += "precision highp int;\nout vec4 frag_color;\n";
         fs += "uniform sampler2D W,X;uniform float ws;\n";
+        if (v.kind == Kind::T3E) {
+            // The engine's kernel, transcribed, so the probe runs the exact text
+            // the board runs: `q` walks activation texels, the weight texel is
+            // q/4 and its byte is chosen by a compare chain, the per-row plane is
+            // Mat::row_scale's part-3 texel, and the store is x_i24encq's.
+            const int np = (rows + 1) / 2;
+            fs += "uniform sampler2D WS;\n";
+            fs += "vec4 dec(float bb){uint u=uint(floor(bb*255.0+0.5));"
+                  "return vec4(float(u&1u),float((u>>2)&1u),float((u>>4)&1u),float((u>>6)&1u))"
+                  "*(1.0-2.0*vec4(float((u>>1)&1u),float((u>>3)&1u),float((u>>5)&1u),"
+                  "float((u>>7)&1u)));}\n";
+            fs += "float wsr(int r){vec4 c=texture2D(WS,vec2(0.125,(float(r/2)+0.5)/float(" +
+                  std::to_string(np) + ")));"
+                  "return (mod(float(r),2.0)<0.5?c.r*65280.0+c.g*255.0"
+                  ":c.b*65280.0+c.a*255.0)*(1.0/65536.0);}\n";
+            fs += "void main(){int r=int(gl_FragCoord.x);float s=0.0;"
+                  "for(int q=0;q<" + std::to_string(cols / 4) + ";q++){"
+                  "vec4 c=texture2D(W,vec2((float(q/4)+0.5)/float(" + std::to_string(nq) + "),"
+                  "(float(r)+0.5)/float(" + std::to_string(rows) + ")));"
+                  "vec4 x=texture2D(X,vec2((float(q)+0.5)/float(" +
+                  std::to_string(cols / 4) + "),0.5))*255.0-128.0;"
+                  "int j=q-4*(q/4);vec4 w4=vec4(0.0);"
+                  "if(j==0)w4=dec(c.r);else if(j==1)w4=dec(c.g);"
+                  "else if(j==2)w4=dec(c.b);else w4=dec(c.a);"
+                  "s+=dot(w4,x);}"
+                  "float v=clamp(floor(s*wsr(r)*ws*256.0+0.5),-8388608.0,8388607.0)+8388608.0;"
+                  "float g=floor(v/65536.0);float b=floor(v/256.0)-g*256.0;"
+                  "float a=v-g*65536.0-b*256.0;"
+                  "frag_color=vec4(g/255.0,b/255.0,a/255.0,1.0);}\n";
+        }
+        if (v.kind != Kind::T3E) {
         fs += "void main(){int r=int(gl_FragCoord.x);float s=0.0;\n";
         fs += "for(int q=0;q<" + std::to_string(nq) + ";q++){\n";
         fs += "vec4 c=texture2D(W,vec2((float(q)+0.5)/float(" + std::to_string(nq) +
@@ -221,7 +274,7 @@ int main(int argc, char** argv) {
             // The engine's own q8 body, verbatim: a vec4 of int8 a texel.
             fs += "vec4 w=c*255.0-128.0;\ns+=dot(w,x0);\n";
         }
-        for (int ch = 0; ch < (v.kind == Kind::Q8 ? 0 : 4); ch++) {
+        for (int ch = 0; ch < (v.kind == Kind::Q8 || v.kind == Kind::T3E ? 0 : 4); ch++) {
             const char* cn = ch == 0 ? "c.r" : ch == 1 ? "c.g" : ch == 2 ? "c.b" : "c.a";
             const string b = "b" + std::to_string(ch);
             const string xg = "x" + std::to_string(ch);
@@ -231,8 +284,6 @@ int main(int argc, char** argv) {
                 fs += "s+=dot(vec4(1.0,0.0,-1.0,0.0)," + xg + ")*(" + b + "*0.0+1.0);\n";
             } else if (v.kind == Kind::T3F) {
                 const string m = "m" + std::to_string(ch), g = "g" + std::to_string(ch);
-                // Magnitudes are bits 0/2/4/6 and signs 1/3/5/7: the fields are
-                // four apart, so the float decode divides by powers of four.
                 fs += "vec4 " + m + "=vec4(mod(" + b + ",2.0),mod(floor(" + b + "*0.25),2.0),"
                       "mod(floor(" + b + "*0.0625),2.0),mod(floor(" + b + "*0.015625),2.0));\n";
                 fs += "vec4 " + g + "=vec4(mod(floor(" + b + "*0.5),2.0),mod(floor(" + b +
@@ -251,13 +302,12 @@ int main(int argc, char** argv) {
             }
         }
         fs += "}\n";
-        // A 24-bit signed store with a 1/65536 step (x_i24encq's shape): the same
-        // cost in every variant, so it does not bias the comparison.
         fs += "float v=clamp(floor(s*ws*256.0+0.5),-8388608.0,8388607.0)+8388608.0;\n";
         fs += "float gg=floor(v/65536.0);float bb=floor(v/256.0)-gg*256.0;"
               "float aa=v-gg*65536.0-bb*256.0;\n";
         fs += v.es3 ? "frag_color=vec4(gg/255.0,bb/255.0,aa/255.0,1.0);}\n"
                     : "gl_FragColor=vec4(gg/255.0,bb/255.0,aa/255.0,1.0);}\n";
+        }
 
         if (getenv("T3MV_DUMP")) {
             printf("---- %s\n%s\n", v.name, fs.c_str());
@@ -297,6 +347,13 @@ int main(int argc, char** argv) {
         glBindTexture(GL_TEXTURE_2D, wtex_id);
         glUniform1i(glGetUniformLocation(p, "W"), 1);
         glUniform1f(glGetUniformLocation(p, "ws"), 1.0f);
+        if (v.kind == Kind::T3E) {
+            glActiveTexture(GL_TEXTURE2);
+            glBindTexture(GL_TEXTURE_2D, wsx_id);
+            glUniform1i(glGetUniformLocation(p, "WS"), 2);
+            glActiveTexture(GL_TEXTURE0);
+            glUniform1f(glGetUniformLocation(p, "ws"), 3.0f);   // the unit
+        }
         glActiveTexture(GL_TEXTURE0);
         glViewport(0, 0, rows, 1);
         glClearColor(0, 0, 0, 0);
@@ -319,6 +376,8 @@ int main(int argc, char** argv) {
                             8388608.0) / 256.0;
         double ref = 0.0;
         for (int i = 0; i < cols; i++) ref += wref[(size_t) i] * xval[i];
+        // (the t3e reference is wref as packed: it already carries the row
+        // scale, and the shader multiplies the plane back to the same number)
         if (v.kind == Kind::T3Fetch) {
             // No unpack: the reference is the shader's own constant pattern.
             ref = 0.0;
@@ -336,6 +395,24 @@ int main(int argc, char** argv) {
         printf("%-24s %6d %9.3f %10.2f %9.2f %8s\n", v.name, nq, ms, 1e6 * ms / (rows * (double) cols),
                (double) nq * rows * 4 / 1e6, good ? "ok" : "MISMATCH");
         if (!good) printf("    row 0: got %.6f want %.6f (err %.6f)\n", got, ref, err);
+        if (v.kind == Kind::T3E) {
+            // Every row: the row scale plane and the weight row change with r, so
+            // "row 0 is right" says almost nothing (that was the wide kernel's
+            // blind spot on the board).
+            int bad = 0; double worst = 0.0; int worst_row = -1;
+            for (int r = 0; r < rows; ++r) {
+                const double g = ((double) px[(size_t) r * 4 + 0] * 65536.0 +
+                                  (double) px[(size_t) r * 4 + 1] * 256.0 +
+                                  px[(size_t) r * 4 + 2] - 8388608.0) / 256.0;
+                double w = 0.0;
+                for (int i = 0; i < cols; ++i) w += wref[(size_t) r * cols + i] * xval[i];
+                const double e = std::fabs(g - w) / (1.0 + std::fabs(w));
+                if (e > 2e-3) ++bad;
+                if (e > worst) { worst = e; worst_row = r; }
+            }
+            printf("    every row: %d of %d rows off (worst rel %.3g at row %d)\n",
+                   bad, rows, worst, worst_row);
+        }
         fflush(stdout);
         glDeleteProgram(p);
         glDeleteShader(hvs);
