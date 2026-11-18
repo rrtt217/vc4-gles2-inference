@@ -7697,3 +7697,45 @@ Tooling: `scripts/cmp_att.py` added (with a README row); `check_att.py` stays
 log2-only -- the linear domain's sum packing (`SMSI = 256/sum_scale`) did not
 match its formula in one pass, so the default configuration still has **no**
 oracle and that gap is recorded here rather than papered over.
+
+## 2026-11-18 (addendum) — what the layer-by-layer integers exclude, and a correction
+
+The section above concluded from layer 0 that "the q4 weight decode is back on
+top".  Four experiments since then, each a full `ATT_DUMP` on the board diffed by
+`scripts/cmp_att.py` against the Xe log, exclude every candidate that conclusion
+implied.  Layer 0's numbers, Xe against the board, `RES=i24 ACT=i16 KV=q16@512`,
+`ATT_SUM=log2 ATT_DUMP=12`:
+
+| board configuration | qrot | k | score | att_out |
+|---|---:|---:|---:|---:|
+| default (imported q4 view) | 92 / 540 | 382 / 943 | 367 / 182 | 2 / 99 |
+| `Q4_FMT=0` (packed q4 decode) | 92 / 540 | 382 / 943 | 367 / 182 | 2 / 99 |
+| `Q16_DECODE=exact` | 92 / 540 | 382 / 943 | 367 / 182 | 2 / 99 |
+
+Identical to the last digit, so:
+
+- **the q4 weight path is not it** -- and not the imported RGBA4 view
+  specifically, which was what `Q4_IMPORT_CHECK`'s texel (0,0) sample left open;
+- **the q16 activity decode is not it** at layer 0 (it does move layers 1-2
+  slightly, which is the documented cheap-decode behaviour);
+- the qkv matvec is already a tree, and `sumorder_probe` shows trees are
+  bit-identical across the two drivers.
+
+**Correction to the section above**: the inference "qrot differs by 0.29 while
+its input agrees, therefore the weights differ" does not survive these numbers.
+What is left is the input difference itself -- `HIDDEN_DUMP` measured layer 0's
+`xb` at max |d| 0.0015 on |x| 0.71, i.e. ~0.2% -- amplified through a 896-term
+dot product.  At layer 0, q's own magnitude is not the O(1) the cosine made it
+look: pocket's |K| reaches 33.6 (`probe_residuals.py`), so a 0.36 LSB difference
+is about 1% of q, which is the right order for a 0.2% input difference integrated
+over 896 terms.
+
+So the board's picture is now: **no wrong kernel, no wrong format, no wrong
+decode -- a 0.2%-per-value difference at the input of layer 0 that compounds to
+10 nats of score difference by layer 23.**  Two things follow for anyone
+continuing: the remaining lever is the *input* streams' precision (the rmsnorm
+output and what feeds it), not the attention block or the weights; and a
+comparison at this resolution must run in the formats the dump decodes
+(`i24`/`i16`) -- the earlier f32 comparison was invalid because `ATT_DUMP`'s
+decoder assumes q16 and both logs were misread the same way, which is why
+`check_att.py` reported 56 failures on a healthy Xe run.
