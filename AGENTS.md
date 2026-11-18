@@ -454,6 +454,13 @@ These were paid for; do not relearn them.
   2048, and there are exactly two chunks -- so the ceiling is 2x the GL target
   width (4096 on VC4, 4608 for LFM2-350M on Xe).  q4 slicing must copy block
   scale/min and repack nibbles.
+- **The rms partial sums saturate at 2048.**  They travel in 24-bit fixed point
+  with a fixed 1/4096 step biased by 2^23, so a lane sum above 2048 pins and
+  `inv_rms` comes out wrong for every deeper layer -- silently, on both drivers.
+  MNN-Pocket reaches sum-of-squares 3.9e6 by layer 15 (24-bit store reads
+  1.07e6, 73% low); `RMS_STORE=f32` stores the same four bytes as a bit-cast
+  float and fixes it.  Default stays i24 because MiniMind3 was baselined in the
+  saturated state.
 - **The residual stream rails at ±128.**  It is q16 fixed point, so a model
   whose residual exceeds 128 cannot be represented on the default path
   (supra2-100M reaches 2300 at layer 4).  A per-layer power-of-two scale is the

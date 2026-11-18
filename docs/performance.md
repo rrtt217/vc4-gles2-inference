@@ -7739,3 +7739,59 @@ comparison at this resolution must run in the formats the dump decodes
 (`i24`/`i16`) -- the earlier f32 comparison was invalid because `ATT_DUMP`'s
 decoder assumes q16 and both logs were misread the same way, which is why
 `check_att.py` reported 56 failures on a healthy Xe run.
+
+## 2026-11-18 — the rms partial sums saturate, and that is what broke pocket on the board
+
+Found by working backwards from the one row the layer-by-layer integers showed as
+a *pure scale*: layer 0's normalised row differed by the constant 1.00212
+(corr(delta,h) = +1.000).  The rms norm is `x / sqrt(mean(x^2) + eps)`, and a
+scale on `x` cancels there, so the factor had to come from `inv_rms` or the norm
+weight.  `RMS_DUMP` (new, `engine/src/gpu_upload.cpp`) prints the 32 lane sums as
+the shader wrote them, and the answer was in the encoding rather than in either:
+the partials travel in **24-bit fixed point with a fixed 1/4096 step, biased by
+2^23** (`kEncs4096`), so the largest lane sum it can carry is 2^23/4096 = **2048**.
+
+MNN-Pocket's residual grows through the depth, and so do its sums.  Measured on
+Xe with `RMS_DUMP`, sum of squares over the row:
+
+| layer | 24-bit store | f32 store | error |
+|---|---:|---:|---:|
+| 0 | 0.4587 | 0.4582 | +0.1% |
+| 10 | 261.5 | 259.5 | +0.8% |
+| 15 | 1.059e6 | 3.350e6 | **-68.4%** |
+| 20 | 1.066e6 | 3.930e6 | **-72.9%** |
+| 25 | 1.068e6 | 3.928e6 | **-72.8%** |
+
+From layer ~15 the lane sums pin at 8.39M LSB and stop growing: the 24-bit store
+**saturates**, so `inv_rms` is about 2x too large and the last fourteen layers are
+normalised by the wrong scale -- silently, on every machine.  At layer 0 the same
+encoding has the opposite problem (lane sums of 5..92 LSB, about seven bits),
+which is where the 0.212% scale came from.
+
+`RMS_STORE=f32` stores the same four bytes as a bit-cast float and has neither
+problem.  Board, MNN-Pocket qat, greedy, `SEQ=128 KV=q16 KV_GRID=512`, `--gen 24`:
+
+| configuration | text | decode |
+|---|---|---:|
+| `RES=i24 ACT=i16` (container defaults) | `杭州是中国中国中国…` | 1694 ms/token (32 tokens) |
+| `RES=f32 ACT=f32` | `杭州是中国中国中国…` | 1787 ms/token |
+| **`RMS_STORE=f32`, `RES=i24 ACT=i16`** | **`杭州，是中华人民共和国浙江省的省会，位于中国东南部…`** | **1168 ms/token** |
+| `RMS_STORE=f32`, `RES=f32 ACT=f32` | the same sentence | 1680 ms/token |
+
+The repetition is gone, and the cheapest correct configuration is *faster* than
+the broken one because the i24 activation streams are cheaper than f32 and the
+f32 sums cost nothing measurable.  Every earlier attempt in this investigation
+(formats, KV grids, summation order, portable exp) was working around a layer
+whose normalisation was saturating.
+
+**Default stays i24.**  An exact store moves MiniMind3's numbers (q8 PPL 270.3170
+-> 276.1542), because MiniMind3's sums saturate too from mid-depth and its pins
+were baselined in that state; switching the default is a re-baseline campaign,
+not a bug fix.  `RMS_STORE=f32` is the switch for a container whose rms exceeds
+the 24-bit range, and Pocket is the first one measured.
+
+Caveat recorded deliberately: the layer-0 scale of 1.00212 **persists** with the
+f32 store (it measured 0.00271), so the layer-0 quantisation and the layer-15
+saturation are two ends of one encoding's range problem, and the greedy fix is
+the saturation -- not the layer-0 factor.  The numbers above are the ones that
+decided it.

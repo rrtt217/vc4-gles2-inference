@@ -51,7 +51,7 @@ The rows below are the registry, one per switch, grouped by the axis they move.
 diagnostic or a pricing arm; `retired` is gone (`--dump-switches` prints the
 same table with what *this* environment resolved to).
 
-136 switches: 28 permanent, 94 probe, 14 retired; 16 legacy spellings are translated.
+138 switches: 28 permanent, 96 probe, 14 retired; 16 legacy spellings are translated.
 
 ### The activation streams
 
@@ -63,6 +63,7 @@ same table with what *this* environment resolved to).
 | `Q16_DECODE` | value | the q16 decode: fast classifies the -32768 rail at 32767.5, exact is integer |
 | `EXP` <br><sub>`ATT_EXP`</sub> | `drv\|poly` | every exponential the shaders emit: drv (default) or a portable polynomial; VC4's SFU exp is 20x Xe's error |
 | `QKV_PAIR` | `=1` | two qkv rows per fragment (int8 only, default on); QKV_PAIR=0 disables |
+| `RMS_STORE` | `i24\|f32` | the rms partial sums: 24-bit fixed point (default, 1/4096 step) or a bit-cast f32 |
 
 ### The attention block's fixed-point
 
@@ -157,6 +158,7 @@ same table with what *this* environment resolved to).
 | `PASS_DUP` | value | replay one fixed per-token pass (embed, rms_att, rms_ffn, logits); dup_env() |
 | `PPL_DUMP` | value | one `position token nll` line per scored token |
 | `QKV_DUMP` | value | hash every qkv matvec row; 2 also prints the first two |
+| `RMS_DUMP` | value | prints the 32 rms partial sums as the shader wrote them (RMS_DUMP=<layer> for one layer) |
 | `RWKV_DUMP` | `=1` | the RWKV block's per-layer peaks (state/residual/sqrelu rails) |
 | `SHADER_SRC` | value | print the GLSL of every program whose key contains the substring |
 | `STAGE_DUMP` | value | per-layer xb/att/x1/xbf/hid/hidA as q16 texels; diff_paths.sh reads it |
