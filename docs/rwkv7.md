@@ -175,6 +175,9 @@ parameterised `-softplus(...)-0.5`, which is not `exp(-sigma(z)/sqrt(e))` of the
 published weights.  The vocab file matters too — the pip package ships it CRLF
 (1,159,262 B) and HF ships it LF (1,093,733 B), so the packer tolerates both.
 
-The regression pins (`RWKV_EXPECT`, `RWKV_PPL_EXPECT`, `RWKV_PPL_SEQ`,
-`RWKV_GPU_EXPECT`) live in the machine's local override, and the GPU greedy
-tripwire is a different string from the CPU one by design.
+The regression pins (`RWKV_EXPECT` for the greedy prefix, `RWKV_PPL_EXPECT` and
+`RWKV_PPL_SEQ` for perplexity) live in the machine's local override, and there is
+**one set for both loops**: `RWKV_GPU=1` changes the answers, so the gate records
+which loop it ran and a mismatch under `RWKV_GPU` is a pin problem, not evidence
+about the GPU path: the GPU greedy prefix is a different string from the CPU one
+by design, and PPL is what decides between them.
