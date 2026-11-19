@@ -27,6 +27,7 @@ Deep dives live here; the component READMEs carry quick starts.
 | [engine-internals.md](engine-internals.md) | VC4 findings, FFN split, GPU attention, persistent layers, Top-K |
 | [test-hooks.md](test-hooks.md) | environment switches: probes, dumps, A/B hooks — generated from `engine/src/switches.cpp` |
 | [prefix-cache.md](prefix-cache.md) | in-memory and disk KV prefix cache, packed cache |
+| [prefill-batching.md](prefill-batching.md) | how a prompt's positions are evaluated: what a position costs, why sharing only the matvecs cannot pay, and the acceptance a batched path has to meet |
 | [long-context.md](long-context.md) | why the Pi stops at 2048 tokens, and what passing it would cost |
 | [deterministic-tools.md](deterministic-tools.md) | model-free tool routing, argument validation, cache interaction |
 
