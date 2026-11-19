@@ -151,6 +151,16 @@ reachable through `packHalf2x16`; it is not.
   exist (§5); a vec4 LUT indexed by the 2-bit code is +22% (dynamic component
   index spills), so the algebraic bit-cast beats both the float-sign form and
   the table.
+- **The float domain beats the integer domain for ternary, even "multiply-free".**
+  The SASORI-style integer dot (activation kept as raw int8, weight decoded to a
+  sign/mag mask, `ivec4` accumulate, one ITOF at the end) measured **+13%
+  single-row and +27% pair** (`t3dec_probe` int_acc).  Two reasons: float is
+  sign-magnitude, so negation is a FREE sign-bit flip, while two's-complement
+  integer negation costs `(a^mask)-mask` (two ops); and the per-component integer
+  mask loses the vec4 dot's FMAD pairing.  Do not "optimize" the t3 decode into
+  the integer domain.  Two more dead micro-opts measured there: omitting the
+  sign's `&1` before `<<31` is free but the compiler already does it (no gain),
+  and zeroing by masking the float bits (`& (0-mag)`) is +4% vs ITOF+fmul.
 - Anything that needs half precision must be assembled by hand from float
   operations; there is no `packHalf2x16`, and there are no half-float textures
   either (`OES_texture_half_float` is not exposed).
