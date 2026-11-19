@@ -146,8 +146,8 @@ same answer from Xe and from the board:
 
 | | decode | note |
 |---|---:|---|
-| Iris Xe | 40.3 ms/token | prefill 0.79 s |
-| Pi Zero (VC4) | 1704 ms/token | prefill 29.3 s |
+| Iris Xe | 37.8 ms/token | prefill 0.75 s |
+| Pi Zero (VC4) | 1323 ms/token | prefill 28.2 s |
 
 The board figure is the point of the kind: 167.5 MB of container, 85 MB of
 texture, and 358 M parameters that the q8 body (435 MB) and the q4 body (337 MB)
@@ -162,12 +162,17 @@ draw (rope and qk-norm read `x_st2q`) and the residual adds (`res_fmt_` is I16_2
 so `rmsnorm` reads pairs) -- which is every projection except the FFN gate, whose
 pairing is across two *matrices* (w1/w3) rather than two rows.
 
-Where the time goes now, `LAYER_PROFILE` corrected for its one-sync-per-mark tax
-(on 2-bit weights, one tile): FFN gate 823 ms of which ~500 is matvec, attention
-633 (56.6 M MAC, i.e. draw-bound: 168 draws a token), down-projection 559 (~250
-matvec), wo 111, rmsnorm 109.  The next two levers are therefore the FFN gate's
-own pair form (a swiglu over two pair textures, ~250 ms) and the attention
-block's draw count, not the decode.
+The FFN gate cannot use that kernel -- its pairing is across two *matrices*
+(w1/w3) -- so it draws w1's pairs into row 0 of the FFN buffer and w3's into row
+1, and `swiglu_pair2row` reads both halves of one texel per row pair.  Measured
+on the board, one step at a time: 1704 -> 1516 ms/token with that gate pair, and
+1516 -> 1323 when the swiglu stopped reading one hidden value at a time (two
+fetches a value, and a parity test that only existed because the first version
+copied the q24 reader's shape) and read both halves directly.
+
+Attention is the one phase that is not arithmetic-bound: 56.6 M MAC for 633 ms of
+a 2224-ms token, i.e. 168 draws a token.  That is VC4's fixed per-draw cost, not
+the 2-bit decode, and it is the next lever.
 
 `T3_EXPAND=1` still expands a t3 body to the q8 levels it stands for, at load
 time and 4x the memory.  That is the packer's acceptance route and the oracle the

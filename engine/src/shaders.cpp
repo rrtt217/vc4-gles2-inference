@@ -1895,6 +1895,10 @@ string swiglu_2row(int hidden, XFormat out, int hs) {
 // of *one* matrix and the two matrices are two rows of the buffer.
 string swiglu_pair2row(int hidden, XFormat out, int hs) {
     need_dim("swiglu_pair2row", hidden);
+    // `out` is always I16_2 here (a pair texture is the point of the kernel);
+    // the parameter stays so the call sites read like the other swiglu builders
+    // and a future hidden format has one place to grow.
+    (void)out;
     const string NP = to_string((hidden + 1) / 2);
     const string HD = hid_scale_def(hs), HM = hid_scale_mul(hs);
     const string rd = "float i16(vec2 c){float u=c.x*65280.0+c.y*255.0;"

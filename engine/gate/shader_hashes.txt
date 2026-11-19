@@ -155,6 +155,7 @@ b958c194072b34ad    2815 rwkv_sigmoid_768_nobias1
 0b5b7d594f1aaea4    4366 swiglu_2432_fused_i16_2
 7b8c1237af2f2841    4379 swiglu_2432_split_i8_4
 21bc9ae53b32d173    3755 swiglu_2row_2432_i16_2
+b2f290fa874ff351    3167 swiglu_pair2row_4096_i16_2
 76ad4490a1bcbe63    3552 swiglu_pair_2432_i16_2
 dd6078e205965b08    3577 swiglu_pair_2432_i8_4
 fc0f0f08dcabc3f5     631 top1_final_6

@@ -8233,16 +8233,17 @@ per token, so the budget only has to be past the first):
 
 | machine | path | prefill | decode | first ids |
 |---|---|---:|---:|---|
-| Iris Xe | `GPU_LAYER=1` | 0.79 s | **40.3 ms/token** | 23523 65 7139 10850 |
-| Pi Zero | `GPU_LAYER=1` | 29.3 s | **1704 ms/token** | 23523 65 7139 10850, then 35413 65 59617 55992 |
+| Iris Xe | `GPU_LAYER=1` | 0.75 s | **37.8 ms/token** | 23523 65 7139 10850 |
+| Pi Zero | `GPU_LAYER=1` | 28.2 s | **1323 ms/token** | 23523 65 7139 10850, then 35413 65 59617 55992 |
 
-Both rows are the column-major texel body with the pair kernels (dtype 7's
-current layout, all four bytes of a fetch feeding two output rows).  The two
-earlier readings of this model were the row-major body (79.4 ms/token on Xe,
-5453-5506 on the board) and the column-major body with a one-row kernel (41.3 /
-2224); the three are the same weights, the same text, and a different amount of
-work per texel -- `docs/checkpoint-container.md` and the `t3p` arm of
-`probes/t3mv_probe`.
+Both rows are the column-major texel body with the pair kernels everywhere they
+fit: two output rows a fragment, all four bytes of each weight fetch used, and
+the FFN gate's w1/w3 pair carried as the two rows of the FFN buffer.  The earlier
+readings of this model were the row-major body (79.4 ms/token on Xe, 5453-5506 on
+the board), the column-major body with a one-row kernel (41.3 / 2224), and the
+pair kernels before the FFN gate (40.3 / 1704).  Same weights, same text, a
+different amount of work per texel -- `docs/checkpoint-container.md` and the
+`t3p` arm of `probes/t3mv_probe`.
 
 The board's answer starts `你好，我是AI助手`, and its tile geometry is identical to
 the desktop's line for line (`T3_GEOM=1` prints it: one tile per matrix,
