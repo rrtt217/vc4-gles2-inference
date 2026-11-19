@@ -146,16 +146,19 @@ same answer from Xe and from the board:
 
 | | decode | note |
 |---|---:|---|
-| Iris Xe | 79.4 ms/token | prefill 1.4 s |
-| Pi Zero (VC4) | 5453-5506 ms/token | prefill 87-90 s; `GPU_LAYER=0` is 7094 ms/token |
+| Iris Xe | 41.3 ms/token | prefill 0.75 s |
+| Pi Zero (VC4) | 2224 ms/token | prefill 45.1 s |
 
 The board figure is the point of the kind: 167.5 MB of container, 85 MB of
 texture, and 358 M parameters that the q8 body (435 MB) and the q4 body (337 MB)
-cannot fit.  It is 18x slower a token than MiniMind3 q4 on the same board
-(304 ms), which is what 5.6x the parameters and four weight fetches an iteration
-cost; the kernel reads one texel per four weights, which is what VC4 allows (see
-below), so it moves q8's fetch count at half its traffic rather than the
-sixteen-weights-a-texel the file layout would permit.
+cannot fit.  It is 7.3x slower a token than MiniMind3 q4 on the same board
+(304 ms) at 5.6x the parameters.
+
+The kernel computes one output row a fragment and consumes two of a texel's four
+bytes an iteration -- eight weights, which on VC4 is as far as the fetch rule
+allows without a paired writer.  `probes/t3mv_probe` prices the two-rows-a-fragment
+form (all four bytes, `x_st2q`) at 1.21-1.25 ns/MAC against this one's ~2.5, so
+the remaining headroom is in the output layout, not the decode.
 
 `T3_EXPAND=1` still expands a t3 body to the q8 levels it stands for, at load
 time and 4x the memory.  That is the packer's acceptance route and the oracle the
@@ -165,6 +168,11 @@ shipping path -- on the board the expansion is OOM-killed at 280 MB.
 Three things the 2-bit kernel needs that the q8 one does not, all of them
 VC4-only in effect and all of them measurable with `probes/t3mv_probe`:
 
+- **A texel's four bytes are two rows by two column groups.** 16 weights a
+  texel only pay off if the kernel can use them, and a row-major reading
+  needs four activation fetches for that. The byte layout is therefore
+  column-major inside the texel (`docs/checkpoint-container.md`, dtype 7):
+  7.8-8.1x per MAC on the board against the row-major reading.
 - **One texture fetch a fragment.** A 16-weight iteration needs four activation
   fetches, and the board returns undefined data when a fragment samples one
   texture more than once once the texture is tall -- the rule `wrow_scale()`

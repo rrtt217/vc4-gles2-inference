@@ -228,10 +228,22 @@ Dtypes: `0` f32, `1` i16, `2` q8u8 (biased by 128), `3` q8i8 (signed), `4` q4
 ternary body, 16 weights an RGBA8 texel, four a byte, two bits a weight -- bit 0
 magnitude, bit 1 sign, so a weight is `mag * (1 - 2*sign)` -- written only for a
 matrix that *is* per-row ternary, with a per-row scale plane as part 3 exactly
-like `--q8-row-scale`.  Byte `j` of a texel carries the four columns
-`16g + 4j .. 16g + 4j + 3`, which is the activation texel the dot product
-multiplies it by; a `cols` that is not a multiple of 16 is padded with zeros
-(they decode to zero weights).
+like `--q8-row-scale`.
+
+The body is a texel grid of `ceil(cols/8) x ceil(rows/2)`: one texel carries
+**two rows by two column groups**, so a kernel that computes two output rows a
+fragment uses all four bytes it fetched.  Texel `(c, t)` holds row `2t` columns
+`8c..8c+3` in `b0`, row `2t` columns `8c+4..8c+7` in `b1`, and the same two for
+row `2t+1` in `b2`, `b3`.  The row-major reading -- four column groups of one
+row -- was the first layout; a kernel could use one of the four bytes per fetch,
+and using all four needed four activation fetches from one sampler, which VC4
+returns undefined data for once the texture is tall (`probes/wrow_probe`).  The
+column-major reading is 7.8-8.1x cheaper per MAC on the board
+(`probes/t3mv_probe`, the `t3p` arm, 2026-11-19).
+
+`cols` pads to 8 and `rows` to 2 with zeros, which decode to zero weights.  The
+grid is half as tall as the matrix, which is why no shape of this model reaches
+VC4's 2048-texel texture limit.
 
 Tensor ids: `1` embedding, `2` embedding scale, `3` rms_att, `4` rms_ffn,
 `5` rms_final, `6` q_norm, `7` k_norm, `8` embedding_i16, `0x10` qkv, `0x11`

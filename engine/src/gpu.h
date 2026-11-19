@@ -294,7 +294,6 @@ private:
     GLuint x_q8_add(int rows, int cols, XFormat xf, bool wrow = false);
     GLuint x_t3(const Mat& m, bool wrow = false);
     GLuint x_t3_add(const Mat& m, XFormat rf, bool wrow = false);
-    GLuint x_t3_add_pair(const Mat& m, XFormat rf, bool wrow = false);
     GLuint x_q8_add_pair(int rows, int cols, XFormat xf, bool wrow = false);
     GLuint x_i4_add_pair(int rows, int cols, XFormat xf, bool fmt4 = false);
     GLuint x_i16(int rows, int cols);

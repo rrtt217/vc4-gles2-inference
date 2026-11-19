@@ -51,7 +51,7 @@ The rows below are the registry, one per switch, grouped by the axis they move.
 diagnostic or a pricing arm; `retired` is gone (`--dump-switches` prints the
 same table with what *this* environment resolved to).
 
-139 switches: 28 permanent, 97 probe, 14 retired; 16 legacy spellings are translated.
+140 switches: 28 permanent, 98 probe, 14 retired; 16 legacy spellings are translated.
 
 ### The activation streams
 
@@ -162,6 +162,7 @@ same table with what *this* environment resolved to).
 | `RWKV_DUMP` | `=1` | the RWKV block's per-layer peaks (state/residual/sqrelu rails) |
 | `SHADER_SRC` | value | print the GLSL of every program whose key contains the substring |
 | `STAGE_DUMP` | value | per-layer xb/att/x1/xbf/hid/hidA as q16 texels; diff_paths.sh reads it |
+| `T3_GEOM` | value | the 2-bit body's tile geometry as the uploader made it and as the shader reads it -- two machines comparing numbers need this to be the same lines |
 | `TOKENS_OUT` | value | prompt and generated token ids (int32) |
 
 ### The 4-bit weight kernels

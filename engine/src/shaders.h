@@ -70,8 +70,6 @@ std::string matvec_q8(int rows, int cols, XFormat xf, bool wrow = false);
 std::string matvec_t3(int rows, int cols, XFormat xf, bool wrow, int t3_th, int t3_tiles);
 std::string matvec_t3_add(int rows, int cols, XFormat xf, XFormat rf, bool wrow,
                           int t3_th, int t3_tiles);
-std::string matvec_t3_add_pair(int rows, int cols, XFormat xf, XFormat rf, bool wrow,
-                               int t3_th, int t3_tiles);
 // One draw for a whole batch of matvec inputs (RWKV-7 chunked prefill, P1):
 // matvec_q8's text with the input row taken from gl_FragCoord.y, so fragment
 // (row r, batch b) is matvec_q8's result for row r of input b.

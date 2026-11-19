@@ -8231,15 +8231,21 @@ rows because VC4's `GL_MAX_TEXTURE_SIZE` is 2048 and the FFN gate is 4096 rows.
 `TIMING=1`, `--gen 12` on the board and `--gen 16` on the desktop (decode is
 per token, so the budget only has to be past the first):
 
-| machine | path | prefill | decode | first 8 ids |
+| machine | path | prefill | decode | first ids |
 |---|---|---:|---:|---|
-| Iris Xe | `GPU_LAYER=1` | 1.4 s | **79.4 ms/token** | 23523 65 7139 53741 6061 59365 4666 6567 |
-| Pi Zero | `GPU_LAYER=1` | 87.4 s | **5506 ms/token** | identical |
-| Pi Zero | `GPU_LAYER=1`, second run | 90.3 s | 5453 ms/token | identical |
-| Pi Zero | `GPU_LAYER=0` | 116.9 s | 7094 ms/token | 23523 65 7139 10850 (the CPU loop's own answer) |
+| Iris Xe | `GPU_LAYER=1` | 0.75 s | **41.3 ms/token** | 23523 65 7139 10850 |
+| Pi Zero | `GPU_LAYER=1` | 45.1 s | **2224 ms/token** | 23523 65 7139 10850, then 35413 65 59617 55992 |
 
-The board's answer is `你好，我是MiniCPM系列模型`, deterministic (two 12-token
-runs byte-identical), and it is the same text the desktop produces.  The t3
+Both rows are the column-major texel body (dtype 7's current layout).  The
+row-major reading this replaced measured 79.4 ms/token on Xe and 5453-5506 on the
+board; the difference is the layout, not a tuning step -- see
+`docs/checkpoint-container.md` and the `t3p` arm of `probes/t3mv_probe`.
+
+The board's answer starts `你好，我是AI助手`, and its tile geometry is identical to
+the desktop's line for line (`T3_GEOM=1` prints it: one tile per matrix,
+`tile_h` equal to the texture height).  That check comes first, because a
+Pi-vs-Xe difference is a defect only when both sides are running the same
+numbers.  The t3
 container is 167.5 MB of file and ~85 MB of texture, so it fits where the q8
 (435 MB) and q4 (337 MB) bodies cannot; that is the whole point of the kind.  It
 costs 18x a token against MiniMind3 q4 on the same board, which is 5.6x the

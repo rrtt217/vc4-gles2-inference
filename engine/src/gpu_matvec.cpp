@@ -242,9 +242,7 @@ void GPU::matvec_add(const Mat& m, GLuint x, GLuint residual, Target& out, XForm
         // the q8 selectors read res_fmt_ themselves, which is why they never had
         // this bug.  Measured: every odd row gained exactly 255/256 and the reply
         // collapsed to one token.
-        GLuint p = m.type == WeightType::T3
-                       ? (res_pack_ ? x_t3_add_pair(m, res_fmt_, wr)
-                                    : x_t3_add(m, res_fmt_, wr))
+        GLuint p = m.type == WeightType::T3 ? x_t3_add(m, res_fmt_, wr)
                   : pair4 ? x_i4_add_pair(m.rows, m.cols, xf, m.fmt4)
                   : pair ? x_q8_add_pair(m.rows, m.cols, xf, wr)
                   : (m.type == WeightType::INT8) ? x_q8_add(m.rows, m.cols, xf, wr)
@@ -665,15 +663,6 @@ GLuint GPU::x_i4_pair_swiglu(int rows, int cols, int hs, bool fmt4){
                               matvec_i4_pair_swiglu_4x4(rows, cols, act_fmt_, inl, hs));
         return x_prog("xi4ps_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(act_fmt_) + tail,
                       matvec_i4_pair_swiglu(rows, cols, act_fmt_, inl, hs));
-    }
-
-GLuint GPU::x_t3_add_pair(const Mat& m, XFormat rf, bool wrow){
-        const int th = m.t3_tile_h > 0 ? m.t3_tile_h : m.rows;
-        const int tiles = m.t3_tile_h > 0 ? m.t3_tiles() : 1;
-        return x_prog("xt3ap_" + to_string(m.rows) + "_" + to_string(m.cols) + "_" +
-                      x_format_name(act_fmt_) + "_" + x_format_name(rf) + "_" +
-                      to_string(th) + (wrow ? "_wr" : ""),
-                      matvec_t3_add_pair(m.rows, m.cols, act_fmt_, rf, wrow, th, tiles));
     }
 
 GLuint GPU::x_q8_add(int rows, int cols, XFormat xf, bool wrow){
