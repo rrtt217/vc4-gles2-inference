@@ -93,6 +93,22 @@ static string dec_signbit() {
            "uint s=(u>>uint(2*k+1))&1u;"
            "w[k]=uintBitsToFloat(0x3F800000u|(s<<31))*float(m);}return w;}\n";
 }
+// Unrolled signbit (no dynamic component write), and a no-floor form: uint()
+// truncates toward zero and bb*255+0.5 is positive, so it equals uint(floor()).
+static string dec_sb_unroll() {
+    return "vec4 dec(float bb){uint u=uint(floor(bb*255.0+0.5));return vec4("
+           "uintBitsToFloat(0x3F800000u|(((u>>1)&1u)<<31))*float(u&1u),"
+           "uintBitsToFloat(0x3F800000u|(((u>>3)&1u)<<31))*float((u>>2)&1u),"
+           "uintBitsToFloat(0x3F800000u|(((u>>5)&1u)<<31))*float((u>>4)&1u),"
+           "uintBitsToFloat(0x3F800000u|(((u>>7)&1u)<<31))*float((u>>6)&1u));}\n";
+}
+static string dec_sb_trunc() {
+    return "vec4 dec(float bb){uint u=uint(bb*255.0+0.5);return vec4("
+           "uintBitsToFloat(0x3F800000u|(((u>>1)&1u)<<31))*float(u&1u),"
+           "uintBitsToFloat(0x3F800000u|(((u>>3)&1u)<<31))*float((u>>2)&1u),"
+           "uintBitsToFloat(0x3F800000u|(((u>>5)&1u)<<31))*float((u>>4)&1u),"
+           "uintBitsToFloat(0x3F800000u|(((u>>7)&1u)<<31))*float((u>>6)&1u));}\n";
+}
 
 int main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
@@ -175,6 +191,14 @@ int main(int argc, char** argv) {
         for (int i = 0; i < cols; i++) w += wref[(size_t) r * cols + i] * xval[i];
         return w;
     };
+    // The 2-row arm stores q16 (rails at +-128): pick a power-of-2 store scale
+    // from the reference peak so the check reports the kernel, not the grid.
+    double pair_div = 1.0;
+    {
+        double amax = 0.0;
+        for (int r = 0; r < rows; r++) amax = std::max(amax, std::fabs(dot_row(r)));
+        while (amax / pair_div > 120.0) pair_div *= 2.0;
+    }
 
     struct V { const char* name; string (*dec)(); bool wide; };
     const V VS[] = {
@@ -183,6 +207,8 @@ int main(int argc, char** argv) {
         {"code (2-bit algebra)", dec_code, false},
         {"lut (vec4 index)", dec_lut, false},
         {"signbit (bit-cast)", dec_signbit, false},
+        {"sb_unroll (no loop)", dec_sb_unroll, false},
+        {"sb_trunc (no floor)", dec_sb_trunc, false},
         {"wide (16 a row)", dec_hoist, true},
     };
     printf("\n%-22s %9s %10s %8s\n", "variant", "ms/draw", "ns/MAC", "check");
@@ -209,7 +235,8 @@ int main(int argc, char** argv) {
                   "vec4 xb=texture2D(X,vec2((float(2*c+1)+0.5)/float(" + std::to_string(cols / 4) + "),0.5))*255.0-128.0;"
                   "s0+=dot(dec(w.r),xa)+dot(dec(w.g),xb);"
                   "s1+=dot(dec(w.b),xa)+dot(dec(w.a),xb);}"
-                  "vec2 p0=e16(s0*256.0),p1=e16(s1*256.0);"
+                  "vec2 p0=e16(s0*" + std::to_string(1.0 / pair_div) + "*256.0),p1=e16(s1*" +
+                  std::to_string(1.0 / pair_div) + "*256.0);"
                   "frag_color=vec4(p0.x,p0.y,p1.x,p1.y);}\n";
         } else {
             // The exact shipped matvec_t3 body: one fragment a row, bb=mix.
@@ -266,7 +293,7 @@ int main(int argc, char** argv) {
                 got = ((double) px[(size_t) r * 4] * 65536.0 + (double) px[(size_t) r * 4 + 1] * 256.0 +
                        px[(size_t) r * 4 + 2] - 8388608.0) / 256.0;
             }
-            const double ref = dot_row(r);
+            const double ref = dot_row(r) / (v.wide ? pair_div : 1.0);
             const double e = std::fabs(got - ref) / (1.0 + std::fabs(ref));
             if (e > 2e-3) { if (bad < 3) printf("    row %d got %.4f want %.4f\n", r, got, ref); ++bad; }
             if (e > worst) worst = e;
