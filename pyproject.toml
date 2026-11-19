@@ -1,0 +1,10 @@
+[project]
+name = "vc4-egl-tools"
+version = "0.0.0"
+description = "The numpy half of the MMCF toolchain; the gates and the server are stdlib-only"
+requires-python = ">=3.10"
+dependencies = ["numpy"]
+
+# This is an environment for the tools, not a package to build or install.
+[tool.uv]
+package = false

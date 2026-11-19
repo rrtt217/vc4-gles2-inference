@@ -26,6 +26,8 @@ core.*
 __pycache__/
 *.py[cod]
 .venv/
+# uv's optional workspace cache (the project environment is .venv/ above)
+/.uv-cache/
 .pytest_cache/
 
 # Engine/build outputs

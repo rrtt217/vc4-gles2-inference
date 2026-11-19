@@ -80,6 +80,13 @@ the file format in [`docs/model-formats.md`](docs/model-formats.md) and
 | `pth_reader.py` | reading a torch zip (`pytorch_model.bin`) without torch, for a release that ships no safetensors (the BitCPM family and anything older); `mmcf_hf.load_minimind` falls back to it, so `--in <dir>` works on the directory as downloaded |
 | `make_tok_byte.py` | the same blob from a *pure byte* `byte_vocab.json` (259 entries, no merges — `void.1`): `<0xNN>` becomes the raw byte, not six characters. `make_tok.py` writes the text `<0x41>` for that vocab, which still gives every id a home, so nothing fails loudly |
 
+The numpy half of the toolchain has a project environment: `uv run
+engine/tools/mmcf_pack.py ...` resolves `pyproject.toml` + `uv.lock` and creates
+`.venv/`; `uv sync` builds it without running anything.  `mmcf_format.py`,
+`mmcf_dump.py` and `make_tok.py` are stdlib and run either way, and the gates
+and the server stay stdlib-only: they must keep working with the system
+`python3`, because CI and the board do not set up this environment.
+
 ### The four non-engine directories — split by what a file *needs*
 
 | Directory | Rule | The map |
