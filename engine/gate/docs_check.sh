@@ -31,10 +31,11 @@ fail=0
 say() { printf '%s\n' "$*"; }
 bad() { printf 'FAIL  %s\n' "$*"; fail=1; }
 
-DOCS="$ROOT/AGENTS.md $ROOT/README.md $ROOT/README.zh-CN.md \
-$ROOT/engine/README.md $ROOT/engine/README.zh-CN.md \
-$ROOT/server/README.md $ROOT/server/README.zh-CN.md \
-$ROOT/models/README.md $ROOT/engine/probes/README.md $(ls "$ROOT"/docs/*.md 2>/dev/null)"
+# The document set is derived, not listed here: docset.py enumerates every
+# Markdown file git would commit (tracked + untracked, minus the vendored
+# pages), so a new page is scanned the moment it exists.  A hand list in this
+# script is how the four engine/*/README.md files stayed outside every check.
+DOCS=$(python3 gate/docset.py --all) || exit 1
 
 # 1. the switch registry against the source and against test-hooks.md, and the
 # document's generated inventory against the registry (the inventory is

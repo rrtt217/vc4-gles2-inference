@@ -36,7 +36,9 @@ __pycache__/
 # documented in docs/performance.md, the binaries are not deliverables
 /engine/engine_mm3_pi.*
 /.final-engine_mm3_pi
-/engine/test_lineedit
+# Compiled test binaries (sources live in engine/tests/): the pattern, not a
+# name, so a new test does not arrive as an untracked binary.
+/engine/test_*
 
 # Probe binaries are build outputs; track the sources only.  A hand-written
 # list of probe names is how probes/packunpack_probe got committed (5 times):

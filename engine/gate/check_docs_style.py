@@ -29,31 +29,15 @@ import os
 import re
 import sys
 
-ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import docset
 
-# Documents whose job is "what is true now".
-STATE = [
-    "AGENTS.md", "docs/AGENTS.md", "README.md", "README.zh-CN.md",
-    "engine/README.md", "engine/README.zh-CN.md",
-    "server/README.md", "server/README.zh-CN.md",
-    "models/README.md",
-    "docs/checkpoint-container.md", "docs/model-formats.md", "docs/engine-layout.md",
-    "docs/engine-internals.md", "docs/engine-layout.md", "docs/quantization.md",
-    "docs/cross-build.md",
-    "docs/prefix-cache.md", "docs/long-context.md", "docs/test-hooks.md",
-    "docs/evaluation.md", "docs/future-optimization.md", "docs/lfm2.5-230m.md",
-    "docs/vc4-glsl-costs.md", "docs/vc4-mesa-debug-build.md",
-    "docs/bitcpm.md", "docs/smollm2-135m.md", "docs/rwkv7.md",
-]
+ROOT = docset.ROOT
 
-# Pre-rule documents: the accumulated record, frozen rather than maintained.
-# Nothing new is appended to them (Git is the record), so they are not checked.
-# `benchmarks.md` is here because its body is 120 dated sections written under
-# the old append-only rule; the rule its top states forbids adding more, and the
-# reference table it should become is a separate job.  Listing it keeps it from
-# silently falling out of every check.
-HISTORY = ("docs/swap-drift.md", "docs/benchmarks.md")
-HISTORY_PREFIX = ("docs/vc4-1536-repro.md",)
+# The document set is derived, not listed: `docset.py` is the one place that
+# decides what is scanned (tracked + untracked, minus the vendored pages), and it
+# carries the short exemption list for the frozen record pages.  The hand lists
+# this replaces had already left the four `engine/*/README.md` files outside the
+# check.
 
 LEGACY = re.compile(r'\b(KV_PACK|KV_FMT|KV_SCALE|ACT8|ACT_FMT|ACT_F32|RES_PACK|RES_FMT|'
                     r'ATT_SCALE|ATT_SUM_SCALE)=[A-Za-z0-9_]')
@@ -137,7 +121,7 @@ def scan(path):
 def main():
     verbose = "-v" in sys.argv
     fail = 0
-    for rel in STATE:
+    for rel in docset.style():
         p = os.path.join(ROOT, rel)
         if not os.path.exists(p):
             print("FAIL  %s: listed as a state document but missing" % rel)
@@ -152,19 +136,19 @@ def main():
             print("FAIL  %s:%d has an undated measurement (no 20YY-MM-DD in its "
                   "heading or paragraph)\n      %s" % (rel, line, text))
             fail = 1
-    for rel in HISTORY + HISTORY_PREFIX:
+    for rel in docset.history():
         if not os.path.exists(os.path.join(ROOT, rel)):
             print("FAIL  %s: listed as history but missing" % rel)
             fail = 1
     if verbose:
         print("  %d state documents, %d history documents exempt"
-              % (len(STATE), len(HISTORY + HISTORY_PREFIX)))
+              % (len(docset.style()), len(docset.history())))
     if fail:
         print("\nsee the header of engine/gate/check_docs_style.py: a state "
               "document records the present; the record is Git.")
         return 1
     print("doc style: ok (%d state documents: canonical commands, dated "
-          "measurements)" % len(STATE))
+          "measurements)" % len(docset.style()))
     return 0
 
 

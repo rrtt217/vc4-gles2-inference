@@ -55,7 +55,7 @@ replace working paths with demos or cosmetic rewrites.
 | `engine/gate/` | the pass/fail checks that need no GPU: documentation, the switch registry, the shader digests, the q16 rail, the draw cap, the target ledger, the container layout.  `gate/README.md` is the map |
 | `engine/scripts/` | oracles, measurement and acceptance, which need a GPU and/or a model: `regression.sh`, the benchmarks, `swap_matrix.py`, `check_att.py`.  `scripts/README.md` is the map |
 | `engine/eval/` | model quality: `bench_mc.py`, `eval_ifeval.py`, `eval_translate.py`, `evalkit.py` and their `data/`.  `eval/README.md` is the map |
-| `engine/tests/` | compiled tests: `test_lineedit.cpp` (`make -C engine test_lineedit`) |
+| `engine/tests/` | compiled tests: `test_lineedit.cpp`, `test_tokenizer.cpp`, `test_xformat.cpp` (`make -C engine test`) |
 | `engine/probes/` | standalone VC4 feature/throughput probes (not linked into the engine); `README.md` is the map: one row per probe = the question it answers, its `_pi` target and where the answer is written down |
 | `server/` | OpenAI-compatible HTTP server, deterministic tools, self-test, eval suite.  `server.py` is the entry point; `http_api.py` (routes/SSE), `engine_bridge.py` (the worker protocol), `chat_render.py`, `tool_calls.py` and `sampling.py` are the parts it was split into on 2026-11-14, all stdlib only |
 | `models/` | central model store (gitignored), one `.mmcf` per precision |
@@ -97,7 +97,8 @@ already contained, and before the split one directory held the gate, the
 oracles, the benchmarks, the eval batteries, a C++ test and a doc generator.
 
 **Read the map before writing a new script.**  A pass/fail check that needs no
-GPU goes in `gate/`; something that prints numbers for a human to read goes in
+GPU goes in `gate/` (`README.md` is the map, `AGENTS.md` the contract a new
+check keeps); something that prints numbers for a human to read goes in
 `scripts/`; anything that scores a model goes in `eval/`.
 
 ## Build
@@ -122,21 +123,26 @@ Build for the target and do not reuse a stale binary:
   protocol and each row's conditions; this file does not repeat them.  The Pi
   rows are the **latest measurement per model**, each dated, not one campaign —
   a row is comparable to itself over time, not necessarily to its neighbour.
-- Before pushing: `make -C engine check` — the no-GPU half in one command, and
-  it is nine gates: `warncheck`, `docs_check.sh` (six sub-checks: the generated
-  inventory, the switch registry, the doc style, the paths, the "gone" names and
-  the links/index), `shader_hashes.sh`, `check_q16_decode.sh`,
-  `check_draw_cap.sh`, `check_target_reset.sh`, `test_mmcf_format.py`,
-  `test_lineedit` (the editor through a pty) and `server/selftest.py`.  It takes
-  about a minute, and ~55 of those seconds are `warncheck`'s forced rebuild: the
-  checks themselves are ~2 s.  `-Wall -Wextra` is on by default; `warncheck`
-  fails the target if `src/` produces any warning, and the eight warnings the
-  vendored Jinja headers produce are filtered, not silenced.
-- CI: `.github/workflows/gate.yml` runs the same no-GPU half on every push — all
-  nine, plus the eval case file's `--selftest`, shell and Python syntax, and the
-  tool CLIs.  It used to miss `check_q16_decode.sh` (fixed 2026-11-17), and
+- Before pushing: `make -C engine check` — the no-GPU half in one command.  It
+  builds and runs the compiled tests (`test_lineedit`, `test_tokenizer`,
+  `test_xformat`), then `warncheck`, `docs_check.sh` (its sub-checks: the
+  generated inventory, the switch registry, the doc style, the paths, the "gone"
+  names, the four-directory maps and the links/index), `shader_hashes.sh`,
+  `check_q16_decode.sh`, `check_draw_cap.sh`, `check_target_reset.sh`,
+  `test_mmcf_format.py` and `server/selftest.py`.  It takes about a minute, and
+  ~55 of those seconds are `warncheck`'s forced rebuild; the checks and the
+  three test builds are the rest.  `-Wall -Wextra` is on by default; `warncheck`
+  fails the target if
+  `src/` produces any warning, and the eight warnings the vendored Jinja headers
+  produce are filtered, not silenced.  `make -C engine test` is the same tests
+  without the rebuild (a few seconds), for iterating on a unit.
+- CI: `.github/workflows/gate.yml` runs that same `check` target on every push,
+  so there is no second list to drift (the workflow listed the steps separately
+  and had missed `check_q16_decode.sh` until 2026-11-17), plus the eval case
+  file's `--selftest`, shell and Python syntax, and the tool CLIs.
   `test_mmcf_format.py` checks only the C++ constants there because `models/` is
-  gitignored — the step says so in its name.  The model-dependent half (golden strings, PPL,
+  gitignored — it prints SKIP for the round trip when the store is absent.  The
+  model-dependent half (golden strings, PPL,
   `swap_matrix.py`) needs the containers and a GL driver, so it stays local —
   run `scripts/regression.sh` before pushing anything that touches numerics.
 

@@ -28,7 +28,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ENGINE = os.path.dirname(HERE)
 DIRS = ["gate", "scripts", "eval", "tests"]
 ROW = re.compile(r'^\|\s*`([^`]+)`')
-SKIP = {"README.md", "__pycache__", ".DS_Store"}
+# README.md is the map; AGENTS.md is the rule file the map points to (the
+# docs/AGENTS.md precedent: a rule is not a check and has no row).
+SKIP = {"README.md", "AGENTS.md", "__pycache__", ".DS_Store"}
 
 
 def files_in(d):

@@ -6,6 +6,10 @@ store**: it reads the source, the generated GLSL, the documents, or a container
 file.  If it needs a GPU or a model it belongs in `../scripts/`, if it scores a
 model it belongs in `../eval/`.
 
+The contract a new gate keeps -- exit codes, the one-line verdict, the language
+to write it in, the negative run that proves it can fail -- is in
+[AGENTS.md](AGENTS.md).  This page is the map.
+
 `docs_check.sh` is the umbrella for the documentation ones and is step 0 of
 `scripts/regression.sh`; the rest are called by `make -C engine check` and by CI.
 This table is checked against the directory by `check_scripts.py` — a file with
@@ -17,6 +21,7 @@ no row, or a row with no file, fails the gate.
 | `check_switches.py` | every switch the source reads has a registry row, every row is read, no retired row is read, every row is documented | — | `docs_check.sh` |
 | `gen_test_hooks.py` | is `docs/test-hooks.md`'s inventory the registry's rendering (`--check`) | — | `docs_check.sh` |
 | `switch_registry.py` | the parser for `src/switches.cpp` that the two above import | — | (library) |
+| `docset.py` | the Markdown files the documentation gates scan, derived from git (tracked + untracked, minus the vendored pages) | git for the set; a tree walk without it | (library: `check_docs_style.py`, `check_docs_links.py`, `docs_check.sh`) |
 | `check_docs_style.py` | canonical switch spellings in commands; four-decimal numbers carry a date | — | `docs_check.sh` |
 | `check_docs_links.py` | relative links and anchors resolve; the docs index is tracked; a documented switch is read | git (for the tracked check) | `docs_check.sh` |
 | `shader_hashes.sh` | did a builder change move the emitted GLSL (`--dump-shaders` digests) | the built binary | `make check`, CI, regression step 0b |

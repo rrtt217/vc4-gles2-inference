@@ -24,13 +24,14 @@ import subprocess
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+import docset
 
-DOCS = [ROOT / "AGENTS.md", ROOT / "README.md", ROOT / "README.zh-CN.md",
-        ROOT / "engine/README.md", ROOT / "engine/README.zh-CN.md",
-        ROOT / "server/README.md", ROOT / "server/README.zh-CN.md",
-        ROOT / "models/README.md", ROOT / "engine/probes/README.md"] + \
-       sorted((ROOT / "docs").glob("*.md"))
+ROOT = docset.ROOT
+
+# The scanned set comes from `docset.py` (tracked + untracked, minus the
+# vendored pages), not from a list here: the list this replaces had left the
+# four `engine/*/README.md` files and `engine/gate/AGENTS.md` outside the check.
+DOCS = docset.paths()
 
 SKIP_SCHEMES = ("http://", "https://", "mailto:", "ftp://")
 

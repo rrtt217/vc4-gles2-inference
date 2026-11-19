@@ -87,7 +87,7 @@ CROSS_CXXFLAGS ?= --sysroot=$(CROSS_SYSROOT) \
                  -ffast-math -std=c++17
 CROSS_LDLIBS ?= -L$(CROSS_TARGETLIB) -lEGL -lGLESv2 -lm
 
-.PHONY: pi armv6 check-cross clean probes check warncheck
+.PHONY: pi armv6 check-cross clean probes check warncheck test
 
 pi: engine_mm3_pi
 
@@ -226,16 +226,25 @@ probes/load_probe_pi: probes/load_probe.cpp | check-cross
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -o $@ $< $(CROSS_LDLIBS)
 
 # The half of the gate that needs no GPU and no model: what a contributor can run
-# before pushing, and what .github/workflows/gate.yml runs on every push.
-check: warncheck test_lineedit
+# before pushing.  This is the only list -- .github/workflows/gate.yml runs this
+# target rather than repeating the steps, because the two copies drifted once
+# (check_q16_decode.sh was missing from the workflow until 2026-11-17).
+check: test warncheck
 	sh gate/docs_check.sh
 	sh gate/shader_hashes.sh
 	sh gate/check_q16_decode.sh
 	sh gate/check_draw_cap.sh
 	sh gate/check_target_reset.sh
 	python3 gate/test_mmcf_format.py
-	./test_lineedit
 	python3 ../server/selftest.py
+
+# The compiled tests, built and run without warncheck's forced engine rebuild:
+# `make test` is the fast loop (a few seconds), and `check` runs it first so a
+# broken unit fails before the minute-long build.
+test: test_lineedit test_tokenizer test_xformat
+	./test_lineedit
+	./test_tokenizer
+	./test_xformat
 
 # Warnings from src/ are a defect: -Wall -Wextra is on by default and this makes a
 # clean build an assertion rather than a hope.  Warnings from third_party/ are
@@ -259,8 +268,25 @@ warncheck:
 test_lineedit: tests/test_lineedit.cpp $(SRC)/lineedit.cpp $(SRC)/lineedit_layout.cpp $(HEADERS)
 	$(CXX) $(ALL_CXXFLAGS) $(INCS) -o $@ tests/test_lineedit.cpp $(SRC)/lineedit.cpp $(SRC)/lineedit_layout.cpp -lutil -pthread
 
+# The tokenizer's .tok blob, BPE rank, special-token atomicity, the user/template
+# split and decode: a synthetic blob, so no model and no GPU.  It is a unit test
+# rather than a golden string because a tokenizer that splits a marker still
+# answers plausibly -- the failure is an id that means something else.
+test_tokenizer: tests/test_tokenizer.cpp tests/checks.h $(SRC)/tokenizer.cpp \
+                $(SRC)/common.cpp $(SRC)/switches.cpp $(HEADERS)
+	$(CXX) $(ALL_CXXFLAGS) $(INCS) -o $@ tests/test_tokenizer.cpp $(SRC)/tokenizer.cpp \
+	  $(SRC)/common.cpp $(SRC)/switches.cpp -lm
+
+# The CPU half of the X formats: x_pack's bytes are what the GLSL decoders undo,
+# so a change to one without the other is a numerics bug the shader digest cannot
+# see.  No GPU, no model.
+test_xformat: tests/test_xformat.cpp tests/checks.h $(SRC)/xformat.cpp \
+              $(SRC)/common.cpp $(SRC)/switches.cpp $(HEADERS)
+	$(CXX) $(ALL_CXXFLAGS) $(INCS) -o $@ tests/test_xformat.cpp $(SRC)/xformat.cpp \
+	  $(SRC)/common.cpp $(SRC)/switches.cpp -lm
+
 clean:
-	rm -f engine engine_mm3 engine_mm3_pi test_lineedit
+	rm -f engine engine_mm3 engine_mm3_pi test_lineedit test_tokenizer test_xformat
 	rm -f probes/vc4_probe probes/vc4_ffn_probe probes/vc4_topk_probe probes/load_probe_pi
 	rm -f probes/matvec_probe probes/texsize_probe probes/q4fmt_probe_pi probes/glsl_probe_pi probes/q4mv_probe_pi probes/draw_probe_pi probes/packunpack_probe probes/packunpack_probe_pi probes/logits_grid_probe probes/wrow_probe probes/wrow_probe_pi probes/conv_probe probes/conv_probe_pi probes/t3mv_probe probes/t3mv_probe_pi \
 	rm -f probes/sumorder_probe probes/sumorder_probe_pi probes/q4mv_probe probes/progbinary_probe_pi probes/ffn2_probe_pi probes/rgba4444_probe probes/rgba4444_probe_pi

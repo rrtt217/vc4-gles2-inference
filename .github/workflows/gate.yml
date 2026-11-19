@@ -1,15 +1,15 @@
 # The no-GPU half of the gate.
 #
-# Everything here runs without a model and without a GPU, which is why it can run
-# on a hosted runner: documentation drift, the shader text digests, the server's
-# stub-worker self-test, shell and Python syntax, and the tool CLIs.  The
-# model-dependent half (golden strings, PPL, swap_matrix.py) needs the containers
-# in models/ and a GL driver, so it stays on the machines that have them.
+# The checks live in `engine/Makefile`'s `check` target and this workflow runs
+# that target -- one list, so the two cannot drift (they did once:
+# check_q16_decode.sh was missing here until 2026-11-17).  `check` builds the
+# engine (warncheck), runs the compiled tests, the documentation and source
+# gates, the shader digests, the container constants and the server self-test.
 #
-# The checks themselves are cheap (docs 0.3 s, shaders 0.01 s, q16 0.05 s,
-# target reset 0.14 s, server self-test 0.6 s); the job's time is the build.
-# The list here and `make -C engine check` must stay the same nine gates -- they
-# drifted once (check_q16_decode.sh was missing here until 2026-11-17).
+# What is left here is what `make check` does not do: the eval case file's
+# self-check, shell and Python syntax, and the tool CLIs.  The model-dependent
+# half (golden strings, PPL, swap_matrix.py) needs the containers in models/
+# and a GL driver, so it stays on the machines that have them.
 
 name: gate
 
@@ -31,40 +31,11 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             g++ make libegl1-mesa-dev libgles2-mesa-dev
 
-      - name: build
-        run: make -C engine -B engine_mm3
-
-      - name: no warnings from src/ (vendored third_party/ is filtered)
-        run: make -C engine warncheck
-
-      - name: documentation drift
-        run: sh engine/gate/docs_check.sh
-
-      - name: shader text digests
-        run: sh engine/gate/shader_hashes.sh
-
-      - name: q16 rail spellings
-        run: sh engine/gate/check_q16_decode.sh
-
-      - name: draw-cap literal
-        run: sh engine/gate/check_draw_cap.sh
-
-      - name: target-reset ledger
-        run: sh engine/gate/check_target_reset.sh
-
-      # The round trip needs the containers, and models/ is gitignored, so on a
-      # hosted runner this checks the C++ constants only and the script says
-      # SKIP for the round trip.  The step is named for what actually runs.
-      - name: container constants (round trip needs a model store, skipped here)
-        run: python3 engine/gate/test_mmcf_format.py
-
-      # The line editor's cursor arithmetic, its paste handling, and the editor
-      # itself driven through a pty: no GPU, no model, no tty of the runner's.
-      - name: line editor layout and pty run
-        run: make -C engine test_lineedit && ./engine/test_lineedit
-
-      - name: server self-test (stub worker, no engine needed)
-        run: python3 server/selftest.py
+      # Warns, builds once (warncheck), and runs every no-GPU check including
+      # the compiled tests.  One step is deliberate: the per-check step list
+      # this replaced was a second copy of the gate, and it drifted.
+      - name: the no-GPU gate (engine/Makefile check target)
+        run: make -C engine check
 
       - name: eval case file self-check
         run: python3 engine/eval/eval_ifeval.py --selftest

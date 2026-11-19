@@ -74,11 +74,10 @@ message, which is also what `git log -S` finds later.
 - **Tables over prose** once there are more than two items.  The same table
   twice, in two sections, is the failure above.
 - **One row per container** in a results table, never one table per run.
-- **This directory is flat on purpose.**  `gate/docs_check.sh` and
-  `gate/check_docs_links.py` glob `docs/*.md`, so a subdirectory would silently
-  fall out of the link and path checks.  Grouping lives in the sections of
-  [`README.md`](README.md); if a split ever earns its cost, those two globs
-  change in the same commit.
+- **This directory is flat on purpose.**  `gate/docset.py` would scan a
+  subdirectory, but the index and the page shapes assume one level.  Grouping
+  lives in the sections of [`README.md`](README.md); if a split ever earns its
+  cost, the index and the page shapes change in the same commit.
 
 ## Cross-file bookkeeping
 
