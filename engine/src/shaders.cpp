@@ -482,83 +482,62 @@ static string t3_byte(const string& byte_expr) {
            "float((uint(floor(" + byte_expr + "*255.0+0.5))>>7)&1u)))";
 }
 
+// The 2-bit fetch, and the tile fold, in one place.  The body is a texel grid
+// of (cols/8) x (rows/2): one texel carries rows 2t and 2t+1, each with two
+// column groups in two bytes (mmcf_hf.t3mat, docs/checkpoint-container.md).
+static string t3_fetch(const string& g, const string& t, int nq, int th, int tiles) {
+    const string NQ = to_string(nq) + ".0";
+    // One tile is every matrix in this model; the tiled form costs 1.8x on VC4
+    // (probes/t3mv_probe: 9.73 ns/MAC tiled against 5.47 untiled, same body), so
+    // it is only emitted when a body really needs folding.
+    if (tiles <= 1)
+        return string("texture2D(W,vec2((") + g + "+0.5)/" + NQ + ",(" + t + "+0.5)/" +
+               to_string(th) + ".0))";
+    // `t` and `g` arrive as float expressions: ESSL has no implicit int->float,
+    // and `(t+0.5)` with an int t is a compile error, not a promotion.
+    return string("texture2D(W,vec2((") + g + "+float(int((" + t + ")/" + to_string(th) +
+           ".0))*" + NQ + "+0.5)/(" + NQ + "*" + to_string(tiles) + ".0),(mod(" + t + "," +
+           to_string(th) + ".0)+0.5)/" + to_string(th) + ".0))";
+}
+
 string matvec_t3(int rows, int cols, XFormat xf, bool wrow, int t3_th, int t3_tiles) {
-    need_shape("matvec_t3", rows, cols, 4);
+    need_shape("matvec_t3", rows, cols, 8);
     const int axw = x_texels(cols, xf);
-    const int nq = (cols + 15) / 16;                  // 16 weights a texel
-    const string ROWS = to_string(rows), NQ = to_string(nq), AXW = to_string(axw);
+    const int nq = (cols + 7) / 8;                    // texels a row pair
+    const string AXW = to_string(axw);
     const string WD = wrow ? wrow_scale(rows) : "";
     const string SC = wrow ? "wsr(r)" : "ws";
-    // The safe form: q walks activation texels (4 values), and the weight texel
-    // q/4 is fetched but only its q%4-th byte is used.
-    // The body is a 2D tile (gpu_upload.cpp): matrix row r lives at tile
-    // (r/TH) and texel row r%TH, so the fetch is x + (r/TH)*TW.  TH == rows and
-    // one tile for every matrix that fits -- all but the FFN gate on VC4.
-    // Every literal in the fetch is written with a decimal point: ESSL has no
-    // implicit int->float, and `float(mod(float(r),1280))` is a compile error
-    // when the modulus is an int literal.
-    const string TH = to_string(t3_th) + ".0", TILES = to_string(t3_tiles);
-    // `float(r)/TH` and not `float(r/TH)`: the latter is an int division (the
-    // tile index is one), and `float(int)` on a division by a float literal is a
-    // compile error in ESSL.
-    const string TILE = "float(int(float(r)/" + TH + "))";
-    const string WQ = "vec2((float(q/4)+" + TILE + "*" + NQ + ".0+0.5)/(" +
-                      NQ + ".0*" + TILES + ".0),(mod(float(r)," + TH + ")+0.5)/" + TH + ")";
     return "//T3\n" + head(xf) + "precision highp int;\n" + q24_helpers() +
            "uniform sampler2D W,X;uniform float ws;" + WD +
-           "void main(){int r=int(gl_FragCoord.x);float s=0.0;"
-           "for(int q=0;q<" + to_string(cols / 4) + ";q++){"
-           "vec4 c=texture2D(W," + WQ + ");"
-           // The activation decode is the format's own macro, unchanged from
-           // the q8 kernel: four values an iteration, and on I16_2 (the format
-           // the GPU layer loop uses) that is TWO texture2D calls, not one --
-           // `X4Q` is the only thing that knows, and a hand-written fetch here
-           // read one texel of a two-value layout and scaled bytes as if they
-           // were the values.
-           "vec4 x=X4Q(X,q*4," + AXW + ".0);"
-           // The byte is selected without a dynamic index (GLSL ES has none):
-           // four decodes and a mix, which compiles to the same four MACs and
-           // keeps `c` definitely initialised (an if/else chain made Mesa warn
-           // and, on this driver, produce nothing at all).
-           "int j=q-" + to_string(4) + "*(q/4);"
-           "vec4 d0=" + t3_byte("c.r") + ",d1=" + t3_byte("c.g") + ","
-           "d2=" + t3_byte("c.b") + ",d3=" + t3_byte("c.a") + ";"
-           "vec4 w4=d0*step(abs(float(j)),0.5)+d1*step(abs(float(j)-1.0),0.5)+"
-           "d2*step(abs(float(j)-2.0),0.5)+d3*step(abs(float(j)-3.0),0.5);"
-           "s+=dot(w4,x);}"
+           "void main(){int r=int(gl_FragCoord.x);int t=r/2;float h=float(r-2*t);float s=0.0;"
+           "for(int g=0;g<" + to_string(nq) + ";g++){"
+           "vec4 c=" + t3_fetch("float(g)", "float(t)", nq, t3_th, t3_tiles) + ";"
+           // The two bytes this row owns: .rg is row 2t, .ba is row 2t+1.  mix()
+           // rather than a dynamic index or an if-chain -- both were measured to
+           // fail, on one driver or the other.
+           "vec2 bb=mix(c.ba,c.rg,1.0-h);"
+           "vec4 xa=X4Q(X,g*8," + AXW + ".0);"
+           "vec4 xb=X4Q(X,g*8+4," + AXW + ".0);"
+           "s+=dot(" + t3_byte("bb.x") + ",xa)+dot(" + t3_byte("bb.y") + ",xb);}"
            "gl_FragColor=x_i24encq(s*" + SC + ");}";
 }
 
 string matvec_t3_add(int rows, int cols, XFormat xf, XFormat rf, bool wrow, int t3_th, int t3_tiles) {
-    need_shape("matvec_t3_add", rows, cols, 4);
+    need_shape("matvec_t3_add", rows, cols, 8);
     const int axw = x_texels(cols, xf);
-    const int nq = (cols + 15) / 16;
-    const string ROWS = to_string(rows), NQ = to_string(nq), AXW = to_string(axw);
+    const int nq = (cols + 7) / 8;
+    const string AXW = to_string(axw);
     const string WD = wrow ? wrow_scale(rows) : "";
     const string SC = wrow ? "wsr(r)" : "ws";
-    // The body is a 2D tile (gpu_upload.cpp): matrix row r lives at tile
-    // (r/TH) and texel row r%TH, so the fetch is x + (r/TH)*TW.  TH == rows and
-    // one tile for every matrix that fits -- all but the FFN gate on VC4.
-    // Every literal in the fetch is written with a decimal point: ESSL has no
-    // implicit int->float, and `float(mod(float(r),1280))` is a compile error
-    // when the modulus is an int literal.
-    const string TH = to_string(t3_th) + ".0", TILES = to_string(t3_tiles);
-    const string TILE = "float(int(float(r)/" + TH + "))";
-    const string WQ = "vec2((float(q/4)+" + TILE + "*" + NQ + ".0+0.5)/(" +
-                      NQ + ".0*" + TILES + ".0),(mod(float(r)," + TH + ")+0.5)/" + TH + ")";
     return "//T3\n" + head(xf) + "precision highp int;\n" + x_residual_glsl(rf) +
            "uniform sampler2D W,X,R;uniform float ws;" + WD +
-           "void main(){int r=int(gl_FragCoord.x);float s=0.0;"
-           "for(int q=0;q<" + to_string(cols / 4) + ";q++){"
-           "vec4 c=texture2D(W," + WQ + ");"
-           // The format's own decode, as in the q8 kernel.
-           "vec4 x=X4Q(X,q*4," + AXW + ".0);"
-           "int j=q-4*(q/4);"
-           "vec4 d0=" + t3_byte("c.r") + ",d1=" + t3_byte("c.g") + ","
-           "d2=" + t3_byte("c.b") + ",d3=" + t3_byte("c.a") + ";"
-           "vec4 w4=d0*step(abs(float(j)),0.5)+d1*step(abs(float(j)-1.0),0.5)+"
-           "d2*step(abs(float(j)-2.0),0.5)+d3*step(abs(float(j)-3.0),0.5);"
-           "s+=dot(w4,x);}"
+           "void main(){int r=int(gl_FragCoord.x);int t=r/2;float h=float(r-2*t);float s=0.0;"
+           "for(int g=0;g<" + to_string(nq) + ";g++){"
+           "vec4 c=" + t3_fetch("float(g)", "float(t)", nq, t3_th, t3_tiles) + ";"
+           "vec2 bb=mix(c.ba,c.rg,1.0-h);"
+           "vec4 xa=X4Q(X,g*8," + AXW + ".0);"
+           "vec4 xb=X4Q(X,g*8+4," + AXW + ".0);"
+           "s+=dot(" + t3_byte("bb.x") + ",xa)+dot(" + t3_byte("bb.y") + ",xb);}"
            "float res=R1Q(R,r," + to_string(x_texels(rows, rf)) + ".0);"
            "gl_FragColor=XST1Q(s*" + SC + "+res);}";
 }

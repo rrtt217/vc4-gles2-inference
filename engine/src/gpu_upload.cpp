@@ -71,7 +71,11 @@ void GPU::upload(Mat& m){
             // `ovarian` twelve times.  probes/t3mv_probe reproduces the edge: the
             // engine's own text is exact at 1024/1536/1792 rows and wrong in 1692
             // of 2048 rows at 2048 (2026-11-18).
-            const int W = (m.cols + 15) / 16;
+            // A texel is 2 rows x 8 columns, so the texture is (cols/8) x
+            // (rows/2) -- half the matrix's height, which is also what keeps
+            // every shape in this model under the driver's 2048-texel limit.
+            const int W = (m.cols + 7) / 8;
+            const int prow = (m.rows + 1) / 2;
             int TH = m.rows;
             // 1024, not the driver's 2048: the probe's edge is at exactly 2048
             // rows (exact at 1792, 1692 of 2048 rows wrong at 2048), which is the
@@ -81,11 +85,12 @@ void GPU::upload(Mat& m){
             if (TH > lim) TH = lim;
             m.t3_tile_w = W;
             m.t3_tile_h = TH;
-            const int tiles = m.t3_tiles();
+            const int tiles = (prow + TH - 1) / TH;
             if (tiles == 1) {
                     // One tile is the body itself: no reshuffle, which is every
-                    // matrix but the FFN gate.
-                    m.tex = make_texture(W, m.rows, m.w3());
+                    // matrix of this model (the tallest is the 2048-row FFN
+                    // chunk, i.e. 1024 texel rows).
+                    m.tex = make_texture(W, prow, m.w3());
             } else {
                     // The body is a row-major W x rows block; the tile wants
                     // row r at (x + (r/TH)*W, r%TH), so consecutive tiles sit
@@ -94,7 +99,7 @@ void GPU::upload(Mat& m){
                     // for every row past the first tile (cost: a wrong model
                     // with no error anywhere).
                     vector<uint8_t> tile((size_t)W * tiles * TH * 4, 0);
-                    for (int r = 0; r < m.rows; ++r) {
+                    for (int r = 0; r < prow; ++r) {
                             const uint8_t* src = m.w3() + (size_t)r * W * 4;
                             uint8_t* dst = &tile[((size_t)(r % TH) * W * tiles +
                                                   (size_t)(r / TH) * W) * 4];

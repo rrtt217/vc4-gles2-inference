@@ -114,11 +114,22 @@ def t3mat(w):
 
     Layout: 16 weights an RGBA8 texel, four a byte, two bits a weight, bit 0
     magnitude and bit 1 sign, so a weight is `mag * (1 - 2*sign)` and a decode
-    needs no compare and no branch.  Byte j of a texel carries the four columns
-    `16g + 4j .. 16g + 4j + 3`, which is exactly the activation texel the dot
-    product multiplies it by (four values a texel): the weight fetch and the
-    activation fetch advance together, one texel each.  A `cols` that is not a
-    multiple of 16 is padded with zeros, which decode to zero weights.
+    needs no compare and no branch.
+
+    The four bytes of a texel are **two rows by two column groups**, not four
+    column groups of one row: texel (c, t) carries row 2t columns 8c..8c+3 (b0),
+    row 2t columns 8c+4..8c+7 (b1), and the same two for row 2t+1 (b2, b3).  A
+    kernel that computes two output rows a fragment then uses all four bytes it
+    fetched -- 16 MACs from one weight fetch -- where the row-major reading threw
+    three of them away: using four bytes of one row would need four activation
+    fetches from one sampler, and VC4 returns undefined data for that once the
+    weight texture is tall.  Measured on the board, ns/MAC: 9.73 for the
+    row-major reading against 1.23 for this one (probes/t3mv_probe, the t3p arm).
+
+    The texture is `ceil(cols/8) x ceil(rows/2)` texels -- half as tall as the
+    matrix, which also keeps every shape this model has under VC4's 2048-texel
+    limit.  `cols` pads to 8 and `rows` to 2 with zeros, which decode to zero
+    weights.
 
     Returns (packed bytes, unit, per-row plane).  `unit` is the matrix's largest
     row scale and the plane is `srow / unit` -- the same convention `q8_per_row`
@@ -139,11 +150,12 @@ def t3mat(w):
     s[s == 0] = 1.0
     lev = np.rint(w / (s[:, None] * 127.0))
     code = (np.abs(lev) > 0.5).astype(np.uint8) | ((lev < -0.5).astype(np.uint8) << 1)
-    pad = (-cols) % 16
+    pad = (-cols) % 8
     if pad:
         code = np.pad(code, ((0, 0), (0, pad)))
-    c = code.reshape(rows, -1, 4, 4)                 # groups, byte, 2-bit slot
-    packed = (c[..., 0] | (c[..., 1] << 2) | (c[..., 2] << 4) | (c[..., 3] << 6)).astype(np.uint8)
+    if rows % 2:                                     # a texel carries a row pair
+        code = np.pad(code, ((0, 1), (0, 0)))
+    packed = _t3_pack(code)
     unit = float(s.max())
     back = unpack_t3(packed.tobytes(), rows, cols) * (s[:, None] * 127.0)
     err = float(np.abs(back - w).max()) if w.size else 0.0
@@ -153,11 +165,35 @@ def t3mat(w):
     return packed.tobytes(), unit, (s / unit).astype(np.float32)
 
 
+def _t3_pack(code):
+    """(rows, cols) 2-bit codes in [0,3] -> the byte block t3mat writes.
+
+    Column-major inside a texel on purpose: b0,b1 are row 2t's two column
+    groups and b2,b3 are row 2t+1's, so the block's row `t` is texel row `t` and
+    the engine uploads it without a repack.
+    """
+    rows, cols = code.shape
+    q = code.reshape(rows // 2, 2, cols // 8, 2, 4)      # pair, which row, group, half, cols
+    b = (q[..., 0] | (q[..., 1] << 2) | (q[..., 2] << 4) | (q[..., 3] << 6))
+    return b.transpose(0, 2, 1, 3).reshape(rows // 2, -1).astype(np.uint8)
+
+
+def _t3_unpack(block, rows, cols):
+    """The inverse of _t3_pack: (rows, cols) codes from the byte block."""
+    q = np.frombuffer(block, np.uint8).reshape(rows // 2, cols // 8, 2, 2)
+    q = q.transpose(0, 2, 1, 3)                          # pair, which row, group, half
+    out = np.empty((rows // 2, 2, cols // 8, 2, 4), np.uint8)
+    for k in range(4):
+        out[..., k] = (q >> (2 * k)) & 3
+    return out.reshape(rows, cols)
+
+
 def unpack_t3(packed, rows, cols):
     """The decode, for t3mat's self-check; the engine's copy is model.cpp's as_t3."""
-    p = np.frombuffer(packed, np.uint8).reshape(rows, -1, 4)
-    code = np.stack([(p >> (2 * k)) & 3 for k in range(4)], axis=-1).reshape(rows, -1)
-    flat = code[:, :cols].astype(np.float32)
+    rpad = rows + (rows % 2)
+    cpad = cols + ((-cols) % 8)
+    code = _t3_unpack(packed, rpad, cpad)
+    flat = code[:rows, :cols].astype(np.float32)
     mag = flat % 2.0
     sgn = np.floor(flat * 0.5) % 2.0
     return mag * (1.0 - 2.0 * sgn)

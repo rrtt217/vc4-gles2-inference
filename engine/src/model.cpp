@@ -928,7 +928,8 @@ bool Model::read_tables() {
                 const uint8_t* p = fbase_ + data_off_ + r.off;
                 if (!getenv("T3_EXPAND")) {
                         m.type = WeightType::T3;
-                        const size_t bytes = (size_t)m.rows * (((m.cols + 15) / 16) * 4);
+                        const size_t bytes =
+                                (size_t)((m.rows + 1) / 2) * ((((m.cols + 7) / 8)) * 4);
                         if (borrow_) {
                                 m.ext3 = p;
                         } else {
@@ -942,14 +943,26 @@ bool Model::read_tables() {
                 }
                 m.type = WeightType::INT8;
                 m.scale = r.scale;                 // the q8 levels are +-127
-                const size_t stride = (size_t)((m.cols + 15) / 16) * 4;   // a row's bytes
+                // The host expansion decodes the same texel grid the kernel
+                // reads: one texel is rows 2y, 2y+1 by 8 columns, two bytes a row
+                // (mmcf_hf.t3mat).  This is the oracle the 2-bit kernels are
+                // diffed against, so it must read the body, not a copy of the
+                // old row-major reading.
+                const size_t stride = (size_t)((m.cols + 7) / 8) * 4;   // a row pair's bytes
                 m.q8.resize((size_t)m.rows * m.cols);
-                for (int y = 0; y < m.rows; ++y) {
-                        const uint8_t* row = p + (size_t)y * stride;
-                        int8_t* dst = m.q8.data() + (size_t)y * m.cols;
-                        for (int x = 0; x < m.cols; ++x) {
-                                const unsigned code = (row[x >> 2] >> (2 * (x & 3))) & 3u;
-                                dst[x] = (code & 1u) ? ((code & 2u) ? -127 : 127) : 0;
+                for (int y = 0; y < (m.rows + 1) / 2; ++y) {
+                        const uint8_t* band = p + (size_t)y * stride;
+                        for (int half = 0; half < 2; ++half) {
+                                const int row = 2 * y + half;
+                                if (row >= m.rows) break;
+                                int8_t* dst = m.q8.data() + (size_t)row * m.cols;
+                                for (int x = 0; x < m.cols; ++x) {
+                                        const int g = x >> 3;             // column group
+                                        const int b = (x >> 2) & 1;       // byte in the row
+                                        const uint8_t byte = band[(size_t)g * 4 + half * 2 + b];
+                                        const unsigned code = (byte >> (2 * (x & 3))) & 3u;
+                                        dst[x] = (code & 1u) ? ((code & 2u) ? -127 : 127) : 0;
+                                }
                         }
                 }
                 t3_mats++;
@@ -1639,11 +1652,17 @@ Mat Model::slice_rows(const Mat& src, int r0, int r1){
         if (!src.row_scale.empty())
                 m.row_scale.assign(src.row_scale.begin() + r0, src.row_scale.begin() + r1);
         if (src.type == WeightType::T3) {
-                // A row slice is a pointer offset: the body is row-major with a
-                // stride of ceil(cols/16)*4 bytes, so nothing has to move.  The
-                // tile shape is recomputed by the uploader (a slice of 2048 rows
-                // is one tile even when its parent's 4096 was two).
-                m.ext3 = src.w3() + (size_t)r0 * (((src.cols + 15) / 16) * 4);
+                // A row slice is a pointer offset, but only on a *row pair*: one
+                // texel carries rows 2t and 2t+1 (docs/checkpoint-container.md,
+                // dtype 7), so the body's row t is the texel row and the stride
+                // is the texels a row-pair.  Every shape in this model is a
+                // multiple of 2, and the FFN chunk is 2048.
+                if (r0 % 2) {
+                        cerr << "mmcf: a 2-bit body slices on a 2-row boundary (asked "
+                                << r0 << ")\n";
+                        exit(2);
+                }
+                m.ext3 = src.w3() + (size_t)(r0 / 2) * (((src.cols + 7) / 8) * 4);
                 m.t3_tile_w = m.t3_tile_h = 0;
                 return m;
         }
@@ -1684,22 +1703,22 @@ Mat Model::slice_cols(const Mat& src, int c0, int c1){
         m.prebiased = src.prebiased;
         m.row_scale = src.row_scale;   // a column slice keeps every row
         if (src.type == WeightType::T3) {
-                // A column slice of a 2-bit body is not contiguous (16 columns
-                // share 4 bytes a row), so it is repacked: one memcpy a row,
-                // which is what the q8 column slice does too.
-                if ((c0 % 16) || ((c1 - c0) % 16)) {
-                        cerr << "mmcf: a 2-bit body can only be column-sliced on a 16-column "
+                // A column group is one texel, so a slice on an 8-column
+                // boundary is a contiguous run of texels *within* a row pair --
+                // one memcpy a row pair, the same shape the q8 column slice has.
+                if ((c0 % 8) || ((c1 - c0) % 8)) {
+                        cerr << "mmcf: a 2-bit body can only be column-sliced on an 8-column "
                                 "boundary (" << c0 << ".." << c1 << ")\n";
                         exit(2);
                 }
-                const size_t src_stride = ((src.cols + 15) / 16) * 4;
-                const size_t dst_stride = m.cols / 4;
+                const size_t src_stride = ((src.cols + 7) / 8) * 4;
+                const size_t dst_stride = ((m.cols + 7) / 8) * 4;
                 m.ext3 = nullptr;
                 m.t3_tile_w = m.t3_tile_h = 0;
-                m.q3.resize((size_t)m.rows * dst_stride);
-                for (int r = 0; r < m.rows; ++r)
-                        memcpy(m.q3.data() + (size_t)r * dst_stride,
-                               src.w3() + (size_t)r * src_stride + c0 / 4, dst_stride);
+                m.q3.resize((size_t)((m.rows + 1) / 2) * dst_stride);
+                for (int t = 0; t < (m.rows + 1) / 2; ++t)
+                        memcpy(m.q3.data() + (size_t)t * dst_stride,
+                               src.w3() + (size_t)t * src_stride + (c0 / 8) * 4, dst_stride);
                 return m;
         }
         if (src.type == WeightType::INT8) {
