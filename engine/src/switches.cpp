@@ -14,6 +14,8 @@ using std::string;
 
 static const SwitchDef kSwitches[] = {
     // ---- Dump: the engine's numbers, written out for an offline oracle ------
+    {"T3_EXPAND", "", SwKind::Str, "", SwStatus::Probe, SwAxis::Load,
+     "expand a 2-bit body to the q8 values it stands for at load time (4x the RAM); the oracle the t3 kernels are diffed against"},
     {"STAGE_DUMP", "", SwKind::Str, "", SwStatus::Probe, SwAxis::Dump,
      "per-layer xb/att/x1/xbf/hid/hidA as q16 texels; diff_paths.sh reads it"},
     {"HIDDEN_DUMP", "", SwKind::Str, "", SwStatus::Probe, SwAxis::Dump,

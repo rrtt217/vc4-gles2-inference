@@ -51,7 +51,7 @@ The rows below are the registry, one per switch, grouped by the axis they move.
 diagnostic or a pricing arm; `retired` is gone (`--dump-switches` prints the
 same table with what *this* environment resolved to).
 
-138 switches: 28 permanent, 96 probe, 14 retired; 16 legacy spellings are translated.
+139 switches: 28 permanent, 97 probe, 14 retired; 16 legacy spellings are translated.
 
 ### The activation streams
 
@@ -221,6 +221,7 @@ same table with what *this* environment resolved to).
 | `KEEP_CPU_WEIGHTS` | value | keep the CPU weights after the upload (debugging only) |
 | `Q8_LAYERS` | value | per-layer weight precision mix at load |
 | `Q8_PARTS` | value | per-part weight precision mix at load |
+| `T3_EXPAND` | value | expand a 2-bit body to the q8 values it stands for at load time (4x the RAM); the oracle the t3 kernels are diffed against |
 | `UPLOAD_XOR` | value | UPLOAD_XOR=0 restores the byte-at-a-time int8 -> uint8 conversion |
 
 ### The tokenizer

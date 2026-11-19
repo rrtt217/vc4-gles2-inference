@@ -77,14 +77,11 @@ void GPU::upload(Mat& m){
             // rows (exact at 1792, 1692 of 2048 rows wrong at 2048), which is the
             // same limit kDrawCap encodes for the draw strips.  A tile of 1024
             // rows keeps every texture at half the ceiling.
-            const int lim = std::min(1024, max_target_dim() > 0 ? max_target_dim() : 2048);
+            const int lim = std::min(kDrawCap, max_target_dim() > 0 ? max_target_dim() : kDrawCap);
             if (TH > lim) TH = lim;
             m.t3_tile_w = W;
             m.t3_tile_h = TH;
             const int tiles = m.t3_tiles();
-            if (getenv("T3_DEBUG"))
-                fprintf(stderr, "T3TEX %dx%d rows=%d cols=%d tile=%dx%d\n",
-                        W * tiles, TH, m.rows, m.cols, W, TH);
             if (tiles == 1) {
                     // One tile is the body itself: no reshuffle, which is every
                     // matrix but the FFN gate.
