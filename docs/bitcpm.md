@@ -186,9 +186,16 @@ The board decode dropped from 1323 ms/token with the signbit weight decode
 (`0x3F800000|(sign<<31)`) instead of `mag*(1-2*sign)`, which pairs the integer
 shift/or with the final mul and drops the ~5-QIR floor.  Byte-identical logits
 on both machines; `probes/t3dec_probe` prices the isolated single-row decode at
-3.01 ns/MAC against 3.46 (-13%).  The model win is smaller (~3%) because the
-FFN/wo/w2 already run the 2-row pair kernels, where the decode is amortized
-over twice the MACs.
+3.01 ns/MAC against 3.46 (-13%), and the 2-row pair kernel the FFN/wo/w2
+actually run at 2.03 against 2.21 (-8%).  The model win is ~3% (median
+1326 -> 1288, every new sample below every old one) because the pair kernel
+already amortizes the decode over twice the MACs.  2.03 ns/MAC is this kernel
+shape's floor on VC4: the fetch-only arm is 0.66, the decode adds ~1.4 at its
+algebraic minimum (~8 ops/weight), and the T-MAC group-LUT idea does not
+transfer -- a random-access texture LUT pays the 100-cycle TMU latency with no
+register/L1 to hold it (the vec4-LUT arm measured +22%), which is why T-MAC is
+CPU-only.  The remaining ~43% of a layer is attention draws and rmsnorm
+elementwise (`LAYER_PROFILE`), the format-agnostic fusion lever, not decode.
 
 The board figure is the point of the kind: 167.5 MB of container, 85 MB of
 texture, and 358 M parameters that the q8 body (435 MB) and the q4 body (337 MB)
