@@ -8215,11 +8215,48 @@ it wrote before moving on.
 Two things this makes explicit.  First, the t3 body is *not* a lossy step: it
 carries a per-row scale where the q8 path carries one scale a matrix, so it is
 the more accurate of the two (0.0278 against 0.0288).  Second, the format's
-memory win is not available until the kernel exists -- the loader expands the
-body to q8 on the host and prints
-`t3 body: 120 matrices expanded to q8 on the host (85 MB on disk -> 342 MB in
-RAM)`, which is the packer's acceptance path and 4x the file.  The board needs
-Phase B2 for the 167 MB, and B2's ceiling is the 1.22x the probe priced.
+memory win needs the kernel, not just the file: at the time of this measurement
+the loader expanded the body to q8 on the host and the board was OOM-killed at
+280 MB of the 342 MB that needs.  The kernel landed the next day -- see
+"2026-11-19, the 2-bit matvec on both machines" below.
+
+## 2026-11-19 — the 2-bit matvec on both machines
+
+`engine_mm3` runs a t3 container's matmuls from the 2-bit body itself, no host
+expansion: `matvec_t3` / `matvec_t3_add` decode four weights a byte with ESSL
+3.00 integer shifts, and the body uploads as a 2D tile of at most `kDrawCap`
+rows because VC4's `GL_MAX_TEXTURE_SIZE` is 2048 and the FFN gate is 4096 rows.
+
+24 layers, `RMS_STORE=f32 KV=q16`, greedy, prompt `用一句话介绍你自己。`,
+`TIMING=1`, `--gen 12` on the board and `--gen 16` on the desktop (decode is
+per token, so the budget only has to be past the first):
+
+| machine | path | prefill | decode | first 8 ids |
+|---|---|---:|---:|---|
+| Iris Xe | `GPU_LAYER=1` | 1.4 s | **79.4 ms/token** | 23523 65 7139 53741 6061 59365 4666 6567 |
+| Pi Zero | `GPU_LAYER=1` | 87.4 s | **5506 ms/token** | identical |
+| Pi Zero | `GPU_LAYER=0` | 116.9 s | 7094 ms/token | 23523 65 7139 10850 (the CPU loop's own answer) |
+
+The board's answer is `你好，我是MiniCPM系列模型`, deterministic (two 12-token
+runs byte-identical), and it is the same text the desktop produces.  The t3
+container is 167.5 MB of file and ~85 MB of texture, so it fits where the q8
+(435 MB) and q4 (337 MB) bodies cannot; that is the whole point of the kind.  It
+costs 18x a token against MiniMind3 q4 on the same board, which is 5.6x the
+parameters and one weight fetch per four weights -- the shape VC4 allows (a
+16-weight iteration needs four activation fetches from one sampler, and the
+board returns undefined data for that at 1280 rows: `probes/t3mv_probe` measures
+exact in 1280/1280 with one fetch against wrong in 1276/1280 with four).
+
+Perplexity, `data/ppl_test.txt`, `SEQ=768 PPL_STRIDE=384`: **35.6726** on the
+fused path against 35.7795 on the CPU loop (same-path acceptance is PPL, and the
+CPU path is a float32 reference that round-trips q16 only at the dump).
+`T3_EXPAND=1` remains the oracle: the same kernels agree with the expanded q8
+body to KL 0.0218 against the float32 forward.
+
+Nothing else moved: `engine/scripts/regression.sh` is ACCEPT with the desktop
+pins unchanged (270.3170 / 326.1483 / 9.2919), the golden strings unchanged, and
+`gate/shader_hashes.sh` reports 158 programs whose digests change only for the
+new t3 kernels.
 
 ## 2026-11-18 — ternary (2-bit) matvec pricing, Iris Xe and Pi Zero
 

@@ -355,15 +355,13 @@ string wrow_scale(int rows, const char* smp = "WS", const char* fn = "wsr",
         // hi pairs (t, t+rows/2): the fused W13 kernel writes row r and row
         // r+rows from one fragment, so those are the two the texel carries.
         // One fetch, same as the (2t, 2t+1) form.
-        return string("uniform sampler2D ") + smp +
-               ";vec2 " + fn + "2(int t){vec4 c=texture2D(" + smp +
+        return string("uniform sampler2D ") + smp + ";vec2 " + fn + "2(int t){vec4 c=texture2D(" + smp +
                ",vec2(0.125,(float(t)+0.5)/float(" + to_string(np) + ")));"
                "return vec2(c.r*65280.0+c.g*255.0,c.b*65280.0+c.a*255.0)*" + unit +
                "*(1.0/65536.0);}"
                "float " + fn + "(int r){return 0.0;}\n";
     }
-    return string("uniform sampler2D ") + smp +
-           ";vec4 " + fn + "p(int r){return texture2D(" + smp +
+    return string("uniform sampler2D ") + smp + ";vec4 " + fn + "p(int r){return texture2D(" + smp +
            ",vec2(0.125,(float(r/2)+0.5)/float(" + to_string(np) + ")));}"
            "float " + fn + "(int r){vec4 c=" + string(fn) + "p(r);"
            "return (mod(float(r),2.0)<0.5?c.r*65280.0+c.g*255.0:c.b*65280.0+c.a*255.0)*"

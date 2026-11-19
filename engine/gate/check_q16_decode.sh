@@ -46,6 +46,11 @@ sites=$(printf '%s\n' "$dump" | grep -c '65280\.0')
 report=$(printf '%s\n' "$dump" | awk '
   { line = $0
     gsub(/65280\.0\*15\.0/, "Q4USCALE", line)
+    # The per-row scale plane is the second unsigned reconstruction: 16 bits of
+    # `s_row/unit` in [0,1], so there is no sign rail to fold.  Its lines carry
+    # the 1/65536 that turns the 16 bits back into a fraction, which no signed
+    # q16 decode has.
+    if (line ~ /1\.0\/65536\.0/) gsub(/65280\.0/, "WSPLANE", line)
     d = gsub(/65280\.0/, "&", line)
     f1c = gsub(/>=32767\.5/, "&", line); f2c = gsub(/>=32768\.0/, "&", line)
     f = f1c + f2c

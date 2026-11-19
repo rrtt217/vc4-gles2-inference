@@ -106,11 +106,14 @@ models/
                                  RMS_STORE=f32 (lane sums 5.4e4).  Iris Xe:
                                  52.5 ms/token, MC acc 0.690.  Docs: docs/bitcpm.md
     bitcpm-0.5b.t3.mmcf          167.5 MB: the same model with a 2-bit ternary
-                                 body (dtype 7, --quant t3, per-row scales).
-                                 The runtime has no t3 kernel yet, so the loader
-                                 expands the body to q8 on the host +-4x RAM and
-                                 says so; same text and KL 0.0278 against the
-                                 float32 reference.  The Pi needs Phase B2
+                                 body (dtype 7, --quant t3, per-row scales) and
+                                 the one container of this model the board can
+                                 hold.  The 2-bit matvec runs on Xe (79.4
+                                 ms/token, KL 0.0218 against the float32
+                                 reference) and on the Pi Zero (5506 ms/token,
+                                 prefill 87 s).  T3_EXPAND=1 restores the host
+                                 expansion, which is the oracle it was accepted
+                                 against.  Docs: docs/bitcpm.md
 ```
 
 `smollm2-135m/` was source-only until 2026-11-18: weights, config and a

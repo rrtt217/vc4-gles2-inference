@@ -141,38 +141,68 @@ path's one scale a matrix): the same chat answer, KL 0.0278 against the float32
 forward where q8 measures 0.0288, and fmt 1.000 on a 10-item multiple-choice
 slice.
 
-**The GPU kernel does not exist yet** (Phase B2).  Until it does the loader
-expands a t3 body into q8 levels on the host -- the exact dequantisation a
-`--q8-row-scale` q8 body would have carried -- and prints
+The **2-bit matvec runs on both machines** -- 24 layers, `GPU_LAYER=1`, the
+same answer from Xe and from the board:
 
-```text
-t3 body: 120 matrices expanded to q8 on the host (85 MB on disk -> 342 MB in RAM)
-```
+| | decode | note |
+|---|---:|---|
+| Iris Xe | 79.4 ms/token | prefill 1.4 s |
+| Pi Zero (VC4) | 5506 ms/token | prefill 87.4 s; `GPU_LAYER=0` is 7094 ms/token |
 
-That is the packer's acceptance path, not the shipping one: it costs 4x the
-file's memory, which is precisely why the board cannot run this container yet.
-Measured on the Pi Zero (2026-11-18, `docs/benchmarks.md`): the board parses the
-file (`mmcf_dump.py`: 246 tensors, CRCs ok, `quant t3`) and reads it at 13 MB/s,
-the engine that predates the kind refuses it by name (`unknown dtype 7`), and the
-engine that reads it is OOM-killed at 280 MB of the 342 MB the expansion needs.
-A t3 container is a *file* until the matvec exists.
+The board figure is the point of the kind: 167.5 MB of container, 85 MB of
+texture, and 358 M parameters that the q8 body (435 MB) and the q4 body (337 MB)
+cannot fit.  It is 18x slower a token than MiniMind3 q4 on the same board
+(304 ms), which is what 5.6x the parameters and four weight fetches an iteration
+cost; the kernel reads one texel per four weights, which is what VC4 allows (see
+below), so it moves q8's fetch count at half its traffic rather than the
+sixteen-weights-a-texel the file layout would permit.
+
+`T3_EXPAND=1` still expands a t3 body to the q8 levels it stands for, at load
+time and 4x the memory.  That is the packer's acceptance route and the oracle the
+2-bit kernels are diffed against (KL 0.0218 against the float32 forward), not a
+shipping path -- on the board the expansion is OOM-killed at 280 MB.
+
+Three things the 2-bit kernel needs that the q8 one does not, all of them
+VC4-only in effect and all of them measurable with `probes/t3mv_probe`:
+
+- **One texture fetch a fragment.** A 16-weight iteration needs four activation
+  fetches, and the board returns undefined data when a fragment samples one
+  texture more than once once the texture is tall -- the rule `wrow_scale()`
+  documents.  Measured with the engine's own text and the same weights: exact in
+  1280 of 1280 rows with one fetch, wrong in 1276 of 1280 with four.
+- **A body taller than the driver's texture limit tiles.** VC4's
+  `GL_MAX_TEXTURE_SIZE` is 2048 and the FFN gate is 4096 rows, so `glTexImage2D`
+  failed, the texture kept its old contents and the model answered one token
+  twelve times.  A body now uploads as a 2D tile of at most `kDrawCap` rows, with
+  each row memcpy'd into its slot.
+- **`ws` carries the missing 127.** `t3mat()` writes the record's scale as the q8
+  step (the largest row magnitude / 127) and the part-3 plane as `s_row/unit`, so
+  `plane * unit` is `s_row/127` -- what a q8 level of +-127 multiplies.  A 2-bit
+  level is +-1, so the row scale has to be `127 * unit`.  `plane[0] * unit`
+  against `s_row[0]` is 127 for every row of every matrix, which is a host-side
+  check, no GPU needed.
+
+The residual add has its own rule, and it is shared with the q8 path: a matvec
+writes its output in the *activation* format and an add-into-residual writes in
+the *residual* format, so `matvec_t3_add` takes both and must be handed
+`res_fmt_`.  Handing it the activation's layout decodes the residual wrongly: on
+this model the two are I16_2 and I16_1, every odd row gained exactly 255/256, and
+the reply collapsed to one token on both drivers (`CPU_ADD_GPU=1` reproduces it
+on the CPU loop, which is the same-path A/B that isolates it).
 
 ## Not done
 
-- **The Pi Zero cannot hold it**: q8 is 434 MB and q4 is 337 MB (the q4 body
-  pays 8 bytes of scale/min per 32 values), against the ~180 MB the board has.
-  The route is Phase B in `docs/bitcpm-assessment.zh-CN.md`: a 2-bit ternary
-  kind (90.8 MB) plus a q8 embedding (75.2 MB), which is SmolLM2's footprint.
-  The **pricing is now measured** (`engine/probes/t3mv_probe`, both machines,
-  `docs/benchmarks.md` 2026-11-18): a 2-bit matvec costs 2.44 ns/MAC on VC4
-  against q8's 2.98, i.e. **1.22x**, and the ES2 float decode is 2.5x *slower*
-  than q8, so the kind is only worth writing on the ESSL 3.00 path.  Model-level
-  that is 1.10 s/token of matvec against 1.29 -- 2-bit buys the *fit*, and a
-  fifth off the decode, not four times.
-- **A t3 kernel.**  The container kind is in (dtype 7); the matvec is B2.  What
-  the probe priced: 2.44 ns/MAC on VC4 against q8's 2.98, so the kernel buys
-  1.22x on top of the memory win, and the ES3 uint decode is the only viable
-  form (the ES2 float decode is 2.5x *slower* than q8).
+- **Only the 2-bit kind fits the board.** q8 is 434 MB and q4 is 337 MB (the q4
+  body pays 8 bytes of scale/min per 32 values) against the ~180 MB the board
+  has; the t3 container is 167.5 MB and is what runs there. The ES2 float decode
+  is 2.5x *slower* than q8, so the 2-bit kernels are ESSL 3.00 only -- on a
+  driver without integer shifts the kind has no fast form.
+- **5.5 s/token is slow enough to matter.** The 2-bit matvec prices at 2.44
+  ns/MAC on VC4 in `probes/t3mv_probe`, i.e. 1.22x q8's 2.98, and the model pays
+  it over 358 M parameters; the q8-equivalent kernels this board already runs
+  are 18x faster a token on an 18x smaller model. A fused `w1/w3` gate and a
+  paired qkv would take draws off, which is where a VC4 block spends its
+  non-arithmetic time.
 - **q4 is not packed.** `q4mat`'s 32-value min/max grid puts 0 half a step off,
   so every zero becomes `±s/15`; that is the one place this model's weights are
   not lossless.  Judge it with PPL before shipping a q4 container.

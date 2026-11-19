@@ -121,6 +121,18 @@ vector<Case> cases() {
     add(v, "matvec_q8_add_pair_768x768_i16_2_gen",
         [] { return matvec_q8_add_pair(768, 768, I16_2, I16_2, false); });
 
+    // --- 2-bit ternary weights (dtype 7).  Two shapes: the FFN gate's 4096 rows
+    // tile into four, the qkv's 1280 into two, and the residual add takes both
+    // res layouts the engine can hand it.
+    add(v, "matvec_t3_1280x1024_i16_2_t1024x2",
+        [] { return matvec_t3(1280, 1024, I16_2, true, 1024, 2); });
+    add(v, "matvec_t3_4096x1024_i16_2_t1024x4",
+        [] { return matvec_t3(4096, 1024, I16_2, true, 1024, 4); });
+    add(v, "matvec_t3_add_1024x1024_i16_2_i16_1",
+        [] { return matvec_t3_add(1024, 1024, I16_2, I16_1, true, 1024, 1); });
+    add(v, "matvec_t3_add_pair_1024x1024_i16_2_i16_2",
+        [] { return matvec_t3_add_pair(1024, 1024, I16_2, I16_2, true, 1024, 1); });
+
     // --- i16 weights (legacy precision, still loadable)
     add(v, "matvec_i16_6400x768_i16_2", [] { return matvec_i16(6400, 768, I16_2); });
     add(v, "matvec_i16_add_1536x768_i16_2_i16_1",
