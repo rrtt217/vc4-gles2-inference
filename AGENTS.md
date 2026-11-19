@@ -149,6 +149,44 @@ Build for the target and do not reuse a stale binary:
 Do not use a short build timeout.  Machine-specific host/sysroot/deploy paths
 belong in `AGENTS.local.md` (DSH) or `AGENTS.override.md` (Hermes/VLAB).
 
+## Git
+
+`main` is the integration branch and published history is append-only.  The
+canonical remote is protected (no force push); a mirror receives the same
+`main`; a build checkout is updated by a push when it is reachable, or by
+`git pull --ff-only` on the host.  Fetch before pushing; a rejected push is
+merged or rebased locally, never forced.  Force-push only a branch nobody has
+pulled.  The remotes' names and paths are machine facts: `AGENTS.local.md`.
+
+A commit is the record (see "Where numbers and history go"), so its message is
+part of the change:
+
+- subject: `<area>: <what changed>`, one line, English, no period.  `docs(PAGE):`
+  is the scoped form; the area is the subject, not a closed list.  There is no
+  50/72 rule here -- long is fine when the change needs it.
+- body: why, what it cost or broke, and the evidence that it works -- the gate
+  result, the measurement, the re-baseline.  Wrap at ~80 columns, and stand
+  alone: `git log -S` is how the next reader arrives.
+- one coherent change per commit; squash WIP and fixup on your own branch
+  before pushing.
+
+Tracked: source, documents, tests.  Not model containers, binaries, build
+outputs, caches, or local overrides -- `.gitignore` owns the patterns, and a new
+artifact type gets a commented pattern there, not a commit.  Nothing secret:
+assume the mirror is public.
+
+Work that needs the hardware gate -- numerics, shaders, the loader, a container
+layout -- or that spans more than one commit, starts on a branch and lands only
+after `scripts/regression.sh` on the machine that owns the pin.  A single change
+whose evidence is `make check` may go straight to `main`; that is the normal
+case here.  Rebase onto `main` and fast-forward, or use `--no-ff` when each
+commit is itself a measured step; delete the branch after the merge.  A pull
+request is optional: use it when the host's CI is the cheapest way to get the
+gate run, not as ceremony.
+
+The pre-push gate is the one in Build; `git status` clean before pushing.
+`git branch` is work in flight, not an archive.
+
 ### Switching models without restarting the engine
 
 `--chat` without `--prompt` is a REPL, and `/model PATH` replaces the container
