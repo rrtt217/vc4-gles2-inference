@@ -74,6 +74,7 @@ the file format in [`docs/model-formats.md`](docs/model-formats.md) and
 | `mmcf_pack.py` | converting an HF directory (safetensors + config) or a legacy checkpoint (Q8M1/Q8M2, Q4M1, I16M1/I16M2) into an MMCF container |
 | `mmcf_format.py` | the layout in one place: magic, header, record format, TLV, CRC, the dtype/kind/template tables.  Imported by the three tools above rather than copied into each; `gate/test_mmcf_format.py` round-trips every container in `models/` through it and compares its constants with `engine/src/model.cpp` |
 | `mmcf_dump.py` | answering "what does the engine actually read from this file" — the whole metadata block, from the file alone (`--check` verifies every CRC) |
+| `store_audit.py` | the model store before a cleanup: every container with its version, size and tracked references, every source payload, every derived checkpoint (`--check` verifies CRCs) |
 | `mmcf_requant_q8.py` | rebuilding the q8 matrices of a container from its i16 sibling (`--clip P` for a percentile scale) |
 | `ref_forward.py` | a numpy forward pass over an HF safetensors source: separates "bad conversion / bad tokenizer / engine bug" |
 | `make_tok.py` | building the `.tok` blob from a HF `tokenizer.json` — ByteLevel or SentencePiece, with added tokens laid onto their ids (a blob built from `model["vocab"]` alone ends at the wrong id and the engine splits `<\|im_start\|>` into characters), byte fallback written as raw bytes, and one id per byte string (`dedupe()`: a real piece beats a `<0xNN>` fallback, the lower id wins a tie) |

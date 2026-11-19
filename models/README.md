@@ -4,12 +4,62 @@ Central store for all model artifacts used by this repository.  The files
 are large and are intentionally **not tracked by Git**; only this README is
 tracked.
 
-**The engine loads `.mmcf` only**, and the store keeps only what is
-needed to build a container: a *source* (safetensors, a llama2.c `.bin`, a
-`.gguf` reference, or one legacy checkpoint that has no other source) next to
-the container(s) built from it.  Derived `.i16` / `.q8` / `.q4` checkpoints are
-deleted once their container exists — they are byte-for-byte inside it, and
-`mmcf_pack.py --quant` rebuilds them from the source in one step.
+**The engine loads `.mmcf` only.**  The store keeps the containers, the small
+inputs a repack needs (`config.json`, `tokenizer.json`, the chat template,
+`*.tok`), and a source only while it is being adapted.  Derived `.i16` / `.q8` /
+`.q4` checkpoints are deleted once their container exists — they are
+byte-for-byte inside it, and `mmcf_pack.py --quant` rebuilds them from the
+source in one step.  A stable model's source and any superseded container are
+cleaned up by the rule in "Keeping the store" below.
+
+## Keeping the store
+
+The store is a workbench, not an archive.  A file earns its place by being used
+or by being the only copy of something that cannot be re-downloaded.
+
+**Containers.**  A `.mmcf` is kept when a tracked document or script names it,
+when a gate, benchmark or eval uses it, or when it is the artifact deployed to
+the board.  Delete it when:
+
+- another container of the same model and precision supersedes it (a dedup or
+  q6 experiment, an old quantisation), or
+- no tracked file names it and no deploy list carries it, or
+- its header version is one the engine does not read — the engine reads v2, v3
+  and v4, so a v1 file is a format leftover.
+
+Deleting a container is recorded in this page: model, path, size, date, why,
+and the command that rebuilds it.  `models/` is gitignored, so this page is the
+record; a deletion with no line here looks like a loss.
+
+**Sources.**  A large weight payload (`*.safetensors`, `*.pth`, `*.gguf`, a
+llama2.c `*.bin`) is scaffolding.  It is kept while the model is being adapted,
+while it is the only local copy, or while the model is under an open
+investigation (SmolLM2's Pi-vs-Xe divergence, supra2's unsupported forward).
+It may be purged once:
+
+- every container built from it is verified (`mmcf_dump.py --check`,
+  `gate/test_mmcf_format.py`),
+- this page names the container and records the upstream repository and
+  revision, the pack command, and the container's sha256,
+- the source is re-downloadable from that revision.
+
+Small inputs (`config.json`, `tokenizer.json`, the chat template, `*.tok`) stay:
+they are kilobytes, and they are what a repack needs first.
+
+**The audit.**  `python3 engine/tools/store_audit.py` lists every container with
+its version, size and tracked references, every source payload, and every
+derived checkpoint; `--check` verifies every container's CRCs.  Review it,
+delete, and update this section in the same commit.  A container with no
+file-name reference is a candidate, not a verdict: a brace row such as
+`tinybrainbot.{i16,q4}.mmcf` names two files without naming either, and the
+engine README names `stories42M i16` as a fact.
+
+Deleted:
+
+- 2026-11-19 `models/minimind3/minimind3.q8.dedup.mmcf` (61 MB) -- a
+  `--head-dedup` q8 experiment, superseded by `minimind3.q8.mmcf` and named by
+  no tracked file.  Rebuild from `model.safetensors` with the q8 command plus
+  `--head-dedup`; the source stays.
 
 ```text
 models/
