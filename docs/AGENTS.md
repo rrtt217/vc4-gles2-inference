@@ -42,11 +42,12 @@ Copy a page instead of inventing a shape.  A model page is:
 6. `## Known gaps` — a table of what is broken, what was accepted and why;
 7. `## Measuring it` — how to reproduce the numbers above.
 
-[`bitcpm.md`](bitcpm.md) is the short example (266 lines).
-[`lfm2.5-230m.md`](lfm2.5-230m.md) is the long one (421: two architectures and
-a fine-tune).  [`smollm2-135m.md`](smollm2-135m.md) is a page whose subject is
-mostly one open question, and [`rwkv7.md`](rwkv7.md) is a page for an
-architecture that was delivered and then deliberately closed.
+[`bitcpm.md`](bitcpm.md) is the short example.
+[`lfm2.5-230m.md`](lfm2.5-230m.md) is the long one, and it is long for a reason
+worth copying: two architectures and a fine-tune in one family.
+[`smollm2-135m.md`](smollm2-135m.md) is a page whose subject is mostly one open
+question, and [`rwkv7.md`](rwkv7.md) is a page for an architecture that was
+delivered and then deliberately closed.
 
 ## What a paragraph may be
 
