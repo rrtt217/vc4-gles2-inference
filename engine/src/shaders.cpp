@@ -465,21 +465,23 @@ string matvec_q8(int rows, int cols, XFormat xf, bool wrow) {
 // moving 4x fewer bytes than q8 per texel -- i.e. it matches q8's fetch count
 // and halves its traffic.  T3_WIDE=1 emits the 16-wide form for a machine where
 // the sampler can be sampled twice (Iris Xe: measured correct there).
+static string t3_dec_def() {
+    // One byte -> four ternary weights as a vec4, the uint hoisted once.  The
+    // sign is bit-cast into a float: +-1.0f is 0x3F800000 | (sign<<31), times
+    // the magnitude bit.  Integer shift/or (1 QIR each, add slot) pair with the
+    // final mul (mul slot); the old mag*(1-2*sign) spent two float ops on the
+    // sign instead.  uint() truncates the positive bb*255+0.5 exactly as
+    // uint(floor()) would, so the ~5-QIR floor is gone.  Measured on VC4:
+    // 3.01 ns/MAC against the old form's 3.46 (probes/t3dec_probe, -13%),
+    // byte-identical -- the same {0,+-1} vec4 in the same accumulation order.
+    return "vec4 t3dec(float bb){uint u=uint(bb*255.0+0.5);return vec4("
+           "uintBitsToFloat(0x3F800000u|(((u>>1)&1u)<<31))*float(u&1u),"
+           "uintBitsToFloat(0x3F800000u|(((u>>3)&1u)<<31))*float((u>>2)&1u),"
+           "uintBitsToFloat(0x3F800000u|(((u>>5)&1u)<<31))*float((u>>4)&1u),"
+           "uintBitsToFloat(0x3F800000u|(((u>>7)&1u)<<31))*float((u>>6)&1u));}\n";
+}
 static string t3_byte(const string& byte_expr) {
-    // One byte -> four ternary weights, as a vec4.  Bit 0 is magnitude and bit
-    // 1 sign, so a weight is `mag * (1 - 2*sign)`: no compare, no branch, and
-    // the same four MACs the q8 kernel spends.
-    const string u = "u";
-    return "vec4("
-           "float(uint(floor(" + byte_expr + "*255.0+0.5))&1u),"
-           "float((uint(floor(" + byte_expr + "*255.0+0.5))>>2)&1u),"
-           "float((uint(floor(" + byte_expr + "*255.0+0.5))>>4)&1u),"
-           "float((uint(floor(" + byte_expr + "*255.0+0.5))>>6)&1u))"
-           "*(1.0-2.0*vec4("
-           "float((uint(floor(" + byte_expr + "*255.0+0.5))>>1)&1u),"
-           "float((uint(floor(" + byte_expr + "*255.0+0.5))>>3)&1u),"
-           "float((uint(floor(" + byte_expr + "*255.0+0.5))>>5)&1u),"
-           "float((uint(floor(" + byte_expr + "*255.0+0.5))>>7)&1u)))";
+    return "t3dec(" + byte_expr + ")";
 }
 
 // The 2-bit fetch, and the tile fold, in one place.  The body is a texel grid
@@ -507,7 +509,7 @@ string matvec_t3(int rows, int cols, XFormat xf, bool wrow, int t3_th, int t3_ti
     const string AXW = to_string(axw);
     const string WD = wrow ? wrow_scale(rows) : "";
     const string SC = wrow ? "wsr(r)" : "ws";
-    return "//T3\n" + head(xf) + "precision highp int;\n" + q24_helpers() +
+    return "//T3\n" + head(xf) + "precision highp int;\n" + t3_dec_def() + q24_helpers() +
            "uniform sampler2D W,X;uniform float ws;" + WD +
            "void main(){int r=int(gl_FragCoord.x);int t=r/2;float h=float(r-2*t);float s=0.0;"
            "for(int g=0;g<" + to_string(nq) + ";g++){"
@@ -529,7 +531,7 @@ string matvec_t3_add(int rows, int cols, XFormat xf, XFormat rf, bool wrow, int 
     const string AXW = to_string(axw);
     const string WD = wrow ? wrow_scale(rows) : "";
     const string SC = wrow ? "wsr(r)" : "ws";
-    return "//T3\n" + head(xf) + "precision highp int;\n" + x_residual_glsl(rf) +
+    return "//T3\n" + head(xf) + "precision highp int;\n" + t3_dec_def() + x_residual_glsl(rf) +
            "uniform sampler2D W,X,R;uniform float ws;" + WD +
            "void main(){int r=int(gl_FragCoord.x);int t=r/2;float h=float(r-2*t);float s=0.0;"
            "for(int g=0;g<" + to_string(nq) + ";g++){"
@@ -557,7 +559,7 @@ string matvec_t3_pair(int rows, int cols, XFormat xf, bool wrow, int t3_th, int 
     const string WD = wrow ? wrow_scale(rows) : "";
     const string SP = wrow ? "vec2 sc=wsr2(2*t);" : "";
     const string SC0 = wrow ? "sc.x" : "ws", SC1 = wrow ? "sc.y" : "ws";
-    return "//T3\n" + head(xf) + "precision highp int;\n" + x_pair2_glsl(xf) +
+    return "//T3\n" + head(xf) + "precision highp int;\n" + t3_dec_def() + x_pair2_glsl(xf) +
            "uniform sampler2D W,X;uniform float ws;" + WD +
            "void main(){int t=int(gl_FragCoord.x);" + SP +
            "float s0=0.0,s1=0.0;"
@@ -580,7 +582,7 @@ string matvec_t3_add_pair(int rows, int cols, XFormat xf, XFormat rf, bool wrow,
     const string WD = wrow ? wrow_scale(rows) : "";
     const string SP = wrow ? "vec2 sc=wsr2(2*t);" : "";
     const string SC0 = wrow ? "sc.x" : "ws", SC1 = wrow ? "sc.y" : "ws";
-    return "//T3\n" + head(xf) + "precision highp int;\n" + x_pair2_glsl(rf) +
+    return "//T3\n" + head(xf) + "precision highp int;\n" + t3_dec_def() + x_pair2_glsl(rf) +
            x_residual_glsl(rf) +
            "uniform sampler2D W,X,R;uniform float ws;" + WD +
            "void main(){int t=int(gl_FragCoord.x);int r0=2*t;int r1=min(r0+1," +
