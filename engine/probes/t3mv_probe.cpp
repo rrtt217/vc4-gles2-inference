@@ -62,6 +62,7 @@ enum class Kind {
     T3Fetch,  // 2-bit layout, fetches kept, unpack removed (pricing arm)
     T3E,      // the engine's own kernel: row-scale plane, q24 store, one fetch
     T3T,      // the same, with the body folded into tiles of --tile rows
+    T3P,      // 2 ROWS a texel: bytes b0,b1 = row r cols 8c+0..7, b2,b3 = row r+1
 };
 
 struct Variant {
@@ -78,6 +79,7 @@ static const Variant VARIANTS[] = {
     {"t3u_fetch (no unpack)", Kind::T3Fetch, 2, true},
     {"t3e (engine text, row scale)", Kind::T3E, 2, true},
     {"t3t (engine text, tiled)", Kind::T3T, 2, true},
+    {"t3p (2 rows/texel)", Kind::T3P, 2, true},
 };
 
 static GLuint compile(GLenum t, const string& src, string& log) {
@@ -128,7 +130,10 @@ int main(int argc, char** argv) {
     for (int i = 0; i < cols; i++) {
         // Integers, so the byte encoding is exact and the CPU reference is the
         // shader's own input (a half-integer value would truncate in the cast).
-        xval[i] = (float) ((i % 61) - 30);                 // -30 .. 30
+        // Small integers, because one arm stores q16: that grid holds +-128 and
+        // a 1024-term dot of +-30 rails it at the first row (the engine's own
+        // residual sits around 1, so this is also the realistic amplitude).
+        xval[i] = (float) ((i % 5) - 2);                   // -2 .. 2
         xtex[(size_t) i] = (unsigned char) ((int) xval[i] + 128);
     }
     GLuint xtex_id = 0;
@@ -168,12 +173,39 @@ int main(int argc, char** argv) {
         const int nq = cols / per;                        // weight texels a row
         const int groups = per / 4;                       // activation texels an iteration
 
+        // The pair layout: ONE texel carries 2 rows x 8 columns, so a fragment
+        // that writes 2 rows (vec4 = two q16 values, x_st2q) can consume all
+        // four bytes of the fetch it makes.  Texel (c, t) holds row 2t cols
+        // 8c+0..3 in b0, row 2t cols 8c+4..7 in b1, row 2t+1 the same in b2, b3.
+        const bool pair_arm = (v.kind == Kind::T3P);
+        const int pnq = pair_arm ? cols / 8 : nq;             // texels a row (pair)
+        const int prows = pair_arm ? (rows + 1) / 2 : rows;   // texel rows
         // ---- the weights, and the CPU reference over the same bytes
-        vector<unsigned char> wtex((size_t) nq * rows * 4, 0);
+        vector<unsigned char> wtex((size_t) pnq * prows * 4, 0);
         vector<float> wref((size_t) rows * cols, 0.0f);
         unsigned seed = 12345;
         auto rnd = [&seed]() { seed = seed * 1103515245u + 12345u; return (seed >> 16) & 0x7fffu; };
-        for (int r = 0; r < rows; r++) {
+        if (pair_arm) {
+            for (int t = 0; t < prows; t++) {
+                for (int c = 0; c < pnq; c++) {
+                    for (int ch = 0; ch < 4; ch++) {
+                        const int r = 2 * t + (ch >= 2 ? 1 : 0);
+                        const int base = 8 * c + (ch & 1) * 4;
+                        const float wsrow = 1.0f + (float) (r % 7) * 0.25f;
+                        unsigned acc = 0;
+                        for (int k = 0; k < 4; k++) {
+                            if (r >= rows) break;             // an odd tail row
+                            const int code = (int) (rnd() % 3);
+                            const float w = code == 0 ? 0.0f : (code == 1 ? 1.0f : -1.0f);
+                            wref[(size_t) r * cols + base + k] = w * wsrow;
+                            acc |= ((code == 0 ? 0u : 1u) | (code == 2 ? 2u : 0u)) << (2 * k);
+                        }
+                        wtex[(size_t) (t * pnq + c) * 4 + ch] = (unsigned char) (acc & 0xff);
+                    }
+                }
+            }
+        }
+        for (int r = 0; pair_arm ? false : (r < rows); r++) {
             const float wsrow = 1.0f + (float) (r % 7) * 0.25f;   // one scale a row
             for (int q = 0; q < nq; q++) {
                 for (int ch = 0; ch < 4; ch++) {
@@ -199,6 +231,23 @@ int main(int argc, char** argv) {
                     wtex[(size_t) (r * nq + q) * 4 + ch] = (unsigned char) (acc & 0xff);
                 }
             }
+        }
+        // The pair arm stores through q16, which holds +-128: pick the store
+        // scale from the reference's own peak so the check can never report the
+        // grid instead of the kernel.  Rows are 4096 columns wide at the
+        // down-projection shape, where a fixed 1/4 still rails (measured 139.5).
+        double pair_div = 1.0;
+        if (pair_arm) {
+            double amax = 0.0;
+            for (int r = 0; r < rows; ++r) {
+                double w = 0.0;
+                for (int i = 0; i < cols; ++i) w += wref[(size_t) r * cols + i] * xval[i];
+                if (std::fabs(w) > amax) amax = std::fabs(w);
+            }
+            while (amax / pair_div > 120.0) pair_div *= 2.0;
+            if (getenv("T3MV_RANGE"))
+                printf("    # pair store scale 1/%g (peak %.1f, q16 rails at 128)\n",
+                       pair_div, amax);
         }
         GLuint wtex_id = 0;
         std::vector<unsigned char> wtiled;
@@ -234,7 +283,10 @@ int main(int argc, char** argv) {
         glGenTextures(1, &wtex_id);
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_2D, wtex_id);
-        if (v.kind == Kind::T3T)
+        if (pair_arm)
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, pnq, prows, 0, GL_RGBA,
+                         GL_UNSIGNED_BYTE, wtex.data());
+        else if (v.kind == Kind::T3T)
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, nq * TILES, TH, 0, GL_RGBA,
                          GL_UNSIGNED_BYTE, (TILES > 1 ? wtiled.data() : wtex.data()));
         else
@@ -252,7 +304,40 @@ int main(int argc, char** argv) {
         string fs = ver + "precision highp float;\n";
         if (v.es3) fs += "precision highp int;\nout vec4 frag_color;\n";
         fs += "uniform sampler2D W,X;uniform float ws;\n";
-        if (v.kind == Kind::T3T) {
+        if (v.kind == Kind::T3P) {
+            // Two output rows a fragment, one weight fetch an iteration, and all
+            // four bytes of that fetch used: b0,b1 are row 2t's two column
+            // groups, b2,b3 are row 2t+1's.  16 MACs per iteration for 4 decodes
+            // and 3 fetches, against the one-row kernel's 4 MACs for the same 4
+            // decodes and 3 fetches.
+            const int np = (rows + 1) / 2;
+            fs += "uniform sampler2D WS;\n";
+            fs += "vec4 dec(float bb){uint u=uint(floor(bb*255.0+0.5));"
+                  "return vec4(float(u&1u),float((u>>2)&1u),float((u>>4)&1u),float((u>>6)&1u))"
+                  "*(1.0-2.0*vec4(float((u>>1)&1u),float((u>>3)&1u),float((u>>5)&1u),"
+                  "float((u>>7)&1u)));}\n";
+            fs += "vec2 wsr2(int t){vec4 c=texture2D(WS,vec2(0.125,(float(t)+0.5)/float(" +
+                  std::to_string(np) + ")));"
+                  "return vec2(c.r*65280.0+c.g*255.0,c.b*65280.0+c.a*255.0)*(1.0/65536.0);}\n";
+            fs += "vec2 enc16(float v){float q=clamp(floor(v+0.5),-32768.0,32767.0);"
+                  "if(q<0.0)q+=65536.0;float hi=floor(q/256.0);"
+                  "return vec2(hi/255.0,(q-hi*256.0)/255.0);}\n";
+            fs += "void main(){int t=int(gl_FragCoord.x);float s0=0.0,s1=0.0;"
+                  "for(int c=0;c<" + std::to_string(cols / 8) + ";c++){"
+                  "vec4 w=texture2D(W,vec2((float(c)+0.5)/float(" + std::to_string(pnq) + "),"
+                  "(float(t)+0.5)/float(" + std::to_string(prows) + ")));"
+                  "vec4 xa=texture2D(X,vec2((float(2*c)+0.5)/float(" +
+                  std::to_string(cols / 4) + "),0.5))*255.0-128.0;"
+                  "vec4 xb=texture2D(X,vec2((float(2*c+1)+0.5)/float(" +
+                  std::to_string(cols / 4) + "),0.5))*255.0-128.0;"
+                  "s0+=dot(dec(w.r),xa)+dot(dec(w.g),xb);"
+                  "s1+=dot(dec(w.b),xa)+dot(dec(w.a),xb);}"
+                  // enc16 takes raw q16: the value grid is 1/256, so the product
+                  // is multiplied in before the round (x_i16enc's shape).
+                  "vec2 sc=wsr2(t)*ws;vec2 p0=enc16(s0*sc.x*256.0),p1=enc16(s1*sc.y*256.0);"
+                  "frag_color=vec4(p0.x,p0.y,p1.x,p1.y);}\n";
+        }
+        else if (v.kind == Kind::T3T) {
             // The engine's own tiled text: tile TH rows, `tiles` of them side by
             // side, one weight fetch an iteration, plus the row-scale plane.
             const int np = (rows + 1) / 2;
@@ -321,7 +406,7 @@ int main(int argc, char** argv) {
                   "float a=v-g*65536.0-b*256.0;"
                   "frag_color=vec4(g/255.0,b/255.0,a/255.0,1.0);}\n";
         }
-        if (v.kind != Kind::T3E && v.kind != Kind::T3T) {
+        if (v.kind != Kind::T3E && v.kind != Kind::T3T && v.kind != Kind::T3P) {
         fs += "void main(){int r=int(gl_FragCoord.x);float s=0.0;\n";
         fs += "for(int q=0;q<" + std::to_string(nq) + ";q++){\n";
         fs += "vec4 c=texture2D(W,vec2((float(q)+0.5)/float(" + std::to_string(nq) +
@@ -409,12 +494,17 @@ int main(int argc, char** argv) {
         glBindTexture(GL_TEXTURE_2D, wtex_id);
         glUniform1i(glGetUniformLocation(p, "W"), 1);
         glUniform1f(glGetUniformLocation(p, "ws"), 1.0f);
-        if (v.kind == Kind::T3E || v.kind == Kind::T3T) {
+        if (v.kind == Kind::T3E || v.kind == Kind::T3T || v.kind == Kind::T3P) {
             glActiveTexture(GL_TEXTURE2);
             glBindTexture(GL_TEXTURE_2D, wsx_id);
             glUniform1i(glGetUniformLocation(p, "WS"), 2);
             glActiveTexture(GL_TEXTURE0);
-            glUniform1f(glGetUniformLocation(p, "ws"), 3.0f);   // the unit
+            // The unit multiplies the plane back.  The pair arm stores through
+            // q16, which holds +-128, so it uses a quarter of the scale and its
+            // reference is a quarter too -- otherwise a 1024-term dot rails the
+            // grid at the first row and the check reports the format, not the
+            // kernel.
+            glUniform1f(glGetUniformLocation(p, "ws"), pair_arm ? (float) (3.0 / pair_div) : 3.0f);
         }
         glActiveTexture(GL_TEXTURE0);
         glClearColor(0, 0, 0, 0);
@@ -425,14 +515,15 @@ int main(int argc, char** argv) {
         // kDrawCap forces on the board (a 1280- or 1536-row target is two
         // draws).  gl_FragCoord.x stays absolute, so the arithmetic is the
         // same either way -- if the numbers change, the cause is the driver.
+        const int frags = pair_arm ? prows : rows;
         auto draw_all = [&]() {
             if (strip <= 0) {
-                glViewport(0, 0, rows, 1);
+                glViewport(0, 0, frags, 1);
                 glDrawArrays(GL_TRIANGLES, 0, 3);
                 return;
             }
-            for (int x0 = 0; x0 < rows; x0 += strip) {
-                const int w = (rows - x0 < strip) ? rows - x0 : strip;
+            for (int x0 = 0; x0 < frags; x0 += strip) {
+                const int w = (frags - x0 < strip) ? frags - x0 : strip;
                 glViewport(x0, 0, w, 1);
                 glDrawArrays(GL_TRIANGLES, 0, 3);
             }
@@ -445,15 +536,41 @@ int main(int argc, char** argv) {
         const double ms = std::chrono::duration<double, std::milli>(
                               std::chrono::steady_clock::now() - t0).count() / iters;
 
-        // ---- row 0 of the readback against the CPU
-        vector<unsigned char> px((size_t) rows * 4, 0);
-        glReadPixels(0, 0, rows, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
-        const double got = ((double) px[0] * 65536.0 + (double) px[1] * 256.0 + px[2] -
-                            8388608.0) / 256.0;
-        double ref = 0.0;
-        for (int i = 0; i < cols; i++) ref += wref[(size_t) i] * xval[i];
-        // (the t3e reference is wref as packed: it already carries the row
-        // scale, and the shader multiplies the plane back to the same number)
+        // ---- the readback against the CPU
+        //
+        // The single-row arms store a 24-bit value in one texel (g,b,a); the pair
+        // arm stores two q16 values in one texel (hi0,lo0,hi1,lo1), the engine's
+        // x_st2q layout, which is what matvec_*_add_pair already writes.
+        vector<unsigned char> px((size_t) frags * 4, 0);
+        glReadPixels(0, 0, frags, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        // q16 is offset-free with a negative rail at 0x8000: u is hi*256+lo and
+        // a u at or above 32768 is a negative value (x_i16raw's rule, which the
+        // CPU reference needs here or every negative row reads 256 too high).
+        auto q16_at = [&](int t, int half) {
+            const size_t o = (size_t) t * 4 + (size_t) half * 2;
+            double u = ((double) px[o] * 65280.0 + (double) px[o + 1] * 255.0) / 255.0;
+            if (u >= 32768.0) u -= 65536.0;
+            return u / 256.0;
+        };
+        auto q24_at = [&](int r) {
+            return ((double) px[(size_t) r * 4] * 65536.0 + (double) px[(size_t) r * 4 + 1] * 256.0 +
+                    px[(size_t) r * 4 + 2] - 8388608.0) / 256.0;
+        };
+        auto dot_row = [&](int r) {
+            double w = 0.0;
+            for (int i = 0; i < cols; ++i) w += wref[(size_t) r * cols + i] * xval[i];
+            return w;
+        };
+        if (getenv("T3MV_RANGE")) {
+            double mx = 0.0;
+            for (int r = 0; r < rows; ++r) {
+                const double w = dot_row(r) / pair_div;
+                if (std::fabs(w) > mx) mx = std::fabs(w);
+            }
+            printf("    # max |reference| = %.1f (q16 rails at 128)\n", mx);
+        }
+        const double got = pair_arm ? q16_at(0, 0) : q24_at(0);
+        double ref = dot_row(0) / pair_div;
         if (v.kind == Kind::T3Fetch) {
             // No unpack: the reference is the shader's own constant pattern.
             ref = 0.0;
@@ -468,20 +585,21 @@ int main(int argc, char** argv) {
         // exactly), so an absolute tolerance flags a correct kernel on the board.
         const double err = std::fabs(got - ref);
         const bool good = err < 2e-3 * (1.0 + std::fabs(ref));
-        printf("%-24s %6d %9.3f %10.2f %9.2f %8s\n", v.name, nq, ms, 1e6 * ms / (rows * (double) cols),
-               (double) nq * rows * 4 / 1e6, good ? "ok" : "MISMATCH");
+        // The MAC count a draw really does: a single-row fragment covers |rows|
+        // outputs, a pair fragment covers two (and the arm still walks the same
+        // columns), so the pair arm does twice the MACs in half the fragments.
+        const double macs = (pair_arm ? 2.0 : 1.0) * (double) rows * (double) cols;
+        printf("%-24s %6d %9.3f %10.2f %9.2f %8s\n", v.name, nq, ms, 1e6 * ms / macs,
+               (double) pnq * prows * 4 / 1e6, good ? "ok" : "MISMATCH");
         if (!good) printf("    row 0: got %.6f want %.6f (err %.6f)\n", got, ref, err);
-        if (v.kind == Kind::T3E || v.kind == Kind::T3T) {
+        if (v.kind == Kind::T3E || v.kind == Kind::T3T || pair_arm) {
             // Every row: the row scale plane and the weight row change with r, so
             // "row 0 is right" says almost nothing (that was the wide kernel's
             // blind spot on the board).
             int bad = 0; double worst = 0.0; int worst_row = -1;
             for (int r = 0; r < rows; ++r) {
-                const double g = ((double) px[(size_t) r * 4 + 0] * 65536.0 +
-                                  (double) px[(size_t) r * 4 + 1] * 256.0 +
-                                  px[(size_t) r * 4 + 2] - 8388608.0) / 256.0;
-                double w = 0.0;
-                for (int i = 0; i < cols; ++i) w += wref[(size_t) r * cols + i] * xval[i];
+                const double g = pair_arm ? q16_at(r / 2, r & 1) : q24_at(r);
+                const double w = dot_row(r) / pair_div;
                 const double e = std::fabs(g - w) / (1.0 + std::fabs(w));
                 if (e > 2e-3) ++bad;
                 if (e > worst) { worst = e; worst_row = r; }
