@@ -175,12 +175,19 @@ GLuint GPU::attention_block(const Mat& qkv, GLuint x, int layer, int pos){
         // the identical round/clamp), so the rope/qk-norm/qrot readers see the
         // same values.
         auto draw_qkv = [&]{
-            if (att_qkv_pair_ && qkv.type == WeightType::INT8) {
+            if (att_qkv_pair_ && (qkv.type == WeightType::INT8 ||
+                                  qkv.type == WeightType::T3)) {
                 const bool wr = qkv.has_row_scale();
                 const int pairs = (qkv.rows + 1) / 2;
-                GLuint p = x_prog("xqkvp_" + to_string(qkv.rows) + "_" + to_string(qkv.cols) +
-                                  "_" + x_format_name(act_fmt_) + (wr ? "_wr" : ""),
-                                  matvec_q8_pair_logits(qkv.rows, qkv.cols, act_fmt_, wr));
+                // A t3 qkv holds both rows of the pair in one texel, so its
+                // kernel fetches once where the q8 one fetches twice; both write
+                // x_st2q, which is why the rope/qk-norm readers do not care.
+                GLuint p = qkv.type == WeightType::T3
+                               ? x_t3_pair(qkv, wr)
+                               : x_prog("xqkvp_" + to_string(qkv.rows) + "_" +
+                                        to_string(qkv.cols) + "_" + x_format_name(act_fmt_) +
+                                        (wr ? "_wr" : ""),
+                                        matvec_q8_pair_logits(qkv.rows, qkv.cols, act_fmt_, wr));
                 bind_fbo(qkv_target_.fbo);
                 glViewport(0, 0, pairs, 1);
                 use_program(p);

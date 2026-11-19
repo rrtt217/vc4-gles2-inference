@@ -542,6 +542,61 @@ string matvec_t3_add(int rows, int cols, XFormat xf, XFormat rf, bool wrow, int 
            "gl_FragColor=XST1Q(s*" + SC + "+res);}";
 }
 
+// The 2-bit pair kernel: two output rows a fragment, so all four bytes of one
+// weight fetch are used (b0,b1 = row 2t's two column groups, b2,b3 = row 2t+1's)
+// and the activation fetch feeds both dot products.  16 MACs a fetch, against
+// the one-row kernel's 8.  The store is the engine's existing x_st2q pair
+// layout, so every reader of a paired target (rope/qk-norm on qkv, rmsnorm on
+// the residual) is unchanged -- probes/t3mv_probe prices this form at
+// 1.21-1.25 ns/MAC on VC4 against 2.5 for the one-row one (2026-11-19).
+string matvec_t3_pair(int rows, int cols, XFormat xf, bool wrow, int t3_th, int t3_tiles) {
+    need_shape("matvec_t3_pair", rows, cols, 8);
+    const int axw = x_texels(cols, xf);
+    const int nq = (cols + 7) / 8;
+    const string AXW = to_string(axw);
+    const string WD = wrow ? wrow_scale(rows) : "";
+    const string SP = wrow ? "vec2 sc=wsr2(2*t);" : "";
+    const string SC0 = wrow ? "sc.x" : "ws", SC1 = wrow ? "sc.y" : "ws";
+    return "//T3\n" + head(xf) + "precision highp int;\n" + x_pair2_glsl(xf) +
+           "uniform sampler2D W,X;uniform float ws;" + WD +
+           "void main(){int t=int(gl_FragCoord.x);" + SP +
+           "float s0=0.0,s1=0.0;"
+           "for(int g=0;g<" + to_string(nq) + ";g++){"
+           "vec4 c=" + t3_fetch("float(g)", "float(t)", nq, t3_th, t3_tiles) + ";"
+           "vec4 xa=X4Q(X,g*8," + AXW + ".0);"
+           "vec4 xb=X4Q(X,g*8+4," + AXW + ".0);"
+           "s0+=dot(" + t3_byte("c.r") + ",xa)+dot(" + t3_byte("c.g") + ",xb);"
+           "s1+=dot(" + t3_byte("c.b") + ",xa)+dot(" + t3_byte("c.a") + ",xb);}"
+           "gl_FragColor=x_st2q(s0*" + SC0 + ",s1*" + SC1 + ");}";
+}
+
+string matvec_t3_add_pair(int rows, int cols, XFormat xf, XFormat rf, bool wrow,
+                          int t3_th, int t3_tiles) {
+    need_shape("matvec_t3_add_pair", rows, cols, 8);
+    const int axw = x_texels(cols, xf);
+    const int rw = (rows + 1) / 2;
+    const int nq = (cols + 7) / 8;
+    const string AXW = to_string(axw);
+    const string WD = wrow ? wrow_scale(rows) : "";
+    const string SP = wrow ? "vec2 sc=wsr2(2*t);" : "";
+    const string SC0 = wrow ? "sc.x" : "ws", SC1 = wrow ? "sc.y" : "ws";
+    return "//T3\n" + head(xf) + "precision highp int;\n" + x_pair2_glsl(rf) +
+           x_residual_glsl(rf) +
+           "uniform sampler2D W,X,R;uniform float ws;" + WD +
+           "void main(){int t=int(gl_FragCoord.x);int r0=2*t;int r1=min(r0+1," +
+           to_string(rows - 1) + ");" + SP +
+           "float res0=R1Q(R,r0," + to_string(rw) + ".0);"
+           "float res1=R1Q(R,r1," + to_string(rw) + ".0);"
+           "float s0=0.0,s1=0.0;"
+           "for(int g=0;g<" + to_string(nq) + ";g++){"
+           "vec4 c=" + t3_fetch("float(g)", "float(t)", nq, t3_th, t3_tiles) + ";"
+           "vec4 xa=X4Q(X,g*8," + AXW + ".0);"
+           "vec4 xb=X4Q(X,g*8+4," + AXW + ".0);"
+           "s0+=dot(" + t3_byte("c.r") + ",xa)+dot(" + t3_byte("c.g") + ",xb);"
+           "s1+=dot(" + t3_byte("c.b") + ",xa)+dot(" + t3_byte("c.a") + ",xb);}"
+           "gl_FragColor=x_p2_stq(s0*" + SC0 + "+res0,s1*" + SC1 + "+res1);}";
+}
+
 string matvec_q8_batch(int rows, int cols, XFormat xf, bool wrow) {
     need_shape("matvec_q8_batch", rows, cols, 4);
     const string ROWS = to_string(rows), COLS4 = to_string(cols / 4);

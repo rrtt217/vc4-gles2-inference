@@ -256,7 +256,11 @@ Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
             bool wo_packs = false;
             for (const Mat& w : m_.wo)
                 if (w.rows > 0) {
-                    wo_packs = w.type == WeightType::INT8 || w.type == WeightType::INT4;
+                    // A t3 matrix writes the packed pair too (matvec_t3_add_pair),
+                    // so it takes the same two-values-a-texel residual the q8 and
+                    // q4 paths use: half the fetch count in every rmsnorm pass.
+                    wo_packs = w.type == WeightType::INT8 || w.type == WeightType::INT4 ||
+                               w.type == WeightType::T3;
                     break;
                 }
             // The residual axis, one value: `i16` keeps the default decision
@@ -288,7 +292,8 @@ Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
         // shifts q4 PPL 325.3751 -> 331.6324 and decodes 1.2% slower.
         bool qkv_pair = true;
         for (const Mat& m : m_.qkv)
-            if (m.type != WeightType::INT8 || (m.rows & 1)) qkv_pair = false;
+            if ((m.type != WeightType::INT8 && m.type != WeightType::T3) || (m.rows & 1))
+                qkv_pair = false;
         if (env_zero("QKV_PAIR")) qkv_pair = false;
         if (gpu_attn_)
             gpu_.init_attention(m_.dim, m_.kv_dim, m_.heads, m_.kv_heads, m_.head_dim,
