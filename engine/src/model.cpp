@@ -916,20 +916,15 @@ bool Model::read_tables() {
         // texture, which is why the format exists at all.
         //
         // The weight a 2-bit level stands for.  `t3mat()` writes the record's
-        // scale as the matrix unit (max_row/127) and the part-3 plane as
-        // `s_row/unit`, and the kernel computes `level * ws * wsr(r)` with
-        // `level` in {0, +-1} -- so `ws` must be the unit exactly as the record
-        // states it, and the reconstruction is `+-unit * s_row/unit = +-s_row`.
-        //
-        // It is NOT the q8 convention: there the level is +-127 and the record's
-        // scale is s_row/127, so the *product* matches while the factors do not.
-        // Carrying q8's `*127` over to the 2-bit body multiplies every weight by
-        // 127 (measured on the board: `ovarian` twelve times, and the logits of
-        // the temporary ±127-expanded q8 body had masked it on Xe, where the
-        // answer happened to be scale-insensitive).
+        // scale as the q8 *step* (the largest row magnitude / 127) and the
+        // part-3 plane as `s_row / unit`, so the pair reconstructs `s_row/127`
+        // -- exactly what a q8 level of +-127 multiplies.  A 2-bit level is
+        // +-1, so `ws` has to carry the missing 127: `+-1 * 127*unit *
+        // s_row/(127*unit) = +-s_row`.  This is checkable without a GPU:
+        // `plane[0] * unit` is 127x smaller than `s_row[0]` for every row.
         auto as_t3 = [&](const MmcfRec& r, Mat& m) {
                 m.rows = (int)r.rows; m.cols = (int)r.cols;
-                m.scale = r.scale;                    // the unit, as written
+                m.scale = r.scale * 127.0f;   // a +-1 level carries +-127 steps
                 if (!getenv("T3_EXPAND")) {
                         m.type = WeightType::T3;
                         const size_t bytes = (size_t)m.rows * (((m.cols + 15) / 16) * 4);
