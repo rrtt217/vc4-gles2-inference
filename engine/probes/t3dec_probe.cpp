@@ -109,6 +109,25 @@ static string dec_sb_trunc() {
            "uintBitsToFloat(0x3F800000u|(((u>>5)&1u)<<31))*float((u>>4)&1u),"
            "uintBitsToFloat(0x3F800000u|(((u>>7)&1u)<<31))*float((u>>6)&1u));}\n";
 }
+// The sign's &1 is redundant: (u>>(2k+1))<<31 shifts every higher bit out of
+// the uint32, so bit31 is already the sign bit alone.  One op less a weight.
+static string dec_sb_noand() {
+    return "vec4 dec(float bb){uint u=uint(bb*255.0+0.5);return vec4("
+           "uintBitsToFloat(0x3F800000u|((u>>1)<<31))*float(u&1u),"
+           "uintBitsToFloat(0x3F800000u|((u>>3)<<31))*float((u>>2)&1u),"
+           "uintBitsToFloat(0x3F800000u|((u>>5)<<31))*float((u>>4)&1u),"
+           "uintBitsToFloat(0x3F800000u|((u>>7)<<31))*float((u>>6)&1u));}\n";
+}
+// Zero by masking the float bits instead of multiplying by the magnitude:
+// (0x3F800000|sign<<31) & (0-mag).  Trades the ITOF(mag)+fmul for a sub+and
+// (both add slot); same {0,+-1} out.
+static string dec_sb_mask() {
+    return "vec4 dec(float bb){uint u=uint(bb*255.0+0.5);return vec4("
+           "uintBitsToFloat((0x3F800000u|((u>>1)<<31))&(0u-(u&1u))),"
+           "uintBitsToFloat((0x3F800000u|((u>>3)<<31))&(0u-((u>>2)&1u))),"
+           "uintBitsToFloat((0x3F800000u|((u>>5)<<31))&(0u-((u>>4)&1u))),"
+           "uintBitsToFloat((0x3F800000u|((u>>7)<<31))&(0u-((u>>6)&1u))));}\n";
+}
 
 int main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
@@ -200,17 +219,21 @@ int main(int argc, char** argv) {
         while (amax / pair_div > 120.0) pair_div *= 2.0;
     }
 
-    struct V { const char* name; string (*dec)(); bool wide; };
+    struct V { const char* name; string (*dec)(); bool wide; bool intacc; };
     const V VS[] = {
-        {"ship (8x convert)", dec_ship, false},
-        {"hoist (uint once)", dec_hoist, false},
-        {"code (2-bit algebra)", dec_code, false},
-        {"lut (vec4 index)", dec_lut, false},
-        {"signbit (bit-cast)", dec_signbit, false},
-        {"sb_unroll (no loop)", dec_sb_unroll, false},
-        {"sb_trunc (no floor)", dec_sb_trunc, false},
-        {"wide (16 a row)", dec_hoist, true},
-        {"sb_wide (2row+signbit)", dec_sb_trunc, true},
+        {"ship (8x convert)", dec_ship, false, false},
+        {"hoist (uint once)", dec_hoist, false, false},
+        {"code (2-bit algebra)", dec_code, false, false},
+        {"lut (vec4 index)", dec_lut, false, false},
+        {"signbit (bit-cast)", dec_signbit, false, false},
+        {"sb_unroll (no loop)", dec_sb_unroll, false, false},
+        {"sb_trunc (no floor)", dec_sb_trunc, false, false},
+        {"sb_noand (sign no &1)", dec_sb_noand, false, false},
+        {"sb_mask (mask not mul)", dec_sb_mask, false, false},
+        {"wide (16 a row)", dec_hoist, true, false},
+        {"sb_wide (2row+signbit)", dec_sb_trunc, true, false},
+        {"int_acc (integer dot)", dec_hoist, false, true},
+        {"int_acc_wide (2row int)", dec_hoist, true, true},
     };
     printf("\n%-22s %9s %10s %8s\n", "variant", "ms/draw", "ns/MAC", "check");
     for (const V& v : VS) {
@@ -219,7 +242,46 @@ int main(int argc, char** argv) {
         string vs = ver + "in vec2 pos;\nvoid main(){gl_Position=vec4(pos,0.0,1.0);}\n";
         string fs = ver + "precision highp float;\nprecision highp int;\nout vec4 frag_color;\n"
                     "uniform sampler2D W,X;\n" + v.dec();
-        if (v.wide) {
+        if (v.intacc) {
+            // Integer-domain dot: keep the activation as raw int8, decode the
+            // weight to a sign/mag mask, (a ^ sign<<31) & (0-mag), accumulate
+            // in ivec4, one ITOF at the end.  No per-weight float mul.  The
+            // small-integer probe data makes this exact (so the check passes);
+            // on real q16 data the rounding differs from the float path -- a
+            // model run would need a PPL re-baseline, not a byte-compare.
+            fs += "ivec4 wmask(uint u,ivec4 a){ivec4 sg=ivec4((u>>1)&1u,(u>>3)&1u,(u>>5)&1u,(u>>7)&1u);"
+                  "ivec4 mask=ivec4(0)-sg;ivec4 mv=ivec4(u&1u,(u>>2)&1u,(u>>4)&1u,(u>>6)&1u);"
+                  "return ((a^mask)-mask)&(ivec4(0)-mv);}\n";
+            if (v.wide) {
+                fs += "vec2 e16(float q){q=clamp(floor(q+0.5),-32768.0,32767.0);if(q<0.0)q+=65536.0;"
+                      "float hi=floor(q/256.0);return vec2(hi/255.0,(q-hi*256.0)/255.0);}\n";
+                fs += "void main(){int t=int(gl_FragCoord.x);ivec4 s0=ivec4(0),s1=ivec4(0);"
+                      "for(int c=0;c<" + std::to_string(pnq) + ";c++){"
+                      "vec4 w=texture2D(W,vec2((float(c)+0.5)/float(" + std::to_string(pnq) +
+                      "),(float(t)+0.5)/float(" + std::to_string(prows) + ")));"
+                      "ivec4 xa=ivec4(texture2D(X,vec2((float(2*c)+0.5)/float(" + std::to_string(cols / 4) + "),0.5))*255.0+0.5)-128;"
+                      "ivec4 xb=ivec4(texture2D(X,vec2((float(2*c+1)+0.5)/float(" + std::to_string(cols / 4) + "),0.5))*255.0+0.5)-128;"
+                      "s0+=wmask(uint(w.r*255.0+0.5),xa)+wmask(uint(w.g*255.0+0.5),xb);"
+                      "s1+=wmask(uint(w.b*255.0+0.5),xa)+wmask(uint(w.a*255.0+0.5),xb);}"
+                      "float f0=float(s0.x+s0.y+s0.z+s0.w)*" + std::to_string(1.0 / pair_div) +
+                      ",f1=float(s1.x+s1.y+s1.z+s1.w)*" + std::to_string(1.0 / pair_div) + ";"
+                      "vec2 p0=e16(f0*256.0),p1=e16(f1*256.0);"
+                      "frag_color=vec4(p0.x,p0.y,p1.x,p1.y);}\n";
+            } else {
+                fs += "void main(){int r=int(gl_FragCoord.x);int t=r/2;float h=float(r-2*t);ivec4 s=ivec4(0);"
+                      "for(int g=0;g<" + std::to_string(pnq) + ";g++){"
+                      "vec4 c=texture2D(W,vec2((float(g)+0.5)/float(" + std::to_string(pnq) +
+                      "),(float(t)+0.5)/float(" + std::to_string(prows) + ")));"
+                      "vec2 bb=mix(c.ba,c.rg,1.0-h);"
+                      "ivec4 xa=ivec4(texture2D(X,vec2((float(g*2)+0.5)/float(" + std::to_string(cols / 4) + "),0.5))*255.0+0.5)-128;"
+                      "ivec4 xb=ivec4(texture2D(X,vec2((float(g*2+1)+0.5)/float(" + std::to_string(cols / 4) + "),0.5))*255.0+0.5)-128;"
+                      "s+=wmask(uint(bb.x*255.0+0.5),xa)+wmask(uint(bb.y*255.0+0.5),xb);}"
+                      "float sf=float(s.x+s.y+s.z+s.w);"
+                      "float q=clamp(floor(sf*256.0+0.5),-8388608.0,8388607.0)+8388608.0;"
+                      "float gg=floor(q/65536.0),b=floor(q/256.0)-gg*256.0,a=q-gg*65536.0-b*256.0;"
+                      "frag_color=vec4(gg/255.0,b/255.0,a/255.0,1.0);}\n";
+            }
+        } else if (v.wide) {
             // 16-wide single row: a texel is 16 weights of ONE row (row-major),
             // so this arm needs its own weight layout -- skip the shared texture
             // and decode all four bytes of the column-major texel as 16 weights
