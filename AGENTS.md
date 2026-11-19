@@ -505,7 +505,7 @@ not break.
 |---|---|---|
 | LFM2.5-230M | the only hybrid (conv + attention): metadata key 14, the conv tensors `0x17`-`0x19`, the fused `GPU_LAYER=1` conv path, and a template that supplies its own `<\|startoftext\|>`.  Still broken: an i16 container on the fused path, a prompt longer than `SEQ`, digit-run tokenisation | [`docs/lfm2.5-230m.md`](docs/lfm2.5-230m.md) |
 | SmolLM2-135M | `RMS_STORE=f32` is **required**: the residual reaches 2.7e4 and a lane sum of `x^2` pins the 24-bit store at 2048, after which the reply comes back empty | `models/README.md`, "Two limits, measured" |
-| BitCPM-CANN-0.5B | the one ternary model: 168 of 169 matrices are per-row `{0, ±s}`, so its q8 body is lossless while `q4mat` is not.  Also the only container with a rope table (metadata key 18) and the only one needing the tokenizer's per-run space marker (metadata key 10's third byte).  `RMS_STORE=f32` is required | [`docs/bitcpm.md`](docs/bitcpm.md) |
+| BitCPM-CANN-0.5B | the one ternary model: 168 of 169 matrices are per-row `{0, ±s}`, so its q8 body is lossless while `q4mat` is not.  Also the only container with a rope table (metadata key 18), the only one needing the tokenizer's per-run space marker (metadata key 10's third byte), and the only one whose 2-bit body (dtype 7, `--quant t3`) fits the board at all.  `RMS_STORE=f32` is required | [`docs/bitcpm.md`](docs/bitcpm.md) |
 
 The BitCPM pack-time constants are load-bearing: `k = 1/scale_emb` is the
 choice that keeps the tied head in range, and `k = 1` destroys it.

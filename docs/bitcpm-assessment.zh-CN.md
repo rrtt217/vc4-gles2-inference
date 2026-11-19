@@ -314,7 +314,7 @@ wrote bitcpm.tok: vocab=73448 merges=57977 maxlen=48 added=8 (sentencepiece)
 |---|---|---|---:|
 | B0 | **已做（2026-11-18）**：`engine/probes/t3mv_probe` 把 2-bit 的三种解包写法与 q8 主体一起定价，两机器都测；结论与模型级外推见 8.4 与 `docs/benchmarks.md` | `engine/probes/t3mv_probe` | 0.5（已完成） |
 | B1 | 新的 2-bit 三值张量种类（容器 record 的 dtype、packer 检测"逐行三值"、q4 切片等价物、dump、`test_mmcf_format.py`、`checkpoint-container.md`） | `engine/tools/mmcf_format.py`、`engine/tools/mmcf_hf.py`、`engine/tools/mmcf_dump.py`、`engine/src/model.cpp` | 1.5–2 |
-| B2 | matvec kernel：解包写法已由 B0 定下（ES3 整数移位、16 权重一 texel），剩下 pair / fused-swiglu / logits 三个变体与逐行 scale | `engine/src/shaders.cpp`、`engine/src/gpu_matvec.cpp`、`engine/src/gpu_ffn.cpp` | 4–6 |
+| B2 | **已做（2026-11-19）**：`matvec_t3` / `matvec_t3_add` / `matvec_t3_add_pair` 跑在 Xe 与 Pi Zero 上，两边同一段文本、同一个答案；板上 5506 ms/token、prefill 87 s，桌面 79.4 ms/token。做法与三个板上独有的约束见 `docs/bitcpm.md` | `engine/src/shaders.cpp`、`engine/src/gpu_matvec.cpp`、`engine/src/gpu_upload.cpp` | 4–6（已完成） |
 | B3 | 板上 bring-up：CMA 实测、SEQ、`scripts/swap_matrix.py`、Pi 与 Xe 的 PPL 对照 | `engine/scripts/`、`docs/benchmarks.md` | 2–4 |
 
 B2 是唯一有真实技术风险的部分：`q6` 当年要拆成两个纹理是因为"VC4 一个 fragment 不能从
@@ -468,6 +468,8 @@ probe 定下来了（ES3 整数解包、16 权重一 texel），B1 不依赖板�
 
 - **q4 容器没打**：`q4mat` 的 32 值 min/max 把 0 放在半个步长上，每个 0 变成 `±s/15`
   —— 这是这个模型唯一"不无损"的格式，要用 PPL 判。
-- **Pi Zero 仍然放不下**（q8 434 MB / q4 337 MB 对板上约 180 MB）。第五节的两条路没变，
-  Phase B（2-bit 三值种类）没有开工，估算 0.8–1.5 s/token 也仍是估算。
+- **Pi Zero 只放得下 2-bit 容器**（q8 434 MB / q4 337 MB 对板上约 180 MB；t3 167.5 MB
+  是唯一放得下的）。B2 落地后的实测是 **5506 ms/token**（`GPU_LAYER=1`，prefill 87 s），
+  比当时的估算慢——估算是按 matvec 的 ns/MAC 外推的，没有算 24 层的 draw 开销与
+  一次取 4 个权重的 fetch 形状。
 - **SEQ > 1024 没测**；容器声明 1024。
