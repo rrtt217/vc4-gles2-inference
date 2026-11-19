@@ -99,12 +99,23 @@ Iris Xe, 2026-11-18, `RMS_STORE=f32`, greedy:
 
 | | |
 |---|---|
-| multiple choice, 100 items (`engine/eval/bench_mc.py`) | **acc 0.690**, acc_cal 0.660, fmt 0.690, p_gold 0.637 (null 0.254) |
-| the same battery on the **t3 container** | acc 0.680, acc_cal 0.670, fmt 0.670, p_gold 0.640 — the two containers agree |
+| multiple choice, 100 items (`engine/eval/bench_mc.py`) | **acc 0.690**, acc_cal 0.660, fmt 0.690, p_gold 0.637 (null 0.253) |
+| the same battery on the **t3 container** | acc 0.710, acc_cal 0.690, fmt 0.760, p_gold 0.657 (null 0.252) — the two agree within one null sd (0.04) |
+| the same two, for the cost | 4077 ms an item at q8 against 2843 at t3 (Xe is bandwidth-bound here) |
 | same battery, for scale | pocket qat 0.480, LFM2.5-230M 0.380, MiniMind3 q8 0.220 |
 | `--ppl` on `engine/data/ppl_test.txt`, SEQ=768 | 36.0302 (nll 3.5844, 247 tokens) |
+| `--ppl`, SEQ=256 (a short span) | 41.3734 on Xe against 41.4572 on the Pi Zero — 0.20% apart, which is the cross-machine agreement this path has |
 | logits vs the float32 numpy forward (`models/bitcpm-0.5b/probe_forward.py`) | KL 0.018 nats, top-20 19/20, entropy 1.546 vs 1.512 |
 | per-token nll on a 667-token mixed text, 4 positions | mean 3.107 against 3.024 |
+
+The multiple-choice battery was re-run after the 2-bit body changed from the
+row-major reading to the column-major one: q8 reproduced its four figures exactly
+(its path did not move), while t3 went from acc 0.680 to 0.710 and fmt 0.670 to
+0.760.  The weights are the same bytes, so what moved is rounding -- the residual
+became a packed pair (`res_fmt_` I16_2) and the rmsnorm's 32 lane sums then
+divide the row differently.  +0.03 is inside the null sd, so this is not evidence
+that one container scores better than the other; it is evidence that the two
+paths round differently.
 
 The `--ppl` path encodes without the leading space marker (it treats the file as
 a continuation), and this model pays 16 nats on its first token when the marker
