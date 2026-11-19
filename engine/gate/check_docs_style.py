@@ -33,7 +33,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 
 # Documents whose job is "what is true now".
 STATE = [
-    "AGENTS.md", "README.md", "README.zh-CN.md",
+    "AGENTS.md", "docs/AGENTS.md", "README.md", "README.zh-CN.md",
     "engine/README.md", "engine/README.zh-CN.md",
     "server/README.md", "server/README.zh-CN.md",
     "models/README.md",

@@ -493,6 +493,11 @@ deep details go to `docs/`.  Keep English and Chinese quick starts in sync:
 `README.md` / `README.zh-CN.md`, `engine/README.md` / `engine/README.zh-CN.md`,
 `server/README.md` / `server/README.zh-CN.md`.
 
+**The READMEs are for humans; `AGENTS.md` files are for agents.**  Before
+writing or rewriting a page in `docs/`, read [`docs/AGENTS.md`](docs/AGENTS.md):
+it carries what this section does not — where a page goes, its sections in
+order, its length, and the cross-file bookkeeping a new model needs.
+
 Update the document that owns the fact:
 
 | Changing | Update |

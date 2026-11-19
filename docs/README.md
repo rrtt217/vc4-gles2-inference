@@ -75,18 +75,15 @@ that answers it — `mmcf_dump.py`, `ref_forward.py`, `diff_paths.sh` /
 
 ## Conventions
 
-- **This directory is flat on purpose.**  `gate/docs_check.sh` and
-  `gate/check_docs_links.py` glob `docs/*.md`, so a subdirectory would silently
-  fall out of the link and path checks.  Grouping lives in the sections above;
-  if a split ever earns its cost, those two globs change in the same commit.
 - Numbers are measured on the machine named in the document; they are not
-  promises for every Pi or driver.
-- `benchmarks.md` is a **reference table, not a log**: a new measurement
-  replaces the row it supersedes and names its commit, and the record of how it
-  moved is Git.  The 120 dated sections it used to carry are at
-  `git show e7a36ec^:docs/performance.md`.  Do not append to it.
-- The Pi and laptop do **not** produce byte-identical KV caches. Build a disk
+  promises for another Pi or driver, and `benchmarks.md` says which comparisons
+  are legal.
+- The Pi and laptop do **not** produce byte-identical KV caches.  Build a disk
   cache on the machine that will load it.
 - `CmaTotal` is the hard CMA ceiling; `CmaFree` is not an occupancy figure and
-  not a budget — near the limit, attempt the load.  See the CMA invariant in
+  not a budget — near the limit, attempt the load.  The invariant is in
   `AGENTS.md`.
+
+How a page here is written — where it goes, its sections in order, its length,
+and the files a new model has to touch — is in [`AGENTS.md`](AGENTS.md), which is
+for agents rather than for readers.
