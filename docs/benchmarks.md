@@ -62,7 +62,7 @@ is a rough guide only: rows come from different builds, and the engine has gaine
 | SmolLM2-135M | **630.7** | 512 | 2026-11-18 | `RMS_STORE=f32` is required; 164 MB in a 320 MB CMA |
 | RWKV-7 0.1B q8r | **1138** GPU / **969** CPU | 512 | 2026-11-17 | the GPU loop is draw-bound on VC4 and slightly slower than the CPU one; the 3.3x GPU win is Xe-only |
 | pocket 0.3B | **1168** | — | 2026-11-18 | `RMS_STORE=f32`; the default i24 rms store answers `杭州是中国中国中国…` |
-| BitCPM-CANN-0.5B t3 | **1323** | — | 2026-11-19 | 2-bit matvec, 167.5 MB file; 5.6x MiniMind3's parameters |
+| BitCPM-CANN-0.5B t3 | **1288** | — | 2026-11-20 | 2-bit matvec, 167.5 MB file; signbit weight decode (`6fee221`), median of 3, was 1323 |
 
 **MiniMind3 q4 is now faster than q8** (185.7 against ~190): the q4 gate is
 about half the token's work, so the flat 8-wide kernel moved it past q8 rather
@@ -108,7 +108,7 @@ regression baseline.  Each points at the document that owns the explanation.
 | MiniMind2 i16 | — | 280.2156 | `docs/quantization.md` |
 | SmolLM2-135M | `RMS_STORE=f32`; `--res q24` at pack time | **7.7157** Xe / **14.2941** Pi (SEQ=512) | `docs/smollm2-135m.md` |
 | BitCPM q8 | `RMS_STORE=f32` | **35.5598** (SEQ=768, 247 tokens; 2026-11-19, reproduced from a fresh pack of the recipe) | `docs/bitcpm.md` |
-| BitCPM t3 | `RMS_STORE=f32`; 2-bit matvec path | **38.1541** (SEQ=768, 2026-11-19); the same file expanded to q8 levels (`T3_EXPAND=1`) is **35.6132**, so the 2-bit kernel now costs 0.070 nats/token | `docs/bitcpm.md` |
+| BitCPM t3 | `RMS_STORE=f32`; 2-bit matvec path | **35.6726** (SEQ=768, 247 tokens, 2026-11-20 after the gate-row fix `4c5b189`); the same file expanded to q8 levels (`T3_EXPAND=1`) is **35.6132**, so the 2-bit kernel costs 0.0015 nats/token (0.17%) | `docs/bitcpm.md` |
 | RWKV-7 0.1B q8r | CPU loop / `RWKV_GPU=1` are separate pins | **9.2919** CPU / **9.1850** GPU (SEQ=512) | `docs/rwkv7.md` |
 | LFM2.5-230M q4 | serial warm path | 29.1588 (28.6196 with `Q16_DECODE=exact`) | `docs/lfm2.5-230m.md` |
 | MoE (v3) | top-1, host routing | see the container's own rows | `AGENTS.md` |

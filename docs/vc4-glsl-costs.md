@@ -142,6 +142,15 @@ reachable through `packHalf2x16`; it is not.
 - Never put `sin`/`cos`/`pow`/`mod` in a per-fragment path.
 - `int * int` is 7 instructions: the q8 scale arithmetic is written in floats on
   purpose.
+- **Bit-cast a sign into a float instead of computing it.**  The t3 weight
+  decode built `mag*(1-2*sign)` (a float mul + sub on the sign); bit-casting
+  `uintBitsToFloat(0x3F800000u|(sign<<31))*float(mag)` replaces those two float
+  ops with integer shift/or (add slot) that pair with the final mul (mul slot).
+  Measured -13% on the isolated decode (`probes/t3dec_probe`, 3.01 vs 3.46
+  ns/MAC), byte-identical.  `uintBitsToFloat` is one of the bit-casts that DOES
+  exist (§5); a vec4 LUT indexed by the 2-bit code is +22% (dynamic component
+  index spills), so the algebraic bit-cast beats both the float-sign form and
+  the table.
 - Anything that needs half precision must be assembled by hand from float
   operations; there is no `packHalf2x16`, and there are no half-float textures
   either (`OES_texture_half_float` is not exposed).

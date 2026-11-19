@@ -179,7 +179,16 @@ same answer from Xe and from the board:
 | | decode | note |
 |---|---:|---|
 | Iris Xe | 37.8 ms/token | prefill 0.75 s |
-| Pi Zero (VC4) | 1323 ms/token | prefill 28.2 s |
+| Pi Zero (VC4) | 1288 ms/token | median of 3, 2026-11-20; prefill 28.2 s |
+
+The board decode dropped from 1323 ms/token with the signbit weight decode
+(`6fee221`, 2026-11-20): the sign is bit-cast into a float
+(`0x3F800000|(sign<<31)`) instead of `mag*(1-2*sign)`, which pairs the integer
+shift/or with the final mul and drops the ~5-QIR floor.  Byte-identical logits
+on both machines; `probes/t3dec_probe` prices the isolated single-row decode at
+3.01 ns/MAC against 3.46 (-13%).  The model win is smaller (~3%) because the
+FFN/wo/w2 already run the 2-row pair kernels, where the decode is amortized
+over twice the MACs.
 
 The board figure is the point of the kind: 167.5 MB of container, 85 MB of
 texture, and 358 M parameters that the q8 body (435 MB) and the q4 body (337 MB)
