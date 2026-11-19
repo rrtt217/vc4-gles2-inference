@@ -1,4 +1,4 @@
-// The RWKV-7 (Goose) fused GPU layer loop (P6, docs/rwkv7-plan.zh-CN.md).
+// The RWKV-7 (Goose) fused GPU layer loop (docs/rwkv7.md).
 //
 // The third layer loop's elementwise ops and WKV7 recurrence run on textures;
 // the matvec family is reused unchanged (matvec_to / matvec_add).  Activations
@@ -133,7 +133,7 @@ void GPU::init_rwkv(const Model& m){
         }
 }
 
-// One host sync for a group of matvecs (docs/rwkv7-plan.zh-CN.md P7).  Each
+// One host sync for a group of matvecs (docs/rwkv7.md).  Each
 // matrix keeps its own draw, its own program and its own uniforms -- the strip
 // split, the q8 row-scale fetch and the 2^k input scaling all happen exactly as
 // in matvec() -- and only the *read-back* is shared: the draws land in the rows

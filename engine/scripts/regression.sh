@@ -429,7 +429,7 @@ else
     skipped "moe" "MOE unset"
 fi
 
-# RWKV-7: the third layer loop (docs/rwkv7-plan.zh-CN.md, P2/P4).  Same contract
+# RWKV-7: the third layer loop (docs/rwkv7.md).  Same contract
 # as the dense pins -- determinism first, then the per-machine prefix, then PPL
 # -- but the reply is multi-line and cut at the gen limit mid-sentence, so the
 # dense behaviour check (Chinese sentence terminator) does not apply: non-empty

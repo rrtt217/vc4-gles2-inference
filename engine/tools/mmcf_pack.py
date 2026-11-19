@@ -705,7 +705,7 @@ def main():
                      (1 << k) * ACTIVATION_RAIL))
     # The WKV state is not a rail: it is a per-head 64x64 recurrence that is
     # never renormalised, so its magnitude is what decides whether the Pi can
-    # hold it in fixed point at all (docs/rwkv7-plan.zh-CN.md, S-1).  Nothing in
+    # hold it in fixed point at all (docs/engine-internals.md).  Nothing in
     # the container changes because of it; it is measured, not enforced.
     speaks = meta.get("state_peaks")
     if speaks:

@@ -268,11 +268,10 @@ Keep as an secondary experiment, not the primary chat model:
 
 ### RWKV7-G1d-0.1B
 
-**2026-11-16: an implementation goal is open** — the per-operator plan is
-[`rwkv7-plan.zh-CN.md`](rwkv7-plan.zh-CN.md) and the evaluation it builds on is
-[`rwkv7-assessment.zh-CN.md`](rwkv7-assessment.zh-CN.md).  The Pi verdict below is
-unchanged: on this board it is a 0.1B-only demo, not a replacement for the dense
-models.
+**Delivered 2026-11-17, optimisation stopped** — the model page is
+[`rwkv7.md`](rwkv7.md) and the block is in
+[`engine-internals.md`](engine-internals.md).  The Pi verdict below held: on this
+board it is a 0.1B-only demo, not a replacement for the dense models.
 
 Not a practical Pi Zero target before that goal, and still the limits to beat:
 
@@ -346,7 +345,7 @@ in `docs/benchmarks.md` with the numbers.
 - adding many tools to the prompt;
 - i16 on Pi as a production path;
 - treating repetition penalties as a fix for factual errors;
-- porting Mamba to VC4 (RWKV-7 has its own goal now: `docs/rwkv7-plan.zh-CN.md`).
+- porting Mamba to VC4 (RWKV-7 is the nearest thing already here: `docs/rwkv7.md`).
 
 ## Benchmark protocol
 

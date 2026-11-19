@@ -1337,7 +1337,7 @@ def rail_peaks_rwkv7(m, seq=8):
     amplifies instead of attenuating -- so both are measured.  The WKV state
     is measured too (m['state_peaks']) but is not a rail: it is a 64x64
     recurrence per head that is never renormalised, and whether the Pi can
-    hold it in fixed point is docs/rwkv7-plan.zh-CN.md's S-1, decided from
+    hold it in fixed point is docs/engine-internals.md's state section, decided from
     that number.
 
     The recurrence is the one in the official numpy forward
@@ -1791,7 +1791,7 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
                 meta['hid_scale'] = k
     if rwkv and m.get('state_peaks'):
         # The WKV state's per-layer |max| is not a rail: it is the number that
-        # decides the Pi's state encoding (docs/rwkv7-plan.zh-CN.md, S-1).  It
+        # decides the Pi's state encoding (docs/engine-internals.md).  It
         # is recorded nowhere in the file; mmcf_pack.py prints it.
         meta['state_peaks'] = list(m['state_peaks'])
     if rwkv and rail_check:

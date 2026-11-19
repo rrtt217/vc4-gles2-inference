@@ -501,9 +501,74 @@ fetches from one sampler at 512x3 -- the wrow plane's failure (§ below,
 `probes/wrow_probe`) is shape-specific, not a general rule.
 
 Known gap: an **i16** hybrid container on the fused path is wrong (PPL 1.39e7
-against 98.10 serial).  It was already wrong at `f22bb76`, the serial path is
+against 15.97 serial).  It was already wrong at `f22bb76`, the serial path is
 fine, and the q4 containers (the path the board runs) are exact; the cause is
 not identified, so the fused path is only safe for q4/(q6 head) hybrids today.
+
+## RWKV-7 (recurrent) block
+
+The third layer loop (`Session::forward_rwkv`), and the only one that is not a
+transformer block: no qkv, no KV cache, no softmax, no RoPE.  A layer is
+
+```
+xb   = LayerNorm(att_norm)(x)                     mean/var, with a bias vector
+xr/xw/xk/xv/xa/xg = lerp6(token_shift, xb)        six per-channel lerps
+r = W_r*xr   k = W_k*xk   v = W_v*xv              three dim x dim matvecs
+w = exp(-0.606531 * sigmoid(W_w2*tanh(W_w1*xw) + w0))
+v += (v_first - v) * sigmoid(W_v2*(W_v1*xv) + v0)   v_first is layer 0's v
+a = sigmoid(W_a2*(W_a1*xa) + a0)                   g = the same, gated
+kk = l2norm_head(k * k_k)    k += (a - 1) * k * k_a
+(y, S) = WKV7(r, w, k, v, -kk, kk*a, S)           per head, per row of S
+y = groupnorm_head(y) * ln_w + ln_b    y += v * sum_head(k * r * r_k)
+x += W_o * y
+xf = LayerNorm(attn_norm_2)(x)    x += W_cm_value * relu(W_cm_key * lerp2(xf))^2
+```
+
+**State.** `heads x 64 x 64` f32 a layer, plus two token-shift rows a layer —
+`O(1)` in context length, 2.36 MB at 0.1B.  There is no `seq`-sized target at
+all: `Session` allocates neither the `seq * kv_dim` KV rows nor the `seq * half`
+RoPE table, and `app.cpp` does not clamp `SEQ` for this architecture (a v4
+container can run `SEQ=32768`).
+
+**The loop.** The serial form keeps the state in `vector<float>` on the host and
+runs every matrix as a GPU matvec, which is the reference path.  The fused form
+(`gpu_rwkv.cpp`, 27 `rwkv_*` builders, `RWKV_GPU=1`) keeps the whole layer on
+textures and stores the state as **bit-cast f32 in RGBA8 ping-pong targets**
+(`floatBitsToUint` / `uintBitsToFloat`), which is exact and needs an ES3 context;
+without one the state stays on the CPU (`RWKV_WKV_CPU=1` forces that).  This is
+the one place an integer encoding was measured and rejected: 1/256 fixed-point
+state costs +0.1543 nats/token on the g1d checkpoint (NLL 0.2357 -> 0.3900).
+
+**VC4-only shapes**, both gated on `needs_finish()` so Xe is bit-identical:
+
+- `rwkv_draw1` splits at `kDrawCap` (1024 fragments), because a single draw wider
+  than that is *silently dropped* on VC4 and the target keeps its clear colour.
+  The board's first failure was a 1536-wide chunked channel-mix sqrelu, which is
+  exactly that shape.
+- The residual add is two steps (`rwkv_mv` -> I24_1, then `rwkv_res_add` -> q16)
+  instead of the fused `matvec_add`, because the fused one drops the dot product
+  on the I24_1 chain there.
+
+`cm_key` is `3072 x 768` at 0.1B, above VC4's 2048-row draw limit, so
+`split_rwkv(max_target_dim())` cuts it the way `split_ffn` cuts a dense FFN —
+and it is a single matrix, so the dense chunk code cannot be reused verbatim.
+
+The final LayerNorm peaks at **315.6** on 0.1B (2.5x the q16 rail), so the head's
+input is written `x * 2^-k` and every logits tile's scale carries `2^k`
+(metadata key 17, the same trick as key 15's `2^-k` hidden store).
+
+`pair_ok()` refuses this architecture (the recurrence is per position, so a
+two-position prefill would have to run the WKV state twice and the token shift
+once), and the prefix cache refuses it too: v4 wants a *state* snapshot, not a KV
+copy.
+
+`probes/rwkv_probe[_pi]` (sections A-J) is what isolated the VC4 failures above:
+each operator is driven against a CPU reference, and section F answers what
+`kDrawCap` counts.
+
+Known gap: the board's speed.  Both loops sit at 0.97-1.04 s/token (~127-145
+MMAC/s against the dense path's 283); the 1.25 fetch/MAC of the q8 kernels is
+the floor, and the draw/sync reductions of 2026-11-17 moved the board by <2%.
 
 ## Top-K
 

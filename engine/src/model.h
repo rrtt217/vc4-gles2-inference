@@ -59,7 +59,7 @@ public:
     // not a transformer block: no qkv semantics, no RoPE, no KV cache, one
     // 64x64 recurrence per head per layer and two token-shift vectors per
     // layer.  The reader fills these; the layer loop that consumes them is
-    // session.cpp's (docs/rwkv7-plan.zh-CN.md, P2).  The four big matrices
+    // session.cpp's (docs/rwkv7.md).  The four big matrices
     // reuse the dense fields on purpose -- `qkv` is [W_r; W_k; W_v] (3*dim x
     // dim), `wo` is W_o, `w1` the channel mix's key matrix (hidden x dim) and
     // `w2` its value matrix (dim x hidden) -- because their ids are the dense

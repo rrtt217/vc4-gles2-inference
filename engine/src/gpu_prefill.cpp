@@ -1,4 +1,4 @@
-// The batched matvec: RWKV-7's chunked prefill (P1, docs/rwkv7-plan.zh-CN.md).
+// The batched matvec: RWKV-7's chunked prefill (docs/rwkv7.md).
 //
 // A prefill is the same layer loop over N tokens, and the only thing that makes
 // it 512 serial passes is that every projection is drawn and read back once per

@@ -335,7 +335,7 @@ conclusion from its output.
   — the turn records the delta around its decode loop, so the prompt's launches
   do not move a per-token figure — and they are the meters the RWKV work is
   judged by, because that path is launch/sync-bound rather than MAC-bound
-  (`docs/rwkv7-plan.zh-CN.md` §九, P6).  One token on the CPU path is ~230
+  (`docs/rwkv7.md`).  One token on the CPU path is ~230
   draws / ~167 syncs; the fused GPU path is ~1150 draws / ~3 syncs (Xe).
 
 - `LAYER_PROFILE=1` — per-pass marks.  The `glFinish` in the lap also retires

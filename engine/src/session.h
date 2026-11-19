@@ -91,7 +91,7 @@ private:
     vector<vector<float>> conv_state_;
     vector<float> rope_cos_, rope_sin_;
 
-    // ---- RWKV-7 (P2, docs/rwkv7-plan.zh-CN.md) ----------------------------
+    // ---- RWKV-7 (docs/rwkv7.md) ----------------------------
     // An RWKV layer has no KV cache: its whole history is one head_size x
     // head_size recurrence per head plus the two token-shift vectors, which is
     // why the state is a fixed-size block rather than [seq x dim].  0.1B:

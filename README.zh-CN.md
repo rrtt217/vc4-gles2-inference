@@ -122,11 +122,11 @@ python3 server.py --seq 768 --kv-pack 16 \
 
 每一行都是 `.mmcf` 容器；打包前的 legacy 文件留在 `models/` 里作为重新打包的源。
 
-| 模型 | 大小 | Pi decode（2026-11-13） | 说明 |
+| 模型 | 大小 | Pi decode（每个模型的最新一次） | 说明 |
 |---|---:|---:|---|
-| LFM2.5-230M q4 (QAD) | 169 MB | 未重测 | 混合 conv+attention；最后数据 1040 ms/token（2026-11-11） |
-| MiniMind3 q8 | 66 MB | 未重测 | 默认中文对话；最后数据 252 ms/token（2026-11-02） |
-| MiniMind3 q4 | 45 MB | ~304 ms/token | 内存模式，质量略低 |
+| LFM2.5-230M q4 (QAD) | 169 MB | ~566 ms/token | 混合 conv+attention，`SEQ=256`；板上最紧的一个 |
+| MiniMind3 q8 | 66 MB | ~190 ms/token | 默认中文对话 |
+| MiniMind3 q4 | 45 MB | ~186 ms/token | 内存模式，质量略低；扁平 q4 gate 之后它也是更快的一条 |
 | MiniMind2 i16 | 58 MB | ~216 ms/token | 参考模型；默认 q16 解码（`Q16_DECODE=exact` 约 290） |
 | MiniMind2 q8 | 29 MB | ~124 ms/token | rope 由容器自带 |
 | MiniMind2 q4 | 21 MB | ~154 ms/token | 内存模式，身份类回答不可靠 |

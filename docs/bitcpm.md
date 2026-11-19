@@ -2,10 +2,11 @@
 
 The first model in this repository whose **weights are ternary and exact**: 168 of
 its 169 matrices are `{0, ±s_row}` (37.3% zeros), so the q8 body is a *lossless*
-copy of them (`docs/bitcpm-assessment.zh-CN.md` has the measurements and the
-work list that produced this support).  It is MiniCPM4-0.5B trained with
-1.58-bit QAT on Ascend and released as `openbmb/BitCPM-CANN-0.5B`; the weights
-are pseudo-quantized bf16, so nothing about running it needs CANN or an NPU.
+copy of them — `±s_row -> ±127` and `127/127 = 1`, so the reconstruction error is
+exactly zero, which is the opposite of what q8 does to Gaussian weights.  It is
+MiniCPM4-0.5B trained with 1.58-bit QAT on Ascend and released as
+`openbmb/BitCPM-CANN-0.5B`; the weights are pseudo-quantized bf16, so nothing
+about running it needs CANN or an NPU.
 
 | | |
 |---|---|
@@ -105,7 +106,7 @@ Iris Xe, 2026-11-18, `RMS_STORE=f32`, greedy:
 | instruction following, 24 cases x 3 seeds (`eval_ifeval.py`, greedy) | q8 pass **0.500**, t3 pass 0.417 — the failed checks are the same list on both (`bullets 6`, `json_valid 6`, `max_chars 6`, `max_words 9`), and only `json_keys` differs (6 against 3), i.e. one case |
 | translation, 30 sentences (`eval_translate.py`, greedy) | q8 chrF **0.495**, t3 0.479 (exact 0.100 against 0.067); t3 leaks the source language less (0.01 against 0.03) and the two directions trade places |
 | same battery, for scale | pocket qat 0.480, LFM2.5-230M 0.380, MiniMind3 q8 0.220 |
-| `--ppl` on `engine/data/ppl_test.txt`, SEQ=768 | 36.0302 (nll 3.5844, 247 tokens) |
+| `--ppl` on `engine/data/ppl_test.txt`, SEQ=768 | 35.5598 (nll 3.5712, 247 tokens; 2026-11-19, both the on-disk container and a fresh pack of the recipe) |
 | `--ppl`, SEQ=256 (a short span) | 41.3734 on Xe against 41.4572 on the Pi Zero — 0.20% apart, which is the cross-machine agreement this path has |
 | logits vs the float32 numpy forward (`models/bitcpm-0.5b/probe_forward.py`) | KL 0.018 nats, top-20 19/20, entropy 1.546 vs 1.512 |
 | per-token nll on a 667-token mixed text, 4 positions | mean 3.107 against 3.024 |
@@ -156,10 +157,16 @@ python3 engine/tools/mmcf_pack.py --in models/bitcpm-0.5b --quant t3 --seq 1024 
 ```
 
 `models/bitcpm-0.5b/bitcpm-0.5b.t3.mmcf` is 167.5 MB against the q8 container's
-435.4 MB, and it is numerically equivalent or better (per-row scales vs the q8
-path's one scale a matrix): the same chat answer, KL 0.0278 against the float32
-forward where q8 measures 0.0288, and fmt 1.000 on a 10-item multiple-choice
-slice.
+435.4 MB.  **The body is equivalent; the 2-bit kernel is not free.**  Expanded
+back to the q8 levels it stands for (`T3_EXPAND=1`, the packer's acceptance route
+and the oracle the kernels are diffed against) the same file scores **35.6132**
+where the q8 container scores 35.5598, so the ternary weights lose nothing.  The
+2-bit matvec path itself measures **38.1541**, i.e. **+0.070 nats/token**; the
+2026-11-18 reading through that path was 35.6726, so the t3 work of 2026-11-19
+(the column-major body, the pair output, the FFN gate pair) now costs 7% of PPL
+for 1.7x the speed (2224 -> 1323 ms/token), and the two have not been separated
+yet.  The chat answer stays fluent and `fmt` stays 1.000 on a 10-item
+multiple-choice slice.
 
 The **2-bit matvec runs on both machines** -- 24 layers, `GPU_LAYER=1`, the
 same answer from Xe and from the board:
@@ -171,8 +178,8 @@ same answer from Xe and from the board:
 
 The board figure is the point of the kind: 167.5 MB of container, 85 MB of
 texture, and 358 M parameters that the q8 body (435 MB) and the q4 body (337 MB)
-cannot fit.  It is 7.3x slower a token than MiniMind3 q4 on the same board
-(304 ms) at 5.6x the parameters.
+cannot fit.  It is 7.1x slower a token than MiniMind3 q4 on the same board
+(185.7 ms) at 5.6x the parameters.
 
 Two kernels, both reading the column-major body: `matvec_t3` computes one output
 row a fragment from two of a texel's four bytes, and `matvec_t3_pair` /
@@ -239,12 +246,14 @@ on the CPU loop, which is the same-path A/B that isolates it).
   has; the t3 container is 167.5 MB and is what runs there. The ES2 float decode
   is 2.5x *slower* than q8, so the 2-bit kernels are ESSL 3.00 only -- on a
   driver without integer shifts the kind has no fast form.
-- **5.5 s/token is slow enough to matter.** The 2-bit matvec prices at 2.44
-  ns/MAC on VC4 in `probes/t3mv_probe`, i.e. 1.22x q8's 2.98, and the model pays
-  it over 358 M parameters; the q8-equivalent kernels this board already runs
-  are 18x faster a token on an 18x smaller model. A fused `w1/w3` gate and a
-  paired qkv would take draws off, which is where a VC4 block spends its
-  non-arithmetic time.
+- **1.32 s/token is the number, and attention is now the largest remaining
+  piece of it.**  The 2-bit matvec prices at 2.44 ns/MAC on VC4 in
+  `probes/t3mv_probe` (1.22x q8's 2.98) and the model pays it over 358 M
+  parameters; the fused `w1/w3` gate and the paired qkv are what took the board
+  from 2224 to 1323 ms/token, so the draws that are left are the ones the
+  arithmetic cannot remove: 56.6 M MAC of attention for 633 ms of the token, 168
+  draws, at VC4's fixed cost a draw.  Getting below that means fewer draws per
+  block, not a smaller matvec.
 - **q4 is not packed.** `q4mat`'s 32-value min/max grid puts 0 half a step off,
   so every zero becomes `±s/15`; that is the one place this model's weights are
   not lossless.  Judge it with PPL before shipping a q4 container.

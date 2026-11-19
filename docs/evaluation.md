@@ -583,7 +583,7 @@ while q8r stays readable.  The 0.4B is a desktop model (453 MB of container,
 386 MB of textures); the Pi cannot hold it at any precision.
 
 **Three behaviours that matter when scoring** (documented in
-[rwkv7-assessment.zh-CN.md](rwkv7-assessment.zh-CN.md) section 11): it invents
+[rwkv7.md](rwkv7.md), "Known gaps"): it invents
 wrapper tags (`<translation_output>`, `<answer>`) and, worst, echoes the user
 turn as `<user>...</user>`; and the multiple-choice battery still needs
 `--completion` because the template puts a think marker at the answer

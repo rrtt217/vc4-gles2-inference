@@ -181,7 +181,7 @@ public:
                       const Mat& out_proj, GLuint xb, GLuint residual,
                       int layer, Target& out);
 
-    // RWKV-7 (Goose) fused GPU layer loop (P6, docs/rwkv7-plan.zh-CN.md).
+    // RWKV-7 (Goose) fused GPU layer loop (docs/rwkv7.md).
     // init_rwkv uploads the per-channel constant vectors (*64 into I24_1) and
     // allocates the per-head WKV state ping-pong, the token-shift rows and the
     // scratch targets; it also switches the format plan to I24_1 activations /
@@ -194,7 +194,7 @@ public:
     // scratch target and the block is read back with a single glReadPixels.  The
     // draws, their programs and their uniforms are unchanged, so the result is
     // bit-identical to calling matvec() once per matrix -- the CPU path's cost is
-    // the read-back, and it paid one per matvec (docs/rwkv7-plan.zh-CN.md P7).
+    // the read-back, and it paid one per matvec (docs/rwkv7.md).
     // rows[i].x is uploaded to its own staging texture (slot i), so several
     // inputs of the same length cannot overwrite each other.
     struct MvRow { const Mat* m; const vector<float>* x; };

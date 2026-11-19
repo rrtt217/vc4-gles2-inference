@@ -2,7 +2,7 @@
 """RWKV-7 (Goose) reference forward pass in numpy, f32 only.
 
 Why this file exists: the engine has no RWKV-7 path yet, and the plan's phase 0
-(docs/rwkv7-plan.zh-CN.md, task O39) needs a reference that can answer two
+(docs/rwkv7.md) needs a reference that can answer two
 questions before any C++ is written -- "what does this model actually compute"
 and "which fixed-point format survives it".  This is that reference: a
 straight-line, dependency-free (numpy only) transcription of the published
@@ -166,7 +166,7 @@ class RwkvVocab:
     the longest match.  A dict probe from the longest possible length down to 1
     is the same function with a different data structure: same ids, and it needs
     no trie, which is what the plan asks the packer to imitate
-    (docs/rwkv7-plan.zh-CN.md, A1).
+    (docs/rwkv7.md).
     """
 
     def __init__(self, vocab_file):

@@ -44,6 +44,7 @@ Deep dives live here; the component READMEs carry quick starts.
 | [lfm2.5-230m.md](lfm2.5-230m.md) | **LFM2.5-230M, the hybrid (conv + attention) model**: containers, run commands, quality numbers, what is still broken |
 | [bitcpm.md](bitcpm.md) | **BitCPM-CANN-0.5B, the ternary model**: the container, its rope table and tokenizer prefix, `k = 1/scale_emb`, `RMS_STORE=f32`, the quality numbers, what is not done |
 | [smollm2-135m.md](smollm2-135m.md) | **SmolLM2-135M, the model that needs `RMS_STORE=f32`**: why the rmsnorm accumulator was the limit, the per-switch isolation, the open Pi-vs-Xe divergence |
+| [rwkv7.md](rwkv7.md) | **RWKV-7 (Goose), the recurrent one**: no KV cache and no attention, the v4 container's key 16/17, the third layer loop, the per-machine numbers, the chat-marker traps, and why the speed work stopped |
 
 ## Building for the Pi, and VC4 hardware
 
@@ -61,11 +62,7 @@ moves; the code and `AGENTS.md` are the present state.
 
 | Document | Contents |
 |---|---|
-| [rwkv7-plan.zh-CN.md](rwkv7-plan.zh-CN.md) | **RWKV-7 实施计划与逐算子清单**（目标文档，进行中）：28 个算子 + 20 项配套的数学/形状/现状/归属/阶段、数值格式决策点、验收门 |
-| [rwkv7-assessment.zh-CN.md](rwkv7-assessment.zh-CN.md) | RWKV-7（Goose）支持评估：算子清单、容器/分词器/状态差距、Pi 与 Xe 的性能内存估算、分阶段工作量 |
-| [lfm2.5-230m-assessment.zh-CN.md](lfm2.5-230m-assessment.zh-CN.md) | LFM2.5-230M 的打包与可行性评估：架构事实、残差/激活幅值实测、官方 GGUF 配方、工作量与风险 |
-| [bitcpm-assessment.zh-CN.md](bitcpm-assessment.zh-CN.md) | BitCPM-CANN-0.5B（MiniCPM4 的三值 QAT）支持评估：三值权重的实测结构、两个缺口、容器大小与 Pi 预算 |
-| [translation-decision-model-fit.zh-CN.md](translation-decision-model-fit.zh-CN.md) | 20–150M 翻译/决策模型选型：Jev-like 决策、适配计划 |
+| [translation-decision-model-fit.zh-CN.md](translation-decision-model-fit.zh-CN.md) | 20–150M 翻译/决策模型选型：Jev-like 决策、适配计划；**唯一记录"评估后决定不做"的测量**，所以留着 |
 | [swap-drift.md](swap-drift.md) | `/model` has been wrong twice: what a swap owns, and the order of evidence that found it |
 | [vc4-1536-repro.md](vc4-1536-repro.md) | the runbook for two open VC4 questions: is a single 1536 draw wrong, and what changing the vocabulary grid costs |
 | [future-optimization.md](future-optimization.md) | prioritized future work, measured dead ends, explicit non-goals |

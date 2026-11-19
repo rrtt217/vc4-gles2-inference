@@ -162,7 +162,7 @@ std::string top2_packed(int rows, int chunk);
 std::string top1_group(int n);
 std::string top1_final(int groups);
 
-// ---- RWKV-7 (Goose) GPU layer loop (P6, docs/rwkv7-plan.zh-CN.md) -----------
+// ---- RWKV-7 (Goose) GPU layer loop (docs/rwkv7.md) -----------
 // The elementwise ops and the WKV7 recurrence of the third layer loop.  All
 // activations are I24_1 (one value per texel, 1/256 step) except the residual
 // stream, which stays q16 (I16_1) to match the CPU add_q16 grid bit-for-bit

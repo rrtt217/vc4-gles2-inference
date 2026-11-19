@@ -107,7 +107,7 @@ bool App::setup_from_model() {
     // template markers, which the byte-level models were never sensitive to.
     tokenizer.set_seg_prefix(model.sp_prefix);
     // RWKV-7's World vocabulary is greedy longest match over raw bytes: no BPE
-    // merges, no <0xNN> spelling (docs/rwkv7-plan.zh-CN.md, A1-A3).  The mode
+    // merges, no <0xNN> spelling (docs/rwkv7.md).  The mode
     // belongs to the container, so it is set here where the tokenizer is built
     // -- and this function is the one the REPL's /model calls again, which is
     // what makes a swap out of (or into) an RWKV container set it correctly.

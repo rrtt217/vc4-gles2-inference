@@ -142,7 +142,7 @@ def main():
              "../models/feng30m/feng.q8.mmcf",
              "../models/lfm2.5-230m/lfm2.5.q4.dedup.mmcf",
              "../models/minimind3/minimind3.q8.mmcf"]
-    # RWKV-7 (docs/rwkv7-plan.zh-CN.md, O32): the swap must rebuild the WKV
+    # RWKV-7 (docs/rwkv7.md): the swap must rebuild the WKV
     # state and both token-shift vectors on the way in and drop them on the way
     # out.  The middle two hops change the q8 weight family (per-row scale
     # planes vs one scale per matrix), which is the row-scale half of the

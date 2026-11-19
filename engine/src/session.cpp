@@ -133,7 +133,7 @@ Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
         gpu_attn_ = gpu_layer_ || gpu_.gpu_attn_enabled();
         // RWKV-7 has no attention block, no FFN gate pair and no KV cache, so
         // none of the fused path's state applies: its layer loop is matvec +
-        // host elementwise (docs/rwkv7-plan.zh-CN.md, P2), and everything
+        // host elementwise (docs/rwkv7.md), and everything
         // below -- the conv history, the KV caches, the rope tables, the
         // rmsnorm weight textures, init_attention() -- would be state nothing
         // reads.  GPU_LAYER=1 is honoured by ignoring it: forward_gpu_hidden()
@@ -555,12 +555,12 @@ vector<float> Session::forward(int token, int pos){
         return x;
     }
 
-// ---- RWKV-7: the block's layer loop (docs/rwkv7-plan.zh-CN.md, O1-O25) ------
+// ---- RWKV-7: the block's layer loop (docs/engine-internals.md) ------
 //
 // A single token through one RWKV-7 (Goose) layer, transcribed from
 // engine/tools/ref_rwkv.py's Rwkv7.forward() -- the oracle this path is accepted
 // against, cos 1.00000000 against the official rwkv package on the same
-// checkpoint (docs/rwkv7-plan.zh-CN.md, section 10).  The *order* is the
+// checkpoint (docs/rwkv7.md).  The *order* is the
 // oracle's and has to stay the oracle's: the block is a chain, so a swapped pair
 // is a different model rather than a different rounding.
 //
@@ -632,7 +632,7 @@ vector<float> Session::rwkv_mv(const Mat& m, const vector<float>& x){
         return gpu_.matvec(ms, xs);
     }
 
-// A group of matvecs sharing one read-back (docs/rwkv7-plan.zh-CN.md P7).  The
+// A group of matvecs sharing one read-back (docs/rwkv7.md).  The
 // per-matrix work is rwkv_mv's, verbatim: the same 2^k input normalisation, the
 // same Mat view with the scale folded in, the same draw and the same decode.
 // What changes is only the number of host syncs -- one per group instead of one

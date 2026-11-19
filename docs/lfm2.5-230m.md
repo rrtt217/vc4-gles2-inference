@@ -3,12 +3,11 @@
 The only **hybrid** model this engine runs: 8 depthwise-conv layers interleaved
 with 6 full-attention layers.  It is why the engine has a conv block, why
 `--ppl` had to learn what a window is, and why the activation format grew a
-per-tensor scale.  This page is the operational record — what the model is,
-which containers exist, how to run it, what the numbers are, and what is still
-broken.  The packing/feasibility study (residual amplitudes, quant recipes,
-vendor GGUF analysis, work estimate) is
-[`lfm2.5-230m-assessment.zh-CN.md`](lfm2.5-230m-assessment.zh-CN.md); the
-chronological measurements are in [`benchmarks.md`](benchmarks.md).
+per-tensor scale.  This page owns the model: what it is, which containers exist,
+how to run it, what the numbers are, and what is still broken.  The packing study
+that preceded it (2026-11-11) left two results that are easy to lose, so they are
+below: the activation amplitudes behind `RES=q16`, and why the tied head cannot
+go to 4 bits.
 
 ## The model
 
@@ -26,11 +25,25 @@ convolution over `gated`, then `y = (W_c x) * cv`, then `W_out y`; the three
 `W_*` slices come from one 3072-row `in_proj`.  The state and the dataflow are
 in [`engine-internals.md`](engine-internals.md) under "Hybrid (conv) block".
 
+### What the activations need
+
+`probe_residuals.py` runs the float32 forward over five id streams.  The residual
+peaks at **29.5** on the artificial worst case and 25.3 on a real chat prompt —
+0.23× the ±128 rail — so the default q16 residual is enough and `--res q24` is
+not needed for this model.  Plain-text ids only reach 6.9, so judge the budget
+on the **chat** form, which is what every run uses.  The rest is looser: the FFN
+product peaks at 26.0, the conv gate's `B*x` at 11.4 and `C*conv` at 17.7,
+against q16's ±128 and I16_2's ±2048.
+
+The two models in this tree that do *not* fit are named in the rail invariant of
+[`AGENTS.md`](../AGENTS.md): supra2-100M reaches 2300 (18× the rail) and
+SmolLM2-135M 2.7e4.
+
 ## Containers
 
 | file | size | what |
 |---|---:|---|
-| `qad/lfm2.5.qad.q4.mmcf` | 169 MB | QAD weights, q4, `--head-dedup`, `SEQ 512` — **the container the board runs** |
+| `qad/lfm2.5.qad.q4.mmcf` | 169 MB | QAD weights, q4, `--head-dedup`, packed at `SEQ 512`; the board runs it at 256 — **the container the board runs** |
 | `lfm2.5.q4.dedup.mmcf` | 169 MB | base weights, same flags |
 | `lfm2.5.q4.q6.mmcf` | 152 MB | base weights, q4 + 6-bit head (`--head-q6`) |
 | `LFM2.5-230M-QAD-Q4_0.gguf` | 149 MB | the vendor file; the reference llama.cpp is compared against |
@@ -52,8 +65,25 @@ python3 engine/tools/mmcf_pack.py --in models/lfm2.5-230m --quant q4 --seq 512 \
 # the i16 reference (15.97 PPL below) is the same line with --quant i16
 ```
 
-The QAD container's recipe is quoted in the assessment doc; it differs only in
-`--in models/lfm2.5-230m/qad` and the name.
+The QAD container's recipe is the same line with `--in models/lfm2.5-230m/qad`
+and the name.
+
+**The head stays at 8 bits, and the vendor agrees.**  The head is tied to the
+embedding, so a precision choice applies to both sides, and the two sides do not
+tolerate the same error.  Measured on a full float32 forward with the head
+quantized each way: 4-bit on the *logits* side is harmless (logits `max|d|` 0.70
+against 0.54 for q8, greedy unchanged), but 4-bit on the *embedding* side
+amplifies through 14 layers to `max|d|` 7.4 and cosine 0.87, and the greedy text
+changes.  So a 4-bit head is out on measurement, not on principle, and
+`--head-dedup` (one q8 copy, 66 MB instead of 132 MB) is the cheap end rather
+than `--head-q6` (152 MB container, 19.07 PPL against 19.87 — a 333-token corpus
+cannot resolve that, see "Quality").
+
+The vendor's three 4-bit GGUFs say the same thing: `token_embd` is **Q6_K**
+(55.1 MB) in Q4_0, Q4_K_M *and* the QAD-Q4_0 file, `output.weight` does not
+exist because the head is tied, and the per-layer mixing is what varies
+(`attn_v` and `ffn_down` at Q6_K in Q4_K_M).  Quantization-aware distillation did
+not buy 4 bits on the input side either.
 
 ## Running it
 
@@ -91,6 +121,13 @@ GPU_LAYER=1 ./bin/engine_mm3_pi --chat \
   binary, so a command carrying it behaves exactly like `GPU_LAYER=1` alone.
 * `KV=q16` is the hybrid default.  The 24-bit KV layout is **wrong for this
   shape** (kv_dim 512, head_dim 64) and the fused path answers garbage with it.
+* **`SEQ=256` is what makes it fit the board**, and it is the only reason the
+  command above says 256: the board's usable CMA was measured at about 170 MB
+  under good conditions (2026-11-11) and the deduped q4 container is already
+  169 MB, so there is no room left for a `SEQ=768` KV cache.  Anything that grows
+  the weights — a q8 body, a tiled head, the i16 reference — has to be measured
+  on the board rather than budgeted, because the margin is smaller than the
+  estimate's error bar.
 * Sampling: the model card and the probe agree on low temperature.  `--temp 0.1
   --top-k 50 --repeat-penalty 1.05` answered the factual prompts correctly where
   `--temp 0.7` drifted; the raw log of that sweep is
@@ -98,9 +135,10 @@ GPU_LAYER=1 ./bin/engine_mm3_pi --chat \
 
 ## Quality
 
-`data/ppl_test.txt`, `SEQ=512`, 334 scored tokens, **with the BOS** (see
-"history" below — every LFM2.5 number published before 2026-11-11 was measured
-without it and is 5× too high):
+`data/ppl_test.txt`, `SEQ=512`, 334 scored tokens, **with the BOS**.  Every
+LFM2.5 perplexity in this repository older than 2026-11-11 was measured *without*
+it and is 5× too high — the fix is `d802cb8`/`c92b895` plus `4ffb536` for the
+cold window below, so do not compare across that date:
 
 | path | PPL | note |
 |---|---:|---|
@@ -158,35 +196,22 @@ board: 3.7% behind serial cold, 10.7% behind warm (Xe: 5.5% / 4.4%), so the
 board's older "3.7% behind" understated what the fused path costs on this
 machine.
 
-### History: what was wrong before 2026-11-11
+**The cold column is protocol, not model.**  A window that starts mid-text is
+cold and costs ~1.8 nats/token on this text (float32: 3.80 with the document in
+front, 5.61 without), so `--ppl` feeds `SEQ` tokens per window and scores only
+the last `SEQ/2`; `PPL_STRIDE=0` restores the old cold windows, and the two are
+not comparable.
 
-Two engine bugs, both found by chasing a phantom 5× gap against llama.cpp, and
-one bad measurement:
+Two more corrections came out of the same week, both from chasing a phantom 5×
+gap against llama.cpp: a **chat** run passed `""` for `bos_token` where the
+template was supposed to supply `<|startoftext|>`, and `--ppl` sent no BOS at
+all (98.10 against 15.97 for the same text).  That is the 5× above —
+`d802cb8`/`c92b895` and `4ffb536`.
 
-1. **Chat prompts had no BOS.**  All three render sites passed `""` for
-   `bos_token`, and the template is *supposed* to supply `<|startoftext|>`; on
-   the board the model then echoed the Chinese prompt verbatim and called
-   C. elegans a beetle.  Fixed in `d802cb8`/`c92b895`; the strings also had to
-   be marked as template text so they tokenise to the special id rather than to
-   `<`, `|`, `start`, `oftext`.
-2. **`--ppl` sent no BOS.**  No template is involved in a perplexity run, so
-   nothing supplied it: 98.10 without against 15.97 with (float32 reference
-   85.44 against 14.71).  Every LFM2.5 PPL in this repository older than
-   2026-11-11 is therefore 5× too high, and one conclusion inverted with it
-   (the fused path is now correctly *worse* than serial).
-3. **A cold window is not a perplexity.**  `--ppl` scored every token of every
-   window from a fresh `Session`, so each window after the first had no context
-   and the total looked like state carried across windows (NLL 4.23 / 5.88 /
-   7.41 against llama.cpp's 3.96 / 3.88).  The float32 reference settles it:
-   5.61 for that text cold against 3.80 with the document in front, i.e. the
-   model, and the engine tracks f32 by the same 0.3 nats (its q4 container)
-   under cold, warm and single-window protocols alike.  `--ppl` now feeds `SEQ`
-   tokens per window and scores only the last `SEQ/2`.
-
-On the way, `GPU::matvec_s()` was added: a matvec input gets a power-of-two
-scale from its own maximum before it is uploaded, because this model's conv
-gate output at the start of a sequence is order 1e-4 and the q16 grid
-(step 1/256) sent it to zero.  Layer-by-layer agreement with the float32
+`GPU::matvec_s()` comes from the same investigation: a matvec input gets a
+power-of-two scale from its own maximum before it is uploaded, because this
+model's conv gate output at the start of a sequence is order 1e-4 and the q16
+grid (step 1/256) sent it to zero.  Layer-by-layer agreement with the float32
 reference went from 6–11% to 0.2–1.4%; MiniMind3's PPL is bit-identical with the
 change, because for well-scaled activations it is a no-op.
 

@@ -148,7 +148,7 @@ which is why the byte was appended rather than put in a key of its own.
 Neither key changes the tensor table, so both are version-2 additions that an
 older reader skips.
 
-### The t3 body: 2-bit ternary, and what reads it today
+### The t3 body: 2-bit ternary
 
 `mmcf_pack.py --quant t3` writes a body whose matrices are 2 bits a weight.  It
 is only written for a matrix that **is** per-row ternary -- `t3mat()` certifies
@@ -156,23 +156,28 @@ every row is `{0, +s, -s}`, decodes what it wrote and refuses if the round trip
 is not exact to float32 -- so the format is lossless by construction: the same
 claim `q8mat` makes on such a matrix, at a quarter of the bytes.
 
-The runtime has **two** readers, and the difference matters:
+The runtime has **two** readers:
 
-- **The GPU kernel does not exist yet** (Phase B2, `docs/bitcpm-assessment.zh-CN.md`).
-- Until it does, `Model::read_tables()` expands a t3 body into q8 levels
-  (`model.cpp`, `as_t3`): +-127 for a nonzero weight, with the part-3 per-row
-  plane attached, which is the exact dequantisation a q8 body would have
-  carried with `--q8-row-scale`.  The load then prints
+- **The 2-bit kernel** (`matvec_t3` and its pair and add forms), ESSL 3.00 only:
+  the ES2 float decode is 2.5x *slower* than q8, so a driver without integer
+  shifts has no fast form for this kind.  The body uploads as a 2D tile of at
+  most `kDrawCap` rows -- VC4's `GL_MAX_TEXTURE_SIZE` is 2048 and the FFN gate is
+  4096 rows -- and the four bytes of a texel are two rows by two column groups.
+  `docs/bitcpm.md` has the measurements and the two kernel rules that came out of
+  them (one texture fetch a fragment, `ws` carries the missing 127).
+- `T3_EXPAND=1` expands the body into q8 levels at load time (`Model::read_tables`,
+  `model.cpp`, `as_t3`): +-127 for a nonzero weight, with the part-3 per-row plane
+  attached, i.e. the exact dequantisation a q8 body would carry with
+  `--q8-row-scale`.  The load prints
 
   ```text
-  t3 body: 120 matrices expanded to q8 on the host (85 MB on disk -> 342 MB in RAM);
-  the 2-bit kernel is Phase B2 (docs/bitcpm.md)
+  t3 body: 120 matrices expanded to q8 on the host (85 MB on disk -> 342 MB in RAM)
+  because T3_EXPAND is set
   ```
 
-  That path is the container's acceptance test -- it makes a t3 file *runnable*
-  against the same kernels as everything else, so the packer can be validated by
-  logits and PPL before a line of new GLSL exists -- and it forfeits the memory
-  win (4x the file).  A t3 container on the Pi is therefore still B2 away.
+  That is the packer's acceptance route and the oracle the 2-bit kernels are
+  diffed against; it forfeits the memory win (4x the file) and the board was
+  OOM-killed at 280 MB.
 
 Key 9 is the model's own `chat_template` from HuggingFace, stored **verbatim**:
 the same text a GGUF file carries in `tokenizer.chat_template`.  A reader that
@@ -584,7 +589,8 @@ the "borrow straight from the mapping" property that makes the loader free.
 
 ## v4: RWKV-7 (version 4)
 
-Added 2026-11-16, P1 of [`rwkv7-plan.zh-CN.md`](rwkv7-plan.zh-CN.md).  An
+Added 2026-11-16 with the model's first container; the model page is
+[`rwkv7.md`](rwkv7.md).  An
 RWKV-7 container is **version 4**: v3's 64-byte record, one new metadata key
 (16) and 17 new tensor ids.  Dense containers stay version 2 and MoE
 containers stay version 3, so every container in `models/` is byte-identical

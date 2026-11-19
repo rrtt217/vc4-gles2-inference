@@ -134,11 +134,11 @@ details.
 Every row is an `.mmcf` container; the legacy file it was packed from stays
 next to it in `models/` as a re-pack source.
 
-| Model | Size | Pi decode (2026-11-13) | Notes |
+| Model | Size | Pi decode (latest per model) | Notes |
 |---|---:|---:|---|
-| LFM2.5-230M q4 (QAD) | 169 MB | not re-measured | hybrid conv+attention; last 1040 ms/token (2026-11-11) |
-| MiniMind3 q8 | 66 MB | not re-measured | default Chinese chat; last 252 ms/token (2026-11-02) |
-| MiniMind3 q4 | 45 MB | ~304 ms/token | memory mode; lower quality |
+| LFM2.5-230M q4 (QAD) | 169 MB | ~566 ms/token | hybrid conv+attention, `SEQ=256`; the board's tightest fit |
+| MiniMind3 q8 | 66 MB | ~190 ms/token | default Chinese chat |
+| MiniMind3 q4 | 45 MB | ~186 ms/token | memory mode; lower quality, and the faster path since the flat q4 gate |
 | MiniMind2 i16 | 58 MB | ~216 ms/token | reference; the default q16 decode (`Q16_DECODE=exact` gives ~290) |
 | MiniMind2 q8 | 29 MB | ~124 ms/token | rope comes from the container |
 | MiniMind2 q4 | 21 MB | ~154 ms/token | memory mode; identity answers unreliable |

@@ -107,9 +107,9 @@ regression baseline.  Each points at the document that owns the explanation.
 | MiniMind3 q4 | — | **326.1483** (SEQ=768; a *format* pin, expect ~1% drift when the q4 path is rearranged) | `AGENTS.md` |
 | MiniMind2 i16 | — | 280.2156 | `docs/quantization.md` |
 | SmolLM2-135M | `RMS_STORE=f32`; `--res q24` at pack time | **7.7157** Xe / **14.2941** Pi (SEQ=512) | `docs/smollm2-135m.md` |
-| BitCPM q8 | `RMS_STORE=f32` | **36.0302** (SEQ=768) | `docs/bitcpm.md` |
-| BitCPM t3 | `RMS_STORE=f32`; 2-bit matvec path | **35.6726** (SEQ=768, `PPL_STRIDE=384`) | `docs/bitcpm.md` |
-| RWKV-7 0.1B q8r | CPU loop / `RWKV_GPU=1` are separate pins | **9.2919** CPU / **9.1850** GPU (SEQ=512) | `docs/rwkv7-plan.zh-CN.md` |
+| BitCPM q8 | `RMS_STORE=f32` | **35.5598** (SEQ=768, 247 tokens; 2026-11-19, reproduced from a fresh pack of the recipe) | `docs/bitcpm.md` |
+| BitCPM t3 | `RMS_STORE=f32`; 2-bit matvec path | **38.1541** (SEQ=768, 2026-11-19); the same file expanded to q8 levels (`T3_EXPAND=1`) is **35.6132**, so the 2-bit kernel now costs 0.070 nats/token | `docs/bitcpm.md` |
+| RWKV-7 0.1B q8r | CPU loop / `RWKV_GPU=1` are separate pins | **9.2919** CPU / **9.1850** GPU (SEQ=512) | `docs/rwkv7.md` |
 | LFM2.5-230M q4 | serial warm path | 29.1588 (28.6196 with `Q16_DECODE=exact`) | `docs/lfm2.5-230m.md` |
 | MoE (v3) | top-1, host routing | see the container's own rows | `AGENTS.md` |
 

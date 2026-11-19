@@ -916,7 +916,7 @@ void Chat::print_stats() const {
 
 // DRAWCOUNT / SYNCCOUNT: what a decoded token costs in launches instead of in
 // milliseconds, which is the quantity the RWKV fusion work moves -- that path is
-// launch/sync-bound, not MAC-bound (docs/rwkv7-plan.zh-CN.md, P6).  Decode only:
+// launch/sync-bound, not MAC-bound (docs/rwkv7.md).  Decode only:
 // the prompt's launches are a prompt-specific extra, so the turn records the
 // delta around its decode loop (TurnReport::draws_decode).
 static void print_launch_counts(const TurnReport& turn) {
