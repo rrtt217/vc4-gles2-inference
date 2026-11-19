@@ -118,11 +118,10 @@ Build for the target and do not reuse a stale binary:
   `engine/Makefile`.
 - A native ARMv6 build on a Pi Zero takes about 8–10 minutes; never run two
   builds concurrently.  Prefer the VLAB cross-build (see the VLAB override).
-- Timings: the reference campaign is 2026-11-13 on HEAD `71cb1e0` (Pi Zero,
-  `GPU_LAYER=1 KV=q16`, greedy, `--gen 16`, one discarded warm-up then three
-  timed runs, median).  [`docs/benchmarks.md`](docs/benchmarks.md) owns the
-  matrix, the protocol and each row's conditions; this file does not repeat
-  them.
+- Timings: [`docs/benchmarks.md`](docs/benchmarks.md) owns the matrix, the
+  protocol and each row's conditions; this file does not repeat them.  The Pi
+  rows are the **latest measurement per model**, each dated, not one campaign —
+  a row is comparable to itself over time, not necessarily to its neighbour.
 - Before pushing: `make -C engine check` — the no-GPU half in one command, and
   it is nine gates: `warncheck`, `docs_check.sh` (six sub-checks: the generated
   inventory, the switch registry, the doc style, the paths, the "gone" names and

@@ -8,7 +8,12 @@ machine named, not portable benchmarks.
 replaces its row; the commit that produced it is named in the row or in the
 section heading.  The history of how a number moved is Git's job —
 `git log --follow docs/benchmarks.md`, and the pre-compression text (120 dated
-sections) is at commit `e7a36ec` and earlier.  Nothing is appended here.
+sections) is at `git show e7a36ec^:docs/performance.md`.  Nothing is appended
+here.
+
+The Pi table is the **latest measurement per model**, from whatever binary
+produced it; each row names its date.  A row is comparable to itself over time,
+not necessarily to the row above it.
 
 ## Protocol
 
@@ -30,36 +35,50 @@ Two rules that came from getting them wrong:
 
 ## Pi Zero decode
 
-Campaign of 2026-11-13 on HEAD `71cb1e0`, the current reference.  † marks a row
-that predates the warm-up rule and carries the noise it explains; †† a row
-measured with the old `floor` q16 decode (the default gives 216.0).
+**The latest measurement per model, not one campaign.**  Each row names the date
+it was taken and the binary generation behind it, so a row is comparable to
+itself over time, not necessarily to the row above it.  Sorting is by speed and
+is a rough guide only: rows come from different builds, and the engine has gained
+10-20% on several models since the oldest of them.
 
-| model | container | SEQ | prompt | decode (median, range) | prefill |
-|---|---|---:|---|---:|---:|
-| MiniMind2 q8 † | `minimind2-small.q8.mmcf` | 512 | chat, `用一句话介绍你自己。` | **123.5** (123.2-123.7) | 7.3-7.9 s |
-| stories15M q8 † | `stories15M.q8.mmcf` | 256 | `Once upon a time` | **116.2** (114.8-117.7) | 3.1-3.9 s |
-| TinyChat15M q8 | `TinyChat15M.q8.mmcf` | 256 | `Once upon a time, there was a little girl named` | **115.4** (114.5-161.2) | 3.6-4.5 s |
-| minimind2 q4 | `minimind2-small.q4.mmcf` | 512 | chat, `用一句话介绍你自己。` | **153.7** (152.1-154.8) | 8.9 s |
-| stories42M q8 | `stories42M.q8.mmcf` | 1024 | `Once upon a time` | **160.2** (158.4-160.4) | 4.3-6.7 s |
-| feng q8 † | `feng.q8.mmcf` | 512 | chat, `用一句话介绍你自己。` | **192.1** (189.2-194.3) | 8.2-14.8 s |
-| feng q8r † | `feng.q8r.mmcf` | 512 | chat, `用一句话介绍你自己。` | **192.8** (189.3-197.9) | 8.0-16.9 s |
-| vertex15 q4 | `vertex15.q4.mmcf` | 512 | chat, `What is the capital of France?` | **196.9** (193.4-211.4) | 8.6-8.7 s |
-| vertex35 q4 | `vertex35.q4.mmcf` | 512 | chat, `What is the capital of France?` | **241.4** (224.0-265.1) | 8.9-9.1 s |
-| MiniMind3 q4 | `minimind3.q4.mmcf` | 768 | chat, `用一句话介绍你自己。` | **304.4** (303.7-310.0) | 16.0-35.9 s |
-| MiniMind3-MoE q4 | `minimind3-moe.q4.mmcf` | 768 | chat, `用一句话介绍你自己。` | **322.0** (319.3-345.3) | 18.2-22.5 s |
-| MiniMind2 i16 †† | `minimind2-small.i16.mmcf` | 512 | chat, `用一句话介绍你自己。` | **216.0** (326.8 with the `floor` decode) | 11.8-19.9 s |
-| vertex100 q4 | `vertex100.q4.mmcf` | 512 | chat, `Write a haiku about rain.` | **487.0** (487.0-633.3) | 18.6-23.1 s |
-| void1 q4 | `void1.q4.mmcf` | 1024 | `Once upon a time,` + `TOK_NO_PREFIX=1` | **554.8** (533.8-578.8) | 14.0 s |
+| model | decode (ms/token) | SEQ | measured | conditions |
+|---|---:|---:|---|---|
+| TinyChat15M q8 | **115.4** | 256 | 2026-11-13 | plain-completion prompt; the container now also ships a `llama2_chat` template |
+| stories15M q8 | **116.2** | 256 | 2026-11-13 | `Once upon a time` |
+| MiniMind2 q8 | **123.5** | 512 | 2026-11-13 | chat prompt |
+| minimind2 q4 | **153.7** | 512 | 2026-11-13 | chat prompt |
+| stories42M q8 | **160.2** | 1024 | 2026-11-13 | `Once upon a time` |
+| **MiniMind3 q4** | **185.7** | 768 | **2026-11-16** | flat 8-wide q4 gate, the default since; 226.7 with `Q4_GATE_NESTED=1` |
+| MiniMind3 q8 | ~190 | 768 | 2026-11-16 | the same session's comparison; measured 188.6 on 2026-11-07 |
+| feng q8 | **192.1** | 512 | 2026-11-13 | chat prompt |
+| feng q8r | **192.8** | 512 | 2026-11-13 | chat prompt |
+| vertex15 q4 | **196.9** | 512 | 2026-11-13 | stops at EOS after 7 tokens |
+| MiniMind2 i16 | **216.0** | 512 | 2026-11-13 | cheap q16 decode; 326.8 with `Q16_DECODE=exact` |
+| vertex35 q4 | **241.4** | 512 | 2026-11-13 | stops after 7 tokens |
+| MiniMind3-MoE q4 | **322.0** | 768 | 2026-11-13 | 131 MB, top-1 routing |
+| vertex100 q4 | **487.0** | 512 | 2026-11-13 | stops after 15 tokens |
+| void1 q4 | **554.8** | 1024 | 2026-11-13 | 259-entry byte tokenizer, `TOK_NO_PREFIX=1` |
+| LFM2.5-QAD q4 | **566.3** | — | 2026-11-16 | hybrid (conv + attention), `IGNORE_EOS` |
+| SmolLM2-135M | **630.7** | 512 | 2026-11-18 | `RMS_STORE=f32` is required; 164 MB in a 320 MB CMA |
+| RWKV-7 0.1B q8r | **1138** GPU / **969** CPU | 512 | 2026-11-17 | the GPU loop is draw-bound on VC4 and slightly slower than the CPU one; the 3.3x GPU win is Xe-only |
+| pocket 0.3B | **1168** | — | 2026-11-18 | `RMS_STORE=f32`; the default i24 rms store answers `杭州是中国中国中国…` |
+| BitCPM-CANN-0.5B t3 | **1323** | — | 2026-11-19 | 2-bit matvec, 167.5 MB file; 5.6x MiniMind3's parameters |
 
-Sample-size notes: `vertex15`/`vertex35` stop at EOS after 7 tokens and
-`vertex100` after 15, so one token weighs 7-14% of their mean.  `void1 q4` uses
-a 259-entry byte tokenizer, so 16 tokens are about 16 characters.
+**MiniMind3 q4 is now faster than q8** (185.7 against ~190): the q4 gate is
+about half the token's work, so the flat 8-wide kernel moved it past q8 rather
+than leaving it 1.18x behind.  Any note that still quotes 304.4 for MiniMind3 q4
+predates 2026-11-16.
 
-Not re-measured in this campaign, and why: MiniMind3 q8 (the only HEAD run was a
-pilot taken while the store was being scanned), LFM2.5-230M q4 (load check only),
-TinyBrainBot q4, picolm85 q4q24 and void1 q8r (load checks only), and
-MiniMind3-MoE q8 (203.5 MB: `FBO incomplete`, recorded 2026-11-11).  Ask for a
-fresh row rather than quoting an older machine's number for these.
+The 2026-11-13 rows were taken under protocol v1 (a discarded warm-up after
+`drop_caches`, then three timed runs 20 s apart, median, `GPU_LAYER=1 KV=q16`,
+greedy, `--gen 16`) with a per-model prompt; the `SEQ` column is theirs.  Prefill
+from that campaign ranged 3-36 s and is not carried here — it moves with the SD
+card and the background load, so it is only meaningful next to its own run.
+
+Not measured on the board since the engine moved on: TinyBrainBot q4, picolm85
+q4q24 and void1 q8r (load checks only), and MiniMind3-MoE q8 (203.5 MB:
+`FBO incomplete`).  Ask for a fresh row rather than quoting another machine's
+number for these.
 
 ## Iris Xe decode
 
