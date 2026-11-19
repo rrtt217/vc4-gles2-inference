@@ -147,7 +147,7 @@ same answer from Xe and from the board:
 | | decode | note |
 |---|---:|---|
 | Iris Xe | 79.4 ms/token | prefill 1.4 s |
-| Pi Zero (VC4) | 5506 ms/token | prefill 87.4 s; `GPU_LAYER=0` is 7094 ms/token |
+| Pi Zero (VC4) | 5453-5506 ms/token | prefill 87-90 s; `GPU_LAYER=0` is 7094 ms/token |
 
 The board figure is the point of the kind: 167.5 MB of container, 85 MB of
 texture, and 358 M parameters that the q8 body (435 MB) and the q4 body (337 MB)

@@ -8235,6 +8235,7 @@ per token, so the budget only has to be past the first):
 |---|---|---:|---:|---|
 | Iris Xe | `GPU_LAYER=1` | 1.4 s | **79.4 ms/token** | 23523 65 7139 53741 6061 59365 4666 6567 |
 | Pi Zero | `GPU_LAYER=1` | 87.4 s | **5506 ms/token** | identical |
+| Pi Zero | `GPU_LAYER=1`, second run | 90.3 s | 5453 ms/token | identical |
 | Pi Zero | `GPU_LAYER=0` | 116.9 s | 7094 ms/token | 23523 65 7139 10850 (the CPU loop's own answer) |
 
 The board's answer is `你好，我是MiniCPM系列模型`, deterministic (two 12-token
