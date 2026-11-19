@@ -62,10 +62,12 @@ message, which is also what `git log -S` finds later.
 
 ## Shape
 
-- **150-400 lines** is a model page.  Past 400 it is carrying history or
-  repeating another page, and both are bugs: `benchmarks.md` was 8296 lines of
-  dated sections (compressed to 179 in `f733573`), `evaluation.md` was 708
-  lines holding four copies of the same table (538 in `7c14966`).
+- **A page that grows with every campaign, or that says the same thing twice,
+  is a bug even when every line is true.**  `benchmarks.md` reached 8296 lines
+  of dated sections and `evaluation.md` 708 lines holding four copies of one
+  table; they are 179 and 538 now (`f733573`, `7c14966`).  Those sizes are the
+  symptom, not the rule: the question is whether a reader has to diff two
+  sections to learn which number is current.
 - **A heading is a subject, never a date.**  `## 2026-11-16 — RWKV-7` is the
   shape that grows without bound, and it is how both of those happened.
 - **Tables over prose** once there are more than two items.  The same table
