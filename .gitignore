@@ -57,6 +57,7 @@ __pycache__/
 
 # Local upstream references / model assets
 /refs/
+/literature/
 /minimind3/tokenizer.json
 
 # Local agent overrides (machine-specific, not portable)
