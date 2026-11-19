@@ -105,7 +105,8 @@ string att_defs(const AttnConfig& c) {
                        "#define SUM_LOG_INV " + to_string(256.0f / c.sum_log_scale) + "\n" : "") +
            "#define KVPACK " + to_string(c.kv_bits) + "\n" +
            "#define KVWIDTH " + to_string(c.kv_width) + "\n" +
-           "#define KVSTEP " + string(c.kv_vstep ? "1" : "0") + "\n";
+           "#define KVSTEP " + string(c.kv_vstep ? "1" : "0") + "\n" +
+           (c.qbatch > 1 ? "#define QB " + to_string(c.qbatch) + "\n" : "");
 }
 
 string att_helpers(const AttnConfig& c) {
@@ -297,18 +298,30 @@ string att_qrot(const AttnConfig& c) {
 
 // The q16 score-pair layout needs the hoisted, rotated q, so this is the only
 // form: ATTN_HOIST=0 and the R/RT/QN kernel it used to select are gone.
+//
+// qbatch > 1 is the prefill batch form: the grid is seq/2 x (heads*QB), row
+// r = h*QB + b, and a fragment scores query b of head h against the KV pair at
+// x, causal up to pos + b.  The dot product, the decode and the encode are the
+// serial kernel's text; only the row addressing moves.  Adjacent rows of one
+// head share its K slice, which is where the win is: a 2x2 fragment quad
+// coalesces its KV fetches (probes/att_out_probe, qN_serial against q1).
 string att_score(const AttnConfig& c) {
+    const bool B = c.qbatch > 1;
+    const string open = B ? "int r=int(gl_FragCoord.y);int h=r/QB;int b=r-h*QB;"
+                          : "int h=int(gl_FragCoord.y);";
+    const string ypos = B ? "pos+float(b)" : "pos";
+    const string qrow = B ? "(float(b)+0.5)/float(QB)" : "0.5";
     return "precision highp float;\n" + att_defs(c) + att_helpers(c) +
         "uniform sampler2D Q,KV;uniform float pos,invsqrt;"
         "vec4 qe(float v){float q=clamp(floor(v*SCS+0.5),-32768.0,32767.0);"
         "if(q<0.0)q+=65536.0;float hi=floor(q/256.0);"
         "return vec4(hi/255.0,(q-hi*256.0)/255.0,0.0,1.0);}"
-        "void main(){int T=int(gl_FragCoord.x);int h=int(gl_FragCoord.y);"
+        "void main(){int T=int(gl_FragCoord.x);" + open +
         "int t0=T*2;int t1=t0+1;int kvh=h/GROUP;float s0=0.0,s1=0.0;"
-        "bool e0=(float(t0)<=pos);bool e1=(float(t1)<=pos);"
+        "bool e0=(float(t0)<=" + ypos + ");bool e1=(float(t1)<=" + ypos + ");"
         "if(!e0&&!e1){gl_FragColor=vec4(0.0,0.0,0.0,0.0);return;}"
         "for(int i=0;i<HEADDIM;i++){"
-        "vec4 qp=texture2D(Q,vec2((float((h*HEADDIM+i)/2)+0.5)/float(DIM/2),0.5));"
+        "vec4 qp=texture2D(Q,vec2((float((h*HEADDIM+i)/2)+0.5)/float(DIM/2)," + qrow + "));"
         "float q=(((h*HEADDIM+i)-(h*HEADDIM+i)/2*2)==0)?dec16(qp.rg):dec16(qp.ba);"
         "int ki=kvh*HEADDIM+i;int tx=ki;int odd=0;"
         "if(KVPACK==16){tx=ki/2;odd=ki-tx*2;}else if(KVPACK==8){tx=ki/4;odd=ki-tx*4;}"
@@ -319,8 +332,14 @@ string att_score(const AttnConfig& c) {
 }
 
 string att_stats(const AttnConfig& c) {
+    // qbatch > 1: the score texture is heads*QB rows tall and this position's
+    // block starts at row qrow0 (= b, a uniform); the scan itself is unchanged.
+    const bool B = c.qbatch > 1;
+    const string srow = B ? "((float(h*QB)+qrow0)+0.5)/float(HEADS*QB)"
+                          : "(float(h)+0.5)/float(HEADS)";
     return "precision highp float;\n" + att_defs(c) + att_helpers(c) +
-        "uniform sampler2D S;uniform float pos;"
+        (B ? "uniform sampler2D S;uniform float pos,qrow0;"
+           : "uniform sampler2D S;uniform float pos;") +
         // One fragment per head: (max, sum) packed into a single texel as two q16
         // values.  Previously two fragments per head did the identical scan and
         // only differed in which of the two statistics they wrote.
@@ -329,11 +348,11 @@ string att_stats(const AttnConfig& c) {
         "return vec2(hi/255.0,(q-hi*256.0)/255.0);}"
         "void main(){int h=int(gl_FragCoord.x);float mx=-1e30;"
         "for(int T=0;T<SEQ/2;T++){int t0=T*2;if(float(t0)>pos)break;"
-        "vec4 c=texture2D(S,vec2((float(T)+0.5)/float(SEQ/2),(float(h)+0.5)/float(HEADS)));"
+        "vec4 c=texture2D(S,vec2((float(T)+0.5)/float(SEQ/2)," + srow + "));"
         "mx=max(mx,dec16(c.rg)*SCSI);if(float(t0+1)<=pos)mx=max(mx,dec16(c.ba)*SCSI);}"
         "float sum=0.0;"
         "for(int T=0;T<SEQ/2;T++){int t0=T*2;if(float(t0)>pos)break;"
-        "vec4 c=texture2D(S,vec2((float(T)+0.5)/float(SEQ/2),(float(h)+0.5)/float(HEADS)));"
+        "vec4 c=texture2D(S,vec2((float(T)+0.5)/float(SEQ/2)," + srow + "));"
         "sum+=" + exp_call(c) + "dec16(c.rg)*SCSI-mx);"
         "if(float(t0+1)<=pos)sum+=" + exp_call(c) + "dec16(c.ba)*SCSI-mx);}"
         // The sum's domain is a choice, not a decision (`AttnConfig::sum_log`):
@@ -365,6 +384,11 @@ string att_v(const AttnConfig& c, XFormat out) {
     // The q16 score/stats layout packs (max,sum) into one texel per head, so the
     // probability decode is fused into this pass; there is no probability
     // texture to read and no unfused variant to keep.
+    // qbatch > 1: S is the batched score texture (row h*QB + qrow0); ST stays
+    // this position's own (heads,1) stats target, and the V pass is unchanged.
+    const bool B = c.qbatch > 1;
+    const string srow = B ? "((float(h*QB)+qrow0)+0.5)/float(HEADS*QB)"
+                          : "(float(h)+0.5)/float(HEADS)";
     const string prob_bind = "S,ST,KV,VS";
     const string prob_body =
         "vec4 st=texture2D(ST,vec2((float(h)+0.5)/float(HEADS),0.5));"
@@ -417,14 +441,15 @@ string att_v(const AttnConfig& c, XFormat out) {
     string fs = "precision highp float;\n" + x_glsl(out) +
                 (out == XFormat::BF16 ? string() : x_bf16_glsl()) +
                 att_defs(c) + att_helpers(c) +
-        "uniform sampler2D " + prob_bind + ";uniform float pos;"
+        "uniform sampler2D " + prob_bind +
+        (B ? ";uniform float pos,qrow0;" : ";uniform float pos;") +
         "void main(){int t=int(gl_FragCoord.x);int x0=" + to_string(N) + "*t;"
         "int h=x0/HEADDIM;int i0=x0-h*HEADDIM;int kvh=h/GROUP;" + init + heads_idx +
         prob_body +
         "int mxT=int(pos+0.5)/2+1;"
         "for(int T=0;T<SEQ/2;T++){if(T>=mxT)break;"
         "int t0=T*2;int t1=t0+1;"
-        "vec4 sp=texture2D(S,vec2((float(T)+0.5)/float(SEQ/2),(float(h)+0.5)/float(HEADS)));"
+        "vec4 sp=texture2D(S,vec2((float(T)+0.5)/float(SEQ/2)," + srow + "));"
         "float p0=" + exp_call(c) + "dec16(sp.rg)*SCSI-mx)*invs;" + (vstep ? step0 : string("")) +
         loads0 + bodies +
         "if(float(t1)<=pos){float p1=" + exp_call(c) + "dec16(sp.ba)*SCSI-mx)*invs;" + (vstep ? step1 : string("")) + loads1 +

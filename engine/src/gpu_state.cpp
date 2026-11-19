@@ -102,6 +102,11 @@ void GPU::reset_targets(){
         att_out_ = Target();
         qrot_target_ = Target();
         qscale_target_ = Target();
+        qrot_batch_ = Target();
+        scores_batch_ = Target();
+        grp_h_.clear();
+        grp_tmp_ = Target();
+        grp_w2a_ = Target();
         hidden_a_ = Target();
         hidden_b_ = Target();
         xb_ = Target();
@@ -167,6 +172,7 @@ void GPU::release_scene(){
         // longer exist (the first swap's answer came back empty exactly so).
         input_textures_.clear();
         input_textures2_.clear();
+        grp_in_.clear();
         conv_k_tex_.clear();
         rwkv_const_.clear();
         rwkv_in_tex_.clear();

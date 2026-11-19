@@ -1715,6 +1715,85 @@ vector<float> Session::step_pair(int tok_a, int pos_a, int tok_b, int pos_b, boo
         return gpu_.logits_from(m_.logits_tiles, xf);
     }
 
+// ---- Prefill query batching (PREFILL_BATCH) --------------------------------
+// The attention-internal passes of N positions fuse into one score draw; the
+// residual chain stays serial.  Unlike the pair path this changes no weight
+// kernel, so it is format agnostic: t3, q8, q4, fused-W13, every KV axis and
+// the hid_shift FFN scale all take it.  What it refuses is what has no dense
+// attention block to fuse (RWKV, hybrid conv) or routes per position (MoE).
+
+int Session::group_size() const {
+        int n = env_int("PREFILL_BATCH", 0);
+        if (n < 2) return 0;
+        if (n > 16) n = 16;
+        return n;
+}
+
+bool Session::group_ok() const {
+        if (!gpu_layer_) return false;
+        if (group_size() < 2) return false;
+        if (m_.is_rwkv()) return false;
+        if (m_.hybrid) return false;
+        if (m_.is_moe()) return false;
+        return true;
+}
+
+vector<float> Session::step_group(const vector<int>& toks, int pos0, bool want_logits){
+        const int n = (int)toks.size();
+        if (n < 2 || !group_ok()) {
+            vector<float> lg;
+            for (int b = 0; b < n; ++b)
+                lg = step(toks[b], pos0 + b, want_logits && b + 1 == n);
+            return lg;
+        }
+        // Every position's embedding, packed before the layer loop.
+        vector<GLuint> h(n);
+        for (int b = 0; b < n; ++b)
+            h[b] = gpu_.upload_hidden_grp(embedding(toks[b]), b, n);
+        for (int l = 0; l < m_.layers; ++l) {
+            if (g_stop) return {};
+            // Phase 1: stage each position's K/V and rotated Q.  The residual
+            // h[b] is untouched here, so the order across positions is free;
+            // each position's own draw sequence is the serial block's.
+            for (int b = 0; b < n; ++b) {
+                GLuint xb = gpu_.rmsnorm(h[b], gpu_.rms_att_tex_[l], gpu_.xb_);
+                gpu_.att_stage(m_.qkv[l], xb, l, pos0 + b, b, n);
+            }
+            // Phase 2: one score draw for the whole group, causal per row.
+            gpu_.att_scores_batch(l, pos0, n);
+            // Phase 3: the serial per-position sequence.  stats and v read the
+            // batched score rows; wo and the FFN are the serial kernels, and
+            // the residual ping-pongs grp_h(b) <-> grp_tmp exactly as the
+            // serial path ping-pongs hidden_a_ <-> hidden_b_.
+            for (int b = 0; b < n; ++b) {
+                if (g_stop) return {};
+                gpu_.att_stats_row(pos0 + b, b, n);
+                gpu_.att_v_row(l, pos0 + b, b, n);
+                gpu_.matvec_add(m_.wo[l], gpu_.att_out_.tex, h[b], gpu_.grp_tmp(), gpu_.act_fmt_);
+                GLuint x1 = gpu_.grp_tmp().tex;
+                GLuint xbf = gpu_.rmsnorm(x1, gpu_.rms_ffn_tex_[l], gpu_.xbf_);
+                const FfnMats f = ffn_mats(m_, l, -1);
+                const int hs = m_.hid_shift(l);
+                if (m_.ffn_chunked) {
+                    GLuint ha, hb;
+                    gpu_.ffn_split_chunked(*f.w1a, *f.w3a, *f.w1b, *f.w3b, xbf,
+                                           m_.ffn_chunk, f.width - m_.ffn_chunk, ha, hb, hs);
+                    gpu_.matvec_add(*f.w2a, ha, x1, gpu_.grp_w2a(), gpu_.ffn_fmt_);
+                    gpu_.matvec_add(*f.w2b, hb, gpu_.grp_w2a().tex, gpu_.grp_h(b, n), gpu_.ffn_fmt_);
+                } else {
+                    GLuint hffn;
+                    if (f.w1 && f.w1->rows) hffn = gpu_.ffn_split(*f.w1, *f.w3, xbf, f.width, hs);
+                    else hffn = gpu_.ffn_fused(*f.w13, xbf, f.width, hs);
+                    gpu_.matvec_add(*f.w2, hffn, x1, gpu_.grp_h(b, n), gpu_.ffn_fmt_);
+                }
+                h[b] = gpu_.grp_h(b, n).tex;
+            }
+        }
+        if (g_stop || !want_logits) return {};
+        GLuint xf = gpu_.rmsnorm(h[n - 1], gpu_.rms_final_tex_, gpu_.xf_);
+        return gpu_.logits_from(m_.logits_tiles, xf);
+}
+
 vector<float> Session::step(int token, int pos, bool want_logits){
         // RWKV-7 runs its own loop.  There is no attention block to fuse and no
         // KV row to write per position, so the position only matters to the

@@ -141,6 +141,28 @@ public:
 
     GLuint attention_block(const Mat& qkv, GLuint x, int layer, int pos);
 
+    // Prefill query batching (PREFILL_BATCH, docs/prefill-batching.md): the
+    // attention-internal passes of N positions fuse into one score draw while
+    // the residual chain stays serial.  att_qkv_draw + kv_rope_write +
+    // att_qrot_stage run per position (phase 1), att_scores_batch once per
+    // group (phase 2), att_stats_row / att_v_row per position against the
+    // batched score texture (phase 3).  Every kernel is the serial text with
+    // the row substituted, so the logits are byte-identical.
+    void att_qkv_draw(const Mat& qkv, GLuint x);
+    // Phase 1 of a group, one position: qkv draw, V grid, KV write, rotated Q
+    // staged into row b.  The serial attention_block's draws in the same order.
+    void att_stage(const Mat& qkv, GLuint x, int layer, int pos, int b, int n);
+    void att_qrot_stage(int layer, int pos, int b, int n);
+    void att_scores_batch(int layer, int pos0, int n);
+    void att_stats_row(int pos, int b, int n);
+    void att_v_row(int layer, int pos, int b, int n);
+    // N hidden upload slots and the per-position residual targets the group
+    // loop ping-pongs through (grp_tmp_ is the shared wo output / x1 scratch).
+    GLuint upload_hidden_grp(const vector<float>& x, int b, int n);
+    Target& grp_h(int b, int n);
+    Target& grp_tmp();
+    Target& grp_w2a();
+
     void init_persistent(int dim, int layers, const vector<float>& rms_att,
                         const vector<float>& rms_ffn, const vector<float>& rms_final);
 
@@ -321,6 +343,11 @@ private:
     GLuint x_qrot();
     GLuint x_score();
     GLuint x_stats();
+    // qbatch variants: the score grid is seq/2 x heads*n; stats/v address the
+    // batched score rows through the qrow0 uniform (n baked into the text).
+    GLuint x_score_batch(int n);
+    GLuint x_stats_row(int n);
+    GLuint x_v_row(int n);
     GLuint x_prob();
     GLuint x_top2_fast(int rows, int chunk);
     GLuint x_top2(int rows, int chunk);
@@ -378,6 +405,12 @@ private:
     Target ffn_a_, ffn_b_, ffn_h_, ffn_ab_;
     Target ffn_ab_a_, ffn_ab_b_, ffn_h_a_, ffn_h_b_;
     Target qkv_target_, att_scores_, att_stats_, att_probs_, att_out_, qrot_target_, qscale_target_;
+    // Prefill query batching: the staged rotated Q (dim/2 x n) and the batched
+    // score texture (seq/2 x heads*n), plus the group's residual store.
+    Target qrot_batch_, scores_batch_;
+    vector<Target> grp_h_;
+    Target grp_tmp_, grp_w2a_;
+    vector<GLuint> grp_in_;
     // 8-bit KV: one per-head V step texel per position, one plane per layer.
     vector<Target> vs_targets_;
     vector<Target> kv_cache_;

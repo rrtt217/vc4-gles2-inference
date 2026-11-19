@@ -58,6 +58,15 @@ struct AttnConfig {
     // sub-0.1% per-head gain.  ATT_SUM=log2 selects it.
     bool sum_log = false;
     float sum_log_scale = kAttnSumLogScale;
+    // Prefill query batching (PREFILL_BATCH).  1 = the serial kernels, text
+    // unchanged.  N > 1: the score grid is seq/2 x (heads*N), one query row a
+    // head-major block (row = h*N + b), the rotated Q texture is N rows tall,
+    // and `pos` carries the group's first position -- a fragment's causal bound
+    // is pos + b.  stats/v keep one draw a position but address the batched
+    // score texture through row = h*N + qrow0 (qrow0 = b, a uniform).  Every
+    // fragment's arithmetic is the serial kernel's; only the row it reads and
+    // writes moves, which is what keeps the logits byte-identical.
+    int qbatch = 1;
 };
 
 std::string att_defs(const AttnConfig& c);

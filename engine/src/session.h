@@ -78,6 +78,18 @@ public:
 
     bool pair_ok() const;
 
+    // Prefill query batching (PREFILL_BATCH, docs/prefill-batching.md): N
+    // positions' attention-internal passes share one score draw -- the grid is
+    // seq/2 x heads*N and adjacent rows of a head coalesce their KV fetches --
+    // while the residual chain (wo, FFN) stays serial per position.  Format
+    // agnostic: no weight kernel changes, so t3/q8/q4 and every KV axis take
+    // it.  Byte-identical to the serial loop: every kernel is the serial text
+    // with the row substituted.  Returns the last position's logits when
+    // want_logits.
+    bool group_ok() const;
+    int group_size() const;
+    vector<float> step_group(const vector<int>& toks, int pos0, bool want_logits);
+
     CandidateResult step_candidates(int token, int pos, int topk, float temp, float top_p);
 
 private:

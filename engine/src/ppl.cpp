@@ -77,6 +77,19 @@ int run_ppl(const std::string& ppl_path, Model& model, GPU& gpu, Tokenizer& toke
             if (g_stop) break;
             const long t = a + j + 1;               // token this position predicts
             const bool score = t >= next;
+            // Prefill query batching: the warm-up run (positions whose
+            // prediction is not scored) goes through the group path when it
+            // is on, so --ppl exercises it; scored positions stay serial
+            // because each needs its own logits.
+            if (!score && win.group_ok() && a + j + 2 < next && j + 2 < len) {
+                size_t n = (size_t)win.group_size();
+                n = std::min(n, (size_t)(next - a - j - 1));
+                n = std::min(n, (size_t)(len - j - 1));
+                vector<int> span(tokens.begin() + (a + j), tokens.begin() + (a + j + (long)n));
+                win.step_group(span, (int)j, false);
+                j += (long)n - 1;
+                continue;
+            }
             vector<float> lg = win.step(tokens[a + j], (int)j, score);
             if (!score) continue;
             if ((int)lg.size() <= tokens[t]) break;

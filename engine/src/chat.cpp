@@ -246,6 +246,19 @@ void Chat::run_turn(const std::string& user, bool first, int pos, std::vector<Ch
         } else if (last && cand_mode) {
             cand = session.step_candidates(tokens[i], pos++, app.opt.top_k, app.opt.temp, app.opt.top_p);
             if (!cand.complete) { logits = std::move(cand.full); cand_mode = false; }
+        } else if (session.group_ok() && i + 1 < tokens.size() && pos + 1 < app.model.seq) {
+            // Prefill query batching (PREFILL_BATCH): N positions share one
+            // attention score draw; the residual chain stays serial.  May
+            // include the last prompt token -- then it also returns the logits.
+            size_t n = (size_t)session.group_size();
+            n = std::min(n, tokens.size() - i);
+            n = std::min(n, (size_t)(app.model.seq - pos));
+            const bool ends = (i + n == tokens.size());
+            vector<int> span(tokens.begin() + i, tokens.begin() + i + (long)n);
+            vector<float> lg2 = session.step_group(span, pos, ends);
+            if (ends && !lg2.empty()) logits = std::move(lg2);
+            pos += (int)n;
+            i += n - 1;
         } else if (!last && i + 2 < tokens.size() && pos + 1 < app.model.seq && session.pair_ok()) {
             // Two prompt tokens per layer pass; the last token stays on the
             // single-position path because its logits are the ones we need.
@@ -461,6 +474,16 @@ void Chat::run_tool_turn(const std::string& user, bool first, std::vector<ChatMs
             } else if (last && cand_mode) {
                 cand = session.step_candidates(tokens[i], (int)i, app.opt.top_k, app.opt.temp, app.opt.top_p);
                 if (!cand.complete) { logits = std::move(cand.full); cand_mode = false; }
+            } else if (session.group_ok() && i + 1 < tokens.size() && (int)i + 1 < app.model.seq) {
+                // Prefill query batching; same rule as the chat loop above.
+                size_t n = (size_t)session.group_size();
+                n = std::min(n, tokens.size() - i);
+                n = std::min(n, (size_t)(app.model.seq - (int)i));
+                const bool ends = (i + n == tokens.size());
+                vector<int> span(tokens.begin() + i, tokens.begin() + i + (long)n);
+                vector<float> lg2 = session.step_group(span, (int)i, ends);
+                if (ends && !lg2.empty()) logits = std::move(lg2);
+                i += n - 1;
             } else if (!last && i + 2 < tokens.size() && (int)i + 1 < app.model.seq && session.pair_ok()) {
                 session.step_pair(tokens[i], (int)i, tokens[i + 1], (int)i + 1, false);
                 ++i;
@@ -1023,6 +1046,16 @@ auto prefill_once = [&]() {
         } else if (last && cand_mode) {
             cand = session.step_candidates(tokens[i], (int)i, app.opt.top_k, app.opt.temp, app.opt.top_p);
             if (!cand.complete) { lg = std::move(cand.full); cand_mode = false; }
+        } else if (session.group_ok() && i + 1 < tokens.size() && (int)i + 1 < app.model.seq) {
+            // Prefill query batching; same rule as the chat loop above.
+            size_t n = (size_t)session.group_size();
+            n = std::min(n, tokens.size() - i);
+            n = std::min(n, (size_t)(app.model.seq - (int)i));
+            const bool ends = (i + n == tokens.size());
+            vector<int> span(tokens.begin() + i, tokens.begin() + i + (long)n);
+            vector<float> lg2 = session.step_group(span, (int)i, ends);
+            if (ends && !lg2.empty()) lg = std::move(lg2);
+            i += n - 1;
         } else if (!last && i + 2 < tokens.size() && (int)i + 1 < app.model.seq && session.pair_ok()) {
             session.step_pair(tokens[i], (int)i, tokens[i + 1], (int)i + 1, false);
             ++i;

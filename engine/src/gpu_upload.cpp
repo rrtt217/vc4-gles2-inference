@@ -237,6 +237,46 @@ GLuint GPU::upload_hidden_b(const vector<float>& x){
         return hidden_in_b_;
     }
 
+// ---- Prefill query batching: the group's residual store --------------------
+// N upload slots (one per position, packed before the layer loop) and N
+// residual targets the group loop ping-pongs through grp_tmp_.  The width is
+// the widest of the three stream formats, so a wo (act) or w2 (ffn) write into
+// a residual slot never outruns the texture whatever the axis settings.
+
+static int grp_width(int dim, XFormat res, XFormat act, XFormat ffn){
+        return std::max(x_texels(dim, res), std::max(x_texels(dim, act), x_texels(dim, ffn)));
+}
+
+GLuint GPU::upload_hidden_grp(const vector<float>& x, int b, int n){
+        const int rw = grp_width(att_dim_, res_fmt_, act_fmt_, ffn_fmt_);
+        while ((int)grp_in_.size() < n) grp_in_.push_back(make_texture(rw, 1, nullptr));
+        const int tw = x_texels((int)x.size(), res_fmt_);
+        vector<uint8_t> data = x_pack(x, res_fmt_);
+        bind_tex(0, grp_in_[b]);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, tw, 1, GL_RGBA, GL_UNSIGNED_BYTE, data.data());
+        layer_finish("NF_UPLOAD");
+        return grp_in_[b];
+}
+
+Target& GPU::grp_h(int b, int n){
+        const int rw = grp_width(att_dim_, res_fmt_, act_fmt_, ffn_fmt_);
+        if ((int)grp_h_.size() < n) grp_h_.resize(n);
+        if (grp_h_[b].tex == 0 || grp_h_[b].w != rw) grp_h_[b] = make_target(rw, 1);
+        return grp_h_[b];
+}
+
+Target& GPU::grp_tmp(){
+        const int rw = grp_width(att_dim_, res_fmt_, act_fmt_, ffn_fmt_);
+        if (grp_tmp_.tex == 0 || grp_tmp_.w != rw) grp_tmp_ = make_target(rw, 1);
+        return grp_tmp_;
+}
+
+Target& GPU::grp_w2a(){
+        const int rw = grp_width(att_dim_, res_fmt_, act_fmt_, ffn_fmt_);
+        if (grp_w2a_.tex == 0 || grp_w2a_.w != rw) grp_w2a_ = make_target(rw, 1);
+        return grp_w2a_;
+}
+
 GLuint GPU::rmsnorm(GLuint x, GLuint w, Target& out){
         const int aw = x_texels(att_dim_, act_fmt_);
         if (out.tex == 0 || out.w != aw) out = make_target(aw, 1);

@@ -246,6 +246,8 @@ static const SwitchDef kSwitches[] = {
      "keep the single-position prefill for a model with per-row scale planes"},
     {"PREFILL_REPEAT", "", SwKind::Str, "", SwStatus::Probe, SwAxis::Prefill,
      "replay the prefill n times, for timing"},
+    {"PREFILL_BATCH", "", SwKind::Int, "0..16", SwStatus::Probe, SwAxis::Prefill,
+     "fuse N positions' attention score passes into one draw (0 = off); the residual chain stays serial"},
 
     // ---- Load: the container, the memory, the upload ----------------------
     {"MODEL", "", SwKind::Str, "", SwStatus::Permanent, SwAxis::Load,

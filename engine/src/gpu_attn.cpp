@@ -156,6 +156,34 @@ void GPU::init_attention(int dim, int kv_dim, int heads, int kv_heads, int head_
         rope_tex_ = make_texture(rw, seq, data.data());
     }
 
+void GPU::att_qkv_draw(const Mat& qkv, GLuint x){
+        if (att_qkv_pair_ && (qkv.type == WeightType::INT8 ||
+                              qkv.type == WeightType::T3)) {
+            const bool wr = qkv.has_row_scale();
+            const int pairs = (qkv.rows + 1) / 2;
+            // A t3 qkv holds both rows of the pair in one texel, so its
+            // kernel fetches once where the q8 one fetches twice; both write
+            // x_st2q, which is why the rope/qk-norm readers do not care.
+            GLuint p = qkv.type == WeightType::T3
+                           ? x_t3_pair(qkv, wr)
+                           : x_prog("xqkvp_" + to_string(qkv.rows) + "_" +
+                                    to_string(qkv.cols) + "_" + x_format_name(act_fmt_) +
+                                    (wr ? "_wr" : ""),
+                                    matvec_q8_pair_logits(qkv.rows, qkv.cols, act_fmt_, wr));
+            bind_fbo(qkv_target_.fbo);
+            glViewport(0, 0, pairs, 1);
+            use_program(p);
+            bind_tex(0, qkv.tex); set_sampler(p, "W", 0);
+            bind_tex(1, x); set_sampler(p, "X", 1);
+            glUniform1f(uloc(p, "ws"), qkv.scale);
+            if (wr) { bind_tex(2, qkv.row_scale_tex); set_sampler(p, "WS", 2); }
+            setup_attrib(p);
+            glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+        } else {
+            matvec_to(qkv, x, qkv_target_);
+        }
+}
+
 GLuint GPU::attention_block(const Mat& qkv, GLuint x, int layer, int pos){
         if (qkv_target_.tex == 0 || kv_cache_.empty()) return 0;
         // Per-pass attribution: the block is five dependent draws and the whole
@@ -174,35 +202,8 @@ GLuint GPU::attention_block(const Mat& qkv, GLuint x, int layer, int pos){
         // same per-row q16 integers the 24-bit writer produced (x_st2q applies
         // the identical round/clamp), so the rope/qk-norm/qrot readers see the
         // same values.
-        auto draw_qkv = [&]{
-            if (att_qkv_pair_ && (qkv.type == WeightType::INT8 ||
-                                  qkv.type == WeightType::T3)) {
-                const bool wr = qkv.has_row_scale();
-                const int pairs = (qkv.rows + 1) / 2;
-                // A t3 qkv holds both rows of the pair in one texel, so its
-                // kernel fetches once where the q8 one fetches twice; both write
-                // x_st2q, which is why the rope/qk-norm readers do not care.
-                GLuint p = qkv.type == WeightType::T3
-                               ? x_t3_pair(qkv, wr)
-                               : x_prog("xqkvp_" + to_string(qkv.rows) + "_" +
-                                        to_string(qkv.cols) + "_" + x_format_name(act_fmt_) +
-                                        (wr ? "_wr" : ""),
-                                        matvec_q8_pair_logits(qkv.rows, qkv.cols, act_fmt_, wr));
-                bind_fbo(qkv_target_.fbo);
-                glViewport(0, 0, pairs, 1);
-                use_program(p);
-                bind_tex(0, qkv.tex); set_sampler(p, "W", 0);
-                bind_tex(1, x); set_sampler(p, "X", 1);
-                glUniform1f(uloc(p, "ws"), qkv.scale);
-                if (wr) { bind_tex(2, qkv.row_scale_tex); set_sampler(p, "WS", 2); }
-                setup_attrib(p);
-                glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
-            } else {
-                matvec_to(qkv, x, qkv_target_);
-            }
-        };
-        draw_qkv();
-        if (attn_dup("qkv")) draw_qkv();
+        att_qkv_draw(qkv, x);
+        if (attn_dup("qkv")) att_qkv_draw(qkv, x);
         att_finish();
         lap("qkv");
         // QKV_DUMP: exact per-row q16 values of the matvec output, layout-agnostic
@@ -418,3 +419,114 @@ void GPU::kv_rope_write(int layer, int pos){
         glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         att_finish();
     }
+
+// ---- Prefill query batching (PREFILL_BATCH) --------------------------------
+// Phase 1 stages each position's rotated Q into row b of qrot_batch_ and its
+// K/V into the cache (att_qkv_draw + kv_rope_write, the serial draws).  Phase 2
+// scores the whole group in ONE draw: the grid is seq/2 x heads*n, row r =
+// h*n + b, and adjacent rows of a head share its K slice -- the 2x2 fragment
+// quads coalesce their KV fetches, which is the measured win (att_out_probe:
+// qN_serial 5.3 ns/MAC against q1's 15.8, same per-fragment arithmetic).  Phase
+// 3 runs stats and v per position against the batched score rows; the residual
+// chain (wo, FFN) stays serial in Session::step_group.
+
+void GPU::att_stage(const Mat& qkv, GLuint x, int layer, int pos, int b, int n){
+        att_qkv_draw(qkv, x);
+        att_finish();
+        if (att_kv_vstep_) kv_vscale(layer, pos);
+        kv_rope_write(layer, pos);
+        att_qrot_stage(layer, pos, b, n);
+}
+
+void GPU::att_qrot_stage(int layer, int pos, int b, int n){
+        if (qrot_batch_.tex == 0 || qrot_batch_.w != att_dim_ / 2 || qrot_batch_.h != n)
+            qrot_batch_ = make_target(att_dim_ / 2, n);
+        if (att_qk_norm_) {
+            if (qscale_target_.tex == 0 || qscale_target_.w != att_heads_)
+                qscale_target_ = make_target(att_heads_, 1);
+            GLuint pq = x_qnorm();
+            bind_fbo(qscale_target_.fbo);
+            glViewport(0, 0, att_heads_, 1);
+            use_program(pq);
+            bind_tex(0, qkv_target_.tex);
+            set_sampler(pq, "R", 0);
+            setup_attrib(pq);
+            glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+            att_finish();
+        }
+        GLuint pr = x_qrot();
+        bind_fbo(qrot_batch_.fbo);
+        // The qrot kernel reads gl_FragCoord.x only, so rendering at y = b
+        // stages row b with the serial text unchanged.
+        glViewport(0, b, att_dim_ / 2, 1);
+        use_program(pr);
+        bind_tex(0, qkv_target_.tex);
+        set_sampler(pr, "R", 0);
+        bind_tex(1, rope_tex_);
+        set_sampler(pr, "RT", 1);
+        if (att_qk_norm_) {
+            bind_tex(2, q_norm_tex_[layer]);
+            set_sampler(pr, "QN", 2);
+            bind_tex(3, qscale_target_.tex);
+            set_sampler(pr, "QS", 3);
+        }
+        glUniform1f(uloc(pr, "pos"), (float)pos);
+        setup_attrib(pr);
+        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+        att_finish();
+}
+
+void GPU::att_scores_batch(int layer, int pos0, int n){
+        if (scores_batch_.tex == 0 || scores_batch_.w != att_seq_ / 2 ||
+            scores_batch_.h != att_heads_ * n)
+            scores_batch_ = make_target(att_seq_ / 2, att_heads_ * n);
+        GLuint p = x_score_batch(n);
+        bind_fbo(scores_batch_.fbo);
+        glViewport(0, 0, att_seq_ / 2, att_heads_ * n);
+        use_program(p);
+        bind_tex(0, qrot_batch_.tex);
+        set_sampler(p, "Q", 0);
+        bind_tex(1, kv_cache_[layer].tex);
+        set_sampler(p, "KV", 1);
+        glUniform1f(uloc(p, "pos"), (float)pos0);
+        glUniform1f(uloc(p, "invsqrt"), 1.0f / sqrtf((float)att_head_dim_));
+        setup_attrib(p);
+        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+        att_finish();
+}
+
+void GPU::att_stats_row(int pos, int b, int n){
+        GLuint p = x_stats_row(n);
+        bind_fbo(att_stats_.fbo);
+        glViewport(0, 0, att_heads_, 1);
+        use_program(p);
+        bind_tex(0, scores_batch_.tex);
+        set_sampler(p, "S", 0);
+        glUniform1f(uloc(p, "pos"), (float)pos);
+        glUniform1f(uloc(p, "qrow0"), (float)b);
+        setup_attrib(p);
+        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+        att_finish();
+}
+
+void GPU::att_v_row(int layer, int pos, int b, int n){
+        GLuint p = x_v_row(n);
+        bind_fbo(att_out_.fbo);
+        glViewport(0, 0, att_out_.w, 1);
+        use_program(p);
+        bind_tex(0, scores_batch_.tex);
+        set_sampler(p, "S", 0);
+        bind_tex(2, att_stats_.tex);
+        set_sampler(p, "ST", 2);
+        bind_tex(1, kv_cache_[layer].tex);
+        set_sampler(p, "KV", 1);
+        if (att_kv_vstep_) {
+            bind_tex(3, vs_targets_[layer].tex);
+            set_sampler(p, "VS", 3);
+        }
+        glUniform1f(uloc(p, "pos"), (float)pos);
+        glUniform1f(uloc(p, "qrow0"), (float)b);
+        setup_attrib(p);
+        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+        att_finish();
+}

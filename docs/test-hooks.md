@@ -51,7 +51,7 @@ The rows below are the registry, one per switch, grouped by the axis they move.
 diagnostic or a pricing arm; `retired` is gone (`--dump-switches` prints the
 same table with what *this* environment resolved to).
 
-140 switches: 28 permanent, 98 probe, 14 retired; 16 legacy spellings are translated.
+141 switches: 28 permanent, 99 probe, 14 retired; 16 legacy spellings are translated.
 
 ### The activation streams
 
@@ -209,6 +209,7 @@ same table with what *this* environment resolved to).
 |---|---|---|
 | `PREFILL_PAIR` | value | the two-position prefill pair (on by default); PREFILL_PAIR=0 disables it |
 | `PAIR_WROW` | value | keep the single-position prefill for a model with per-row scale planes |
+| `PREFILL_BATCH` | `0..16` | fuse N positions' attention score passes into one draw (0 = off); the residual chain stays serial |
 | `PREFILL_REPEAT` | value | replay the prefill n times, for timing |
 
 ### Loading, memory and the container
@@ -494,6 +495,14 @@ conclusion from its output.
 - `PREFILL_PAIR=0` — disable the two-position prefill pair (the default since
   step 5 of the prefill-batching work).  `diff_paths.sh` sets it so both paths
   step every position through the same code.
+
+- `PREFILL_BATCH=n` — prefill query batching: n positions' attention score
+  passes share one draw (grid `seq/2 x heads*n`), while stats/v read the
+  batched score rows and the residual chain (wo, FFN) stays serial per
+  position.  Format agnostic — no weight kernel changes — and byte-identical
+  to the serial loop (every kernel is the serial text with the row
+  substituted).  `PREFILL_BATCH=0` (the default) keeps the serial/pair loop;
+  the A/B runs inside one binary.  See [`prefill-batching.md`](prefill-batching.md).
 
 - `PAIR_WROW=0` — keep the single-position prefill path for a model with
   per-row q8 scale planes.  The pair kernels have wrow variants and are on by

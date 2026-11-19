@@ -796,6 +796,24 @@ GLuint GPU::x_score(){ return x_prog("xsc", att_score(att_cfg())); }
 
 GLuint GPU::x_stats(){ return x_prog("xst", ::att_stats(att_cfg())); }
 
+// The qbatch variants bake n into the shader text (QB) and take the position's
+// row offset qrow0 as a uniform; the serial getters above stay qbatch = 1.
+GLuint GPU::x_score_batch(int n){
+        AttnConfig c = att_cfg(); c.qbatch = n;
+        return x_prog("xscb_" + to_string(n), att_score(c));
+}
+
+GLuint GPU::x_stats_row(int n){
+        AttnConfig c = att_cfg(); c.qbatch = n;
+        return x_prog("xstr_" + to_string(n), ::att_stats(c));
+}
+
+GLuint GPU::x_v_row(int n){
+        AttnConfig c = att_cfg(); c.qbatch = n;
+        return x_prog("xvr_" + to_string(n) + "_" + x_format_name(act_fmt_),
+                      ::att_v(c, act_fmt_));
+}
+
 GLuint GPU::x_prob(){ return x_prog("xpr", att_prob(att_cfg())); }
 
 GLuint GPU::x_top2_fast(int rows, int chunk){
