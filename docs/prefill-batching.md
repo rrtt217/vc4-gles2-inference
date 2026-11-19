@@ -112,6 +112,34 @@ serial t3 FFN -- the pair chunk's first call reallocated its two-row target
 between the two row draws, dropping the gate row; fixed in `gpu_ffn.cpp`
 (`ffn_t3_pair_chunk`), which moved the serial t3 PPL 41.3734 -> 35.6726.
 
+On the Pi Zero (2026-11-20, same container and prompt) `LOGITS_OUT` is
+byte-identical between `PREFILL_BATCH=0` and `8`, and the SEQ=256 PPL is
+34.1065 on both arms (the board's container is a different pack one corpus
+token apart from the laptop's, so the two machines' PPLs are not comparable
+to each other; each is comparable to its own history).
+
+## What it buys on the board
+
+Warm prefill (`PREFILL_REPEAT`, the cold pass discarded; completion mode,
+t3 container, `GPU_LAYER=1 KV=q16 RMS_STORE=f32`, Pi Zero, 2026-11-20):
+
+| prompt | serial | batch 8 | delta |
+|---|---:|---:|---:|
+| ~18 tokens | 24.85 s | 24.38 s | -1.9% |
+| ~150 tokens | 201.7 s | 199.7 s | -1.0% |
+
+**Below the board's 2% resolution** (`fb48114`), so the default stays 0.
+The mechanism is real in isolation -- at the engine's own SEQ=1024 shape the
+probe still prices the fused score set at 44.7 ms against 131.0 ms serial
+(2.9x) -- but the score pass is a small fraction of a position at these
+prompt lengths (2.0 ms of the ~16 ms attention block at pos <= 22,
+`PROFATT`), most of its grid is causal-masked early-exits, and the batched
+stats/v passes read a score texture N times as tall.  The path is accepted
+and available for workloads where the score fraction grows (long context,
+many heads); enabling it there is a measurement decision, not a correctness
+one.  Fusing stats and v into the same draw is the remaining lever, and the
+fraction arithmetic above is the reason it has not been spent.
+
 ## Measuring before building
 
 `LAYER_PROFILE` gives the per-phase split and `DRAWCOUNT` the launches;

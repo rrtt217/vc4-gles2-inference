@@ -98,7 +98,9 @@ units instead of 802.
 
 Iris Xe, `RMS_STORE=f32`, greedy, 2026-11-19 (the two containers re-measured
 after the t3 kernel work moved them; the cross-model tables are in
-[`evaluation.md`](evaluation.md)):
+[`evaluation.md`](evaluation.md)).  The t3 cells were measured before the
+layer-0 FFN gate-row fix (`4c5b189`, 2026-11-20); the q8 cells are unaffected
+by it.
 
 | | |
 |---|---|
@@ -109,7 +111,7 @@ after the t3 kernel work moved them; the cross-model tables are in
 | translation, 30 sentences (`eval_translate.py`, greedy) | q8 chrF **0.495** (zh→en 0.511, en→zh 0.479), t3 0.468 (0.521, 0.415); exact 0.100 against 0.067, and t3 leaks the source script less (0.007 against 0.035 of characters) |
 | same battery, for scale | pocket qat 0.480, LFM2.5-230M 0.380, MiniMind3 q8 0.220 |
 | `--ppl` on `engine/data/ppl_test.txt`, SEQ=768 | 35.5598 (nll 3.5712, 247 tokens; 2026-11-19, both the on-disk container and a fresh pack of the recipe) |
-| `--ppl`, SEQ=256 (a short span) | 41.3734 on Xe against 41.4572 on the Pi Zero — 0.20% apart, which is the cross-machine agreement this path has |
+| `--ppl`, SEQ=256 (a short span) | **35.6726** on Xe (247 tokens) against **34.1065** on the Pi Zero (246 tokens), 2026-11-20 after the gate-row fix (`4c5b189`); the two machines' containers are different packs one corpus token apart, so each number is comparable to its own history (41.3734 / 41.4572 before the fix), not to the other machine's |
 | logits vs the float32 numpy forward (`models/bitcpm-0.5b/probe_forward.py`) | KL 0.018 nats, top-20 19/20, entropy 1.546 vs 1.512 |
 | per-token nll on a 667-token mixed text, 4 positions | mean 3.107 against 3.024 |
 
@@ -159,16 +161,17 @@ python3 engine/tools/mmcf_pack.py --in models/bitcpm-0.5b --quant t3 --seq 1024 
 ```
 
 `models/bitcpm-0.5b/bitcpm-0.5b.t3.mmcf` is 167.5 MB against the q8 container's
-435.4 MB.  **The body is equivalent; the 2-bit kernel is not free.**  Expanded
+435.4 MB.  **The body is equivalent, and so is the kernel.**  Expanded
 back to the q8 levels it stands for (`T3_EXPAND=1`, the packer's acceptance route
 and the oracle the kernels are diffed against) the same file scores **35.6132**
-where the q8 container scores 35.5598, so the ternary weights lose nothing.  The
-2-bit matvec path itself measures **38.1541**, i.e. **+0.070 nats/token**; the
-2026-11-18 reading through that path was 35.6726, so the t3 work of 2026-11-19
-(the column-major body, the pair output, the FFN gate pair) now costs 7% of PPL
-for 1.7x the speed (2224 -> 1323 ms/token), and the two have not been separated
-yet.  The chat answer stays fluent and `fmt` stays 1.000 on a 10-item
-multiple-choice slice.
+where the q8 container scores 35.5598, so the ternary weights lose nothing.
+The 2-bit matvec path itself measures **35.6726** (SEQ=768, 247 tokens,
+2026-11-20) -- +0.0015 nats/token over the expansion, 0.17%.  Before the
+layer-0 FFN gate-row fix (`4c5b189`, 2026-11-20) the same path measured
+38.1541, and the 7% gap that reading implied was the uninitialized gate row,
+not the format: the fix allocates the pair chunk's two-row target before the
+first draw instead of reallocating it between the two row draws.  The chat
+answer stays fluent and `fmt` stays 1.000 on a 10-item multiple-choice slice.
 
 The **2-bit matvec runs on both machines** -- 24 layers, `GPU_LAYER=1`, the
 same answer from Xe and from the board:
