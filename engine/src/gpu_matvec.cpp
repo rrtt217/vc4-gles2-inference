@@ -237,8 +237,14 @@ void GPU::matvec_add(const Mat& m, GLuint x, GLuint residual, Target& out, XForm
         // A t3 matrix must write the layout `res_pack_` says the reader expects:
         // the packed pair when the residual is two values a texel (VC4's I16_2),
         // the single value otherwise.
+        // `xf` is the *activation* format (the X texture); the residual is
+        // always res_fmt_.  Passing xf here decodes R with the wrong layout --
+        // the q8 selectors read res_fmt_ themselves, which is why they never had
+        // this bug.  Measured: every odd row gained exactly 255/256 and the reply
+        // collapsed to one token.
         GLuint p = m.type == WeightType::T3
-                       ? (res_pack_ ? x_t3_add_pair(m, xf, wr) : x_t3_add(m, xf, wr))
+                       ? (res_pack_ ? x_t3_add_pair(m, res_fmt_, wr)
+                                    : x_t3_add(m, res_fmt_, wr))
                   : pair4 ? x_i4_add_pair(m.rows, m.cols, xf, m.fmt4)
                   : pair ? x_q8_add_pair(m.rows, m.cols, xf, wr)
                   : (m.type == WeightType::INT8) ? x_q8_add(m.rows, m.cols, xf, wr)

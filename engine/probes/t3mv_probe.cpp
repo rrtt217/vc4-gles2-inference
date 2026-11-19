@@ -97,7 +97,7 @@ static GLuint compile(GLenum t, const string& src, string& log) {
 
 int main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
-    int rows = 1024, cols = 1024, iters = 20, tile = 0, x4 = 0;
+    int rows = 1024, cols = 1024, iters = 20, tile = 0, x4 = 0, strip = 0;
     const char* only = nullptr;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--rows") && i + 1 < argc) rows = atoi(argv[++i]);
@@ -106,6 +106,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--variant") && i + 1 < argc) only = argv[++i];
         else if (!strcmp(argv[i], "--tile") && i + 1 < argc) tile = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--x4")) x4 = 1;
+        else if (!strcmp(argv[i], "--strip") && i + 1 < argc) strip = atoi(argv[++i]);
         else {
             printf("usage: %s [--rows N] [--cols M] [--iters K] [--variant NAME]\n", argv[0]);
             return 2;
@@ -416,16 +417,30 @@ int main(int argc, char** argv) {
             glUniform1f(glGetUniformLocation(p, "ws"), 3.0f);   // the unit
         }
         glActiveTexture(GL_TEXTURE0);
-        glViewport(0, 0, rows, 1);
         glClearColor(0, 0, 0, 0);
         glClear(GL_COLOR_BUFFER_BIT);
         glEnableVertexAttribArray(0);
         glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
-
-        glDrawArrays(GL_TRIANGLES, 0, 3);                 // warm-up, discarded
+        // --strip N draws in N-row viewport chunks, the shape the engine's
+        // kDrawCap forces on the board (a 1280- or 1536-row target is two
+        // draws).  gl_FragCoord.x stays absolute, so the arithmetic is the
+        // same either way -- if the numbers change, the cause is the driver.
+        auto draw_all = [&]() {
+            if (strip <= 0) {
+                glViewport(0, 0, rows, 1);
+                glDrawArrays(GL_TRIANGLES, 0, 3);
+                return;
+            }
+            for (int x0 = 0; x0 < rows; x0 += strip) {
+                const int w = (rows - x0 < strip) ? rows - x0 : strip;
+                glViewport(x0, 0, w, 1);
+                glDrawArrays(GL_TRIANGLES, 0, 3);
+            }
+        };
+        draw_all();                                        // warm-up, discarded
         glFinish();
         const auto t0 = std::chrono::steady_clock::now();
-        for (int k = 0; k < iters; k++) glDrawArrays(GL_TRIANGLES, 0, 3);
+        for (int k = 0; k < iters; k++) draw_all();
         glFinish();
         const double ms = std::chrono::duration<double, std::milli>(
                               std::chrono::steady_clock::now() - t0).count() / iters;
