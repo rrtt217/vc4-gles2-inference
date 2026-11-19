@@ -1888,29 +1888,31 @@ string swiglu_2row(int hidden, XFormat out, int hs) {
 // 2t+1.  This is the FFN gate's shape when the weights are 2-bit: one texel
 // carries both column groups of one row, so a pair kernel writes adjacent rows
 // of *one* matrix and the two matrices are two rows of the buffer.
+// swiglu over the two rows of a buffer that holds **q16 pairs** (x_st2q): row 0
+// is the gate, row 1 the up projection, and texel t of each holds rows 2t and
+// 2t+1.  This is the FFN gate's shape when the weights are 2-bit: one texel
+// carries both column groups of one row, so a pair kernel writes adjacent rows
+// of *one* matrix and the two matrices are two rows of the buffer.
 string swiglu_pair2row(int hidden, XFormat out, int hs) {
     need_dim("swiglu_pair2row", hidden);
     const string NP = to_string((hidden + 1) / 2);
     const string HD = hid_scale_def(hs), HM = hid_scale_mul(hs);
-    // The pair decode, spelled once: a texel is (row 2t, row 2t+1).
     const string rd = "float i16(vec2 c){float u=c.x*65280.0+c.y*255.0;"
                       "if(u>=32767.5)u-=65536.0;return u/256.0;}";
-    // No bitwise test: `(i & 1)` needs ESSL 3.00, and this kernel has no other
-    // reason to (the pair decode is float arithmetic).  mix() with a 0/1 weight
-    // picks the half of the texel the row owns.
-    const string read =
+    // One texel is two rows, so a fragment reads each texture once and gets both
+    // halves: no parity test (which would need ESSL 3.00 bitwise ops), no mix(),
+    // and two fetches where reading the rows one at a time took four.
+    const string body =
         "uniform sampler2D A;"
-        "float yat(int i){float t=floor(float(i)*0.5);float h=float(i)-2.0*t;"
-        "vec4 ca=texture2D(A,vec2((t+0.5)/float(" + NP + "),0.25));"
-        "vec4 cb=texture2D(A,vec2((t+0.5)/float(" + NP + "),0.75));"
-        "float a=mix(i16(ca.ba),i16(ca.rg),1.0-h);"
-        "float b=mix(i16(cb.ba),i16(cb.rg),1.0-h);"
-        "return (a/(1.0+" + EXP("-a") + "))*b;}";
-    // Two hidden values a fragment, the same x_st2 the q24 reader writes, so w2
-    // sees exactly the layout it already reads.
-    const string body = "void main(){int t=int(gl_FragCoord.x);int i0=2*t;"
-                        "gl_FragColor=x_st2(yat(i0)" + HM + ",yat(i0+1)" + HM + ");}";
-    return head(XFormat::I16_2) + HD + rd + read + body;
+        "void main(){int t=int(gl_FragCoord.x);"
+        "vec4 ca=texture2D(A,vec2((float(t)+0.5)/float(" + NP + "),0.25));"
+        "vec4 cb=texture2D(A,vec2((float(t)+0.5)/float(" + NP + "),0.75));"
+        "float g0=i16(ca.rg),g1=i16(ca.ba);"
+        "float u0=i16(cb.rg),u1=i16(cb.ba);"
+        "float y0=(g0/(1.0+" + EXP("-g0") + "))*u0;"
+        "float y1=(g1/(1.0+" + EXP("-g1") + "))*u1;"
+        "gl_FragColor=x_st2(y0" + HM + ",y1" + HM + ");}";
+    return head(XFormat::I16_2) + HD + rd + body;
 }
 
 string swiglu(int hidden, bool fused, XFormat out, int hs) {
