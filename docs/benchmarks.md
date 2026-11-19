@@ -8173,6 +8173,8 @@ checkpoint, `models/bitcpm-0.5b/probe_forward.py`):
 |---|---|
 | `bench_mc.py`, 100 items | **acc 0.690**, acc_cal 0.660, fmt 0.690, p_gold 0.637 (null 0.253) |
 | the same on the t3 container, re-run on the current kernels | acc 0.710, acc_cal 0.690, fmt 0.760, p_gold 0.657 (null 0.252); 2843 ms an item against q8's 4077 |
+| IFEval, 24 cases x 3 seeds, greedy | q8 pass **0.500**, t3 0.417; the failed-check lists coincide except `json_keys` |
+| translation, 30 sentences, greedy | q8 chrF **0.495**, t3 0.479; t3 leaks the source language less (0.01 against 0.03) |
 | for scale | pocket qat 0.480, LFM2.5-230M 0.380, MiniMind3 q8 0.220 |
 | decode, `--gen 64`, three runs | 46.3 / 53.8 / 52.5 ms/token (median **52.5**) |
 | prefill, 34-token prompt | 0.92 / 0.96 / 1.17 s |

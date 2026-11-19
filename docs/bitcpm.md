@@ -102,11 +102,20 @@ Iris Xe, 2026-11-18, `RMS_STORE=f32`, greedy:
 | multiple choice, 100 items (`engine/eval/bench_mc.py`) | **acc 0.690**, acc_cal 0.660, fmt 0.690, p_gold 0.637 (null 0.253) |
 | the same battery on the **t3 container** | acc 0.710, acc_cal 0.690, fmt 0.760, p_gold 0.657 (null 0.252) — the two agree within one null sd (0.04) |
 | the same two, for the cost | 4077 ms an item at q8 against 2843 at t3 (Xe is bandwidth-bound here) |
+| instruction following, 24 cases x 3 seeds (`eval_ifeval.py`, greedy) | q8 pass **0.500**, t3 pass 0.417 — the failed checks are the same list on both (`bullets 6`, `json_valid 6`, `max_chars 6`, `max_words 9`), and only `json_keys` differs (6 against 3), i.e. one case |
+| translation, 30 sentences (`eval_translate.py`, greedy) | q8 chrF **0.495**, t3 0.479 (exact 0.100 against 0.067); t3 leaks the source language less (0.01 against 0.03) and the two directions trade places |
 | same battery, for scale | pocket qat 0.480, LFM2.5-230M 0.380, MiniMind3 q8 0.220 |
 | `--ppl` on `engine/data/ppl_test.txt`, SEQ=768 | 36.0302 (nll 3.5844, 247 tokens) |
 | `--ppl`, SEQ=256 (a short span) | 41.3734 on Xe against 41.4572 on the Pi Zero — 0.20% apart, which is the cross-machine agreement this path has |
 | logits vs the float32 numpy forward (`models/bitcpm-0.5b/probe_forward.py`) | KL 0.018 nats, top-20 19/20, entropy 1.546 vs 1.512 |
 | per-token nll on a 667-token mixed text, 4 positions | mean 3.107 against 3.024 |
+
+Instruction following and translation separate the two containers no better than
+the multiple-choice battery does: with 72 attempts (sd about 0.06) and 30
+sentences, every gap sits inside one or two standard deviations, and the *sets* of
+failed instructions coincide.  Read these as "the two bodies are the same model",
+not as a ranking.  The absolute level is the 0.5B ternary model's own: about half
+the format instructions fail and chrF is 0.48.
 
 The multiple-choice battery was re-run after the 2-bit body changed from the
 row-major reading to the column-major one: q8 reproduced its four figures exactly
