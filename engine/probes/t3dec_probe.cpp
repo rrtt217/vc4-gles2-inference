@@ -210,6 +210,7 @@ int main(int argc, char** argv) {
         {"sb_unroll (no loop)", dec_sb_unroll, false},
         {"sb_trunc (no floor)", dec_sb_trunc, false},
         {"wide (16 a row)", dec_hoist, true},
+        {"sb_wide (2row+signbit)", dec_sb_trunc, true},
     };
     printf("\n%-22s %9s %10s %8s\n", "variant", "ms/draw", "ns/MAC", "check");
     for (const V& v : VS) {
