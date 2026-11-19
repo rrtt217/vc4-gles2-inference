@@ -255,7 +255,7 @@ wrote bitcpm.tok: vocab=73448 merges=57977 maxlen=48 added=8 (sentencepiece)
   但会掉质量）；这里 q8 只是把 {−1,0,1} 原样存下来。
 - **q4 的代价全部落在 0 上**：37% 的精确 0 变成 ±s/15 的噪声，相当于给每个零加了一个
   ~4% 行幅值的扰动。这对 PPL 有多大影响**必须实测**（本仓库的 q4 PPL 是格式 pin，见
-  `docs/benchmarks.md` 的 2026-11-15 条目），不能假设"三值模型 q4 也没事"。
+  `docs/benchmarks.md`），不能假设"三值模型 q4 也没事"。
 - 因此真正合适的表示是**新的 2-bit 三值种类**：0.25 B/参数、精确、并且 matvec 的纹理读取
   量是 q8 的 1/4、q4 的 1/2。这不是优化，它是这个模型在 Pi 上**能不能放下**的分界线（3.3）。
 
@@ -441,7 +441,7 @@ cd models/bitcpm-0.5b && python3 probe_forward.py --measure --prompt "The Transf
 
 `engine/probes/t3mv_probe` 把引擎的 q8 matvec 主体和"一个 texel 装 16 个三值权重"的
 同一段循环放在一起量，三个写法（ES2 浮点 `mod`/`floor`、ES3 整数移位、以及把解包去掉的
-取纹理对照），每个先与 CPU 点积对拍再计时（`docs/benchmarks.md` 2026-11-18）：
+取纹理对照），每个先与 CPU 点积对拍再计时（`docs/benchmarks.md`）：
 
 | ns/MAC | q8 | ES2 浮点 | ES3 整数 | 只取纹理 |
 |---|---:|---:|---:|---:|

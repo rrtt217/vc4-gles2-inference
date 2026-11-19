@@ -377,7 +377,7 @@ template, key 8 bos 0 / eos 261 / stop 261, key 17 logit_shift 2, seq 512).
 The layer loop's faithfulness is verified separately (engine ↔ oracle-on-
 container-weights cos 0.9976–0.9990 across four prompts, top-1 4/4; the R-1
 residual-grid PPL study and the Xe pins are in
-[benchmarks.md](benchmarks.md)'s 2026-11-16 sections) — the numbers below
+[benchmarks.md](benchmarks.md)) — the numbers below
 measure the model, not the engine.
 
 **Protocol — three things differ from the 2026-11-12 rows, all deliberate:**

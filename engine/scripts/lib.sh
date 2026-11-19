@@ -14,7 +14,7 @@
 #
 # Every value is overridable from the environment, and every function keeps the
 # behaviour the scripts had, because these numbers are cited in docs/benchmarks.md
-# and an accidental change of protocol would invalidate the history.
+# and an accidental change of protocol would invalidate every row in it.
 
 # --- where we are -------------------------------------------------------
 # $0 is the *caller* (scripts/*.sh), which is the documented way to run them:

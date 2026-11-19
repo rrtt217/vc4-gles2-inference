@@ -236,7 +236,7 @@ Still open, in order of what a reader would want next:
   fits the 320 MB CMA.  What is open is its *numerics* there: logits 3.49 from
   the float32 reference against Xe's 1.08, PPL 14.29 against 7.72, `17*4 = 220`
   against 68, and the format axes are excluded because widening them makes the
-  board worse.  See `docs/benchmarks.md` (2026-11-18); the lead is
+  board worse.  See `docs/benchmarks.md`; the lead is
   `MATVEC_STRIP`, which is a no-op on Xe and moves this model's board logits by
   12.7 while leaving MiniMind3 identical.
 - `-Instruct` is the same weights with the same template; no separate container.

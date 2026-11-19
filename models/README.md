@@ -60,7 +60,7 @@ models/
                                  (float32 numpy reference 14.71), so it is
                                  within 9% of the reference.
                                  Pi Zero: dedup 1133 ms/token, q6 1371 ms, both
-                                 run (docs/benchmarks.md, 2026-11-11); those
+                                 run (docs/benchmarks.md); those
                                  timings stand, the PPL that chose qad over
                                  base does not -- re-measure before trusting
                                  the container choice.

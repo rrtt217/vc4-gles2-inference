@@ -383,7 +383,7 @@ conclusion from its output.
   two small 16-bound reduce passes; one texel per tile read back) instead of
   reading the whole vocabulary back.  **Opt-in: measured a net loss on VC4**
   (the read-back is ~6 ms a token on the hybrid, the reduction ~14 ms; see
-  `docs/benchmarks.md`, 2026-11-15), kept as a byte-identical measurement
+  `docs/benchmarks.md`), kept as a byte-identical measurement
   arm.  The reduction compares the exact stored integers and keeps the first
   maximum at every level, which is `std::max_element`'s tie rule, so the
   winner is byte-identical to the read-back.  Only greedy turns without

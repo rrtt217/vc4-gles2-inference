@@ -167,6 +167,6 @@ The Pi was tested with the q4-capable engine and `minimind3.q4`:
 - q4 decode: ~0.77 s/token vs ~0.50 s/token for q8 (optimized q4 shader);
 - q8 KV output drifts from q16 at longer generations.
 
-Full numbers and caveats: [benchmarks.md](benchmarks.md#pi-zero-minimind3-kv-and-q4-validation).
+Full numbers and caveats: [benchmarks.md](benchmarks.md#pi-zero-decode).
 
 

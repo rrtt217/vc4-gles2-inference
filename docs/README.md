@@ -20,7 +20,7 @@ Deep dives:
 | [engine-layout.md](engine-layout.md) | source layout, X formats, regression rule |
 | [cross-build.md](cross-build.md) | **how to build for the Pi Zero**: the ARMv6 toolchain and sysroot recipe, why a missing `-B` fails silently, and how the build verifies the artifact |
 | [quantization.md](quantization.md) | q4/q6 experiments, offline Q4M1, packed KV, quality caveats |
-| [benchmarks.md](benchmarks.md) | Pi/laptop timing tables, the chronological lab notebook, regression baselines |
+| [benchmarks.md](benchmarks.md) | **Timings and model-quality numbers**, the protocol that produced them, and the conditions each row needs — a reference table, not a log |
 | [swap-drift.md](swap-drift.md) | `/model` has been wrong twice: what a swap owns, and the order of evidence that found it |
 | [long-context.md](long-context.md) | why the Pi stops at 2048 tokens, and what passing it would cost |
 | [vc4-glsl-costs.md](vc4-glsl-costs.md) | what each GLSL function costs on VC4, read from Mesa 26.2.2 — and the six that abort the process |
@@ -49,10 +49,10 @@ Conventions:
 
 - Numbers are measured on the machine named in the section; they are not
   promises for every Pi or driver.
-- `benchmarks.md` is chronological.  The **newest dated campaign near the
-  bottom** is the current matrix (with a documentation addendum after it); the
-  table near the top is the 2026-11-02 history, kept so the cost model stays
-  auditable.
+- `benchmarks.md` is a **reference table, not a log**: a new measurement
+  replaces the row it supersedes and names its commit, and the record of how it
+  moved is Git.  The 120 dated sections it used to carry are at
+  `git show e7a36ec^:docs/performance.md`.  Do not append to it.
 - The Pi and laptop do **not** produce byte-identical KV caches. Build a disk
   cache on the machine that will load it.
 - `CmaFree` is actual CMA occupancy; reducing `gpu_mem` or `cma` does not

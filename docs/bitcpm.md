@@ -88,7 +88,7 @@ rms_final         x (dim_model_base/hidden) / (k*scale_emb)  = x 0.25
 0.02, five steps of the store -- the logits come out as noise).  Measured
 against a float32 forward of the same checkpoint: cosine 0.885 with `k = 1`,
 0.9868 with `k = 1/scale_emb`, and the folded model against the unfolded one
-1.000000 (`docs/benchmarks.md`, 2026-11-18).
+1.000000 (`docs/benchmarks.md`).
 
 The fold is also what makes `RES=q16` enough: the residual peak is 41 in these
 units instead of 802.

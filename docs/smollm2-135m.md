@@ -10,7 +10,7 @@ machines**, for a reason that is still open.
 This page is the operational record: what the model is, which container exists,
 how to run it, what the numbers are on each machine, and what is still broken.
 The chronological measurements are in
-[`benchmarks.md`](benchmarks.md) (2026-11-18, Xe and Pi Zero).
+[`benchmarks.md`](benchmarks.md).
 
 ## The model
 

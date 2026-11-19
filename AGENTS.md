@@ -116,6 +116,13 @@ Build for the target and do not reuse a stale binary:
   be Raspbian; Debian's armhf is ARMv7).
 - Probes: `make -C engine -B probes/<name>[_pi]` — see the targets in
   `engine/Makefile`.
+- A native ARMv6 build on a Pi Zero takes about 8–10 minutes; never run two
+  builds concurrently.  Prefer the VLAB cross-build (see the VLAB override).
+- Timings: the reference campaign is 2026-11-13 on HEAD `71cb1e0` (Pi Zero,
+  `GPU_LAYER=1 KV=q16`, greedy, `--gen 16`, one discarded warm-up then three
+  timed runs, median).  [`docs/benchmarks.md`](docs/benchmarks.md) owns the
+  matrix, the protocol and each row's conditions; this file does not repeat
+  them.
 - Before pushing: `make -C engine check` — the no-GPU half in one command, and
   it is nine gates: `warncheck`, `docs_check.sh` (six sub-checks: the generated
   inventory, the switch registry, the doc style, the paths, the "gone" names and
@@ -136,49 +143,6 @@ Build for the target and do not reuse a stale binary:
 
 Do not use a short build timeout.  Machine-specific host/sysroot/deploy paths
 belong in `AGENTS.local.md` (DSH) or `AGENTS.override.md` (Hermes/VLAB).
-
-### Pi Zero reference (measured, not a target)
-
-**The current reference is the 2026-11-13 campaign on HEAD `71cb1e0`**: Pi Zero,
-`GPU_LAYER=1 KV=q16`, greedy, `--gen 16`, and per model a discarded warm-up
-followed by three timed runs (median).  Decode only; prefill is prompt-specific
-and moves with the board's SD card and background load.  The protocol, the
-prefill ranges and the rows that were not re-measured are in
-[`docs/benchmarks.md`](docs/benchmarks.md), which is the authority.
-
-| model | decode (2026-11-13) |
-|---|---:|
-| TinyChat15M q8 | 115.4 ms/token |
-| stories15M q8 | 116.2 ms/token |
-| MiniMind2 q8 | 123.5 ms/token |
-| minimind2 q4 | 153.7 ms/token |
-| stories42M q8 | 160.2 ms/token |
-| feng q8 | 192.1 ms/token |
-| feng q8r | 192.8 ms/token |
-| vertex15 q4 | 196.9 ms/token |
-| vertex35 q4 | 241.4 ms/token |
-| MiniMind3 q4 | 304.4 ms/token |
-| MiniMind3-MoE q4 (131 MB) | 322.0 ms/token |
-| MiniMind2 i16 | 216.0 ms/token |
-| vertex100 q4 | 487.0 ms/token |
-| void1 q4 | 554.8 ms/token |
-
-Ordered by speed.  **Not re-measured**: MiniMind3 q8, LFM2.5-230M q4,
-TinyBrainBot q4, picolm85 q4q24 and void1 q8r (their last numbers are in
-`docs/benchmarks.md` with their own dates), and MiniMind3-MoE q8 (203.5 MB does
-not fit the CMA).
-
-The i16 row used to be 41% slower than its 2026-11-02 number; a board bisect
-put that on `6234328`'s floor-based exact q16 decode (i16 has no paired kernel
-to amortise the decode).  The default decode now classifies the negative rail
-at 32767.5 and costs two multiplies, which is the row above; it reconstructs
-every q16 value on VC4 with a small error, so the board's q8 pin moved with it.
-`Q16_DECODE=exact` restores `6234328`'s decode and the older pins
-(i16 289.7 ms/token); `docs/benchmarks.md` has both tables and the
-TinyBrainBot cosine evidence.
-
-A native ARMv6 build on a Pi Zero takes about 8–10 minutes; never run two
-builds concurrently.  Prefer the VLAB cross-build (see the VLAB override).
 
 ### Switching models without restarting the engine
 
@@ -416,6 +380,11 @@ These were paid for; do not relearn them.
   pin.  Compare `STAGE_DUMP` hashes and PPL against the parent commit.
 - **A golden string is chaotic across GPUs and across reassociations.**  Pin it
   per machine, re-baseline deliberately, and let PPL decide.
+- **Decode is the reproducible number; prefill is not.**  Identical MiniMind3 q4
+  runs gave 16.0 and 35.9 s prefill (background load 0.9 against 2.4) while
+  decode stayed inside ±1%, because the board's SD card and the resident
+  `pumpkin` move prefill.  Quote prefill only with its run, and never compare it
+  across sessions.
 - **Never compare a Pi run with an Xe run**, and never compare PPL across
   different `SEQ` values.
 - **A window that starts mid-text is cold, and a cold window is not a
@@ -579,12 +548,34 @@ When a flag is removed, grep the whole tree for it: `--template` survived in
 five scripts and two READMEs after the engine dropped it, and `docs_check.sh`
 only catches the paths it knows about.
 
-`docs/benchmarks.md` is the Pi Zero decode matrix and its measurement protocol —
-a reference table, not a log.  New measurements **replace** the row they
-supersede and carry the commit that produced them; a run that overturns an older
-number replaces it, and the old value stays reachable through Git.  Do not append
-a dated section for each campaign: that is how a reference table becomes an
-archive.
+### Where numbers and history go
+
+Five kinds of content were once mixed in one dated file.  They have different
+homes, and the rule is by kind, not by recency:
+
+| content | home | what it looks like |
+|---|---|---|
+| a decode/PPL number that will be compared later | a row in `docs/benchmarks.md` | replaced when superseded, the commit named next to it |
+| a load-bearing constant or format (rms 2048 rail, `k = 1/scale_emb`) | the owning document's invariant **and** a comment at the definition in `engine/src` | one sentence, no history |
+| why a change was made, what it cost, what it broke | the commit message | as long as it needs to be |
+| an approach that was tried and rejected | the commit message; a document may also keep a bounded "rejected" list **per topic**, never per date | one line and the commit |
+| the sequence of a long investigation | commit messages, and `git log -S` / `git log --follow -- <path>` | not in a file |
+
+**A value that will be compared over time must be machine-readable.**  A prose
+table has to be re-typed to answer "did this move?", so a number that matters
+belongs in a form a script can read.  `engine/scripts/bench.sh` still prints only
+human-readable lines; until it grows a machine-readable mode, treat a new
+campaign as replacing the table row and record the raw runs in the commit
+message, not as another dated section.
+
+**Never reintroduce a dated log.**  A file that is appended to becomes an
+archive, and the archive buries the present state it was meant to serve.  If a
+fact is worth keeping, it is worth putting where a reader will look for it: the
+table, the invariant, or the commit.
+
+`docs/benchmarks.md` currently holds the distilled reference table plus the
+removed record's pointer (`git show e7a36ec^:docs/performance.md` has the 120
+dated sections verbatim).  Do not grow it back.
 
 ## Source split policy
 
