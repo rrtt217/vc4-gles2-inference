@@ -110,6 +110,12 @@ public:
     GLuint swiglu_2row(Target& src, int hidden, int hs = 0);
 
     GLuint swiglu_2row(Target& src, int hidden, Target& out, int hs = 0);
+    // The 2-bit FFN gate: `ab` holds the gate in row 0 and the up projection in
+    // row 1, each as q16 pairs (one texel = rows 2t, 2t+1).
+    GLuint swiglu_pair2row(Target& src, int hidden, Target& out, int hs = 0);
+    GLuint ffn_t3_pair_chunk(const Mat& w1, const Mat& w3, GLuint x, int hidden,
+                             Target& ab, Target& out, int hs = 0);
+    void matvec_pair_to_row(const Mat& m, GLuint x, Target& out, int row);
 
     GLuint swiglu_split(Target& a, Target& b);
 

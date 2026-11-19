@@ -120,6 +120,8 @@ std::string matvec_i4_add_pair_4x4(int rows, int cols, XFormat xf, XFormat rf,
 // programs are byte-identical.
 std::string swiglu_pair(int hidden, XFormat out, int hs = 0);
 std::string swiglu_2row(int hidden, XFormat out, int hs = 0);
+// the FFN gate when the weights are 2-bit: `A` is two rows of q16 pairs
+std::string swiglu_pair2row(int hidden, XFormat out, int hs = 0);
 // EXP=drv|poly: one switch for every exponential the shaders emit (the SiLU in
 // the FFN kernels, the sigmoid in the RWKV gate kernels, and the attention
 // weights).  See shaders.cpp for the evidence.

@@ -78,6 +78,15 @@ void GPU::ffn_split_chunked(const Mat& w1a, const Mat& w3a, const Mat& w1b, cons
         // The pair path's buffer is a q16 pair layout by construction; f32 and
         // bf16 both take the two-buffer path below (bf16 measured 60.93 against
         // 7148610 on pocket when it was let through, 2026-11-18).
+        // A 2-bit gate has its own pair form: adjacent *rows of one matrix* per
+        // texel rather than gate/up of one row, so it writes (gate, up) as two
+        // rows of `ab` and swiglu_pair2row reads them.
+        if (w1a.type == WeightType::T3 && w3a.type == WeightType::T3 &&
+            ffn_fmt_ == XFormat::I16_2) {
+                ha = ffn_t3_pair_chunk(w1a, w3a, x, n1, ffn_ab_a_, ffn_h_a_, hs);
+                hb = ffn_t3_pair_chunk(w1b, w3b, x, n2, ffn_ab_b_, ffn_h_b_, hs);
+                return;
+        }
         const bool pair = pair_env && ffn_fmt_ == XFormat::I16_2 &&
                           ((w1a.type == WeightType::INT8 && w3a.type == WeightType::INT8) ||
                            (w1a.type == WeightType::INT4 && w3a.type == WeightType::INT4));
@@ -298,6 +307,56 @@ GLuint GPU::ffn_pair_chunk(const Mat& w1, const Mat& w3, GLuint x, int hidden, T
         ffn_sync();
         return out.tex;
     }
+
+// ---- the 2-bit FFN gate: two rows of one matrix a fragment, gate and up as the
+// two rows of `ab`.  The pair kernel needs a viewport one texel row wide per
+// output row pair, so it cannot go through draw() (which counts matrix rows).
+void GPU::matvec_pair_to_row(const Mat& m, GLuint x, Target& out, int row){
+        const int tw = (m.rows + 1) / 2;
+        if (out.tex == 0 || out.w != tw || out.h <= row) out = make_target(tw, row + 1);
+        const bool wr = m.has_row_scale();
+        GLuint p = x_t3_pair(m, wr);
+        bind_fbo(out.fbo);
+        use_program(p);
+        bind_tex(0, m.tex); set_sampler(p, "W", 0);
+        bind_tex(1, x);     set_sampler(p, "X", 1);
+        // The pair kernel names its scale uniform "ws" and reads the row plane
+        // through wsr2() like every other wrow kernel.
+        glUniform1f(uloc(p, "ws"), m.scale);
+        if (wr) { bind_tex(3, m.row_scale_tex); set_sampler(p, "WS", 3); }
+        setup_attrib(p);
+        for (int x0 = 0; x0 < tw; x0 += kDrawCap) {
+                const int w = min(kDrawCap, tw - x0);
+                glViewport(x0, row, w, 1);
+                glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+        }
+        layer_finish("NF_MAT");
+}
+
+GLuint GPU::swiglu_pair2row(Target& src, int hidden, Target& out, int hs){
+        const int aw = x_texels(hidden, ffn_fmt_);
+        if (out.tex == 0 || out.w != aw) out = make_target(aw, 1);
+        GLuint p = x_prog("xswp2_" + to_string(hidden) + "_" + x_format_name(ffn_fmt_) +
+                          (hs ? "_h" + to_string(hs) : ""),
+                          ::swiglu_pair2row(hidden, ffn_fmt_, hs));
+        bind_fbo(out.fbo);
+        glViewport(0, 0, aw, 1);
+        use_program(p);
+        bind_tex(0, src.tex); set_sampler(p, "A", 0);
+        setup_attrib(p);
+        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+        if (ffn_flush_wanted(layer_fast_finish_)) glFlush();
+        else layer_finish("NF_FFN");
+        ffn_sync();
+        return out.tex;
+}
+
+GLuint GPU::ffn_t3_pair_chunk(const Mat& w1, const Mat& w3, GLuint x, int hidden,
+                              Target& ab, Target& out, int hs){
+        matvec_pair_to_row(w1, x, ab, 0);
+        matvec_pair_to_row(w3, x, ab, 1);
+        return swiglu_pair2row(ab, hidden, out, hs);
+}
 
 void GPU::layer_finish(const char* skip_env){
         bool skip = skip_env && getenv(skip_env);
