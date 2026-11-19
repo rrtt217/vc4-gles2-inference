@@ -313,6 +313,9 @@ GLuint GPU::ffn_pair_chunk(const Mat& w1, const Mat& w3, GLuint x, int hidden, T
 // output row pair, so it cannot go through draw() (which counts matrix rows).
 void GPU::matvec_pair_to_row(const Mat& m, GLuint x, Target& out, int row){
         const int tw = (m.rows + 1) / 2;
+        // NOTE: growing a target here REALLOCATES it -- a row already drawn
+        // into the old texture is lost.  Callers drawing more than one row
+        // must allocate the full height first (ffn_t3_pair_chunk does).
         if (out.tex == 0 || out.w != tw || out.h <= row) out = make_target(tw, row + 1);
         const bool wr = m.has_row_scale();
         GLuint p = x_t3_pair(m, wr);
@@ -353,6 +356,15 @@ GLuint GPU::swiglu_pair2row(Target& src, int hidden, Target& out, int hs){
 
 GLuint GPU::ffn_t3_pair_chunk(const Mat& w1, const Mat& w3, GLuint x, int hidden,
                               Target& ab, Target& out, int hs){
+        // Both rows must land in ONE texture.  matvec_pair_to_row grows a
+        // too-short target by REALLOCATION, which drops the row already drawn:
+        // the first call allocated height 1, the second (row 1) reallocated to
+        // height 2, and row 0 became whatever the driver put in the new memory.
+        // The serial path survived on allocator reuse; a different allocation
+        // history (the prefill group's staged targets) exposed it as a layer-0
+        // FFN drift.  Allocate the full pair height up front.
+        const int tw = (w1.rows + 1) / 2;
+        if (ab.tex == 0 || ab.w != tw || ab.h < 2) ab = make_target(tw, 2);
         matvec_pair_to_row(w1, x, ab, 0);
         matvec_pair_to_row(w3, x, ab, 1);
         return swiglu_pair2row(ab, hidden, out, hs);
