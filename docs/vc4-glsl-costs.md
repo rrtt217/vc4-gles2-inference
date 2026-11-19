@@ -161,6 +161,16 @@ reachable through `packHalf2x16`; it is not.
   the integer domain.  Two more dead micro-opts measured there: omitting the
   sign's `&1` before `<<31` is free but the compiler already does it (no gain),
   and zeroing by masking the float bits (`& (0-mag)`) is +4% vs ITOF+fmul.
+- **"Compute without decoding" (T-MAC's LUT) is 2.4x SLOWER on VC4.**  A
+  per-group activation LUT in a texture, indexed by the weight code, replaces
+  the decode with a table fetch -- but the packed t3 format's advantage is
+  1 weight fetch per 16 weights, and the LUT adds 4 random-access fetches per
+  16 weights (5x traffic).  `probes/t3lut_probe`: 5.63 vs 2.33 ns/MAC at
+  1024x1024.  The TMU cannot sustain the random access; on Xe (fast texture,
+  big cache) the LUT wins, which is why T-MAC is CPU-only.  The decode is the
+  irreducible cost of reading a packed format on hardware with no unpack/dot
+  instruction: extracting the weight information costs either ALU (decode,
+  cheap) or fetches (LUT, expensive here).
 - Anything that needs half precision must be assembled by hand from float
   operations; there is no `packHalf2x16`, and there are no half-float textures
   either (`OES_texture_half_float` is not exposed).
