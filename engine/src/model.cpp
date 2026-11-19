@@ -1663,7 +1663,7 @@ Mat Model::slice_rows(const Mat& src, int r0, int r1){
                         exit(2);
                 }
                 m.ext3 = src.w3() + (size_t)(r0 / 2) * (((src.cols + 7) / 8) * 4);
-                m.t3_tile_w = m.t3_tile_h = 0;
+                m.t3_tile_w = m.t3_tile_h = m.t3_tiles_n = 0;
                 return m;
         }
         if (src.type == WeightType::INT8) {
@@ -1714,7 +1714,7 @@ Mat Model::slice_cols(const Mat& src, int c0, int c1){
                 const size_t src_stride = ((src.cols + 7) / 8) * 4;
                 const size_t dst_stride = ((m.cols + 7) / 8) * 4;
                 m.ext3 = nullptr;
-                m.t3_tile_w = m.t3_tile_h = 0;
+                m.t3_tile_w = m.t3_tile_h = m.t3_tiles_n = 0;
                 m.q3.resize((size_t)((m.rows + 1) / 2) * dst_stride);
                 for (int t = 0; t < (m.rows + 1) / 2; ++t)
                         memcpy(m.q3.data() + (size_t)t * dst_stride,

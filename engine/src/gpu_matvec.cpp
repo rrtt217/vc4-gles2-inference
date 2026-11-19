@@ -493,6 +493,9 @@ GLuint GPU::x_t3(const Mat& m, bool wrow){
         // one tile is the fallback and is what every fitting body uses.
         const int th = m.t3_tile_h > 0 ? m.t3_tile_h : m.rows;
         const int tiles = m.t3_tile_h > 0 ? m.t3_tiles() : 1;
+        if (getenv("T3_GEOM"))
+                fprintf(stderr, "T3GEOM mv rows=%d cols=%d tile_h=%d th=%d tiles=%d\n",
+                        m.rows, m.cols, m.t3_tile_h, th, tiles);
         return x_prog("xt3_" + to_string(m.rows) + "_" + to_string(m.cols) + "_" +
                       x_format_name(act_fmt_) + "_" + to_string(th) + (wrow ? "_wr" : ""),
                       matvec_t3(m.rows, m.cols, act_fmt_, wrow, th, tiles));

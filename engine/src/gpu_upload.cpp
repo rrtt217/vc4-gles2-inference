@@ -76,16 +76,24 @@ void GPU::upload(Mat& m){
             // every shape in this model under the driver's 2048-texel limit.
             const int W = (m.cols + 7) / 8;
             const int prow = (m.rows + 1) / 2;
-            int TH = m.rows;
+            // The tile geometry is decided HERE and only here: the shader reads
+            // the two numbers back off the Mat.  Computing the count in the
+            // uploader over texel rows and again in the Mat over matrix rows is
+            // how a 2048-row chunk became a one-tile texture its own shader
+            // fetched as two (2026-11-19).
+            //
             // 1024, not the driver's 2048: the probe's edge is at exactly 2048
-            // rows (exact at 1792, 1692 of 2048 rows wrong at 2048), which is the
-            // same limit kDrawCap encodes for the draw strips.  A tile of 1024
-            // rows keeps every texture at half the ceiling.
+            // (exact at 1792, 1692 of 2048 rows wrong at 2048), the same limit
+            // kDrawCap encodes for the draw strips.
             const int lim = std::min(kDrawCap, max_target_dim() > 0 ? max_target_dim() : kDrawCap);
-            if (TH > lim) TH = lim;
+            const int TH = std::min(prow, lim);
+            const int tiles = (prow + TH - 1) / TH;
             m.t3_tile_w = W;
             m.t3_tile_h = TH;
-            const int tiles = (prow + TH - 1) / TH;
+            m.t3_tiles_n = tiles;
+            if (getenv("T3_GEOM"))
+                    fprintf(stderr, "T3GEOM up rows=%d cols=%d prow=%d W=%d TH=%d tiles=%d "
+                            "lim=%d\n", m.rows, m.cols, prow, W, TH, tiles, lim);
             if (tiles == 1) {
                     // One tile is the body itself: no reshuffle, which is every
                     // matrix of this model (the tallest is the 2048-row FFN
