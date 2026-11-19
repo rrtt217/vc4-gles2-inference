@@ -17,6 +17,8 @@ regression gate pins both.  It is also *not competitive*: on the board 0.1B cost
 ([`evaluation.md`](evaluation.md)), so the speed work stopped where the
 measurements said it should ("Known gaps" below).  The 0.4B is desktop-only.
 
+## The model
+
 | | |
 |---|---|
 | containers | `models/rwkv7/packed/` — 0.1B and 0.4B, `q8` / `q8r` / `q4`, chat and numeric |
@@ -31,11 +33,35 @@ measurements said it should ("Known gaps" below).  The 0.4B is desktop-only.
 | specials | bos 0, eos 261 (the text `"\n\n"`), stop 261, `add_bos 0` |
 | metadata | key 16 (arch and hyper-parameters), key 17 (the head input's scale — see below) |
 
+## Containers
+
 Two container fields exist because of this model and are documented where they
 belong: **key 16** carries `arch, head_size, r_w, r_a, r_v, r_g, norm_eps` and a
 gate flag, and **key 17** carries `logit_shift`, because the final LayerNorm's
 output peaks at **315.6** — 2.5x the q16 rail — so the engine writes `x * 2^-k`
 and the packer folds `2^k` into every logits tile's scale.
+
+| file | size | what |
+|---|---:|---|
+| `rwkv7-g1d-0.1b.q8.mmcf` | 191.8 MB | numeric only (no tokenizer, no template) — pure forward tests |
+| `rwkv7-g1d-0.1b.q8.chat.mmcf` | 192.7 MB | one scale a matrix, tokenizer and template embedded |
+| `rwkv7-g1d-0.1b.q8r.chat.mmcf` | 193.5 MB | `--q8-row-scale` — **the pinned container** |
+| `rwkv7-g1d-0.1b.q8r.q24.chat.mmcf` | 193.5 MB | the same body with a q24 residual (`--res q24`) |
+| `rwkv7-g1d-0.1b.q4.chat.mmcf` | 158.9 MB | 4-bit body — runs, but Chinese degenerates into repetition |
+| `rwkv7-g1d-0.4b.q8r.chat.mmcf` | 454.9 MB | **the 0.4B to ship** |
+| `rwkv7-g1d-0.4b.q8.chat.mmcf` | 453.4 MB | one scale a matrix: PPL 7.04 against q8r's 6.34 |
+| `rwkv7-g1d-0.4b.q4.chat.mmcf` | 334.9 MB | 4-bit: collapses into tag repetition in generation |
+
+**The row scale is worth its 0.2% of file size** at 0.4B: `rkv[12]` has a row
+skew of 103, and one scale a matrix costs +0.70 PPL there (+0.11 at 0.1B).  All
+four matrices of the block (rkv, wo, cm_key, cm_value) take q8, q4 and
+`--q8-row-scale` without a new kernel.
+
+`cm_key` is `3072 x 768` at 0.1B, above VC4's 2048-row draw limit, so
+`split_rwkv` cuts the channel-mix the way `split_ffn` cuts a dense FFN (Xe does
+not trigger it, and the cosine is unchanged).  The 0.4B's FFN is 4096 = 2x2048 —
+exactly on the line where a VC4 draw is silently dropped — which is the other
+reason 0.4B stays on the desktop.
 
 ## Run
 
@@ -71,30 +97,6 @@ RWKV_GPU=1 GPU_LAYER=1 KV=q16 SEQ=512 ./bin/engine_mm3_pi --chat \
 * `pair_ok()` refuses an RWKV model, so a prompt always prefills through the
   serial loop; the batched prefill (default off) applies the matvecs to a block
   and keeps only the recurrence per position.
-
-## Containers
-
-| file | size | what |
-|---|---:|---|
-| `rwkv7-g1d-0.1b.q8.mmcf` | 191.8 MB | numeric only (no tokenizer, no template) — pure forward tests |
-| `rwkv7-g1d-0.1b.q8.chat.mmcf` | 192.7 MB | one scale a matrix, tokenizer and template embedded |
-| `rwkv7-g1d-0.1b.q8r.chat.mmcf` | 193.5 MB | `--q8-row-scale` — **the pinned container** |
-| `rwkv7-g1d-0.1b.q8r.q24.chat.mmcf` | 193.5 MB | the same body with a q24 residual (`--res q24`) |
-| `rwkv7-g1d-0.1b.q4.chat.mmcf` | 158.9 MB | 4-bit body — runs, but Chinese degenerates into repetition |
-| `rwkv7-g1d-0.4b.q8r.chat.mmcf` | 454.9 MB | **the 0.4B to ship** |
-| `rwkv7-g1d-0.4b.q8.chat.mmcf` | 453.4 MB | one scale a matrix: PPL 7.04 against q8r's 6.34 |
-| `rwkv7-g1d-0.4b.q4.chat.mmcf` | 334.9 MB | 4-bit: collapses into tag repetition in generation |
-
-**The row scale is worth its 0.2% of file size** at 0.4B: `rkv[12]` has a row
-skew of 103, and one scale a matrix costs +0.70 PPL there (+0.11 at 0.1B).  All
-four matrices of the block (rkv, wo, cm_key, cm_value) take q8, q4 and
-`--q8-row-scale` without a new kernel.
-
-`cm_key` is `3072 x 768` at 0.1B, above VC4's 2048-row draw limit, so
-`split_rwkv` cuts the channel-mix the way `split_ffn` cuts a dense FFN (Xe does
-not trigger it, and the cosine is unchanged).  The 0.4B's FFN is 4096 = 2x2048 —
-exactly on the line where a VC4 draw is silently dropped — which is the other
-reason 0.4B stays on the desktop.
 
 ## Quality
 
