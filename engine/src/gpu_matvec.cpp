@@ -223,7 +223,8 @@ CandidateResult GPU::logits_candidates_from(const vector<Mat>& tiles, GLuint xt,
     }
 
 void GPU::matvec_add(const Mat& m, GLuint x, GLuint residual, Target& out, XFormat xf){
-        const bool pair = res_pack_ && m.type == WeightType::INT8;
+        const bool pair = res_pack_ && (m.type == WeightType::INT8 ||
+                                        m.type == WeightType::T3);
         const bool pair4 = res_pack_ && m.type == WeightType::INT4;
         const int ow = (pair || pair4) ? (m.rows + 1) / 2 : m.rows;
         if (out.tex == 0 || out.w != ow) out = make_target(ow, 1);
@@ -233,7 +234,11 @@ void GPU::matvec_add(const Mat& m, GLuint x, GLuint residual, Target& out, XForm
         // rather than the writer switching layouts.
         const bool wr = (m.type == WeightType::INT8 || m.type == WeightType::T3) &&
                         m.has_row_scale();
-        GLuint p = m.type == WeightType::T3 ? x_t3_add(m, xf, wr)
+        // A t3 matrix must write the layout `res_pack_` says the reader expects:
+        // the packed pair when the residual is two values a texel (VC4's I16_2),
+        // the single value otherwise.
+        GLuint p = m.type == WeightType::T3
+                       ? (res_pack_ ? x_t3_add_pair(m, xf, wr) : x_t3_add(m, xf, wr))
                   : pair4 ? x_i4_add_pair(m.rows, m.cols, xf, m.fmt4)
                   : pair ? x_q8_add_pair(m.rows, m.cols, xf, wr)
                   : (m.type == WeightType::INT8) ? x_q8_add(m.rows, m.cols, xf, wr)
@@ -651,6 +656,15 @@ GLuint GPU::x_i4_pair_swiglu(int rows, int cols, int hs, bool fmt4){
                               matvec_i4_pair_swiglu_4x4(rows, cols, act_fmt_, inl, hs));
         return x_prog("xi4ps_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(act_fmt_) + tail,
                       matvec_i4_pair_swiglu(rows, cols, act_fmt_, inl, hs));
+    }
+
+GLuint GPU::x_t3_add_pair(const Mat& m, XFormat rf, bool wrow){
+        const int th = m.t3_tile_h > 0 ? m.t3_tile_h : m.rows;
+        const int tiles = m.t3_tile_h > 0 ? m.t3_tiles() : 1;
+        return x_prog("xt3ap_" + to_string(m.rows) + "_" + to_string(m.cols) + "_" +
+                      x_format_name(act_fmt_) + "_" + x_format_name(rf) + "_" +
+                      to_string(th) + (wrow ? "_wr" : ""),
+                      matvec_t3_add_pair(m.rows, m.cols, act_fmt_, rf, wrow, th, tiles));
     }
 
 GLuint GPU::x_q8_add(int rows, int cols, XFormat xf, bool wrow){

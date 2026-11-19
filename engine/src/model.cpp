@@ -925,6 +925,7 @@ bool Model::read_tables() {
         auto as_t3 = [&](const MmcfRec& r, Mat& m) {
                 m.rows = (int)r.rows; m.cols = (int)r.cols;
                 m.scale = r.scale * 127.0f;   // a +-1 level carries +-127 steps
+                const uint8_t* p = fbase_ + data_off_ + r.off;
                 if (!getenv("T3_EXPAND")) {
                         m.type = WeightType::T3;
                         const size_t bytes = (size_t)m.rows * (((m.cols + 15) / 16) * 4);

@@ -1124,6 +1124,53 @@ string matvec_q8_add(int rows, int cols, XFormat xf, XFormat rf, bool wrow) {
         "gl_FragColor=XST1Q(s*" + SC + "+res);}";
 }
 
+// The 2-bit pair add: two output rows a fragment, written in the *packed*
+// residual layout the rmsnorm reads.  The single-row matvec_t3_add writes
+// XST1Q, which is one value a texel -- correct only when `res_pack_` is false.
+// VC4's residual is I16_2 (two values a texel) for every q8-era model, and
+// writing one value into it is what made layer 0's `x1` wrong in 1692 of 2048
+// rows (probes/t3mv_probe, stage dumps) while the *draw* kernels were fine.
+string matvec_t3_add_pair(int rows, int cols, XFormat xf, XFormat rf, bool wrow,
+                          int t3_th, int t3_tiles) {
+    need_shape("matvec_t3_add_pair", rows, cols, 4);
+    const int axw = x_texels(cols, xf);
+    const int rw = (rows + 1) / 2;
+    const int nq = (cols + 15) / 16;
+    const string ROWS = to_string(rows), NQ = to_string(nq), AXW = to_string(axw);
+    const string WD = wrow ? wrow_scale(rows) : "";
+    const string SP = wrow ? "vec2 sc=wsr2(r0);" : "";
+    const string SC0 = wrow ? "sc.x" : "ws", SC1 = wrow ? "sc.y" : "ws";
+    const string TH = to_string(t3_th) + ".0", TILES = to_string(t3_tiles);
+    // Two rows, so two weight fetches a step; the activation is fetched once and
+    // feeds both (its column range is the same for r0 and r1).
+    auto wq = [&](const string& rr) {
+        return "vec2((float(q/4)+float(int(float(" + rr + ")/" + TH + "))*" + NQ +
+               ".0+0.5)/(" + NQ + ".0*" + TILES + ".0),(mod(float(" + rr + ")," + TH +
+               ")+0.5)/" + TH + ")";
+    };
+    auto pick = [&](const string& c) {
+        return "vec4 w4=vec4(0.0);vec4 d0=" + t3_byte(c + ".r") + ",d1=" + t3_byte(c + ".g") +
+               ",d2=" + t3_byte(c + ".b") + ",d3=" + t3_byte(c + ".a") + ";"
+               "w4=d0*step(abs(float(j)),0.5)+d1*step(abs(float(j)-1.0),0.5)+"
+               "d2*step(abs(float(j)-2.0),0.5)+d3*step(abs(float(j)-3.0),0.5);";
+    };
+    return "//T3\n" + head(xf) + "precision highp int;\n" + x_pair2_glsl(rf) + x_residual_glsl(rf) +
+           "uniform sampler2D W,X,R;uniform float ws;" + WD +
+           "void main(){int t=int(gl_FragCoord.x);int r0=2*t;int r1=min(r0+1," +
+           to_string(rows - 1) + ");" + SP +
+           "float res0=R1Q(R,r0," + to_string(rw) + ".0);"
+           "float res1=R1Q(R,r1," + to_string(rw) + ".0);"
+           "float s0=0.0,s1=0.0;"
+           "for(int q=0;q<" + to_string(cols / 4) + ";q++){"
+           "vec4 x=X4Q(X,q*4," + AXW + ".0);"
+           "int j=q-4*(q/4);"
+           "vec4 c0=texture2D(W," + wq("r0") + ");" + pick("c0") +
+           "s0+=dot(w4,x);"
+           "vec4 c1=texture2D(W," + wq("r1") + ");" + pick("c1") +
+           "s1+=dot(w4,x);}"
+           "gl_FragColor=x_p2_stq(s0*" + SC0 + "+res0,s1*" + SC1 + "+res1);}";
+}
+
 string matvec_q8_add_pair(int rows, int cols, XFormat xf, XFormat rf, bool inl, bool wrow) {
     need_shape("matvec_q8_add_pair", rows, cols, 4);
     const int axw = x_texels(cols, xf);
