@@ -146,19 +146,28 @@ same answer from Xe and from the board:
 
 | | decode | note |
 |---|---:|---|
-| Iris Xe | 41.3 ms/token | prefill 0.75 s |
-| Pi Zero (VC4) | 2224 ms/token | prefill 45.1 s |
+| Iris Xe | 40.3 ms/token | prefill 0.79 s |
+| Pi Zero (VC4) | 1704 ms/token | prefill 29.3 s |
 
 The board figure is the point of the kind: 167.5 MB of container, 85 MB of
 texture, and 358 M parameters that the q8 body (435 MB) and the q4 body (337 MB)
 cannot fit.  It is 7.3x slower a token than MiniMind3 q4 on the same board
 (304 ms) at 5.6x the parameters.
 
-The kernel computes one output row a fragment and consumes two of a texel's four
-bytes an iteration -- eight weights, which on VC4 is as far as the fetch rule
-allows without a paired writer.  `probes/t3mv_probe` prices the two-rows-a-fragment
-form (all four bytes, `x_st2q`) at 1.21-1.25 ns/MAC against this one's ~2.5, so
-the remaining headroom is in the output layout, not the decode.
+Two kernels, both reading the column-major body: `matvec_t3` computes one output
+row a fragment from two of a texel's four bytes, and `matvec_t3_pair` /
+`matvec_t3_add_pair` compute two rows, using all four.  The pair form is what the
+model's own matrices take wherever the reader already expects a pair -- the qkv
+draw (rope and qk-norm read `x_st2q`) and the residual adds (`res_fmt_` is I16_2,
+so `rmsnorm` reads pairs) -- which is every projection except the FFN gate, whose
+pairing is across two *matrices* (w1/w3) rather than two rows.
+
+Where the time goes now, `LAYER_PROFILE` corrected for its one-sync-per-mark tax
+(on 2-bit weights, one tile): FFN gate 823 ms of which ~500 is matvec, attention
+633 (56.6 M MAC, i.e. draw-bound: 168 draws a token), down-projection 559 (~250
+matvec), wo 111, rmsnorm 109.  The next two levers are therefore the FFN gate's
+own pair form (a swiglu over two pair textures, ~250 ms) and the attention
+block's draw count, not the decode.
 
 `T3_EXPAND=1` still expands a t3 body to the q8 levels it stands for, at load
 time and 4x the memory.  That is the packer's acceptance route and the oracle the

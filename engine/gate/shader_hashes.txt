@@ -95,6 +95,8 @@ bc974908f33fad7c    4002 matvec_q8_pair_swiglu_2432x768_i16_2_inl
 525ceac9127c718f    4930 matvec_t3_1280x1024_i16_2_t1024x2
 d33d2a9ef7981cbf    4931 matvec_t3_4096x1024_i16_2_t1024x4
 8fe4b37ee35db733    4435 matvec_t3_add_1024x1024_i16_2_i16_1
+2483871391c5ddda    5703 matvec_t3_add_pair_1024x1024_i16_2_i16_2
+0d1f0c2b101d5a51    5173 matvec_t3_pair_1280x1024_i16_2_t640x1
 2ac3a5dab0dc4ec9    3758 mul_act_1024_24_16
 2248e872152f989b    3826 mul_act_1024_24_24
 ebf7e71d6e0f5af5    3501 p2_split_768_i16_1

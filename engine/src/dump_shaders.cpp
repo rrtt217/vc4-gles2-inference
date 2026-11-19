@@ -130,6 +130,10 @@ vector<Case> cases() {
         [] { return matvec_t3(4096, 1024, I16_2, true, 1024, 4); });
     add(v, "matvec_t3_add_1024x1024_i16_2_i16_1",
         [] { return matvec_t3_add(1024, 1024, I16_2, I16_1, true, 1024, 1); });
+    add(v, "matvec_t3_pair_1280x1024_i16_2_t640x1",
+        [] { return matvec_t3_pair(1280, 1024, I16_2, true, 640, 1); });
+    add(v, "matvec_t3_add_pair_1024x1024_i16_2_i16_2",
+        [] { return matvec_t3_add_pair(1024, 1024, I16_2, I16_2, true, 512, 1); });
 
     // --- i16 weights (legacy precision, still loadable)
     add(v, "matvec_i16_6400x768_i16_2", [] { return matvec_i16(6400, 768, I16_2); });
