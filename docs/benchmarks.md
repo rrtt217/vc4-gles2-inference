@@ -120,13 +120,14 @@ regression baseline.  Each points at the document that owns the explanation.
 | bytes | 435,368,297 | **167,520,233** |
 | RAM to run it | 435 MB of texture | ~85 MB of texture (167.5 MB of file); the earlier host-expansion path wanted 342 MB and the board was OOM-killed at 280 |
 | KL against the float32 forward | 0.0288 | 0.0278 |
-| `bench_mc.py`, 100 items | acc 0.690 (fmt 0.690) | acc 0.710 (fmt 0.760) |
-| IFEval, 24 cases x 3 seeds, greedy | pass **0.500** | 0.417; the failed-check *lists* coincide except `json_keys` |
-| translation, 30 sentences, greedy | chrF **0.495** | 0.479; t3 leaks the source language less (0.01 against 0.03) |
+| `bench_mc.py`, 100 items (2026-11-19) | acc 0.690 (fmt 0.690) | acc 0.710 (fmt 0.700) |
+| IFEval, 24 cases x 3 seeds, greedy (2026-11-19) | pass **0.500** | pass 0.500; the failed-check lists coincide cell for cell |
+| translation, 30 sentences, greedy (2026-11-19) | chrF **0.495** (0.511 zh→en / 0.479 en→zh) | 0.468 (0.521 / 0.415); t3 leaks the source script less (0.007 against 0.035) |
 
 The t3 body is not a lossy step for this model: it carries a per-row scale where
 the q8 path carries one scale a matrix, hence the slightly better KL and
-`bench_mc`.  Its win is **memory, not speed** — on VC4 the 2-bit matvec costs
+`bench_mc`.  Its one repeatably worse cell is en→zh translation (0.415 against
+0.479).  Its win is **memory, not speed** — on VC4 the 2-bit matvec costs
 2.45 ns/MAC against q8's 2.97, a 1.2x, because the decode is ALU-bound and the
 fetch is only 22% of the time; on Xe the uint decode is *slower* than q8
 (0.109 against 0.063 at 1024x1024).  `probes/t3mv_probe` is the measurement.

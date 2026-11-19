@@ -98,6 +98,21 @@ RWKV_GPU=1 GPU_LAYER=1 KV=q16 SEQ=512 ./bin/engine_mm3_pi --chat \
   serial loop; the batched prefill (default off) applies the matvecs to a block
   and keeps only the recurrence per position.
 
+### The 0.4B has three tiers, and they are not interchangeable
+
+| tier | flags | when |
+|---|---|---|
+| production | `--temp 1.0 --topp 0.3 --repeat-penalty 1.2 --seed 42 --gen 80` | every chat, translation and explanation request: 20 of 20 sampled runs (10 prompts x greedy/sampled) produced readable output inside 80 tokens, both translation directions included |
+| tripwire | `--greedy --gen 16` | determinism and regression checks only.  Greedy is **not** usable for open-ended or translation prompts on this checkpoint |
+| thinking | `--thinking --gen 400` or more, and check that `</think>` closes | only to watch the chain; never to get an answer |
+
+Greedy is a tripwire because the nothink template does not stop this checkpoint
+opening its own `<think>`: `--greedy --gen 200` spends the whole budget reasoning
+on both translation prompts and never emits an answer, and the `--thinking`
+variant is still inside an unclosed block at 200 tokens.  The same prompts under
+the card's preset answer inside 80 and translate, where the 0.1B only repeated
+its source (six runs, all rc=0, in `models/rwkv7/phase2-direct/`).
+
 ## Quality
 
 Perplexity, `engine/data/ppl_test.txt`, `SEQ=512`, the container's own tokenizer

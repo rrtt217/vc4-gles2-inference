@@ -96,36 +96,38 @@ units instead of 802.
 
 ## Quality and agreement with the float reference
 
-Iris Xe, 2026-11-18, `RMS_STORE=f32`, greedy:
+Iris Xe, `RMS_STORE=f32`, greedy, 2026-11-19 (the two containers re-measured
+after the t3 kernel work moved them; the cross-model tables are in
+[`evaluation.md`](evaluation.md)):
 
 | | |
 |---|---|
-| multiple choice, 100 items (`engine/eval/bench_mc.py`) | **acc 0.690**, acc_cal 0.660, fmt 0.690, p_gold 0.637 (null 0.253) |
-| the same battery on the **t3 container** | acc 0.710, acc_cal 0.690, fmt 0.760, p_gold 0.657 (null 0.252) — the two agree within one null sd (0.04) |
-| the same two, for the cost | 4077 ms an item at q8 against 2843 at t3 (Xe is bandwidth-bound here) |
-| instruction following, 24 cases x 3 seeds (`eval_ifeval.py`, greedy) | q8 pass **0.500**, t3 pass 0.417 — the failed checks are the same list on both (`bullets 6`, `json_valid 6`, `max_chars 6`, `max_words 9`), and only `json_keys` differs (6 against 3), i.e. one case |
-| translation, 30 sentences (`eval_translate.py`, greedy) | q8 chrF **0.495**, t3 0.479 (exact 0.100 against 0.067); t3 leaks the source language less (0.01 against 0.03) and the two directions trade places |
+| multiple choice, 100 items (`engine/eval/bench_mc.py`) | **acc 0.690**, acc_cal 0.660, fmt 0.690, p_gold 0.637, null 0.254 ± 0.040, zh 0.62 / en 0.78 (10.9 sigma over the null) |
+| the same battery on the **t3 container** | acc 0.710, acc_cal 0.700, fmt 0.700, p_gold 0.653, null 0.253 ± 0.040, zh 0.64 / en 0.78 — the two are inside one null sd (0.04) |
+| the same two, for the cost | 5800 ms an item at q8 against 3992 at t3 (Xe is bandwidth-bound here) |
+| instruction following, 24 cases x 3 seeds (`eval_ifeval.py`, greedy) | pass **0.500** on both containers, `hard pass` 0.500, zh 0.500 / en 0.500; the failed-check lists are identical cell for cell (`json_valid`+`json_keys` 6+6, `bullets` 6, `max_words` 9, `max_chars` 6, `max_lines`/`absent_regex`/`contains_none`/`regex` 3 each) |
+| translation, 30 sentences (`eval_translate.py`, greedy) | q8 chrF **0.495** (zh→en 0.511, en→zh 0.479), t3 0.468 (0.521, 0.415); exact 0.100 against 0.067, and t3 leaks the source script less (0.007 against 0.035 of characters) |
 | same battery, for scale | pocket qat 0.480, LFM2.5-230M 0.380, MiniMind3 q8 0.220 |
 | `--ppl` on `engine/data/ppl_test.txt`, SEQ=768 | 35.5598 (nll 3.5712, 247 tokens; 2026-11-19, both the on-disk container and a fresh pack of the recipe) |
 | `--ppl`, SEQ=256 (a short span) | 41.3734 on Xe against 41.4572 on the Pi Zero — 0.20% apart, which is the cross-machine agreement this path has |
 | logits vs the float32 numpy forward (`models/bitcpm-0.5b/probe_forward.py`) | KL 0.018 nats, top-20 19/20, entropy 1.546 vs 1.512 |
 | per-token nll on a 667-token mixed text, 4 positions | mean 3.107 against 3.024 |
 
-Instruction following and translation separate the two containers no better than
-the multiple-choice battery does: with 72 attempts (sd about 0.06) and 30
-sentences, every gap sits inside one or two standard deviations, and the *sets* of
-failed instructions coincide.  Read these as "the two bodies are the same model",
-not as a ranking.  The absolute level is the 0.5B ternary model's own: about half
-the format instructions fail and chrF is 0.48.
+Instruction following separates the two containers not at all -- the same 36 of
+72 attempts, failing the same checks -- and multiple choice and translation
+separate them inside one null sd (sd 0.04 on 100 items, about 0.06 on 72
+attempts).  Read these as "the two bodies are the same model", not as a ranking;
+the only cell that is repeatably different is the en→zh half of the translation
+battery (0.479 against 0.415), which is where 2 bits of weights and per-row
+scales have the least room.  The absolute level is the 0.5B ternary model's own:
+half the format instructions fail.
 
-The multiple-choice battery was re-run after the 2-bit body changed from the
-row-major reading to the column-major one: q8 reproduced its four figures exactly
-(its path did not move), while t3 went from acc 0.680 to 0.710 and fmt 0.670 to
-0.760.  The weights are the same bytes, so what moved is rounding -- the residual
-became a packed pair (`res_fmt_` I16_2) and the rmsnorm's 32 lane sums then
-divide the row differently.  +0.03 is inside the null sd, so this is not evidence
-that one container scores better than the other; it is evidence that the two
-paths round differently.
+None of that gap is the weights: the two files carry the same ternary body, and
+what differs is rounding -- the 2-bit path takes the residual as a packed pair
+(`res_fmt_` I16_2), so the rmsnorm's 32 lane sums divide the row differently.
+The column-major texel layout is what moved t3 from acc 0.680 / fmt 0.670 (the
+row-major reading) to the numbers above, while q8 reproduced its four figures
+exactly through that change -- the check that the q8 path itself did not move.
 
 The `--ppl` path encodes without the leading space marker (it treats the file as
 a continuation), and this model pays 16 nats on its first token when the marker
@@ -134,8 +136,8 @@ tokenizers anyway (a 73448-entry Chinese-first vocabulary against SmolLM2's
 49152 byte-level one): the number here is a within-model regression pin, not a
 ranking.
 
-The chat answer is fluent at 32 tokens
-(`你好，我是AI助手，我的名字是李华，我来自中国北京，目前是一名计算机科学家。`)
+The chat answer is fluent at 32 tokens on both containers
+(`你好，我是AI助手，我的名字是李华，我是一个基于人工智能技术的程序，我的主要职责是提供信息、解答问题和执行任务。`)
 and it stops on `<|im_end|>` when the prompt is short enough to be answered in
 one paragraph.
 

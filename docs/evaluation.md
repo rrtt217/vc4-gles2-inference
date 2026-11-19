@@ -1,10 +1,10 @@
 # Evaluation: model quality, measured instead of judged
 
-The chat comparison of 2026-11-12 produced opinions ("the compact model is
-better at Chinese poems, the hybrid one terminates").  Those are useful as
-leads and useless as regressions: a different sampler, prompt or seed flips
-them.  This page documents the three batteries that turn the same questions into
-numbers, and the numbers themselves.
+Quality claims in this tree are numbers or they are leads.  A chat comparison on
+2026-11-12 ("the compact model writes better Chinese poems, the hybrid one
+terminates") produced only leads: a different sampler, prompt or seed flips them.
+These three batteries turn the same questions into numbers, and every model the
+engine runs is scored on them, one row each.
 
 | Battery | Script | Answers |
 |---|---|---|
@@ -21,13 +21,72 @@ The data lives next to the tools, so a re-run needs no download:
 | [`engine/eval/data/ifeval.jsonl`](../engine/eval/data/ifeval.jsonl) | 24 instruction-following cases (zh 10, en 14), each with machine checks and a good/bad example |
 | [`engine/eval/data/translate.jsonl`](../engine/eval/data/translate.jsonl) | 15 sentence pairs (daily/idiom/news/science/technical) run in **both** directions; each direction's reference is the other direction's source |
 
-## The multiple-choice battery
+## The models in the tables
 
-### Method
+Every row below is one of these containers, on the same machine: laptop, Intel
+Iris Xe (ADL GT2), Mesa 26.2.5, `GPU_LAYER=1 KV=q16`.
 
-One engine run per item: the prompt is prefilled, `--gen 0` (no decode), and
-`LOGITS_OUT` carries the logits of the last prompt token -- the position where
-the answer starts.  The item is rendered as
+| Model | Container | What it is |
+|---|---|---|
+| MiniMind3 dense q8 (64M) | `models/minimind3/minimind3.q8.mmcf` | the default chat model |
+| MiniMind3-MoE q8 (198M-A64M) | `models/minimind3-moe/minimind3-moe.q8.mmcf` | top-1 routing, 8 host syncs a token |
+| LFM2.5-230M QAD q4 | `models/lfm2.5-230m/qad/lfm2.5.qad.q4.mmcf` | hybrid conv + attention, the vendor's QAD q4 |
+| RWKV-7 0.1B q8r | `models/rwkv7/packed/rwkv7-g1d-0.1b.q8r.chat.mmcf` | recurrent, v4 container, World vocab, G1 nothink template |
+| MNN-Pocket-0.3B **qat** | `models/pocket-qat/pocket-qat.q4q24.dedup.q6.mmcf` | the GGUF `Q4_1` QAT upload, dequantized to F16 and repacked |
+| MNN-Pocket-0.3B **bf16** | `models/pocket-0.3b/pocket-0.3b.q4q24.dedup.q6.mmcf` | the BF16 release, quantized here |
+| BitCPM-CANN-0.5B **q8** | `models/bitcpm-0.5b/bitcpm-0.5b.q8.mmcf` | ternary MiniCPM4-0.5B (168 of 169 matrices per-row `{0, ±s}`), 434 MB, `RMS_STORE=f32` |
+| BitCPM-CANN-0.5B **t3** | `models/bitcpm-0.5b/bitcpm-0.5b.t3.mmcf` | the same weights at 2 bits (167.5 MB), its own matvec path |
+
+The two pocket containers are the same shape and size (198,007,797 B each) and
+**different checkpoints**, not two packagings of one: their weights are 0.9955
+cosine apart and their logits against the BF16 reference 0.9261, which is why
+both are scored (measured 2026-11-17, sha256 `b164eee8…` and `d2a97700…`; the
+engine's own fidelity against a float32 forward is in
+[benchmarks.md](benchmarks.md)).
+
+## Protocol
+
+Two things are common to every row and are not repeated per table: one engine
+run per item with the prompt prefilled, and the reply scored exactly as it comes
+out -- no fence stripping, no case folding.
+
+**Per-model overrides**, and there are only four:
+
+| Model | Multiple choice | Instruction following | Translation |
+|---|---|---|---|
+| MiniMind3 pair | chat template, letter logits | `--preset minimind`, 2 seeds | greedy |
+| LFM2.5-230M | chat template | `--preset lfm`, 2 seeds | greedy |
+| RWKV-7 0.1B | **completion mode** (`--completion`) | `--preset rwkv` (card), 2 seeds | `--preset rwkv`, sampled |
+| MNN-Pocket | chat template | `--preset greedy`, 3 seeds | greedy |
+| BitCPM-CANN-0.5B | chat template | `--preset greedy`, 3 seeds | greedy |
+
+* **RWKV-7's multiple choice must run in completion mode.**  Its chat template
+  puts a think marker at the answer position, so the first decoded token is the
+  marker, not a letter: a 100-item chat-mode run measured `fmt` ≈ 0 and `acc` at
+  the null (archived at `models/rwkv7/phase4/eval_mc_chat_invalid/`).  In
+  completion mode the first token's logits are the letter itself.
+* **RWKV-7 is sampled at the model card's recommendation** -- `--temp 1.0
+  --topp 0.3 --repeat-penalty 1.2` -- not greedy and not the engine default.
+  `eval_ifeval.py --preset auto` (the default) and `eval_translate.py --preset
+  auto` pick it for any container that declares RWKV-7 in metadata key 16 and
+  keep the historical presets for everything else; `evalkit.RWKV_SAMPLING` holds
+  the one copy.
+* **The seed counts differ** (2 for the four older rows, 3 for pocket, i.e. 48
+  against 72 attempts): the *rates* compare, the failure *counts* do not.  The
+  per-case failure lists below are quoted with their attempt count for that
+  reason.
+* **BitCPM needs `RMS_STORE=f32`** on all three batteries: its residual lane sums
+  reach 5.4e4 against the 24-bit store's 2048, and without the switch the reply
+  degenerates instead of failing loudly (`docs/bitcpm.md`).
+* **Pocket is measured on a fixed grid**, `SEQ=512 KV_GRID=512 RES=f32 ACT=f32`,
+  the best configuration from its fidelity campaign -- a different format
+  configuration from the other rows, chosen so the number measures the model
+  rather than its encoding.
+
+### The multiple-choice battery
+
+`--gen 0` (no decode) and `LOGITS_OUT` carries the logits of the last prompt
+token, the position where the answer starts.  The item is rendered as
 
     <question>
     A. <option 0>
@@ -45,9 +104,9 @@ The four candidate ids are **not hard-coded**: the tool reads them out of the
 model's own tokenizer by encoding the prompt with and without a trailing letter
 and looking for the one id inserted; it tries the full-width colon first and a
 newline second, and refuses the model if a letter is not one token (a merged
-`":A"` token cannot be compared with a standalone `"A"`).  Run
-`--out <dir>` keeps them in `<model>.letters.json`; the MiniMind pair gives
-68-71, the LFM 542-545.
+`":A"` token cannot be compared with a standalone `"A"`).  The MiniMind pair
+gives 68-71, the LFM 542-545; `--out <dir>` keeps them in
+`<model>.letters.json`.
 
 Score of option L is the softmax over the four letter logits.  Three columns
 matter:
@@ -62,37 +121,17 @@ matter:
   going to answer a letter at all.  When `fmt` is low, `acc` measures
   instruction following, not knowledge -- read both.
 
-### Run
-
-```bash
-python3 engine/eval/bench_mc.py \
-  --model minimind3-q8=models/minimind3/minimind3.q8.mmcf \
-  --model minimind3-moe-q8=models/minimind3-moe/minimind3-moe.q8.mmcf \
-  --model lfm2.5-qad-q4=models/lfm2.5-230m/qad/lfm2.5.qad.q4.mmcf \
-  --data engine/eval/data/mc_zh.jsonl \
-  --data engine/eval/data/mc_en.jsonl \
-  --out /tmp/eval_mc --resume
-```
-
-One item is 0.9 s on the dense model, 2.6 s on the LFM and 2.7 s on the MoE
-(measured, the same machine as the results below), so the full 100-item,
-three-model battery is ~10 minutes on the laptop GPU.  `--resume`
-appends to `<out>/<model>.items.jsonl` and skips items already scored, which is
-what a battery cut off by a tool timeout needs.  Every item's four probabilities
-are kept in that file: a surprising number can be re-checked without the GPU.
-
-## The instruction-following battery
-
-### Method
+### The instruction-following battery
 
 Each case is a prompt plus a list of checks; a case passes when every check
-passes.  Cases are sampled `--seeds` times (default 3) with the model's own
-recommended sampling preset:
+passes.  Cases are sampled `--seeds` times with the model's own recommended
+sampling preset:
 
 | Preset | Settings |
 |---|---|
 | `minimind` | `--temp 0.85 --top-k 50 --topp 0.85` |
 | `lfm` | `--temp 0.1 --top-k 50 --repeat-penalty 1.05` |
+| `rwkv` | `--temp 1.0 --topp 0.3 --repeat-penalty 1.2` |
 | `greedy` | `--greedy` |
 
 Supported checks (all must pass): `regex`, `absent_regex`, `starts_with`,
@@ -110,34 +149,18 @@ up as a gap between them.
 `good_example` must pass and every `bad_example` must fail -- so a wrong regex
 cannot silently score a model down.
 
-### Run
+### The translation battery
 
-```bash
-python3 engine/eval/eval_ifeval.py --data engine/eval/data/ifeval.jsonl --selftest
-
-python3 engine/eval/eval_ifeval.py \
-  --model minimind3-q8=models/minimind3/minimind3.q8.mmcf --preset minimind --seeds 3 \
-  --data engine/eval/data/ifeval.jsonl --out /tmp/eval_ifeval
-```
-
-
-## The translation battery
-
-### Method
-
-Translation was the one capability the chat comparison got wrong in both
-directions: one sampled reply to one sentence said the MiniMind pair "can
-translate" and the MoE "cannot", and nothing in that test separated "translated
-the sentence" from "finished a sentence that started like a translation".  This
-battery uses a fixed bilingual corpus and a reference-based metric.
+This is the one capability the chat comparison got wrong in both directions: one
+sampled reply to one sentence said the MiniMind pair "can translate" and the MoE
+"cannot", and nothing separated "translated the sentence" from "finished a
+sentence that started like a translation".
 
 15 sentences, each run in **both** directions (30 items: 12 daily, 3 idiom,
 1 science, 1 technical, 2 news -- the same sentence is the reference for the
-other direction).  Prompts are greedy: translation is a deterministic task and
-the sampler noise of a 64M model swamps the signal.  The instruction is Chinese
-in both directions ("把下面这句话翻译成英文/中文，只输出译文。" + the source),
-for the same reason the multiple-choice battery uses a Chinese answer
-instruction.
+other direction).  The instruction is Chinese in both directions ("把下面这句话
+翻译成英文/中文，只输出译文。" + the source), for the same reason the
+multiple-choice battery uses a Chinese answer instruction.
 
 The score is **chrF** (character n-gram F-score, n = 1..6, beta = 2, precision
 and recall averaged over n before combining, whitespace removed -- sacrebleu's
@@ -155,103 +178,153 @@ zero.  Alongside it the dump records:
   a high chrF means the model answered in the wrong language for part of the
   string.
 
-### Run
-
-```bash
-python3 engine/eval/eval_translate.py \
-  --model minimind3-q8=models/minimind3/minimind3.q8.mmcf \
-  --model minimind3-moe-q8=models/minimind3-moe/minimind3-moe.q8.mmcf \
-  --model lfm2.5-qad-q4=models/lfm2.5-230m/qad/lfm2.5.qad.q4.mmcf \
-  --data engine/eval/data/translate.jsonl --out /tmp/eval_translate
-```
-
-30 items per model, under a second per item per model on the laptop GPU; the
-battery is small on purpose -- it is long enough to see a trend and short enough
-that it can sit in the same run as the other two.
-
 ## Results
 
-Machine: laptop, Intel Iris Xe (ADL GT2), Mesa 26.2.5, `GPU_LAYER=1
-KV=q16`, 2026-11-12.  Containers: `minimind3.q8.mmcf`,
-`minimind3-moe.q8.mmcf`, `lfm2.5.qad.q4.mmcf` (QAD, the vendor's
-quantization-aware-distilled q4).  System prompt: `You are a helpful
-assistant.`
+The short version, before the tables:
+
+| Battery | Best | Then |
+|---|---|---|
+| Multiple choice, 100 items | **BitCPM t3 0.710** (q8 0.690) | pocket qat 0.480, LFM2.5 0.380 |
+| Instruction following, 24 cases | **pocket qat 0.792** | LFM2.5 0.562, BitCPM q8 0.500 |
+| Translation, 30 items (chrF) | **BitCPM q8 0.495** (t3 0.479) | pocket bf16 0.383, LFM2.5 0.328 |
+
+No model wins all three, and the two leaders are two different architectures at
+two different sizes: a 0.5B ternary MiniCPM4 that knows things and translates but
+only half-follows an instruction, and a 0.36B Qwen3 dense model that follows
+instructions best and is beaten by 0.1-0.2 on the other two.  Every row below is
+one container, all on the same machine; the translation table adds a
+sampled row where that was measured, because for three of these models greedy
+and sampled decoding disagree.  The dates in the captions are the run dates: the
+four transformer/RWKV rows were measured 2026-11-12 and 2026-11-16, pocket's
+2026-11-17, and BitCPM's 2026-11-19 (both containers, after the t3 kernel work
+moved it -- the 2026-11-18 readings are in `docs/bitcpm.md`).
 
 ### Multiple choice
 
-100 items (50 zh + 50 en), one deterministic run each.  "Null" is the accuracy
-the same prediction letters would score against shuffled gold labels (200
-permutations, fixed seed): an accuracy at the null means the letter choice
+100 items (50 zh + 50 en), one deterministic run each, 2026-11-12 (chat mode),
+2026-11-16 (RWKV, completion mode), 2026-11-17 (pocket) and 2026-11-19 (BitCPM,
+both containers, re-measured after the t3 kernel work moved it).  "Null" is the
+accuracy the same prediction letters would score against shuffled gold labels
+(200 permutations, fixed seed): an accuracy at the null means the letter choice
 carries no information about the question.
 
-| Model | acc | acc_cal | fmt | p_gold | null (acc / acc_cal) | zh | en |
-|---|---:|---:|---:|---:|---|---:|---:|
-| MiniMind3 dense q8 (64M) | 0.220 | 0.320 | 0.880 | 0.255 | 0.253 ± 0.032 / 0.260 ± 0.033 | 0.16 | 0.28 |
-| MiniMind3-MoE q8 (198M-A64M) | 0.250 | 0.250 | 0.620 | 0.254 | 0.251 ± 0.017 / 0.244 ± 0.035 | 0.24 | 0.26 |
-| LFM2.5-230M QAD q4 | **0.380** | **0.400** | 0.880 | 0.404 | 0.250 ± 0.038 / 0.254 ± 0.033 | 0.28 | **0.48** |
+| Model | mode | acc | acc_cal | fmt | p_gold | null acc | null acc_cal | zh | en |
+|---|---|---:|---:|---:|---:|---|---|---:|---:|
+| MiniMind3 dense q8 (64M) | chat | 0.220 | 0.320 | 0.880 | 0.255 | 0.253 ± 0.032 | 0.260 ± 0.033 | 0.16 | 0.28 |
+| MiniMind3-MoE q8 (198M-A64M) | chat | 0.250 | 0.250 | 0.620 | 0.254 | 0.251 ± 0.017 | 0.244 ± 0.035 | 0.24 | 0.26 |
+| LFM2.5-230M QAD q4 | chat | 0.380 | 0.400 | 0.880 | 0.404 | 0.250 ± 0.038 | 0.254 ± 0.033 | 0.28 | 0.48 |
+| RWKV-7 0.1B q8r | **completion** | 0.240 | 0.310 | 0.740 | 0.262 | 0.251 ± 0.040 | 0.255 ± 0.039 | 0.16 | 0.32 |
+| MNN-Pocket qat | chat | **0.480** | **0.480** | 0.710 | 0.479 | 0.255 ± 0.037 | — | 0.46 | 0.50 |
+| MNN-Pocket bf16 | chat | 0.450 | 0.400 | 0.740 | 0.443 | 0.254 ± 0.034 | — | 0.44 | 0.46 |
+| BitCPM-CANN q8 | chat | 0.690 | 0.660 | 0.690 | 0.637 | 0.254 ± 0.040 | — | 0.62 | 0.78 |
+| BitCPM-CANN t3 | chat | **0.710** | 0.700 | 0.700 | 0.653 | 0.253 ± 0.040 | — | 0.64 | 0.78 |
 
 Chance is 0.25.  Reading the table:
 
-* **The LFM is the only model with signal**: 0.380 against a null of
-  0.250 ± 0.038 is 3.4 sigma, and its calibrated 0.400 against 0.254 ± 0.033 is
-  4.4 sigma -- the signal survives both the letter prior and the label
-  shuffling.  Its accuracy is common sense (15/17 on that
-  category) and science (11/23), with **arithmetic at 1/19** -- the same split
-  the chat comparison showed from the other direction (it terminates and
-  formats well, it cannot compute).
+* **BitCPM has the strongest signal in the table by a wide margin**: 0.690
+  against a null of 0.254 ± 0.040 is 10.9 sigma (t3: 0.710 against 0.253 ± 0.040,
+  11.4), and unlike every other row its predicted letters are flat (A 32, B 24,
+  C 19, D 25), so there is no positional prior to remove and `acc_cal` lands on
+  `acc`.  It is a 0.5B model with 168 ternary matrices against a 0.36B pocket --
+  and the ternary body is not what limits it: t3 is 2 points *ahead* of q8 in
+  raw accuracy on the same weights.
+* **Pocket is next**: 0.480 against a null of 0.255 ± 0.037 is 6.0 sigma.  Its
+  prior (A 57, B 1, C 20, D 22) costs it nothing either, so `acc_cal` does not
+  move.  LFM2.5 is next: 0.380 against 0.250 ± 0.038 is 3.4 sigma, 4.4 on
+  `acc_cal`.
+* **The QAT container is the better checkpoint**, 3 points raw and 8 calibrated
+  over bf16 (0.480 against 0.400 once the prior is removed).  That settles what
+  the packaging campaign could not: the QAT upload is not a differently-produced
+  file, it is the better model.
 * **MiniMind3 dense sits at the null**: 0.220 against 0.253 ± 0.032.  It picks
   "C" 65 times out of 100 (A 30, B 4, D 1), so the letter is a positional
-  prior, not a decision.  `acc_cal` (0.320) removes the prior and comes out
-  at 1.8 sigma over its own null (0.260 ± 0.033) -- a lead, not a result.
-* **The MoE answers "A" 94 times out of 100**, is at the null exactly (0.250
-  against 0.251 ± 0.017), and only puts a letter first 62% of the time
-  (`fmt`): one fifth of the items it starts the reply with something else,
-  which the 8-host-sync route does not explain -- this is a model property.
-  It is also the slowest of the three (2.7 s/item against 0.9 s).
-* **Difficulty does not order the models.**  Neither MiniMind improves on
-  "easy" items; the LFM's easy/medium/hard split is 0.43 / 0.40 / 0.25, which
-  is the one monotone ordering in the three (the MiniMind pair is flat, i.e.
-  noise).
+  prior, not a decision.  `acc_cal` 0.320 is 1.8 sigma over its own null -- a
+  lead, not a result.
+* **The MoE answers "A" 94 times out of 100**, is at the null exactly, and only
+  puts a letter first 62% of the time (`fmt`): one fifth of the items it starts
+  the reply with something else, which the 8-host-sync route does not explain --
+  this is a model property.  It is also the slowest of the three (2.7 s/item
+  against 0.9 s).
+* **RWKV-7 is at the null raw** (0.240 against 0.251 ± 0.040, `acc_cal` 1.4
+  sigma -- the dense MiniMind's kind of lead) but **answers in the asked
+  format** (`fmt` 0.740), and the split is language-shaped: zh 0.92, en 0.56.
+  Its knowledge is English-centric (en 0.32 against zh 0.16), the opposite
+  weighting of the Chinese-tuned MiniMind pair.
+* **Pocket is balanced across languages** (0.46 / 0.50), the only row that is;
+  BitCPM is English-heavy (0.62 / 0.78), LFM2.5 0.28 / 0.48, MiniMind3 0.16 /
+  0.28.  By category pocket is science
+  0.652 (n=23), common_sense 0.647 (17), geography 0.500 (12), history 0.500
+  (12), language 0.500 (6), **math 0.263 (19)**, chinese 0.250 (8), logic 0.000
+  (3, too small to read).  Math is *identical* in both pocket containers, so the
+  arithmetic weakness is the model and not the quantisation -- and it is the same
+  weakness the board shows in a hand probe (`84 * 3 = ` gives `54.` on the Pi and
+  `252.` on the Xe: two independent paths, one wrong answer).
+* **`fmt` is a ceiling, not a footnote.**  Pocket's 0.710 means 29 items had a
+  non-letter full-vocabulary argmax and are scored wrong, so 0.48 is a floor
+  (0.48/0.71 among the formatted items); BitCPM's 0.690 is the same story
+  (0.69 is 0.69/0.69 among the formatted ones, i.e. its floor and its rate
+  coincide).  LFM2.5 follows the letter format far more often (0.88) and is less
+  accurate: its weak half is knowledge, pocket's and BitCPM's is instruction
+  following.
+* **Difficulty orders BitCPM and LFM, and nothing else.**  BitCPM q8 goes
+  0.80 / 0.68 / 0.55 on easy/medium/hard (30/50/20 items) and t3 0.80 / 0.70 /
+  0.60; LFM2.5 goes 0.43 / 0.40 / 0.25 the same way.  Neither MiniMind improves
+  on "easy" items, and RWKV-7's is inverted (0.17 / 0.22 / 0.40) -- at 100 items
+  that is noise, and it is recorded here as noise.
 
-Per-item probabilities are in `<out>/<model>.items.jsonl`; the per-model JSON
+Per-item probabilities are in `<out>/<model>.items.jsonl`, and the per-model JSON
 summary carries the per-category, per-language and per-difficulty splits.
 
 ### Instruction following
 
-24 cases, 2 samples each (the battery was cut from 3 to 2 seeds to fit the
-machine time; a case that needs luck still shows up as a gap between pass rate
-and hard pass).  Presets: `minimind` for the MiniMind pair, `lfm` for the LFM
-(see the table above).  The reply is scored exactly as it comes out of the
-engine, with no fence stripping and no case folding:
+24 cases, 2 or 3 seeds each (48 or 72 attempts, see the protocol table), scored
+as it comes out of the engine: 2026-11-12 (MiniMind pair, LFM, 2 seeds),
+2026-11-16 (RWKV, 2 seeds), 2026-11-17 (pocket, 3 seeds).
 
-| Model | pass | hard pass | zh | en | most-failed checks (count over 48 attempts) |
-|---|---:|---:|---:|---:|---|
-| MiniMind3 dense q8 (64M) | 0.188 | 0.167 | 0.25 | 0.14 | max_words 8, json_valid+json_keys 6+6, bullets 4, starts_with 4, ends_with 4, max_chars 4 |
-| MiniMind3-MoE q8 (198M-A64M) | 0.188 | 0.167 | 0.25 | 0.14 | identical pattern to the dense model (json 6+6, max_words 8, bullet/prefix/suffix/char 4 each) |
-| LFM2.5-230M QAD q4 | **0.562** | **0.542** | 0.45 | **0.64** | json_valid+json_keys 6+6, max_words 6, max_chars 4, bullets 2, absent_regex 2 |
+| Model | preset | seeds | pass | hard pass | zh | en | most-failed checks |
+|---|---|---:|---:|---:|---:|---:|---|
+| MiniMind3 dense q8 (64M) | minimind | 2 | 0.188 | 0.167 | 0.25 | 0.14 | max_words 8, json_valid+json_keys 6+6, bullets 4, starts_with 4, ends_with 4, max_chars 4 |
+| MiniMind3-MoE q8 (198M-A64M) | minimind | 2 | 0.188 | 0.167 | 0.25 | 0.14 | identical pattern to the dense model (json 6+6, max_words 8, bullet/prefix/suffix/char 4 each) |
+| LFM2.5-230M QAD q4 | lfm | 2 | 0.562 | 0.542 | 0.45 | 0.64 | json_valid+json_keys 6+6, max_words 6, max_chars 4, bullets 2, absent_regex 2 |
+| RWKV-7 0.1B q8r | rwkv | 2 | 0.250 | 0.208 | **0.40** | 0.14 | max_words 8, json_valid+json_keys 6+6, ends_with 4, max_chars 4, max_lines 3, six checks at 2, bullets/numbered_list 1 each |
+| MNN-Pocket qat | greedy | 3 | **0.792** | **0.792** | 0.700 | 0.857 | bullets 3, cjk_ratio_min 3, max_words 3, min_words 3, regex 3 |
+| MNN-Pocket bf16 | greedy | 3 | 0.708 | 0.708 | 0.600 | 0.786 | max_words 9, bullets 3, contains_any 3, max_chars 3, min_words 3, regex 3 |
+| BitCPM-CANN q8 | greedy | 3 | 0.500 | 0.500 | 0.500 | 0.500 | json_valid+json_keys 6+6, bullets 6, max_words 9, max_chars 6, max_lines/absent_regex/contains_none/regex 3 each |
+| BitCPM-CANN t3 | greedy | 3 | 0.500 | 0.500 | 0.500 | 0.500 | identical to the q8 row, cell for cell |
 
 The per-case pattern is more informative than the totals:
 
-* **The LFM passes exactly the cases a chat user would notice**: JSON is the one
-  family it loses (all three JSON cases, 6 of 6 attempts, because it wraps the
-  object in \`\`\`json fences even when the prompt says not to), plus the
-  one-word/character-budget cases where it answers with a full sentence
-  ("天空是蓝色的。" for "用一个词回答").  Everything else -- ALL CAPS, exact
-  prefix/suffix, numbered lists, bullets, two-line answers, the date-arithmetic
-  regex -- passes on both seeds.
-* **The MiniMind pair passes only the "write something long" cases**: if-07,
-  if-08, if-13 and if-15 are the length/language checks, which any verbose
-  answer passes; every case with an exact format fails.  Their per-case
-  patterns are *identical*, which is what an instruction-following battery
-  looks like when neither model has learned the instruction meta-skill: the
-  failure mode is the tuning, not the parameter count (the MoE has 3x the
-  parameters and scores the same).
-* **The gap is the product**: 0.19 vs 0.56 on the same 24 cases, in the same
-  direction as the chat comparison (termination, formatting, English), and in
-  the same direction as the multiple-choice table (LFM 0.38, MiniMind at
-  chance).  The two batteries disagree on *which* skill a model lacks -- the
-  LFM can follow instructions and cannot compute, the MiniMind pair does
-  neither.
+* **JSON is the universal failure -- except for pocket.**  Six of the eight
+  rows (everything except pocket) lose `json_valid` + `json_keys` on all 6
+  attempts: they wrap the object in a fenced block or answer with prose.  Pocket's failure list has no `json_*` at
+  all, and `hard pass == pass` in both of its containers: an attempt either
+  satisfies the instruction completely or not at all.
+* **LFM2.5 passes exactly the cases a chat user would notice**: everything
+  except the three JSON cases and the one-word/character-budget ones, where it
+  answers with a full sentence ("天空是蓝色的。" for "用一个词回答").  ALL CAPS,
+  exact prefix/suffix, numbered lists, bullets, two-line answers and the
+  date-arithmetic regex pass on both seeds.
+* **The MiniMind pair passes only the "write something long" cases** -- if-07,
+  if-08, if-13, if-15, the length/language checks any verbose answer passes -- and
+  every case with an exact format fails.  Their per-case patterns are
+  *identical*, which is what an instruction battery looks like when neither model
+  has learned the meta-skill: the failure mode is the tuning, not the parameter
+  count (the MoE has 3x the parameters and scores the same).
+* **RWKV-7 sits between the two** (0.250 against 0.188 / 0.562).  Its hard-pass
+  cases are the MiniMind pattern plus if-21 (a steps answer); if-04 and if-16
+  pass on one seed only, which is the 0.250 against 0.208 gap.
+* **BitCPM sits between the MiniMind pair and LFM2.5, and is the one row whose
+  two languages agree**: 0.500 in Chinese and 0.500 in English, identically in
+  the q8 and the t3 container (36 of 72 attempts, `hard pass` the same 0.500).
+  Its failure profile is the MiniMind pair's -- length and JSON -- not LFM2.5's.
+* **Which language a model follows instructions in better is not its knowledge
+  language**: the MiniMind pair (zh 0.25 against en 0.14) and RWKV-7 (0.40 against
+  0.14) do better in Chinese, though RWKV-7's *knowledge* is English-centric;
+  LFM2.5 (0.45 against 0.64) and pocket (0.700 against 0.857) do better in
+  English; BitCPM is equal.  The instruction-format axis and the knowledge axis
+  are independent, and only pocket is strong on both.
+* **The spread is the product**: 0.19 (MiniMind pair), 0.25 (RWKV), 0.50
+  (BitCPM), 0.56 (LFM), 0.71-0.79 (pocket) on the same 24 cases.
 
 Two more things about reading a pass rate:
 
@@ -267,56 +340,84 @@ Two more things about reading a pass rate:
 
 ### Translation
 
-30 items (15 sentences x 2 directions), greedy, chrF against the reference.
-"tgt/leak" are the target/source script fractions; see the method section.
+30 items (15 sentences x 2 directions), 2026-11-12 and 2026-11-17, chrF against
+the reference.  "tgt/leak" are the target/source script fractions; see the method
+section.  `chrF ≥ 0.5` / `≥ 0.3` (`—` where the run did not report the
+distribution) are the usable / half-right counts, and `copies source` is a count
+out of 30 except for pocket, whose dump reports a fraction.
 
-| Model | chrF (greedy) | zh→en | en→zh | chrF ≥ 0.5 | chrF ≥ 0.3 | copies source | meta-preamble | len |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| MiniMind3 dense q8 (64M) | 0.130 | 0.203 | 0.058 | 2/30 | 2/30 | 9/30 | 15/30 | 3.0 |
-| MiniMind3-MoE q8 (198M-A64M) | 0.133 | 0.172 | 0.094 | 1/30 | 2/30 | 7/30 | 12/30 | 2.1 |
-| LFM2.5-230M QAD q4 | **0.328** | **0.368** | **0.287** | **8/30** | **13/30** | 3/30 | 2/30 | 1.0 |
-
-Sampling does not rescue the MiniMind pair: with each model's own recommended
-preset (MiniMind temp 0.85 / top-p 0.85 / top-k 50, LFM QAD temp 0.1 / top-k 50
-/ repetition 1.05, seed 42) the numbers are dense **0.085**, MoE **0.130**, LFM
-**0.335**.  The LFM's translation is stable across greedy and sampled decoding;
-the dense model's is not (0.130 -> 0.085, and its en→zh cell drops to 0.017).
+| Model | decode | chrF | zh→en | en→zh | ≥ 0.5 | ≥ 0.3 | len |
+|---|---|---:|---:|---:|---:|---:|---:|
+| MiniMind3 dense q8 (64M) | greedy | 0.130 | 0.203 | 0.058 | 2/30 | 2/30 | 3.0 |
+| MiniMind3 dense q8, sampled | minimind | 0.085 | — | 0.017 | — | — | — |
+| MiniMind3-MoE q8 (198M-A64M) | greedy | 0.133 | 0.172 | 0.094 | 1/30 | 2/30 | 2.1 |
+| MiniMind3-MoE q8, sampled | minimind | 0.130 | — | — | — | — | — |
+| LFM2.5-230M QAD q4 | greedy | 0.328 | 0.368 | 0.287 | 8/30 | 13/30 | 1.0 |
+| LFM2.5-230M QAD q4, sampled | lfm | 0.335 | — | — | — | — | — |
+| RWKV-7 0.1B q8r | rwkv | 0.099 | 0.139 | 0.059 | 0/30 | 4/30 | 3.43 |
+| MNN-Pocket qat | greedy | 0.366 | 0.504 | 0.228 | — | — | 1.12 |
+| MNN-Pocket bf16 | greedy | 0.383 | 0.480 | 0.286 | — | — | 1.12 |
+| BitCPM-CANN q8 | greedy | **0.495** | 0.511 | 0.479 | — | — | 1.11 |
+| BitCPM-CANN t3 | greedy | 0.468 | **0.521** | 0.415 | — | — | 1.08 |
 
 Reading it:
 
-* **Only the LFM translates.**  8 of 30 outputs are usable (chrF >= 0.5) and
-  13 of 30 are half-right (>= 0.3); its mean length is 1.0x the reference and
-  it almost never talks about translating (2/30 preambles).
-* **The MiniMind pair does not translate; it describes the request.**  Dense
-  emits "Here is the translation of the sentence \"…\" into English:" in
+* **BitCPM translates best, then pocket, then LFM2.5** -- 0.495 / 0.468 for the
+  two BitCPM containers, 0.383 for pocket's bf16 file, 0.328 for LFM2.5 (8 of its
+  30 outputs usable, 13 half-right, mean length 1.0x the reference, and it almost
+  never talks about translating: 2/30).  LFM's translation is stable across
+  decoding (0.328 greedy, 0.335 sampled), where the dense MiniMind's is not
+  (0.130 -> 0.085).
+* **The ternary body costs the en→zh direction, not the total**: q8 is balanced
+  (0.511 zh→en / 0.479 en→zh) while t3 keeps the zh→en side (0.521) and drops
+  en→zh to 0.415, with exact 3/30 against 2/30 and the same near-zero source
+  leakage (0.035 / 0.007 of characters).  That is the shape of a rounding
+  difference, not a broken container -- and it is the one battery where the
+  167 MB file is measurably behind its 435 MB sibling.
+* **A real MT fine-tune on the same engine is a different league**: the official
+  LFM2-350M-ENJP-MT (EN<->JA) packed into a q4 container scores 0.559 on a
+  9-sentence probe against 0.419 for the untuned 230M base, and 0.675 for the
+  vendor GGUF through llama.cpp.  Build steps and packing traps in
+  [lfm2.5-230m.md](lfm2.5-230m.md#a-translation-fine-tune-of-the-same-architecture-lfm2-350m-enjp-mt).
+* **A human paraphrase scores ~0.65, not 1.0, on this corpus** ("The weather is
+  lovely today." against "The weather is nice today." gives 0.651).  So 0.33
+  means "half the content is wrong", not "almost right" -- and BitCPM's 0.495 is
+  the best this corpus has produced outside the 350M MT fine-tune (0.559):
+  short simple sentences
+  come out well (0.71, 0.76, 0.84 are real), numbers do not ("ten million" ->
+  "a million", "twenty minutes late" -> "two hours late"), idioms and complex
+  clauses do not.  0.13 means "the sentence is not there".
+* **The MiniMind pair does not translate; it describes the request.**  The dense
+  model emits "Here is the translation of the sentence \"…\" into English:" in
   half the cases (15/30, 12 of them zh→en), and for en→zh it repeats the English
-  source instead of translating it: 9 of its 15 en→zh outputs are more than
-  half source script, the direction scores 0.058 (0.017 sampled) -- the worst
-  cell in the battery.  The MoE mixes
-  the two languages inside one sentence ("请关闭 window; it is very cold
+  source: 9 of its 15 en→zh outputs are more than half source script, and that
+  direction scores 0.058 (0.017 sampled), the worst cell in the battery.  The
+  MoE mixes both languages inside a sentence ("请关闭 window; it is very cold
   outside."), loops, and preambles in 12/30.
-* **A human paraphrase scores ~0.65, not 1.0, on this corpus** (measured:
-  "The weather is lovely today." against "The weather is nice today." gives
-  0.651).  So LFM's 0.33 means "half the content is wrong", not "almost right":
-  it translates short simple sentences well (0.71, 0.76, 0.84 are real:
-  "Learning a new language requires time and patience." / "Scientists
-  discovered that this plant can thrive in deserts."), and it fails numbers
-  ("ten million" -> "a million", "twenty minutes late" -> "two hours late"),
-  idioms, and complex clause structure.  0.13 means "the sentence is not there".
-* **A real MT fine-tune on the same engine is a different league**: the
-  official LFM2-350M-ENJP-MT (EN<->JA) packed into a q4 container scores 0.559
-  on a 9-sentence probe against 0.419 for the untuned 230M base -- and 0.675 for
-  the vendor GGUF through llama.cpp.  The build steps, the two packing traps and
-  the numbers are in [lfm2.5-230m.md](lfm2.5-230m.md#a-translation-fine-tune-of-the-same-architecture-lfm2-350m-enjp-mt).
-* **The chat comparison's "the dense model translates" was one sentence.**  That
-  sentence ("今天天气很好") is one of the 2/30 this battery scores above 0.5;
-  the other 28 were never in that test.  This is the same lesson as the
-  multiple-choice battery: one sampled reply per prompt decides nothing.
+* **RWKV-7 is in the MiniMind pair's league, not the LFM's**: 0 of 30 usable, 4
+  half-right, 18 of 30 more than half source script, mean length 3.4x -- it
+  rambles.  en→zh is its worst cell (0.059, 10/15 copies): asked for Chinese it
+  repeats the English source, sometimes behind a "Translation:" preamble.  Its
+  best cell is en-zh-08 (0.448): "Learning a new language requires time and
+  patience." expanded into a paragraph of Chinese advice.  zh-en-01 has the right
+  sentence ("Today is a great day.") quote-wrapped and repeated twice, which chrF
+  prices at 0.191 -- the right sentence in the wrong behaviour, which is what the
+  0.099 mean says.
+* **Pocket's shape is consistent with its other batteries**: it reads Chinese
+  well (zh→en 0.50 against LFM's 0.37) and writes it worse (en→zh 0.23 against
+  0.29).  Chinese *input* is its strength, Chinese *output* its weakness -- the
+  same direction as its MC (zh 0.46) and ifeval (zh 0.700) rows, which are
+  comprehension-heavy.  The bf16 container edges ahead here (0.383 against
+  0.366), the one battery where it does, and it gets there by writing longer (its
+  top ifeval failure is `max_words 9`), not by translating better.
+* **The chat comparison's "the dense model translates" was one sentence**: 今天
+  天气很好 is one of the 2/30 this battery scores above 0.5, and the other 28 were
+  never in that test.  Same lesson as the multiple-choice battery: one sampled
+  reply per prompt decides nothing.
 
 The raw per-attempt replies (ifeval), per-item probabilities (multiple choice)
 and hypotheses (translation) are in each run's `--out` directory next to the
-summaries; the tables above were produced with `--seeds 2` and the presets
-stated in the method sections.
+summaries.
 
 ## What these numbers mean, and what they do not
 
@@ -325,30 +426,99 @@ stated in the method sections.
   two models are not resolved.  Read the per-category columns as leads and the
   totals as ±0.05.
 * **Chance is 0.25, and the letter prior is real.**  The 64M model answers "C"
-  65 times out of 100 and the MoE answers "A" 94 times; against balanced gold
-  those constants alone score ~0.25.  `acc_cal` subtracts the letter prior and
-  the null column says what the same letters would score against shuffled gold,
-  so "0.22" or "0.25" is not read as "the model tried".
+  65 times out of 100, the MoE "A" 94 times, pocket "A" 57 times; against
+  balanced gold those constants alone score ~0.25.  `acc_cal` subtracts the
+  letter prior and the null column says what the same letters would score against
+  shuffled gold, so "0.22" or "0.25" is not read as "the model tried".
 * **The English instruction problem.**  With "Answer with the option letter
   only." the MiniMind pair replies with prose to English items ("Based on...",
   "The question is...") under greedy decoding, for every English phrasing
   tried; the same question behind the Chinese instruction gets a letter from
-  all three models.  The battery therefore uses the Chinese instruction for
-  both languages, and `fmt` reports compliance anyway.  This is a property of
-  the models, not of the harness: a per-language instruction would have
-  measured it instead of knowledge.
+  all three transformer models.  The battery therefore uses the Chinese
+  instruction for both languages, and `fmt` reports compliance anyway.  This is
+  a property of the models, not of the harness: a per-language instruction would
+  have measured it instead of knowledge.
 * **Instruction following is a separate axis.**  A model can know the answer
   and still fail a case because it added "Here are three bullets:" above the
   bullets or wrapped JSON in a code fence.  The ifeval pass rate is the number
-  a chat user feels first, and it does not correlate with the MC accuracy.
+  a chat user feels first, and it does not correlate with the MC accuracy: the
+  best MC row is also the best ifeval row, but the MiniMind pair and RWKV-7
+  order differently on the two.
 * **This is not a leaderboard.**  The items are our own, deliberately easy
   (they are meant to be answerable by a bright child, which is roughly the
   ceiling of a 64M model).  They do not compare with published C-Eval / ARC
   numbers, which use thousands of items and full-size models.
-* **Quantization is part of the model.**  The LFM is measured at QAD q4 because
-  that is the container that works best for it; the MiniMind pair at q8.  A
-  cross-precision comparison is a different experiment (`bench_mc.py` takes
-  any container, so run both).
+* **Quantization is part of the model.**  LFM2.5 is measured at QAD q4 because
+  that is the container that works best for it, the MiniMind pair at q8, pocket
+  at q4 body + q6 head on a f32 stream grid, RWKV-7 at q8 with per-row scales.  A
+  cross-precision comparison is a different experiment (`bench_mc.py` takes any
+  container, so run both -- the two pocket rows are exactly that experiment).
+
+## Reproducing every row
+
+The three batteries, one command each for the 2026-11-12 baseline rows:
+
+```bash
+python3 engine/eval/bench_mc.py \
+  --model minimind3-q8=models/minimind3/minimind3.q8.mmcf \
+  --model minimind3-moe-q8=models/minimind3-moe/minimind3-moe.q8.mmcf \
+  --model lfm2.5-qad-q4=models/lfm2.5-230m/qad/lfm2.5.qad.q4.mmcf \
+  --data engine/eval/data/mc_zh.jsonl \
+  --data engine/eval/data/mc_en.jsonl \
+  --out /tmp/eval_mc --resume
+
+python3 engine/eval/eval_ifeval.py \
+  --model minimind3-q8=models/minimind3/minimind3.q8.mmcf --preset minimind --seeds 3 \
+  --data engine/eval/data/ifeval.jsonl --out /tmp/eval_ifeval
+
+python3 engine/eval/eval_translate.py \
+  --model minimind3-q8=models/minimind3/minimind3.q8.mmcf \
+  --model minimind3-moe-q8=models/minimind3-moe/minimind3-moe.q8.mmcf \
+  --model lfm2.5-qad-q4=models/lfm2.5-230m/qad/lfm2.5.qad.q4.mmcf \
+  --data engine/eval/data/translate.jsonl --out /tmp/eval_translate
+```
+
+RWKV-7, where two of the three need a flag (`--preset auto`, the default, picks
+the rwkv preset from metadata key 16 by itself; the explicit flag pins it):
+
+```bash
+python3 engine/eval/bench_mc.py \
+  --model rwkv7-q8r=models/rwkv7/packed/rwkv7-g1d-0.1b.q8r.chat.mmcf \
+  --data engine/eval/data/mc_zh.jsonl --data engine/eval/data/mc_en.jsonl \
+  --out /tmp/eval_mc --completion --resume
+
+python3 engine/eval/eval_ifeval.py \
+  --model rwkv7-q8r=models/rwkv7/packed/rwkv7-g1d-0.1b.q8r.chat.mmcf \
+  --preset rwkv --seeds 2 \
+  --data engine/eval/data/ifeval.jsonl --out /tmp/eval_ifeval
+
+python3 engine/eval/eval_translate.py \
+  --model rwkv7-q8r=models/rwkv7/packed/rwkv7-g1d-0.1b.q8r.chat.mmcf \
+  --preset rwkv --data engine/eval/data/translate.jsonl --out /tmp/eval_translate
+```
+
+MNN-Pocket, on its fixed grid and with absolute paths (the batteries spawn a
+tokenizer probe whose cwd is not `engine/`):
+
+```bash
+cd engine
+M=$(readlink -f ../models/pocket-qat/pocket-qat.q4q24.dedup.q6.mmcf)
+E='--env GPU_LAYER=1 --env SEQ=512 --env KV=q16 --env KV_GRID=512 --env RES=f32 --env ACT=f32'
+python3 eval/bench_mc.py      --model qat=$M --data eval/data/mc_en.jsonl \
+    --data eval/data/mc_zh.jsonl $E --out /tmp/pocket_mc
+python3 eval/eval_ifeval.py   --model qat=$M --preset greedy $E --out /tmp/pocket_if
+python3 eval/eval_translate.py --model qat=$M --preset greedy $E --out /tmp/pocket_tr
+```
+
+`--resume` appends to `<out>/<model>.items.jsonl` and skips items already
+scored, which is what a battery cut off by a tool timeout needs; every item's
+four probabilities are kept there, so a surprising number can be re-checked
+without the GPU.  One item costs 0.9 s on the dense model, 2.6 s on the LFM and
+2.7 s on the MoE, so the full 100-item, three-model battery is ~10 minutes on the
+laptop GPU.  The RWKV-7 runs of 2026-11-16 are archived at
+`models/rwkv7/phase4/{eval_mc,eval_ifeval,eval_translate}/`, and the superseded
+rounds next to them (chat-mode MC, greedy ifeval, truncated-template ifeval)
+carry READMEs.
 
 ## Adding items
 
@@ -366,343 +536,3 @@ A-D, or a letter-prior model scores above chance for free.
 For instruction cases the schema is
 `{"id","lang","prompt","gen","checks":[...],"good_example","bad_example"}`;
 after editing, `--selftest` must report zero mismatches.
-
-## 2026-11-16 — RWKV-7 0.1B (q8r): a third architecture in the same batteries
-
-Machine: laptop, Intel Iris Xe (ADL GT2), Mesa 26.2.5, `GPU_LAYER=1
-KV=q16`.  Container: `models/rwkv7/packed/rwkv7-g1d-0.1b.q8r.chat.mmcf`
-(the official BlinkDL g1d 0.1B checkpoint, q8 with one scale per output row,
-MMCF v4, embedded World-vocab tokenizer and the official G1 **nothink** chat
-template, key 8 bos 0 / eos 261 / stop 261, key 17 logit_shift 2, seq 512).
-The layer loop's faithfulness is verified separately (engine ↔ oracle-on-
-container-weights cos 0.9976–0.9990 across four prompts, top-1 4/4; the R-1
-residual-grid PPL study and the Xe pins are in
-[benchmarks.md](benchmarks.md)) — the numbers below
-measure the model, not the engine.
-
-**Protocol — three things differ from the 2026-11-12 rows, all deliberate:**
-
-* **Sampling is the model card's recommendation**, not greedy and not the
-  engine default: **temperature 1.0, top_p 0.3, repetition_penalty 1.2**
-  (source: the fla-hub/rwkv7-0.1B-g1 model card; the repo's
-  generation_config.json carries only bos/eos, so the card is the authority).
-  One copy lives in `evalkit.RWKV_SAMPLING`; `eval_ifeval.py --preset auto`
-  (the new default) and `eval_translate.py --preset auto` pick it for any
-  container that declares RWKV-7 (metadata key 16) and keep the historical
-  presets for everything else.  The minimind/lfm/greedy presets are unchanged.
-* **The multiple-choice battery runs in completion mode** (`bench_mc.py
-  --completion`, no `--chat`).  RWKV's chat template puts a think marker at
-  the answer position: the first decoded token is the marker, not a letter, so
-  chat-mode letter logits score noise (a 100-item chat-mode run measured
-  fmt ≈ 0 and acc at the null; it is archived at
-  `models/rwkv7/phase4/eval_mc_chat_invalid/`).  In completion mode the same
-  prompt's first token is the letter itself (fmt 1.000 on the probe).  The
-  transformer rows above stay in chat mode; the letter-splice probe works in
-  both.
-* **ifeval uses 2 seeds** (48 attempts — the 2026-11-12 table's protocol, cut
-  from 3 for machine time); **translate is sampled** with the card preset
-  (seed 0) where the old rows are greedy — read the cross-model comparison
-  with that in mind (the MiniMind pair's *sampled* translate numbers, 0.085 /
-  0.130, are the closer comparison).
-
-The template itself is the official G1 nothink render (`Assistant: \n`
-with a complete empty think block; `open_thinking` defaults to false).  Two
-same-day truncation accidents in the repo's copy (a dropped closing `>`,
-then a dropped opening tag) were found by hex comparison against the official
-tokenizer_config.json and fixed before the final runs; the rounds measured on
-the broken renders are archived with READMEs, not reported.  The container's
-stop id 261 is `\n\n`: a reply ends at its first blank line, which is a
-property of the shipped model and visible in the multi-line ifeval cases.
-
-### Multiple choice (RWKV in completion mode)
-
-100 items (50 zh + 50 en), one deterministic run each (`--gen 0`, letter
-logits).  The first three rows are the 2026-11-12 chat-mode results, unchanged;
-the RWKV row is completion mode.
-
-| Model | acc | acc_cal | fmt | p_gold | null (acc / acc_cal) | zh | en |
-|---|---:|---:|---:|---:|---|---:|---:|
-| MiniMind3 dense q8 (64M) | 0.220 | 0.320 | 0.880 | 0.255 | 0.253 ± 0.032 / 0.260 ± 0.033 | 0.16 | 0.28 |
-| MiniMind3-MoE q8 (198M-A64M) | 0.250 | 0.250 | 0.620 | 0.254 | 0.251 ± 0.017 / 0.244 ± 0.035 | 0.24 | 0.26 |
-| LFM2.5-230M QAD q4 | **0.380** | **0.400** | 0.880 | 0.404 | 0.250 ± 0.038 / 0.254 ± 0.033 | 0.28 | **0.48** |
-| RWKV-7 0.1B q8r (completion) | 0.240 | 0.310 | 0.740 | 0.262 | 0.251 ± 0.040 / 0.255 ± 0.039 | 0.16 | 0.32 |
-
-Reading the RWKV row:
-
-* **Raw accuracy is at the null**: 0.240 against 0.251 ± 0.040 — the letter
-  choice carries no information about the question, the same place the
-  MiniMind pair sits.  The calibrated 0.310 against its own null 0.255 ± 0.039
-  is 1.4 sigma — a lead, not a result (the dense MiniMind's 1.8 sigma is the
-  same kind of lead).  The LFM remains the only model with a resolved signal.
-* **It answers in the asked format** (fmt 0.740): three quarters of the items
-  have a letter as the full-vocabulary argmax at the answer position.  The
-  split is language-shaped — zh 0.92, en 0.56: on English items the model
-  often wants to write prose first.  The letter prior is mild (A 45, B 24,
-  C 24, D 7 out of 100), between the dense model's C-65 and the MoE's A-94.
-* **English-centric knowledge**: en 0.32 vs zh 0.16, the opposite weighting
-  of the Chinese-tuned MiniMind pair's training data.  Categories: math 6/19,
-  science 7/23, common sense 5/17, geography 0/12, logic 0/3.  Difficulty is
-  inverted (easy 0.17, medium 0.22, hard 0.40) — at 100 items that is noise,
-  the same non-ordering the 2026-11-12 table showed.
-
-### Instruction following (RWKV preset, 2 seeds)
-
-24 cases, 2 samples each (48 attempts), the card preset above.  The first
-three rows are the 2026-11-12 results (minimind/lfm presets), unchanged.
-
-| Model | pass | hard pass | zh | en | most-failed checks (count over 48 attempts) |
-|---|---:|---:|---:|---:|---|
-| MiniMind3 dense q8 (64M) | 0.188 | 0.167 | 0.25 | 0.14 | max_words 8, json_valid+json_keys 6+6, bullets 4, starts_with 4, ends_with 4, max_chars 4 |
-| MiniMind3-MoE q8 (198M-A64M) | 0.188 | 0.167 | 0.25 | 0.14 | identical pattern to the dense model |
-| LFM2.5-230M QAD q4 | **0.562** | **0.542** | 0.45 | **0.64** | json_valid+json_keys 6+6, max_words 6, max_chars 4, bullets 2, absent_regex 2 |
-| RWKV-7 0.1B q8r (rwkv preset) | 0.250 | 0.208 | **0.40** | 0.14 | max_words 8, json_valid+json_keys 6+6, ends_with 4, max_chars 4, max_lines 3, min_lines/is_upper/starts_with/contains_none/regex/absent_regex 2 each, bullets/numbered_list 1 each |
-
-* **Between the MiniMind pair and the LFM**: 0.250 vs 0.188 / 0.562.  The
-  hard-pass cases are the MiniMind pattern — the four "write something long"
-  cases (if-07, if-08, if-13, if-15) that any verbose answer passes — plus
-  if-21 (a steps answer).  if-04 and if-16 pass on one seed only: the gap
-  between pass 0.250 and hard-pass 0.208 is those two.
-* **JSON is the universal failure**: 6 of 6 attempts, like every model in
-  this table — the reply wraps or rambles instead of emitting the object.
-  max_words (8) is the other big one: the model answers at length.
-* **Chinese instructions work, English ones do not**: zh 0.40 vs en 0.14.
-  The zh pass rate is close to the LFM's 0.45; the en cell is the MiniMind
-  pair's 0.14.  A 0.1B model with English-centric pretraining still follows
-  the *format* of a Chinese instruction better than an English one — the
-  instruction language and the knowledge language are different axes.
-
-
-### Translation (RWKV preset, seed 0)
-
-30 items (15 sentences x 2 directions), chrF against the reference.  The first
-three rows are the 2026-11-12 **greedy** results, unchanged; the RWKV row is
-**sampled** with the card preset (the protocol the user directed for RWKV), so
-the closer cross-model comparison is the MiniMind pair's sampled numbers
-quoted below the old table (dense 0.085, MoE 0.130, LFM 0.335).
-
-| Model | chrF | zh→en | en→zh | chrF ≥ 0.5 | chrF ≥ 0.3 | copies source | meta-preamble | len |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| MiniMind3 dense q8 (64M, greedy) | 0.130 | 0.203 | 0.058 | 2/30 | 2/30 | 9/30 | 15/30 | 3.0 |
-| MiniMind3-MoE q8 (198M-A64M, greedy) | 0.133 | 0.172 | 0.094 | 1/30 | 2/30 | 7/30 | 12/30 | 2.1 |
-| LFM2.5-230M QAD q4 (greedy) | **0.328** | **0.368** | **0.287** | **8/30** | **13/30** | 3/30 | 2/30 | 1.0 |
-| RWKV-7 0.1B q8r (sampled) | 0.099 | 0.139 | 0.059 | 0/30 | 4/30 | 18/30 | 8/30 | 3.43 |
-
-* **It does not translate.**  0 of 30 outputs are usable (chrF ≥ 0.5), 4 of 30
-  half-right; 18 of 30 are more than half source script (the copy column),
-  and the mean length is 3.4x the reference — it rambles.  en→zh is the worst
-  cell (0.059, 10/15 copies): asked for Chinese, it repeats the English
-  source, sometimes with a "Translation:" preamble (8/30 overall).
-* **The failure modes are visible in the hypotheses** (kept in the dump):
-  zh→en-01 answers `"Today is a great day."` — correct words, but
-  quote-wrapped and repeated twice, which chrF punishes (0.191); en-zh-08
-  expands "Learning a new language requires time and patience." into a
-  paragraph of Chinese advice (0.448, the battery's best cell); zh-en-09
-  emits the Chinese source unchanged (0.000).  A model that *can* produce the
-  right sentence sometimes, wrapped in the wrong behaviour, is exactly what
-  the 0.099 mean says.
-* **At its own sampling protocol it is the MiniMind pair's league** (0.099
-  vs 0.085 / 0.130 sampled), not the LFM's (0.335 sampled).  The LFM's
-  translation remains the only one a chat user would notice.
-
-### What the RWKV rows say overall
-
-* **The quality ceiling is the model's, not the engine's.**  The engine runs
-  g1d faithfully (the cos/PPL evidence in benchmarks.md), and the three
-  batteries still place it with the MiniMind pair: MC at the null, ifeval
-  0.25, no translation.  The LFM2.5-230M is the only model in the table with
-  a resolved MC signal, real instruction following and usable translation.
-  RWKV-7's value here is the architecture (a 2.36 MB recurrent state instead
-  of a KV cache, O(1) per-token memory) — not a quality win at 0.1B.
-* **The language split is consistent**: English-centric knowledge (MC en
-  0.32 > zh 0.16) with Chinese instruction format following better than
-  English (ifeval zh 0.40 > en 0.14).  Read the two batteries together.
-* **Perplexity context** (gate corpus, SEQ=512 warm window, measured
-  2026-11-16 on Xe, `docs/benchmarks.md`): engine q8r
-  9.2919 against the f32 oracle's 8.1014 on the same token stream; per-row
-  scales are worth −23% PPL over per-matrix (12.0831), and the q16 residual
-  grid costs ~0.05 nats/token (the R-1 study in benchmarks.md decided q16
-  stays the default — q24's wider range is unused at a 37.4 residual peak).
-
-### Reproducing the RWKV rows
-
-```bash
-python3 engine/eval/bench_mc.py \
-  --model rwkv7-q8r=models/rwkv7/packed/rwkv7-g1d-0.1b.q8r.chat.mmcf \
-  --data engine/eval/data/mc_zh.jsonl --data engine/eval/data/mc_en.jsonl \
-  --out /tmp/eval_mc --completion --resume
-
-python3 engine/eval/eval_ifeval.py \
-  --model rwkv7-q8r=models/rwkv7/packed/rwkv7-g1d-0.1b.q8r.chat.mmcf \
-  --preset rwkv --seeds 2 \
-  --data engine/eval/data/ifeval.jsonl --out /tmp/eval_ifeval
-
-python3 engine/eval/eval_translate.py \
-  --model rwkv7-q8r=models/rwkv7/packed/rwkv7-g1d-0.1b.q8r.chat.mmcf \
-  --preset rwkv \
-  --data engine/eval/data/translate.jsonl --out /tmp/eval_translate
-```
-
-`--preset auto` (the default) picks the rwkv preset for this container by
-itself; the explicit `--preset rwkv` above pins the protocol.  Raw dumps from
-the 2026-11-16 runs: `models/rwkv7/phase4/eval_mc/`, `eval_ifeval/`,
-`eval_translate/`; the superseded rounds (chat-mode MC, greedy ifeval,
-truncated-template ifeval) are archived next to them with READMEs.  The
-per-item files keep every probability / reply, so a surprising number can be
-re-checked without the GPU.
-
-## 2026-11-17 — RWKV-7 0.4B: how to run it (and why q8r only)
-
-The 0.1B rows above are scores; this section is the **operating recipe** for
-the 0.4B (`rwkv7-g1d-0.4b-20260210-ctx8192`, 450.8M parameters, 24x1024,
-FFN 4096, ranks 64/64/32/128, a bf16 checkpoint).  Container
-`models/rwkv7/packed/rwkv7-g1d-0.4b.q8r.chat.mmcf` (454,949,100 B, MMCF v4,
-key 16 ranks with the gate flag, key 17 logit_shift 2), on Xe with
-`GPU_LAYER=1 KV=q16` and `SEQ=512`.
-
-**Three tiers, do not mix them:**
-
-| tier | flags | when |
-|---|---|---|
-| production | `--temp 1.0 --topp 0.3 --repeat-penalty 1.2 --seed 42 --gen 80` | every chat / translation / explanation request. All 20 sampled matrix runs produced readable output inside 80 tokens, including both translation directions |
-| tripwire | `--greedy --gen 16` | determinism and regression checks only (self-intro and the like). Greedy is **not** usable for open-ended or translation prompts on this checkpoint |
-| thinking | `--thinking --gen 400` or more, and the caller must check that `</think>` closes | only to watch the reasoning chain, never to get an answer |
-
-**Why greedy is a tripwire only.**  The nothink template does not stop this
-checkpoint opening its own `<think>`: with `--greedy --gen 200` both
-translation prompts spend the whole budget reasoning and never emit an answer,
-and the `--thinking` variant is still inside an unclosed think block at 200
-tokens.  The same prompts under the card's sampling preset answer inside 80
-(and translate, where the 0.1B only repeated its source).  Six runs, all rc=0:
-`models/rwkv7/phase2-direct/`.
-
-**q8r only, q4 is not viable.**  PPL on the gate corpus is 6.3432 at q8r
-against **7.7273** at q4 (f32 oracle 5.7405 on the same token stream), and the
-generation matrix shows what that costs: the q4 greedy column collapses into
-`<line>` x18 on the haiku prompt and repeats one clause ten times on the poem,
-while q8r stays readable.  The 0.4B is a desktop model (453 MB of container,
-386 MB of textures); the Pi cannot hold it at any precision.
-
-**Three behaviours that matter when scoring** (documented in
-[rwkv7.md](rwkv7.md), "Known gaps"): it invents
-wrapper tags (`<translation_output>`, `<answer>`) and, worst, echoes the user
-turn as `<user>...</user>`; and the multiple-choice battery still needs
-`--completion` because the template puts a think marker at the answer
-position.  Raw matrix (50 runs) and the per-prompt side-by-side against the
-0.1B: `models/rwkv7/phase2-gen/SUMMARY.md`.
-
-## 2026-11-17 — MNN-Pocket-0.3B (Qwen3 dense 0.36B): both containers, all three batteries
-
-Machine: laptop, Intel Iris Xe (ADL GT2), Mesa 26.2.5, `GPU_LAYER=1 SEQ=512
-KV=q16 KV_GRID=512 RES=f32 ACT=f32` — the best fixed-grid configuration from
-the fidelity campaign (`benchmarks.md`, same date).  Two containers of the
-same shape, 198,007,797 B each:
-
-| | container | sha256 (first 16) | source |
-|---|---|---|---|
-| **qat** | `models/pocket-qat/pocket-qat.q4q24.dedup.q6.mmcf` | `b164eee8b19e4db9` | the GGUF `Q4_1` QAT upload, dequantized to F16 and repacked (`models/pocket-qat/gguf_q4_to_hf.py`) |
-| **bf16** | `models/pocket-0.3b/pocket-0.3b.q4q24.dedup.q6.mmcf` | `d2a977003aab2501` | the BF16 release, quantized here |
-
-The engine's fidelity against a float32 numpy forward is 0.9552 cosine (qat,
-f32 streams + KV f32) and 0.9415 with q16 streams — measured, not asserted, and
-in `benchmarks.md`.  **The two containers are different checkpoints**, not two
-packagings of one: their weights are 0.9955 cosine apart and their logits against
-the BF16 reference only 0.9261, which is why they are measured separately below.
-
-### Multiple choice (100 items, one deterministic run each)
-
-| Model | acc | acc_cal | fmt | p_gold | null (acc) | zh | en |
-|---|---:|---:|---:|---:|---|---:|---:|
-| **pocket qat** | **0.480** | **0.480** | 0.710 | 0.479 | 0.255 ± 0.037 | 0.46 | 0.50 |
-| pocket bf16 | 0.450 | 0.400 | 0.740 | 0.443 | 0.254 ± 0.034 | 0.44 | 0.46 |
-
-Reading it:
-
-* **0.480 is 6.0 sigma over the null** and the highest in this document (LFM2.5's
-  0.380 is 3.4 sigma).  It is also the first model here whose `acc_cal` does not
-  move: calibration subtracts the letter logits of the same prompt with no
-  question, and for MiniMind3 that *raises* accuracy (0.220 -> 0.320) because its
-  letter prior was working against it.  Pocket's prior (A 57, B 1, C 20, D 22)
-  costs it nothing.
-* **The QAT file is the better checkpoint**, by 3 points raw and 8 calibrated:
-  bf16 falls to 0.400 once the prior is removed, qat stays at 0.480.  This
-  settles what the packaging campaign could not: the QAT upload is not merely a
-  differently-produced file, it is the better model.
-* **Chinese and English are balanced** (0.46 / 0.50) — the only row in this
-  document that is.  LFM2.5 is 0.28 / 0.48, MiniMind3 0.16 / 0.28.
-* `fmt 0.710` is the ceiling caveat: 29 items had a non-letter full-vocabulary
-  argmax and are scored wrong, so 0.48 is a floor (0.48/0.71 among the formatted
-  ones).  Pocket follows the letter format less often than LFM2.5 (0.88) and is
-  much more accurate: its weak half is instruction following, not knowledge.
-* By category: science 0.652 (n=23), common_sense 0.647 (17), geography 0.500
-  (12), history 0.500 (12), language 0.500 (6), **math 0.263 (19)**, `chinese`
-  questions 0.250 (8), logic 0.000 (3, too small to read).  **Math is identical
-  in both containers (0.263)**, so the arithmetic weakness is the model, not the
-  quantisation — and it is the same weakness the board showed in a hand probe
-  (`84 * 3 = ` -> `54.` on the Pi, `84 * 3 = 252.` on the Xe), i.e. two
-  independent paths agreeing.
-
-### Instruction following (24 cases, 3 seeds = 72 attempts, preset greedy)
-
-| Model | pass | hard pass | zh | en | most-failed checks (over 72 attempts) |
-|---|---:|---:|---:|---:|---|
-| **pocket qat** | **0.792** | **0.792** | 0.700 | 0.857 | bullets 3, cjk_ratio_min 3, max_words 3, min_words 3, regex 3 |
-| pocket bf16 | 0.708 | 0.708 | 0.600 | 0.786 | **max_words 9**, bullets 3, contains_any 3, max_chars 3, min_words 3, regex 3 |
-| LFM2.5-230M QAD q4 (2026-11-12 rows, 2 seeds) | 0.562 | 0.542 | 0.45 | 0.64 | json_valid+json_keys 6+6, max_words 6, max_chars 4 |
-
-* **The first model in this document that passes the JSON cases.**  Every other
-  row's top failure is `json_valid+json_keys 6+6` — the document says "JSON is
-  the universal failure" — and pocket's failure list contains no `json_*` at all.
-* `hard pass == pass` in both containers: an attempt either satisfies the
-  instruction completely or not at all, which is a different profile from a model
-  that half-complies.  The containers' failure profiles also differ in a way
-  that matches their translation lengths: bf16's largest single failure is
-  `max_words 9` (it runs long), qat's are spread evenly at 3.
-* Chinese 0.700 against LFM2.5's 0.45, English 0.857 against 0.64.
-* Protocol difference: 3 seeds here (72 attempts) against 2 (48) for the rows
-  above, so the *rates* compare and the failure counts do not.
-
-### Translation (30 cases, greedy, chrF)
-
-| Model | chrF | zh→en | en→zh | copies source | len | ms |
-|---|---:|---:|---:|---:|---:|---:|
-| pocket qat | 0.366 | **0.504** | 0.228 | 0.12 | 1.12 | 4483 |
-| pocket bf16 | **0.383** | 0.480 | 0.286 | 0.07 | 1.12 | 5260 |
-| LFM2.5-230M QAD q4 (2026-11-12) | 0.328 | 0.368 | 0.287 | 3/30 | 1.0 | — |
-
-* Total is a wash against LFM2.5, but the **shape is different and consistent
-  with everything else here**: pocket reads Chinese well (zh→en 0.50 against
-  0.37) and writes it worse (en→zh 0.23 against 0.29).  Its Chinese *input* is
-  its strength, its Chinese *output* is its weakness — the same direction as the
-  MC (zh 0.46) and ifeval (zh 0.70) rows, which are comprehension-heavy.
-* On this battery the BF16 container edges ahead (0.383 against 0.366), the one
-  place it does.  One battery, 30 cases: not enough to overturn the MC margin.
-* `copies source 0.12` / `len 1.12`: it occasionally repeats the source instead
-  of translating, and runs slightly long; the 2026-11-12 rows carry the
-  comparison for those columns.
-
-### What the three rows say together
-
-Pocket is the strongest 0.36B-class model in this document on knowledge and
-instruction following, and the first that is usable in Chinese at this size
-without a translation penalty.  Its weak spot is arithmetic, identical in both
-containers, and its Chinese *generation* lags its Chinese *comprehension*.
-
-**The QAT container wins two of the three batteries, and not narrowly**: MC 0.480
-against 0.450 (8 points once the letter prior is removed) and ifeval 0.792
-against 0.708 (zh 0.700 against 0.600).  bf16 is ahead only on translation
-(0.383 against 0.366, from 30 cases), which is the one place where the two
-containers' shapes differ least — and bf16 gets there by writing longer (its
-top ifeval failure is `max_words 9`), not by translating better.  Ship qat.
-
-Reproduce (paths absolute — the batteries spawn a tokenizer probe whose cwd is
-not `engine/`):
-
-```bash
-cd engine
-M=$(readlink -f ../models/pocket-qat/pocket-qat.q4q24.dedup.q6.mmcf)
-E='--env GPU_LAYER=1 --env SEQ=512 --env KV=q16 --env KV_GRID=512 --env RES=f32 --env ACT=f32'
-python3 eval/bench_mc.py --model qat=$M --data eval/data/mc_en.jsonl \
-    --data eval/data/mc_zh.jsonl $E --out /tmp/pocket_mc
-python3 eval/eval_ifeval.py  --model qat=$M --preset greedy $E --out /tmp/pocket_if
-python3 eval/eval_translate.py --model qat=$M --preset greedy $E --out /tmp/pocket_tr
-```
