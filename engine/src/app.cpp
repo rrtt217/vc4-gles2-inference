@@ -185,7 +185,14 @@ void App::upload_weights() {
     // its client pointer before it returns, per the GL spec, not at the finish.
     gpu.upload_batch_begin();
     uint64_t done = 0;
-    for (Mat* m : mats) {
+    // Prefetch one matrix ahead: the next matrix's bytes are read while this
+    // one is being uploaded, so the SD faults overlap with texture work
+    // instead of landing inside the next glTexImage2D.  The window is one
+    // matrix, which the drop_pages() below keeps resident-free.
+    const bool prefetch = !env_zero("UPLOAD_PREFETCH");
+    for (size_t i = 0; i < mats.size(); ++i) {
+        Mat* m = mats[i];
+        if (prefetch && i + 1 < mats.size()) model.prefetch(*mats[i + 1]);
         gpu.upload(*m);
         // The bytes just consumed are dead: drop their pages now instead of
         // holding the whole container in the page cache while the rest of it

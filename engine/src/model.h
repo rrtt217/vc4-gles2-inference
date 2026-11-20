@@ -235,6 +235,14 @@ public:
     void drop_pages(const Mat& m);
     void drop_pages(const void* p, size_t bytes);
 
+    // Start the read of the *next* matrix while the current one is being
+    // uploaded: one `madvise(MADV_WILLNEED)` over the borrowed bytes, so the
+    // SD card faults pages ahead instead of inside the next glTexImage2D.
+    // The window stays one matrix wide, which is what keeps `drop_pages()`
+    // safe on a board where the container's pages and its textures share the
+    // same movable pool.
+    void prefetch(const Mat& m);
+
     // Copy any borrowed weights back into their vectors (only the opt-in
     // rewrite paths need that; upload reads the borrowed bytes directly).
     static void materialize(Mat& m);

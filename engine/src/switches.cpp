@@ -76,6 +76,8 @@ static const SwitchDef kSwitches[] = {
      "upload wall time and the per-texture breakdown"},
     {"UPLOAD_SYNC", "", SwKind::Flag, "", SwStatus::Probe, SwAxis::Probe,
      "one glFinish per texture upload (the pre-batch form), for an A/B"},
+    {"UPLOAD_PREFETCH", "", SwKind::Flag, "", SwStatus::Probe, SwAxis::Probe,
+     "read the next matrix ahead of its upload (on unless set to 0)"},
     {"DRAWCOUNT", "", SwKind::Str, "", SwStatus::Probe, SwAxis::Probe,
      "draws per decoded token"},
     {"SYNCCOUNT", "", SwKind::Str, "", SwStatus::Probe, SwAxis::Probe,

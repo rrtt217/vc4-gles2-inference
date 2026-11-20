@@ -2,6 +2,7 @@
 #include "logits_grid.h"
 #include <algorithm>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <cstring>
 #include <map>
@@ -174,16 +175,42 @@ void Model::drop_pages(const void* p, size_t bytes){
         posix_fadvise(fd_, (off_t)off, (off_t)(end - off), POSIX_FADV_DONTNEED);
 }
 
-void Model::drop_pages(const Mat& m){
+// The ranges a Mat's borrowed bytes live in, one call per plane.  A t3 body is
+// the range that matters most here: it is the largest kind (85 MB of the
+// 167 MB BitCPM container) and it was missing from both this list and the
+// release, so the body stayed resident while its own texture was being built.
+static void each_borrowed(const Mat& m,
+                          const std::function<void(const void*, size_t)>& fn){
         const size_t cols = (size_t)m.cols, rows = (size_t)m.rows;
-        if (m.ext8) drop_pages(m.ext8, rows * cols);
-        if (m.ext16) drop_pages(m.ext16, rows * cols * 2);
-        if (m.ext4) drop_pages(m.ext4, rows * (cols / 2));
+        if (m.ext3) fn(m.ext3, mat_bytes(m));
+        if (m.ext8) fn(m.ext8, rows * cols);
+        if (m.ext16) fn(m.ext16, rows * cols * 2);
+        if (m.ext4) fn(m.ext4, rows * (cols / 2));
         if (m.groups > 0) {
                 const size_t plane = rows * (size_t)m.groups * sizeof(int16_t);
-                if (m.ext_scale4) drop_pages(m.ext_scale4, plane);
-                if (m.ext_min4) drop_pages(m.ext_min4, plane);
+                if (m.ext_scale4) fn(m.ext_scale4, plane);
+                if (m.ext_min4) fn(m.ext_min4, plane);
         }
+}
+
+void Model::drop_pages(const Mat& m){
+        each_borrowed(m, [this](const void* p, size_t n){ drop_pages(p, n); });
+}
+
+void Model::prefetch(const Mat& m){
+        if (!map_ || !borrow_) return;
+        each_borrowed(m, [this](const void* p, size_t bytes){
+                const char* base = (const char*)map_;
+                const char* q = (const char*)p;
+                if (!p || !bytes) return;
+                if (q < base || q >= base + map_size_) return;
+                const uint64_t page = 4096;
+                uint64_t off = (uint64_t)(q - base) & ~(page - 1);
+                uint64_t end = ((uint64_t)(q - base) + (uint64_t)bytes + page - 1) & ~(page - 1);
+                if (end > (uint64_t)map_size_) end = (uint64_t)map_size_;
+                if (end <= off) return;
+                madvise((void*)(base + off), (size_t)(end - off), MADV_WILLNEED);
+        });
 }
 
 void Model::release_map(){
@@ -192,6 +219,7 @@ void Model::release_map(){
     if (fd_ >= 0) { close(fd_); fd_ = -1; }
     auto clear = [](vector<Mat>& v){
         for (auto& m : v) {
+            m.ext3 = nullptr;
             m.ext8 = nullptr; m.ext16 = nullptr; m.ext4 = nullptr;
             m.ext_scale4 = nullptr; m.ext_min4 = nullptr;
         }
