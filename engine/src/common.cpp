@@ -108,6 +108,10 @@ void Progress::init(const char* what, uint64_t total, const char* unit, bool cou
         what_ = what;
         unit_ = unit;
         total_ = total;
+        // A phase starts at zero: a bump can draw before the first `set`, and an
+        // inherited count from the previous phase (the upload's 60.9 MB on the
+        // prefill's first frame) is not a number anyone can read.
+        done_ = 0;
         // A total of zero is a phase with nothing to do, not a phase of unknown
         // size -- that is begin_open(), which keeps the line.
         if (total == 0 && !open) return;
@@ -136,22 +140,33 @@ void Progress::side_bump(const char* label) {
         if (!on_) return;
         side_label_ = label;
         ++side_;
+        // Redraw here too, not only on the phase's own `set`.  A link can take a
+        // second on the board -- the first prefill token pays every program
+        // before it can report anything -- so a count that only moved at token
+        // boundaries stayed invisible for exactly the wait it describes (measured
+        // on the Pi: the first frame appeared at 4.0 s with `shaders 16` already
+        // there, 16 links that the bar never showed arriving).
+        maybe_draw(false);
 }
 
 void Progress::set(uint64_t done) {
         if (!on_) return;
+        done_ = done;
+        maybe_draw(!open_ && done >= total_);
+}
+
+void Progress::maybe_draw(bool final) {
         const auto now = Clock::now();
-        const bool last = !open_ && done >= total_;
         if (!drawn_) {
                 // The line is for a wait: a phase that is already over before it
                 // is visible would only have blinked.
                 if (elapsed_ms(start_, now) < kShowAfterMs) return;
-        } else if (!last && elapsed_ms(last_, now) < kRedrawMs) {
+        } else if (!final && elapsed_ms(last_, now) < kRedrawMs) {
                 return;
         }
         last_ = now;
         drawn_ = true;
-        draw(done);
+        draw(done_);
 }
 
 void Progress::draw(uint64_t done) {

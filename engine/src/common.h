@@ -239,6 +239,7 @@ public:
         bool active() const { return on_; }
 private:
         void init(const char* what, uint64_t total, const char* unit, bool count, bool open);
+        void maybe_draw(bool final);
         void draw(uint64_t done);
         bool on_ = false;
         bool count_ = false;        // whole units, not MB
@@ -248,6 +249,7 @@ private:
         const char* unit_ = "MB";
         const char* side_label_ = nullptr;
         uint64_t total_ = 0;
+        uint64_t done_ = 0;
         uint64_t side_ = 0;
         Clock::time_point start_ {}, last_ {};
 };
