@@ -64,12 +64,27 @@ jobs:
           print("python syntax ok (%d files)" % len(files))
           PY
 
+      # The numpy half of engine/tools imports numpy at module scope (mmcf_hf,
+      # the ref_* passes, pth_reader, mmcf_requant_q8), so even `--help` needs
+      # it, and the runner's bare python3 has no numpy: this step failed with
+      # ModuleNotFoundError.  pyproject.toml + uv.lock are the tools' declared
+      # environment and the only list of it (`--frozen` also fails when the two
+      # disagree), so CI builds that one and not a second requirements file.
+      # The gate and the server above it still run on the bare python3 --
+      # the board has no such environment and they must not need one.
+      - name: the tools' numpy environment (pyproject.toml + uv.lock)
+        run: |
+          set -eu
+          python3 -m venv "$RUNNER_TEMP/uv"
+          "$RUNNER_TEMP/uv/bin/pip" install --quiet --disable-pip-version-check uv
+          "$RUNNER_TEMP/uv/bin/uv" sync --frozen --python python3
+
       - name: tool CLIs
         run: |
           set -eu
           n=0
           for f in engine/tools/*.py; do
-            python3 "$f" --help > /dev/null
+            .venv/bin/python "$f" --help > /dev/null
             n=$((n + 1))
           done
           echo "tool CLIs ok ($n tools)"

@@ -86,7 +86,8 @@ engine/tools/mmcf_pack.py ...` resolves `pyproject.toml` + `uv.lock` and creates
 `.venv/`; `uv sync` builds it without running anything.  `mmcf_format.py`,
 `mmcf_dump.py` and `make_tok.py` are stdlib and run either way, and the gates
 and the server stay stdlib-only: they must keep working with the system
-`python3`, because CI and the board do not set up this environment.
+`python3`, because the board does not set up this environment.  CI builds it
+for the tool CLIs only.
 
 ### The four non-engine directories — split by what a file *needs*
 
@@ -147,7 +148,11 @@ Build for the target and do not reuse a stale binary:
 - CI: `.github/workflows/gate.yml` runs that same `check` target on every push,
   so there is no second list to drift (the workflow listed the steps separately
   and had missed `check_q16_decode.sh` until 2026-11-17), plus the eval case
-  file's `--selftest`, shell and Python syntax, and the tool CLIs.
+  file's `--selftest`, shell and Python syntax, and the tool CLIs.  The tool
+  CLIs run in the `pyproject.toml` + `uv.lock` environment (`uv sync --frozen`),
+  because the numpy half of `engine/tools` imports numpy at module scope and the
+  runner's `python3` has none; the gate and the server above them still run on
+  that bare `python3`, which is the board's situation too.
   `test_mmcf_format.py` checks only the C++ constants there because `models/` is
   gitignored — it prints SKIP for the round trip when the store is absent.  The
   model-dependent half (golden strings, PPL,
