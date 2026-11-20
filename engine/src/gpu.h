@@ -50,6 +50,13 @@ public:
     ~GPU();
 
     void upload(Mat& m);
+    // Weight-upload batching.  The caller brackets its upload loop with these
+    // two; every make_texture()/make_q4_texture() in between stops finishing
+    // the pipeline per texture (a 157 MB, 480-texture container paid 43.2 s of
+    // it on the Pi), and the bracket's end pays one finish for the batch.
+    // `UPLOAD_SYNC=1` restores the per-texture finish for an A/B.
+    void upload_batch_begin();
+    void upload_batch_end();
 
     // Everything this context created that is *scene* rather than *program*:
     // weight textures, per-layer tables, scratch/FBO targets, the upload cache.
@@ -540,6 +547,7 @@ private:
     Target& target_for(int rows);
 
     GLuint upload_activations(const vector<float>& x);
+
 
 
 

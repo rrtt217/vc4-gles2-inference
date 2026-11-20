@@ -74,6 +74,8 @@ static const SwitchDef kSwitches[] = {
      "prefill and decode timings to stderr"},
     {"UPLOAD_TIME", "", SwKind::Str, "", SwStatus::Probe, SwAxis::Probe,
      "upload wall time and the per-texture breakdown"},
+    {"UPLOAD_SYNC", "", SwKind::Flag, "", SwStatus::Probe, SwAxis::Probe,
+     "one glFinish per texture upload (the pre-batch form), for an A/B"},
     {"DRAWCOUNT", "", SwKind::Str, "", SwStatus::Probe, SwAxis::Probe,
      "draws per decoded token"},
     {"SYNCCOUNT", "", SwKind::Str, "", SwStatus::Probe, SwAxis::Probe,

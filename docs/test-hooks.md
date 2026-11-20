@@ -51,7 +51,7 @@ The rows below are the registry, one per switch, grouped by the axis they move.
 diagnostic or a pricing arm; `retired` is gone (`--dump-switches` prints the
 same table with what *this* environment resolved to).
 
-141 switches: 28 permanent, 99 probe, 14 retired; 16 legacy spellings are translated.
+142 switches: 28 permanent, 100 probe, 14 retired; 16 legacy spellings are translated.
 
 ### The activation streams
 
@@ -132,6 +132,7 @@ same table with what *this* environment resolved to).
 | `SHADER_TIME` | `=1` | STARTUP phase marks and one line per program |
 | `SYNCCOUNT` | value | host <-> GPU synchronisations per decoded token |
 | `TIMING` | value | prefill and decode timings to stderr |
+| `UPLOAD_SYNC` | `=1` | one glFinish per texture upload (the pre-batch form), for an A/B |
 | `UPLOAD_TIME` | value | upload wall time and the per-texture breakdown |
 
 ### Diagnostics: what the engine dumps
@@ -359,6 +360,12 @@ conclusion from its output.
 
 - `UPLOAD_TIME=1` — `UPLOAD <s> wall, <n> textures, texture time <ms>` after
   the weight upload (also implied by `SHADER_TIME=1`).
+- `UPLOAD_SYNC=1` — put back one `glFlush`+`glFinish` per texture upload.  The
+  default batches the whole weight upload and finishes once at its end, because
+  nothing between two uploads samples the previous one and the command stream
+  already orders a texture before the first draw that reads it (the Pi paid
+  43.2 s of per-texture drains on the 157 MB t3 container).  This switch is the
+  A/B arm, not a deployment option.
 - `RWKV_CHUNK_TEST=1`：在桌面（GL 上限 16384）强制 RWKV channel-mix 按 2048 行分块，
   复现/验证 VC4 的分块路径（Pi 天然触发）。只影响 split_rwkv 的 max_dim。
 
