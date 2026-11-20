@@ -246,6 +246,12 @@ probes/t3act_probe: probes/t3act_probe.cpp probes/egl_surfaceless.h
 probes/t3act_probe_pi: probes/t3act_probe.cpp probes/egl_surfaceless.h | check-cross
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -o $@ $< $(CROSS_LDLIBS)
 
+# rmsnorm normalize draw cost: what folding it into the consumer matvec saves.
+probes/rmsfuse_probe: probes/rmsfuse_probe.cpp probes/egl_surfaceless.h
+	$(CXX) $(ALL_CXXFLAGS) -o $@ $< $(LDLIBS)
+probes/rmsfuse_probe_pi: probes/rmsfuse_probe.cpp probes/egl_surfaceless.h | check-cross
+	$(CROSS_CXX) $(CROSS_CXXFLAGS) -o $@ $< $(CROSS_LDLIBS)
+
 probes/rgba4444_probe: probes/rgba4444_probe.cpp probes/egl_surfaceless.h
 	$(CXX) $(ALL_CXXFLAGS) -o $@ $< $(LDLIBS)
 probes/rgba4444_probe_pi: probes/rgba4444_probe.cpp probes/egl_surfaceless.h | check-cross
@@ -318,7 +324,7 @@ test_xformat: tests/test_xformat.cpp tests/checks.h $(SRC)/xformat.cpp \
 clean:
 	rm -f engine engine_mm3 engine_mm3_pi test_lineedit test_tokenizer test_xformat
 	rm -f probes/vc4_probe probes/vc4_ffn_probe probes/vc4_topk_probe probes/load_probe_pi
-	rm -f probes/matvec_probe probes/texsize_probe probes/q4fmt_probe_pi probes/glsl_probe_pi probes/q4mv_probe_pi probes/draw_probe_pi probes/packunpack_probe probes/packunpack_probe_pi probes/logits_grid_probe probes/wrow_probe probes/wrow_probe_pi probes/conv_probe probes/conv_probe_pi probes/t3mv_probe probes/t3mv_probe_pi probes/t3dec_probe probes/t3dec_probe_pi probes/t3lut_probe probes/t3lut_probe_pi probes/t3act_probe probes/t3act_probe_pi probes/att_batch_probe probes/att_batch_probe_pi probes/att_out_probe probes/att_out_probe_pi \
+	rm -f probes/matvec_probe probes/texsize_probe probes/q4fmt_probe_pi probes/glsl_probe_pi probes/q4mv_probe_pi probes/draw_probe_pi probes/packunpack_probe probes/packunpack_probe_pi probes/logits_grid_probe probes/wrow_probe probes/wrow_probe_pi probes/conv_probe probes/conv_probe_pi probes/t3mv_probe probes/t3mv_probe_pi probes/t3dec_probe probes/t3dec_probe_pi probes/t3lut_probe probes/t3lut_probe_pi probes/t3act_probe probes/t3act_probe_pi probes/rmsfuse_probe probes/rmsfuse_probe_pi probes/att_batch_probe probes/att_batch_probe_pi probes/att_out_probe probes/att_out_probe_pi \
 	rm -f probes/sumorder_probe probes/sumorder_probe_pi probes/q4mv_probe probes/progbinary_probe_pi probes/ffn2_probe_pi probes/rgba4444_probe probes/rgba4444_probe_pi
 
 probes/glsl_probe_pi: probes/glsl_probe.cpp | check-cross
