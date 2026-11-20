@@ -207,8 +207,25 @@ Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
                 for (const Mat& m : v) if (m.type != WeightType::INT8) return false;
                 return true;
             };
+            const auto all_t3 = [](const vector<Mat>& v) {
+                if (v.empty()) return false;
+                for (const Mat& m : v) if (m.type != WeightType::T3) return false;
+                return true;
+            };
             const vector<Mat>& w2 = !m_.w2a.empty() ? m_.w2a : m_.w2;
+            const vector<Mat>& w1 = !m_.w1a.empty() ? m_.w1a : m_.w1;
+            const vector<Mat>& w3 = !m_.w3a.empty() ? m_.w3a : m_.w3;
             const bool q8_model = all_int8(m_.qkv) && all_int8(m_.wo) && all_int8(w2);
+            // A 2-bit body takes the same activation stream: the t3 kernels are
+            // built with the activation format as a parameter (they read X4Q,
+            // which every format defines), so what the gate tests is "which
+            // matvec family will read this stream", and `all-q8` was only ever
+            // a shorthand for "a family that has an I8_4 path".
+            // WORK IN PROGRESS: the t3 path answers garbage under ACT=i8 (the
+            // finding is in this branch's first commit).  Only ACT=i8 reaches
+            // it; a run that does not set the axis is unaffected.
+            const bool t3_model = all_t3(m_.qkv) && all_t3(m_.wo) && all_t3(w1) &&
+                                  all_t3(w3) && all_t3(w2);
             // The activation axis, one value for the GPU streams (the uploaded
             // h, the attention output, xb/xbf): `i16` is the q16 pair grid,
             // `f32` the bit-cast one (same memory as the 24-bit residual, one
@@ -222,8 +239,9 @@ Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
                 if (!strcmp(a, "f32")) gpu_.act_fmt_ = XFormat::F32;
                 else if (!strcmp(a, "bf16")) gpu_.act_fmt_ = XFormat::BF16;
                 else if (!strcmp(a, "i8")) {
-                    if (q8_model) gpu_.act_fmt_ = XFormat::I8_4;
-                    else cerr << "ACT=i8 needs an all-q8 model; keeping the q16 streams\n";
+                    if (q8_model || t3_model) gpu_.act_fmt_ = XFormat::I8_4;
+                    else cerr << "ACT=i8 needs all-q8 or all-t3 weights; "
+                                 "keeping the q16 streams\n";
                 }
             }
             // FFN_HID: the FFN hidden stream's format.  `f32` exists because the
