@@ -128,6 +128,24 @@ static string dec_sb_mask() {
            "uintBitsToFloat((0x3F800000u|((u>>5)<<31))&(0u-((u>>4)&1u))),"
            "uintBitsToFloat((0x3F800000u|((u>>7)<<31))&(0u-((u>>6)&1u))));}\n";
 }
+// The unused code 2 (mag0 sign1) is a DON'T-CARE: assign it -2 and the weight
+// becomes bit0 - 2*bit1 -- an integer subtract + one ITOF, no bit-cast and no
+// float multiply (frees the mul slot for the dot's FMAD).  Valid codes
+// {00,01,11} still decode to {0,+1,-1}; code 2 -> -2 never occurs.  Works on the
+// shipped mag/sign encoding, no repack.
+static string dec_sub() {
+    return "vec4 dec(float bb){uint u=uint(bb*255.0+0.5);return vec4("
+           "float(int(u&1u)-(int((u>>1)&1u)<<1)),"
+           "float(int((u>>2)&1u)-(int((u>>3)&1u)<<1)),"
+           "float(int((u>>4)&1u)-(int((u>>5)&1u)<<1)),"
+           "float(int((u>>6)&1u)-(int((u>>7)&1u)<<1)));}\n";
+}
+static string dec_sub_vec() {
+    return "vec4 dec(float bb){uint u=uint(bb*255.0+0.5);"
+           "ivec4 m=ivec4(u&1u,(u>>2)&1u,(u>>4)&1u,(u>>6)&1u);"
+           "ivec4 s=ivec4((u>>1)&1u,(u>>3)&1u,(u>>5)&1u,(u>>7)&1u);"
+           "return vec4(m-(s<<1));}\n";
+}
 
 int main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
@@ -230,8 +248,12 @@ int main(int argc, char** argv) {
         {"sb_trunc (no floor)", dec_sb_trunc, false, false},
         {"sb_noand (sign no &1)", dec_sb_noand, false, false},
         {"sb_mask (mask not mul)", dec_sb_mask, false, false},
+        {"subtract (bit0-2bit1)", dec_sub, false, false},
+        {"sub_vec (ivec4)", dec_sub_vec, false, false},
         {"wide (16 a row)", dec_hoist, true, false},
         {"sb_wide (2row+signbit)", dec_sb_trunc, true, false},
+        {"sub_wide (2row+sub)", dec_sub, true, false},
+        {"sub_vec_wide (2row)", dec_sub_vec, true, false},
         {"int_acc (integer dot)", dec_hoist, false, true},
         {"int_acc_wide (2row int)", dec_hoist, true, true},
     };
