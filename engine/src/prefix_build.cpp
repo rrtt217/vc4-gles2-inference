@@ -67,10 +67,15 @@ int build_prefix_cache(Model& model, Tokenizer& tokenizer,
     if (tokens.empty() || (int)tokens.size() > model.seq) {
         cerr << "cache prompt empty or too long (" << tokens.size() << ")\n"; return 1;
     }
+    // One bar over the prompt: this mode reads nothing but a prompt file and
+    // then prefills it, so the wait is exactly this loop.
+    ProgressScope pref("prefill", tokens.size(), "tok");
     for (size_t i = 0; i < tokens.size(); ++i) {
         if (g_stop) return 1;
         session.step(tokens[i], (int)i, false);
+        pref.set(i + 1);
     }
+    pref.end();
     if (!session.save_prefix_cache(opt.build_cache_out, tokens, system_fnv, tools_fnv)) {
         cerr << "cannot save prefix cache (GPU attention required)\n"; return 1;
     }

@@ -207,26 +207,66 @@ std::string dump_escape(const std::string& t);
 // A field out of /proc/meminfo by name prefix (CmaFree, MemFree); -1 if absent.
 long long proc_meminfo_kb(const char* key);
 
-// A one-line progress bar on stderr for the two phases a start actually spends
-// time in: reading the container and uploading its weights.  Off unless stderr is
-// a terminal, so a pipe, the worker protocol and the regression scripts never see
-// a '\r' or half a line -- and off when SHADER_TIME is set, whose STARTUP lines
-// are grep targets.  One global rather than a parameter because Model::load() and
-// App::upload_weights() sit three call layers below main.
+// A one-line progress bar on stderr for the waits a start or a turn spends time
+// in: uploading the weights, prefilling a prompt, a --ppl run's windows.  Off
+// unless stderr is a terminal, so a pipe, the worker protocol and the regression
+// scripts never see a '\r' or half a line -- and off when SHADER_TIME is set,
+// whose STARTUP lines are grep targets.  The engine owns exactly one (g_progress):
+// the shader links run *inside* a prefill, from gpu_prog.cpp, and count
+// themselves on it as a side figure -- a local instance would draw a bar that
+// never showed them.
+//
+// A phase has to last kShowAfterMs before the first line is drawn: a two-token
+// prefill on a desktop is ~30 ms, and a bar that appears and erases for 30 ms is
+// a blink, not information.
 class Progress {
 public:
+        Progress() = default;
+        Progress(const Progress&) = delete;
+        Progress& operator=(const Progress&) = delete;
+        // A phase with a size: bytes (shown in MB) or whole units (tokens).
         void begin(const char* what, uint64_t total);
+        void begin_count(const char* what, uint64_t total, const char* unit);
+        // A phase whose size nobody can state before running it -- how many
+        // windows a --ppl run needs depends on its own warm-up arithmetic -- so
+        // it shows a count and a clock instead of a percentage that would be
+        // wrong.  A bar that ends at 90% is worse than no bar.
+        void begin_open(const char* what, const char* unit);
+        void side_bump(const char* label);            // "shaders 12": a count, no total
         void set(uint64_t done);
         void end();
         ~Progress() { end(); }
         bool active() const { return on_; }
 private:
+        void init(const char* what, uint64_t total, const char* unit, bool count, bool open);
+        void draw(uint64_t done);
         bool on_ = false;
+        bool count_ = false;        // whole units, not MB
+        bool open_ = false;         // no total: never "done"
+        bool drawn_ = false;
         const char* what_ = "";
+        const char* unit_ = "MB";
+        const char* side_label_ = nullptr;
         uint64_t total_ = 0;
-        Clock::time_point last_ {};
+        uint64_t side_ = 0;
+        Clock::time_point start_ {}, last_ {};
 };
 extern Progress g_progress;
+
+// A phase's bar, in a scope: begun at construction, erased at destruction, so the
+// early returns a Ctrl-C and a full context take cannot leave half a line on
+// stderr.  It drives the global because that is the object the shader links are
+// counted on.
+class ProgressScope {
+public:
+        ProgressScope(const char* what, uint64_t total);                     // bytes, in MB
+        ProgressScope(const char* what, uint64_t total, const char* unit);   // whole units
+        ~ProgressScope() { g_progress.end(); }
+        ProgressScope(const ProgressScope&) = delete;
+        ProgressScope& operator=(const ProgressScope&) = delete;
+        void set(uint64_t done) { g_progress.set(done); }
+        void end() { g_progress.end(); }
+};
 
 // Environment switches, read one way.  Reading the same variable twice in one
 // expression (`getenv(X) ? atoi(getenv(X)) : d`) is both slow in a per-layer loop

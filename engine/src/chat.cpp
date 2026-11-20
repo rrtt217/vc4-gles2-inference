@@ -237,6 +237,12 @@ void Chat::run_turn(const std::string& user, bool first, int pos, std::vector<Ch
                           && marker_mask.empty() && !getenv("LOGITS_OUT")
                           && session.greedy_fast_ok();
     int next_fast = -1;
+    // A long prompt is seconds of a frozen screen on the board, and the first
+    // one also pays every lazy shader link; the bar counts the tokens this turn
+    // still has to run (minus the cached prefix) and carries the link count on
+    // the same line.  The object is scope-bound so the early returns below --
+    // Ctrl-C, context full -- cannot leave half a line on stderr.
+    ProgressScope pref("prefill", tokens.size() - (size_t)skip, "tok");
     for (size_t i = skip; i < tokens.size(); ++i) {
         if (g_stop) { tt.cut = "prefill"; app.gpu.sync(); return; }
         if (pos >= app.model.seq) { tt.cut = "context"; cout << "[context full]\n"; return; }
@@ -285,7 +291,9 @@ void Chat::run_turn(const std::string& user, bool first, int pos, std::vector<Ch
         } else {
             logits = session.step(tokens[i], pos++, last);
         }
+        pref.set(i + 1 - (size_t)skip);
     }
+    pref.end();
     if (g_stop) { tt.cut = "prefill"; app.gpu.sync(); return; }
     tt.begin_decode();
     // DRAWCOUNT / SYNCCOUNT count the decode loop only: the prompt's draws are a
@@ -1038,6 +1046,9 @@ int next_fast = -1;
 // bytes before it is read - so prefill_warm is the number the server sees.
 auto prefill_once = [&]() {
     vector<float> lg;
+    // Same bar as the chat loop: this path is `--prompt`, where the wait is the
+    // prompt and nothing is printed until it is over.
+    ProgressScope pref("prefill", tokens.size(), "tok");
     for (size_t i = 0; i < tokens.size(); ++i) {
         if (g_stop) break;
         bool last = (i + 1 == tokens.size());
@@ -1072,7 +1083,9 @@ auto prefill_once = [&]() {
         } else {
             lg = session.step(tokens[i], (int)i, last);
         }
+        pref.set(i + 1);
     }
+    pref.end();
     return lg;
 };
 TurnTiming tt;

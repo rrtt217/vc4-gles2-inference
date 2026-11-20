@@ -162,9 +162,20 @@ TinyChat15M 是 llama-2 chat 格式的 15M 模型，不是补全模型：容器�
 所以语法和取值范围的权威就是 `/help`；打错一个字的单词命令会说“你是不是想用 X”，
 而不是被当成消息发给模型。改动在**下一轮**生效：REPL 只在两轮之间读 stdin，所以模型解码时敲的
 东西到不了采样器。`/stats` 打印当前容器（路径、形状、模板、rms eps）、上下文占用、可用内存和
-板上的 SoC 温度——不报 CmaFree，那不是 GL 场景真正能拿到的额度。每轮结束在终端上打一行 `[8 tok  108.1 tok/s  0.55 s prefill  ctx 39/256]`，
-加载容器时在同一条线上画进度条（`[upload  45% ...]`）；stderr 不是终端时两者都不打，设了
-`SHADER_TIME` 时进度条也不打（它的 `STARTUP` 行是 grep 目标）。
+板上的 SoC 温度——不报 CmaFree，那不是 GL 场景真正能拿到的额度。每轮结束在终端上打一行 `[8 tok  108.1 tok/s  0.55 s prefill  ctx 39/256]`；
+屏幕上本来什么都不动的那些等待，会在同一条线上画进度条：加载容器、prompt 的 prefill、
+`--build-prefix-cache` 和 `--ppl`。
+
+```
+[upload  45% ############------------   27.1/  60.9 MB    3.4 s]
+[prefill 63% #######################-   397/   397 tok    5.0 s  shaders 20]
+[ppl           7 win    5.7 s]
+```
+
+prefill 条上的 `shaders` 是这一趟付掉了多少个 program link：link 是惰性的，所以都落在第一次
+prefill 里（板上是其中 1.89 s），以前这段时间条子一直停在 0%。150 ms 内就结束的阶段一律不画
+——桌面上一两个 token 的 prefill 只会闪一下。stderr 不是终端时全部不打，设了 `SHADER_TIME`
+时也不打（它的 `STARTUP` 行是 grep 目标）。
 
 它们是 base completion 模型，不是 chat 模型；用普通 prompt，不要加 `--chat`：
 

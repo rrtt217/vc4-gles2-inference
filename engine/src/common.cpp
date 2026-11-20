@@ -93,31 +93,91 @@ long long proc_meminfo_kb(const char* key) {
 // drawn at most ten times a second; on the Pi a container read is 6 s of SD card
 // and a redraw per record would cost more than the load.
 // ---------------------------------------------------------------------------
-void Progress::begin(const char* what, uint64_t total) {
+static constexpr double kShowAfterMs = 150.0;   // a shorter phase never draws
+static constexpr double kRedrawMs = 100.0;
+
+void Progress::init(const char* what, uint64_t total, const char* unit, bool count, bool open) {
         end();
-        if (total == 0 || !isatty(STDERR_FILENO)) return;
-        if (getenv("SHADER_TIME")) return;   // those STARTUP lines are grep targets
-        on_ = true;
+        on_ = false;
+        // A side count belongs to one phase: a swap's upload must not inherit
+        // the links the previous model compiled during its last prefill.
+        side_ = 0;
+        side_label_ = nullptr;
+        count_ = count;
+        open_ = open;
         what_ = what;
+        unit_ = unit;
         total_ = total;
-        last_ = Clock::now() - chrono::milliseconds(500);
-        set(0);
+        // A total of zero is a phase with nothing to do, not a phase of unknown
+        // size -- that is begin_open(), which keeps the line.
+        if (total == 0 && !open) return;
+        if (!isatty(STDERR_FILENO)) return;
+        if (getenv("SHADER_TIME")) return;   // those STARTUP lines are grep targets
+        start_ = last_ = Clock::now();
+        drawn_ = false;
+        on_ = true;
+}
+
+void Progress::begin(const char* what, uint64_t total) { init(what, total, "MB", false, false); }
+
+void Progress::begin_count(const char* what, uint64_t total, const char* unit) {
+        init(what, total, unit, true, false);
+}
+
+void Progress::begin_open(const char* what, const char* unit) { init(what, 0, unit, true, true); }
+
+ProgressScope::ProgressScope(const char* what, uint64_t total) { g_progress.begin(what, total); }
+
+ProgressScope::ProgressScope(const char* what, uint64_t total, const char* unit) {
+        g_progress.begin_count(what, total, unit);
+}
+
+void Progress::side_bump(const char* label) {
+        if (!on_) return;
+        side_label_ = label;
+        ++side_;
 }
 
 void Progress::set(uint64_t done) {
         if (!on_) return;
         const auto now = Clock::now();
-        const bool last = done >= total_;
-        if (!last && elapsed_ms(last_, now) < 100.0) return;
+        const bool last = !open_ && done >= total_;
+        if (!drawn_) {
+                // The line is for a wait: a phase that is already over before it
+                // is visible would only have blinked.
+                if (elapsed_ms(start_, now) < kShowAfterMs) return;
+        } else if (!last && elapsed_ms(last_, now) < kRedrawMs) {
+                return;
+        }
         last_ = now;
+        drawn_ = true;
+        draw(done);
+}
+
+void Progress::draw(uint64_t done) {
+        const double secs = elapsed_ms(start_, Clock::now()) / 1000.0;
+        char side[40] = "";
+        if (side_label_)
+                snprintf(side, sizeof side, "  %s %llu", side_label_, (unsigned long long)side_);
+        if (open_) {
+                fprintf(stderr, "\r[%-8s %6llu %-3s %5.1f s%s\x1b[K", what_,
+                        (unsigned long long)done, unit_, secs, side);
+                return;
+        }
         double pct = 100.0 * (double)done / (double)total_;
         if (pct > 100.0) pct = 100.0;
         char bar[25];
         const int filled = (int)(pct / 100.0 * 24.0 + 0.5);
         for (int i = 0; i < 24; ++i) bar[i] = i < filled ? '#' : '-';
         bar[24] = 0;
-        fprintf(stderr, "\r[%-6s %3.0f%% %s %6.1f/%6.1f MB\x1b[K", what_, pct, bar,
-                (double)done / (1024.0 * 1024.0), (double)total_ / (1024.0 * 1024.0));
+        // A counted phase prints whole units (a token is not 14.0 tokens); a byte
+        // phase prints MB with one decimal, which is how a container's size is
+        // quoted everywhere else in this tree.
+        const int dec = count_ ? 0 : 1;
+        const double dv = count_ ? (double)done : (double)done / (1024.0 * 1024.0);
+        const double tv = count_ ? (double)total_ : (double)total_ / (1024.0 * 1024.0);
+        fprintf(stderr, "\r[%-8s %3.0f%% %s %6.*f/%6.*f %-3s %5.1f s%s\x1b[K", what_, pct, bar,
+                dec, dv, dec, tv, unit_, secs, side);
 }
 
 void Progress::end() {

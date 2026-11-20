@@ -181,10 +181,22 @@ the REPL reads stdin only between turns, so nothing typed while the model is
 decoding can reach the sampler.  `/stats` prints the live container (path, shape,
 template, rms eps), the context usage, available memory and the SoC temperature
 when the board has one -- not CmaFree, which is not the budget a GL scene gets.  After each turn a one-line summary goes to stderr at a terminal --
-`[8 tok  108.1 tok/s  0.55 s prefill  ctx 39/256]` -- and loading a container
-draws one bar there (`[upload  45% ############------------   27.1/  60.9 MB]`),
-both off when stderr is not a terminal and the bar also off under `SHADER_TIME`,
-whose `STARTUP` lines are grep targets.
+`[8 tok  108.1 tok/s  0.55 s prefill  ctx 39/256]` -- and the phases that would
+otherwise show nothing on screen draw one bar on that line instead: loading a
+container, a prompt's prefill, `--build-prefix-cache`, and a `--ppl` run.
+
+```
+[upload  45% ############------------   27.1/  60.9 MB    3.4 s]
+[prefill 63% #######################-   397/   397 tok    5.0 s  shaders 20]
+[ppl           7 win    5.7 s]
+```
+
+The prefill bar's `shaders` count is how many program links that pass paid for:
+links are lazy, so they land inside the first prefill (1.89 s of it on the board)
+and the bar sat at 0% while they ran.  A phase that is over in under 150 ms never
+draws -- a two-token prefill on a desktop would only blink.  All of it is off
+when stderr is not a terminal, and off under `SHADER_TIME`, whose `STARTUP` lines
+are grep targets.
 
 **What the REPL does not have** (a deliberate list, not an oversight): `--ppl`
 and `--worker` are processes, not conversations; `/tools` would have to

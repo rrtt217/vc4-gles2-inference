@@ -67,6 +67,12 @@ int run_ppl(const std::string& ppl_path, Model& model, GPU& gpu, Tokenizer& toke
     int windows = 0;
     const long n = (long)tokens.size();
     long next = 1;                                  // first token still to score
+    // One line over the whole run: on the board this is minutes.  Its size is
+    // not stated -- the window count comes from this loop's own warm-up
+    // arithmetic (the first window covers `span` tokens, every later one
+    // `stride`), and re-deriving it here would be a second copy of the protocol
+    // to drift.  So the line is a count and a clock.
+    g_progress.begin_open("ppl", "win");
     while (next < n) {
         if (g_stop) break;
         const long a = windows == 0 ? 0 : next - warm;   // first token fed
@@ -107,7 +113,9 @@ int run_ppl(const std::string& ppl_path, Model& model, GPU& gpu, Tokenizer& toke
             next = t + 1;
         }
         ++windows;
+        g_progress.set((uint64_t)windows);
     }
+    g_progress.end();
     if (!cnt) { cerr << "no tokens scored\n"; return 1; }
     printf("PPL %.4f  nll=%.4f  tokens=%ld  windows=%d  span=%d  stride=%d\n",
            exp(nll / cnt), nll / cnt, cnt, windows, span, stride);

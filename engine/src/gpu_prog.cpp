@@ -207,5 +207,11 @@ GLuint GPU::link_program(const string& fs_in){
                     count, shader_time_ms(), ms, fs.size(),
                     (size_t)std::hash<string>{}(fs), g_prog_key.c_str(), total);
         }
+        // The progress bar's side count.  Links are lazy: they happen inside the
+        // first forward pass, so the only honest figure is how many have been
+        // made (the set is whatever that pass touches, which no table states).
+        // On the board this is a second and a half of the first token's prefill,
+        // and it was invisible -- the bar sat at 0% while it ran.
+        g_progress.side_bump("shaders");
         return p;
     }
