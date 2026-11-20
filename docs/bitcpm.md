@@ -275,6 +275,16 @@ on the CPU loop, which is the same-path A/B that isolates it).
   arithmetic cannot remove: 56.6 M MAC of attention for 633 ms of the token, 168
   draws, at VC4's fixed cost a draw.  Getting below that means fewer draws per
   block, not a smaller matvec.
+- **`ACT=i8` on the 2-bit body is correct and not worth it.**  With the t3 add
+  kernels fixed (`5b66ebc`) the 8-bit stream answers the same text as the q16
+  one; it costs 0.24 nats/token (2026-11-21, Xe, 247 tokens: 35.6726 ->
+  45.3255) for -2% decode on Xe and a difference inside the board's noise
+  (median -2.3% over two interleaved rounds).  The isolated pair kernel does
+  measure -20% ns/MAC with an 8-bit stream, but a t3 matvec is weight-decode
+  bound (the fetch is 22% of it), so the model sees -2%; the bill is the fixed
+  1/16 grid, and none of it is clipping (xb peaks at 3.5 of the 7.94 rail).  A
+  per-row-scaled 8-bit stream is the format this model could afford, not this
+  one.
 - **q4 is not packed.** `q4mat`'s 32-value min/max grid puts 0 half a step off,
   so every zero becomes `±s/15`; that is the one place this model's weights are
   not lossless.  Judge it with PPL before shipping a q4 container.
