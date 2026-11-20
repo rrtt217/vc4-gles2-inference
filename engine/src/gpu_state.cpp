@@ -241,6 +241,38 @@ static bool q4_tex_stats(){
         return v;
 }
 
+// Batched upload.  Every make_texture() used to end with glFlush + glFinish,
+// so a container drained the whole pipeline once per texture -- 480 times for
+// the t3 body, 43.2 s for 157 MB on the Pi.  Nothing between two uploads reads
+// the previous one, and the GL command stream already orders a texture's upload
+// before the first draw that samples it, so the drains bought no ordering: they
+// only serialised the SD page faults that a borrowed container pays for.
+//
+// The batch flushes every 32 textures to keep the command queue bounded; the
+// single finish that matters is the bracket's end, and it is the one counted in
+// g_up_tex_ms, so UPLOAD_TIME still measures the wall time the phase waits.
+// `UPLOAD_SYNC=1` restores the per-texture form, which is how this was priced.
+static bool upload_sync_per_texture(){
+        static const bool v = env_flag("UPLOAD_SYNC");
+        return v;
+}
+static bool g_up_batch = false;
+static int g_up_pending = 0;
+
+static void upload_sync_point(){
+        if (!g_up_batch || upload_sync_per_texture()) { glFlush(); glFinish(); return; }
+        if (++g_up_pending >= 32) { glFlush(); g_up_pending = 0; }
+}
+
+void GPU::upload_batch_begin(){ g_up_batch = true; g_up_pending = 0; }
+
+void GPU::upload_batch_end(){
+        g_up_batch = false; g_up_pending = 0;
+        const double t0 = shader_time_ms();
+        glFlush(); glFinish();
+        g_up_tex_ms += shader_time_ms() - t0;
+}
+
 
 GLuint GPU::make_texture(int w, int h, const void* data){
         const double t0 = shader_time_ms();
@@ -263,7 +295,7 @@ GLuint GPU::make_texture(int w, int h, const void* data){
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        glFlush(); glFinish();
+        upload_sync_point();
         g_up_tex_ms += shader_time_ms() - t0; ++g_up_tex;
         return t;
     }
@@ -347,7 +379,7 @@ GLuint GPU::make_q4_texture(int w, int h, const void* data){
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        glFlush(); glFinish();
+        upload_sync_point();
         g_up_tex_ms += shader_time_ms() - t0; ++g_up_tex;
         return t;
     }
