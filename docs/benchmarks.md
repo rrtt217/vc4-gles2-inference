@@ -55,7 +55,7 @@ is a rough guide only: rows come from different builds, and the engine has gaine
 | vertex15 q4 | **196.9** | 512 | 2026-11-13 | stops at EOS after 7 tokens |
 | MiniMind2 i16 | **216.0** | 512 | 2026-11-13 | cheap q16 decode; 326.8 with `Q16_DECODE=exact` |
 | vertex35 q4 | **241.4** | 512 | 2026-11-13 | stops after 7 tokens |
-| MiniMind3-MoE q4 | **322.0** | 768 | 2026-11-13 | 131 MB, top-1 routing |
+| MiniMind3-MoE q4 | **222.8** | 768 | 2026-11-21 | 131 MB, top-1 routing; median of three (222.8 / 216.9 / 227.2), was 322.0 on the 2026-11-13 build |
 | vertex100 q4 | **487.0** | 512 | 2026-11-13 | stops after 15 tokens |
 | void1 q4 | **554.8** | 1024 | 2026-11-13 | 259-entry byte tokenizer, `TOK_NO_PREFIX=1` |
 | LFM2.5-QAD q4 | **566.3** | — | 2026-11-16 | hybrid (conv + attention), `IGNORE_EOS` |
