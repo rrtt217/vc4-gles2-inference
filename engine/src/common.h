@@ -92,18 +92,31 @@ struct Mat {
     bool fmt4 = false;
 };
 
-// The bytes a matrix's weights occupy, for accounting (the upload progress bar
-// and the scene ledger).  Nibbles are stored packed; a q4 matrix also carries one
-// int16 scale and minimum per group.
+// The bytes a matrix's weights occupy, for accounting (the upload progress bar).
+// Packed layouts are counted packed; a q4 matrix also carries one int16 scale and
+// minimum per group.  A per-row scale plane (part 3) is not counted for any kind,
+// so the total is the container's weight bytes, not its file size.
+//
+// The switch is exhaustive on purpose, with no `default:`.  A t3 body was added
+// to WeightType without a case here and fell through to `n` -- four times its
+// real size -- so BitCPM's 167 MB container printed "413.7/413.7 MB" while the
+// load line next to it said 85 MB of t3 texture (2026-11-20).  -Wswitch now names
+// any kind added later and `warncheck` fails the gate on it.
 inline size_t mat_bytes(const Mat& m) {
     const size_t n = (size_t)m.rows * (size_t)m.cols;
     switch (m.type) {
+        case WeightType::INT8: return n;
         case WeightType::INT16: return n * 2;
         case WeightType::INT4: return n / 2 + (size_t)m.rows * (size_t)m.groups * 2 * sizeof(int16_t);
-        case WeightType::INT6: return n;   // two planes of one byte each; only the tied head
-        case WeightType::INT8:
-        default: return n;
+        // Two planes, a 4-bit low and a 2-bit high one (`mmcf_hf.q6mat`): 6 bits
+        // a value, not one byte.  Only the tied head uses it.
+        case WeightType::INT6: return n / 2 + n / 4;
+        // 2 bits a weight, in the container's own texel grid: an RGBA8 texel is
+        // 2 rows by 8 columns, so ((rows+1)/2) * ((cols+7)/8) * 4 bytes -- n/4
+        // for a shape the packer accepts.  This is the length `as_t3()` borrows.
+        case WeightType::T3: return (((size_t)m.rows + 1) / 2) * ((((size_t)m.cols + 7) / 8) * 4);
     }
+    return n;
 }
 
 struct Target {
