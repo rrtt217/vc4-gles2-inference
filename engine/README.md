@@ -1,9 +1,10 @@
 # GLES2 inference engine
 
 A small GLES2/EGL inference engine for llama2.c-family, Llama-shaped and
-Qwen3-shaped checkpoints. It runs headless on Raspberry Pi Zero (VC4 V3D 2.1)
-and on desktop GLES2 drivers, and it reads exactly one file format: the
-self-describing [MMCF container](../docs/checkpoint-container.md).
+Qwen3-shaped checkpoints, plus RWKV-7 (the v4 container family).  It runs
+headless on Raspberry Pi Zero (VC4 V3D 2.1) and on desktop GLES2 drivers, and it
+reads exactly one file format: the self-describing
+[MMCF container](../docs/checkpoint-container.md).
 
 This README is the quick start. Deep notes are in [../docs/](../docs/):
 
@@ -27,7 +28,7 @@ This README is the quick start. Deep notes are in [../docs/](../docs/):
 | `gate/` | pass/fail checks that need no GPU: documents, the switch registry, shader digests, the q16 rail, the draw cap, the target ledger, the container layout |
 | `scripts/` | oracles, measurement and acceptance, which need a GPU and/or a model: `regression.sh`, the benchmarks, `swap_matrix.py`, `check_att.py` |
 | `eval/` | model quality: `bench_mc.py`, `eval_ifeval.py`, `eval_translate.py` and their `data/` |
-| `tests/` | compiled tests (`test_lineedit.cpp`, built by the Makefile) |
+| `tests/` | compiled tests (`test_lineedit`, `test_tokenizer`, `test_xformat`), built by the Makefile |
 | `probes/` | standalone VC4 probes, not linked into the engine |
 
 Each of those five has a `README.md` whose table is the map — one row per file
@@ -209,8 +210,9 @@ so it would need one plus a call into `kCmd`.
 `/model PATH` loads another container without rebuilding the GL context, which
 is the expensive part: on the Pi Zero the context costs 4.23 s and the 13
 program links 1.89 s per process, against 6.12 s to read a container and 2.99 s
-to upload it (`docs/benchmarks.md`, "Where the first token goes").  A path that
-is unreadable, not a container, or not a chat model is refused **before** the
+to upload it (`../AGENTS.md`, "Switching models without restarting the
+engine").  A path that is unreadable, not a container, or not a chat model is
+refused **before** the
 current model is released -- the header and the metadata are enough to decide that
 -- so a typo costs nothing.  There is no capacity pre-check: the kernel's free-CMA
 figure is not what a new scene can actually get, and desktop kernels have none, so
@@ -300,11 +302,12 @@ GPU_LAYER=1 KV=q16 ./engine_mm3 \
   --prompt "Once upon a time" --gen 64 --greedy
 ```
 
-On the Pi, stories15M i16 is coherent at ~167 ms/token and stories42M q8 at
-~190 ms/token.  `stories15M.q8` produces gibberish in this repo's conversion;
-use the i16 container.  stories42M i16 is too large for the current CMA budget.
-The 260K model is a floor probe: ~85 ms/token, but 5.4 s prefill, because the
-attention passes walk the full 512-position grid.
+On the Pi, stories15M q8 decodes at ~116 ms/token and stories42M q8 at ~160
+(`docs/benchmarks.md` owns the rows); both q8 containers and stories15M i16 answer
+coherently.  stories42M i16 is too large for the current CMA budget.
+`models/llama2c/stories260K.bin` is the floor probe -- 5 layers, a 512-token
+vocabulary, attention over the full grid -- so read it as a prefill measurement,
+not an interactive model; the store holds the `.bin` source, not a container.
 
 These come from llama2.c fp32 `.bin` sources, which the packer accepts
 directly (`--in .../stories15M.bin --quant i16`).  There is no `LEGACY_Q8=1` path
@@ -326,7 +329,8 @@ GPU_LAYER=1 ./engine_mm3 --chat \
 `GPU_LAYER=1` puts the conv block on the GPU, because it selects the fused layer
 loop and a conv layer takes its GPU branch there; the serial `GPU_LAYER=0` loop
 runs the conv on the CPU, which is the reference path (the fused path is 4%
-worse in perplexity and 3x faster).  `KV=q16` is the hybrid default — the
+worse in perplexity and several times faster -- `docs/lfm2.5-230m.md` owns both
+numbers).  `KV=q16` is the hybrid default — the
 24-bit KV layout is wrong for this model's shape.  Perplexity, timings, the
 template/tool checks and the list of open defects are in
 [docs/lfm2.5-230m.md](../docs/lfm2.5-230m.md).
@@ -369,7 +373,8 @@ chat markers that sit *above* the BPE range onto their ids — a blob built from
 `<|im_start|>` into characters.
 
 A llama2.c `.bin` works the same way (`--in ../models/llama2c/stories15M.bin
---quant i16 --tok ... --template plain --chat`).  A legacy checkpoint is still
+--quant i16 --tok ... --template plain` -- no `--chat`: the packer refuses to
+advertise chat support on a completion model).  A legacy checkpoint is still
 accepted, and then `--theta` and `--rope-half` are required for a `Q8M1`/`I16M1`
 source, because that header carries no rope at all and the packer refuses to
 guess.  Templates:
@@ -380,9 +385,10 @@ tokenizer is embedded, and the special-token ids are derived from it.
 
 A container may carry the model's own `chat_template` (the HuggingFace Jinja
 text, metadata key 9 — the same string a GGUF file holds).  When it does, that
-template is the prompt builder; `--template`'s kind is only the fallback for
-containers written before the key existed.  A template the engine cannot parse
-is refused at load with the parser's message, never silently replaced.
+template is the prompt builder; the container's template kind (metadata key 4)
+is only the fallback for containers written before the key existed.  A template
+the engine cannot parse is refused at load with the parser's message, never
+silently replaced.
 
 ```bash
 python3 tools/mmcf_dump.py ../models/minimind3/minimind3.q8.mmcf | grep -i 'chat tmpl'
@@ -396,9 +402,10 @@ message containing `<|im_end|>` is tokenised as ordinary text, so it cannot
 forge a turn boundary.  That is a behaviour change from the kind-based path,
 which built one string and matched specials everywhere.
 
-Tools still take the legacy path (`run_tool_turn`), so `--tools` remains
-MiniMind3-only until that loop is message-based; a template that renders `tools`
-is already able to describe them, but the loop's continuation is still ChatML.
+The tool loop is model-agnostic when the container carries a template: every
+round re-renders the message list through it, so `--tools` works for any chat
+container.  Only a template-less container falls back to the string path, which
+builds one prompt and is why it only ever worked for the ChatML family.
 
 ## MiniMind3 64M
 
@@ -417,17 +424,17 @@ and the rows not re-measured):
 
 | model | prefill | decode |
 |---|---:|---:|
-| MiniMind3 q4 | 16.0–35.9 s | **304.4 ms/token** |
+| MiniMind3 q4 | 16.0–35.9 s | **185.7 ms/token** (2026-11-16, flat q4 gate) |
 | MiniMind2 i16 | 11.8–19.9 s | 216.0 ms/token |
 | MiniMind2 q8 | 7.3–7.9 s | 123.5 ms/token |
 | MiniMind2 q4 | 8.9 s | 153.7 ms/token |
 | TinyChat15M q8 | 3.6–4.5 s | 115.4 ms/token |
 
-MiniMind3 q8 was not re-measured; its last number is 252 ms/token (2026-11-02).
-The historical 520.9 ms/token and 42.7 s prefill figures predate the q16
-attention and q4 paired-residual work; the 32-token plain-prompt pair for the
-two MiniMind3 containers is 195.5 / 291.7 ms/token (2026-11-05), a different
-protocol.
+MiniMind3 q8 decodes at ~190 ms/token (188.6 on 2026-11-07, compared in the same
+session as the q4 row).  The historical 520.9 ms/token and 42.7 s prefill figures
+predate the q16 attention and q4 paired-residual work; the 32-token plain-prompt
+pair for the two MiniMind3 containers is 195.5 / 291.7 ms/token (2026-11-05), a
+different protocol.
 
 The FFN hidden width 2432 exceeds the VC4 2048-pixel FBO limit.
 `Model::split_ffn()` splits W1/W3 rows and W2 columns into 1216-wide chunks;
@@ -440,7 +447,7 @@ the second W2 matvec adds into the first residual.
 ...  --thinking --prompt "1+1等于几？" --gen 64
 
 # tool definitions
-...  --tools-file minimind3/tools.json \
+...  --tools-file ../minimind3/tools.json \
   --prompt "现在几点了？" --gen 64 --greedy
 ```
 
@@ -453,9 +460,10 @@ Built-in tools:
 - `calculate_math` — safe recursive-descent arithmetic (`+ - * / % ^`,
   parentheses, unary, Python-style `**`).
 
-The native tool loop generates until `<|im_end|>`, parses all complete
-`<tool_call>` blocks, executes them, appends one user turn with
-`<tool_response>` blocks, and re-prefills. Up to 3 rounds.
+The native tool loop generates until the turn ends, parses all complete
+`<tool_call>` blocks, executes them, appends the results to the history -- as
+`tool` messages when the container has a template, as one `<tool_response>` user
+turn on the legacy string path -- and re-prefills. Up to 3 rounds.
 
 Thinking mode often fails to close `</think>` within 64 tokens on the 64M
 model; tool calls are much more reliable.
@@ -481,8 +489,8 @@ model; tool calls are much more reliable.
 | `ACT=i8` | all matvec inputs in I8_4, q8 weights only; opt-in |
 
 See [test hooks](../docs/test-hooks.md) for the full list, including the dump
-and probe switches (`STAGE_DUMP`, `RAW_DUMP`, `QKV_DUMP`, `ATT_DUMP`,
-`ATTN_DUP`, `PASS_DUP`, `DRAWCOUNT`, ...).
+and probe switches (`STAGE_DUMP`, `QKV_DUMP`, `ATT_DUMP`, `ATTN_DUP`,
+`PASS_DUP`, `DRAWCOUNT`, ...).
 
 Top-k is a sampler flag, not an environment switch: `--top-k N` keeps the N
 most likely tokens before top-p (0 = off, the default), and
@@ -552,10 +560,11 @@ before concluding anything from it.
 The OpenAI-compatible Python server lives in [../server/](../server/):
 
 ```bash
-python3 server/build_prefix_cache.py build --model ../models/minimind3/minimind3.q8.mmcf \
+# From the repository root (the cache builder runs the engine there, so its
+# paths are repository-relative):
+python3 server/build_prefix_cache.py build --model models/minimind3/minimind3.q8.mmcf \
   --seq 768 --kv-pack 16 --out pfx_tools_pi768.kv        # writes pfx_tools_pi768.kv.json too
-python3 server.py --seq 768 --kv-pack 16 \
-  --prefix-cache pfx_tools_pi768.kv
+python3 server/server.py --seq 768 --kv-pack 16 --prefix-cache pfx_tools_pi768.kv
 ```
 
 See [server/README.md](../server/README.md).
@@ -565,4 +574,5 @@ See [server/README.md](../server/README.md).
 `SIGINT`/`SIGTERM` set a flag instead of tearing down EGL inside the signal
 handler. The current GPU call/layer/token finishes, then `glFinish()` and
 normal EGL teardown run. In chat mode Ctrl+C stops the current turn and
-returns to the prompt; Ctrl+C at the prompt exits.
+returns to the prompt; at the prompt one Ctrl-C abandons the line and keeps the
+session, a second one in a row exits (`Ctrl-D` or `/exit` leaves immediately).

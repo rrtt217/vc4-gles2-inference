@@ -57,9 +57,11 @@ template (MMCF metadata key 9), exactly as `llama.cpp` does with
 prompt string.  `ready` reports `"chat_template": true|false`; when it is false
 the request is refused with a 400 naming the packer flag, because the
 alternative — guessing a format here — is what used to put ChatML markers in
-front of a model that had never seen them.  Every shipped chat container carries
-key 9; only the `stories*` completion models do not, and they have no chat turn
-to render.  Repack with `mmcf_pack.py --chat-template <file>.jinja`.  `GET
+front of a model that had never seen them.  Every chat container packed from a
+source with a `chat_template` carries key 9; the `stories*` completion models have
+no chat turn to render, and a chat container packed without the key -- e.g.
+`smollm2-135m.q8q24.mmcf` -- is refused with a 400 until it is repacked.  Repack
+with `mmcf_pack.py --chat-template <file>.jinja`.  `GET
 /health` prints the template name under `template`.
 
 The system turn is still this process's policy: Chatbox's runtime metadata
@@ -75,11 +77,10 @@ is stripped and the neutral default is filled in when the client sends none.
 |---|---|
 | `minimind3` / `chatml` | `<|im_start|>system ...` plus a `<think>` block, exactly as before |
 | `tinybrainbot` | `<|user|> {q}<|assistant|> `, no system turn, no `<think>`; history turns end with `<|end|>` |
-| `plain` / unknown | falls back to chatml and prints one warning |
+| `plain` / unknown | whatever the container's own template renders; a container with no template is refused with 400 |
 
 TinyBrainBot also needs `--no-gpu-layer`: its full texture-resident GPU layer
-path is not correct on VC4 yet (docs/benchmarks.md, item 12), so the CPU path
-is the deployable one.
+path is not correct on VC4 yet, so the CPU path is the deployable one.
 
 ## Endpoints
 
@@ -105,7 +106,7 @@ POST /v1/chat/completions
 | `busy`, `inflight` | requests being processed now; the engine is single-flight, so this is a queue |
 | `est_wait_ms` | median of the last eight request durations times the requests ahead; `-1` when something is queued but nothing has finished yet to extrapolate from |
 | `last_request_ms` | the previous request's wall time |
-| `engine` | the last numbers the engine reported about itself: `cma_free_kb` (**the** board number: it decides whether another model fits), `mem_available_kb`, `programs` compiled, `seq` |
+| `engine` | the last numbers the engine reported about itself: `cma_free_kb` (a headroom signal, **not** a budget: near the ceiling, attempt the load), `mem_available_kb`, `programs` compiled, `seq` |
 | `models`, `resident` | every configured model and the one loaded now |
 
 Every finished request logs one line with its id, so a client's `chatcmpl-...`
@@ -140,7 +141,7 @@ its container file name.  A request's `model` field selects the container, and
 keeps its EGL context and compiled programs across the switch, so a switch costs
 a container read plus an upload (6.12 s + 2.99 s on the board) instead of a
 process start (which would also pay 4.23 s of context and 1.89 s of program
-links -- `docs/benchmarks.md`).  The switch happens on the first request that
+links -- `engine/README.md`).  The switch happens on the first request that
 names a different model and is logged as `[model] <id> resident, load <ms> ms`;
 the resident model is not reloaded per request.  The container's chat template
 travels with it, so `/health`'s `template` and the chat-template refusal follow
@@ -266,11 +267,12 @@ So a client that paraphrases the description (or omits a field, or reorders the
 tools) no longer pays a full prefill for it — that was the difference between
 83 s and a cache hit.
 
-**Keep the header small.** MiniMind3-64M was trained at 256 positions; the
-one-tool header is already 277 tokens.  Building the cache with all five local
-tools produces an 845-token header, which the engine rejects for a 768-token
-window ("cache prompt empty or too long").  Send zero or one tool if you care
-about latency and quality.
+**Keep the header small.** MiniMind3's trained context is 768
+(`docs/long-context.md`), and 256 is the container's packed `seq`; the one-tool
+header is already 234 tokens (measured with `build --tools system_status`).
+Building the cache with all five local tools produces an 802-token header, which
+the engine rejects for a 768-token window ("cache prompt empty or too long").
+Send zero or one tool if you care about latency and quality.
 
 ## Context overflow
 
@@ -284,14 +286,14 @@ A chat that outgrows the window degrades instead of failing:
    and retries up to four times; a single over-long message is cut in half with
    an explicit `[earlier text trimmed to fit the context window]` marker.
 3. Only when nothing is left to trim does the request fail, with HTTP **400** and
-   `code: context_length_exceeded`.
+   `type: context_length_exceeded` (`code` stays null).
 
 Measured on the Pi: a 2880-character single message is trimmed and answered
 (prefill dominates: ~190 s), and a two-turn chat whose first turn is that long
 answers in ~10 s after the first turn is dropped.
 
-`max_tokens` larger than the window is clamped by the engine rather than
-rejected.
+`max_tokens` larger than the window is capped at 256 here and then clamped to the
+remaining window by the engine; it is never rejected.
 
 ## Stop sequences
 
@@ -381,8 +383,8 @@ does not fail, it silently prefills everything again.
 
 ## Python overhead
 
-The Python layer only does HTTP parsing, ChatML construction, JSON/SSE framing,
-and pipe I/O.  Measured on this laptop with a fully cached 79-token prompt and
+The Python layer only does HTTP parsing, message and tool-list normalisation,
+JSON/SSE framing, and pipe I/O.  Measured on this laptop with a fully cached 79-token prompt and
 8 generated tokens:
 
 | path | wall |
@@ -392,9 +394,9 @@ and pipe I/O.  Measured on this laptop with a fully cached 79-token prompt and
 
 So the Python/HTTP overhead is **about 1 ms** for a cached request, and about
 19 ms for the first cold request.  It is not the bottleneck.  On Pi Zero, the
-same tens-of-ms absolute overhead is negligible next to ~315 ms/token decode
-and 40 s prefill; the real costs are model prefill, attention, and KV-cache
-size.
+same tens-of-ms absolute overhead is negligible next to ~190 ms/token decode
+(`docs/benchmarks.md`) and a prefill measured in seconds; the real costs are
+model prefill, attention, and KV-cache size.
 
 ### Health and worker recovery
 
@@ -414,7 +416,7 @@ next chat request came back with a normal completion after the restart
 
 ## Deterministic tools (no model in the loop)
 
-A 64M model cannot reliably pick between three tools and mangles their
+A 64M model cannot reliably pick between five tools and mangles their
 arguments (measured: `system_status` requested as `get_status` /
 `get_status_task`, `256*37` turned into `32 + 45 * 3`).  So every deterministic
 tool can be invoked without asking the model at all.
@@ -456,7 +458,8 @@ to a local tool the request never reaches the worker:
 Arguments come from `tool_arguments` when present, otherwise from the last user
 message (for `calculate_math` the message text is the expression; a leading
 `/math` is stripped).  Anything malformed returns
-`{"ok": false, "error": "..."}` with HTTP 400 instead of being executed.
+`{"ok": false, "error": "..."}` (HTTP 200, `finish_reason: "stop"`) instead of
+being executed; only `POST /v1/tool` answers 400.
 
 `--only-tool NAME` prunes the forwarded tool list to a single
 tool.  The model still chooses (badly), but with one option the choice stops
@@ -468,16 +471,17 @@ being a coin flip.
 python3 server/selftest.py            # routing, SSE and sampling; no engine needed
 python3 server/eval_suite.py --base http://127.0.0.1:8000 --out eval.json
 python3 server/build_prefix_cache.py build  --tools system_status --out server/pfx.kv
-python3 server/build_prefix_cache.py verify --cache server/pfx.kv
+python3 server/build_prefix_cache.py verify --tools system_status --cache server/pfx.kv
 ```
 
 `selftest.py` substitutes a stub worker, so it checks routing, validation and
 SSE framing in ~1 s without a GPU.  `eval_suite.py` runs a fixed case set
 (identity, arithmetic, tool routing, multi-turn, long prompt, streaming,
 malformed body) against a live server and writes JSON for diffing.  The
-prefix-cache builder writes a sidecar `.json` (engine hash, model hash, seq,
-KV packing, prompt hash, tool list) and `verify` refuses to load a cache whose
-sidecar no longer matches.
+engine writes a sidecar `.json` next to the cache (container size and mtime, the
+shape, `seq`, KV packing, prompt and tool hashes, token count); the builder only
+triggers the build and then `verify` refuses a cache whose sidecar no longer
+matches.
 
 ## Limitations
 
@@ -489,9 +493,10 @@ sidecar no longer matches.
   4 × 64 chars); in streaming mode the tail that could still become a stop
   sequence is held back instead of emitted.  Sampling penalties are supported
   per request (see above).
-- Built-in tool *execution* is limited to the three deterministic tools in
-  `localtools.py`, and only when the client names one via `tool_choice`; the
-  general case is still the client-side `tool_calls` flow.
+- Built-in tool *execution* is limited to the five deterministic tools in
+  `localtools.py` (`system_status`, `get_current_time`, `calculate_math`,
+  `network_info`, `disk_usage`), and only when the client names one via
+  `tool_choice`; the general case is still the client-side `tool_calls` flow.
 - The worker runs with `GPU_LAYER=1` by default; use `--no-gpu-layer` for the
   CPU-attention path.
 - This is not a multi-tenant server.  Queueing is via a Python lock; a second
@@ -540,7 +545,7 @@ confused.  Three operations exist:
 The first one replaces the model while keeping the EGL
 context and its compiled programs (on a Pi Zero that is 4.23 s of context and
 1.89 s of program links, against 6.12 s to read a container and 2.99 s to
-upload it -- `docs/benchmarks.md`, "Where the first token goes"):
+upload it -- `engine/README.md`):
 
 ```json
 {"op": "load", "model": "../models/minimind3/minimind3.q4.mmcf"}

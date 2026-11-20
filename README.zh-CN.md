@@ -32,8 +32,18 @@ OpenAI 兼容 HTTP 服务器和磁盘 KV prefix cache。
 - **MiniMind2 Small** — i16/q8/q4；Qwen 风格 chat，指令跟随弱于 MiniMind3。
 - **LFM2.5-230M** — 唯一的混合模型：8 个 depthwise conv 层与 6 个 attention 层交错，
   dim 1024、vocab 64402，自带 ChatML 风格模板（含工具与 `<think>`）。融合路径
-  笔记本约 33 ms/token，Pi Zero `SEQ=256` 约 1.0 s/token；困惑度距 float32 参考 9% 以内。
+  笔记本约 33 ms/token，Pi Zero `SEQ=256` 约 570 ms/token；困惑度距 float32 参考 9% 以内。
   详见 [docs/lfm2.5-230m.md](docs/lfm2.5-230m.md)。
+- **MiniMind3-MoE** — 混合专家检查点（198M-A64M，top-1，每个专家都常驻）：
+  q4 的 131 MB 才是 Pi Zero 装得下的，q8 装不下。容器版本 3；路由每层每 token
+  回读一次。
+- **RWKV-7 0.1B** — 循环模型（容器版本 4）：没有 attention、没有 KV cache，
+  CPU 和 GPU 两套层循环不能按字符串比较。见 [docs/rwkv7.md](docs/rwkv7.md)。
+- **BitCPM-CANN-0.5B** — 三值模型：2-bit 体（`--quant t3`，0.5B 权重 167.5 MB，
+  需要 ESSL 3.00 上下文），q8 体是无损的，因为 169 个矩阵里有 168 个是逐行
+  `{0, ±s}`。见 [docs/bitcpm.md](docs/bitcpm.md)。
+- **SmolLM2-135M** — Llama 形状，也是必须 `RMS_STORE=f32` 的那个（见下面的已知限制）。
+  见 [docs/smollm2-135m.md](docs/smollm2-135m.md)。
 - **只有一种文件格式** — 自描述的 **MMCF** 容器。权重自带 tokenizer、
   chat 模板、rope 配置和能力位，所以一个 `MODEL=` 就是全部配置。
   legacy 布局（llama2.c fp32、Q8M1、I16M1、Q8M2/I16M2、Q4M1）只是
@@ -81,7 +91,7 @@ GPU_LAYER=1 KV=q16 ./engine_mm3 --chat \
 
 ```bash
 # 一步完成：打包器直接从 safetensors 量化，不写中间文件
-python3 engine/tools/mmcf_pack.py --in models/minimind3 --quant q4 --seq 512 \
+python3 engine/tools/mmcf_pack.py --in models/minimind3 --quant q4 --seq 256 \
   --tok models/minimind3/minimind3.tok --out models/minimind3/minimind3.q4.mmcf \
   --name minimind3 --template minimind3 --chat \
   --chat-template minimind3/chat_template.jinja --verify
@@ -92,18 +102,18 @@ GPU_LAYER=1 KV=q16 ./engine_mm3 --chat \
   --prompt "用一句话介绍你自己。" --gen 64 --greedy
 ```
 
-离线 Q4M1 为 45 MB，q8 为 66 MB。shader unroll 后本地约
-16–23 ms/token（q8 约 14–20 ms/token），但省权重显存。要从 F16 源量化；q8 -> q4 是二次
-量化，质量会下降。
+离线 Q4M1 为 45 MB，q8 为 66 MB：省权重显存，但它既不是 bit-exact、也不是
+质量无损——[benchmarks.md](docs/benchmarks.md) 给 q4 单独钉了 PPL。要从 F16 源量化；
+q8 -> q4 是二次量化，质量会下降。
 
 ### OpenAI 兼容服务器
 
 ```bash
-cd server
-python3 build_prefix_cache.py build --model ../models/minimind3/minimind3.q8.mmcf \
+# 在仓库根目录执行：缓存构建器以这里为 cwd 启动引擎，所以它的路径都是相对仓库根目录的；
+# 服务器的 worker 则继承调用者的 cwd。
+python3 server/build_prefix_cache.py build --model models/minimind3/minimind3.q8.mmcf \
   --seq 768 --kv-pack 16 --out pfx_tools_pi768.kv        # writes pfx_tools_pi768.kv.json too
-python3 server.py --seq 768 --kv-pack 16 \
-  --prefix-cache pfx_tools_pi768.kv
+python3 server/server.py --seq 768 --kv-pack 16 --prefix-cache pfx_tools_pi768.kv
 ```
 
 接口、工具和缓存细节见 [server/README.zh-CN.md](server/README.zh-CN.md)。
@@ -112,7 +122,7 @@ python3 server.py --seq 768 --kv-pack 16 \
 
 | 路径 | 内容 |
 |---|---|
-| [engine/](engine/) | GLES2 引擎、容器工具链、转换器、探针、脚本 |
+| [engine/](engine/) | GLES2 引擎、容器工具链、探针、gate、脚本 |
 | [models/](models/) | 统一模型目录（gitignore） |
 | [minimind3/](minimind3/) | MiniMind3 源配置、tokenizer 源和参考实现 |
 | [server/](server/) | OpenAI 兼容 Python 服务器 |
@@ -127,20 +137,20 @@ python3 server.py --seq 768 --kv-pack 16 \
 | LFM2.5-230M q4 (QAD) | 169 MB | ~566 ms/token | 混合 conv+attention，`SEQ=256`；板上最紧的一个 |
 | MiniMind3 q8 | 66 MB | ~190 ms/token | 默认中文对话 |
 | MiniMind3 q4 | 45 MB | ~186 ms/token | 内存模式，质量略低；扁平 q4 gate 之后它也是更快的一条 |
-| MiniMind2 i16 | 58 MB | ~216 ms/token | 参考模型；默认 q16 解码（`Q16_DECODE=exact` 约 290） |
+| MiniMind2 i16 | 58 MB | ~216 ms/token | 参考模型；默认 q16 解码（`Q16_DECODE=exact` 约 327） |
 | MiniMind2 q8 | 29 MB | ~124 ms/token | rope 由容器自带 |
 | MiniMind2 q4 | 21 MB | ~154 ms/token | 内存模式，身份类回答不可靠 |
-| TinyChat15M q8 | 24 MB | ~115 ms/token | llama-2 chat 格式；需要随仓库提供的 `[INST]` 模板；15M 级质量 |
+| TinyChat15M q8 | 24 MB | ~115 ms/token | llama-2 chat 格式；`[INST]` 模板由容器自带；15M 级质量 |
 | stories15M i16 | 49 MB | 板上没有 | TinyStories 补全，连贯 |
 | stories42M q8 | 58 MB | ~160 ms/token | TinyStories 补全，连贯 |
 | stories15M q8 | 24 MB | ~116 ms/token | TinyStories 补全，连贯 |
-| stories260K | 1 MB | 板上没有 | 下限探针；prefill 5.4 s |
 
-Pi 一列是 2026-11-13 在 HEAD `71cb1e0` 上的测试（`GPU_LAYER=1 KV=q16`、
-greedy、`--gen 16`，先丢弃一次预热、再 3 次计时取中位数），只含 decode。
-标"未重测"/"板上没有"的行沿用
-[benchmarks.md](docs/benchmarks.md) 里带日期的最后数据，协议、prefill 范围和
-q16 解码开关也在那里。prefill 受板子 SD 卡和后台负载影响，不要当作常数引用。
+Pi 一列是每个模型最新的一次测量：2026-11-13 在 HEAD `71cb1e0` 上的那轮测试
+（`GPU_LAYER=1 KV=q16`、greedy、`--gen 16`，先丢弃一次预热、再 3 次计时取中位数），
+加上之后单独重测的行（MiniMind3 q4/q8 和 LFM2.5，2026-11-16）。只含 decode。
+标"板上没有"的行沿用 [benchmarks.md](docs/benchmarks.md) 里带日期的最后数据；
+矩阵由它拥有——本表没有列的容器（MoE、RWKV-7、BitCPM、SmolLM2）、协议、prefill
+范围和 q16 解码开关也在那里。prefill 受板子 SD 卡和后台负载影响，不要当作常数引用。
 
 ## 文档
 
@@ -171,11 +181,17 @@ MIT，见 [LICENSE](LICENSE)。模型权重和第三方模型资源不包含在�
 
 ## 已知限制
 
+- **SmolLM2-135M 必须 `RMS_STORE=f32`。** 它的残差能到 2.7e4，默认 24-bit rms
+  存储在 2048 就钉住，之后回复是**空的**；
+  `models/smollm2-135m/smollm2-135m.q8q24.mmcf` 是那个容器。板子和笔记本在它的
+  logits 和 greedy 答案上不一致，原因仍未查清——见
+  [docs/smollm2-135m.md](docs/smollm2-135m.md)。
 - **引擎只加载 MMCF 容器。** `.bin`/`.q8`/`.q4`/`.i16` 是打包工具输入，
   用 `engine/tools/mmcf_pack.py` 转换。
 - Pi 和笔记本生成的 KV cache **不是逐字节相同**；磁盘缓存要在目标机器上生成。
-- `CmaFree` 是真实 CMA 占用。调小 `gpu_mem` 或 `cma` 不会凭空增加 CMA，
-  反而可能让压力更大。
+- `CmaTotal` 是 CMA 的硬上限；`CmaFree` **不是**占用数字、也不是预算——它报的是
+  调用方"大概还能拿到多少"，而且它的变化量是噪声。调小 `cma`/`gpu_mem` 不会凭空
+  增加 CMA。接近上限时，直接尝试加载、让它在真实的那一步失败，不要用算术拒绝它。
 - Pi Zero 上 `SEQ=768` + packed q16 很紧（加载后 `CmaFree` 约 2 MB）；
   要用实际模型/缓存组合验证。
 - q8 KV 流畅但质量不安全；packed q16 是安全的 KV 默认。

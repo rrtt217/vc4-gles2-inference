@@ -94,14 +94,18 @@ models/
   feng30m/                       feng-30m (Qwen3-shaped, 11 layers): works
 
   lfm2.5-230m/                   LFM2.5-230M (hybrid: 8 conv + 6 attention layers):
-                                 lfm2.5.q4.dedup.mmcf (169 MB, --head-dedup) and
+                                 qad/lfm2.5.qad.q4.mmcf (169 MB, QAD weights --
+                                 the container the board runs and the run
+                                 commands name), lfm2.5.q4.dedup.mmcf (169 MB,
+                                 base weights, same flags) and
                                  lfm2.5.q4.q6.mmcf (152 MB, 6-bit head).  The
                                  tiled-head lfm2.q4.mmcf (235 MB) and the two
                                  i16 reference containers (563 MB each) were
                                  deleted on 2026-11-11 to reclaim 1.6 GB; rebuild
                                  with `mmcf_pack.py --quant q4` (drop
                                  --head-dedup) and `--quant i16`.
-                                 Xe: 172-180 ms/token serial, 24 ms fused.
+                                 Xe: ~33 ms/token on the fused loop
+                                 (docs/lfm2.5-230m.md owns the timing rows).
                                  Every PPL quoted for this model before
                                  2026-11-11 was measured without a BOS and is
                                  5x too high (docs/benchmarks.md has the

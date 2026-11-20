@@ -7,10 +7,24 @@ schema。
 ```text
 OpenAI 客户端 / curl
         |  HTTP + SSE
-server.py（仅标准库）
+http_api.py  <- server.py 组装并调用 main()
         |  base64 + tab 分隔请求，JSONL 事件
 engine_mm3 --worker（一个 GL context，一个模型）
 ```
+
+模块（2026-11-14 拆分；此前 `server.py` 是一个 1504 行的文件）：
+
+| 文件 | 内容 |
+|---|---|
+| `server.py` | 入口：CLI、模型列表、server 对象、`main()` |
+| `http_api.py` | 路由和 SSE 写入（`Handler`） |
+| `engine_bridge.py` | worker：请求行、JSONL 事件、控制行、取消、重启 |
+| `chat_render.py` | messages/tools/thinking/系统提示的渲染与上下文裁剪 |
+| `tool_calls.py` | 确定性工具选择、参数和 OpenAI `tool_calls` 回复 |
+| `sampling.py` | `StopFilter` 和每请求的惩罚 |
+| `localtools.py` | 确定性工具本身 |
+
+全部仍然只用标准库。
 
 ## 启动
 
@@ -20,9 +34,10 @@ python3 server.py --host 127.0.0.1 --port 8000
 ```
 
 以 `{` 开头的一行是**控制行**而不是请求（请求第一列是 base64 的 prompt，base64 没有 `{`）。
-目前只支持一个操作：`{"op":"load","model":"..."}`，它不重建 EGL 上下文与已编译程序地换模型
+控制行有三个操作（`load` / `cancel` / `stats`），下面有表；`load` 不重建 EGL 上下文与
+已编译程序地换模型
 （板上省下 4.23 s 上下文 + 1.89 s 程序链接，代价是 6.12 s 读容器 + 2.99 s 上载，见
-`docs/benchmarks.md`）。回复一个 `loaded` 事件（含 `load_ms`）或一个 `error` 事件；容器读不出来
+`engine/README.md`）。回复一个 `loaded` 事件（含 `load_ms`）或一个 `error` 事件；容器读不出来
 时进程直接退出，滚动前缀缓存随模型一起丢弃。验收见 `engine/scripts/swap_matrix.py`。
 
 默认：
@@ -38,11 +53,11 @@ python3 server.py --host 127.0.0.1 --port 8000
 使用离线 q4：
 
 ```bash
-MODEL=../models/minimind3/minimind3.q4.mmcf \
-python3 server.py --seq 768 --kv-pack 16
+python3 server.py --model ../models/minimind3/minimind3.q4.mmcf --seq 768 --kv-pack 16
 ```
 
-不要把 `Q4_WEIGHTS=1` 和 Q4M1 模型文件一起设置。
+容器统一用 `--model` 指定（`MODEL=` 只有 `run-pi.sh` 读）；legacy 检查点要先经
+`engine/tools/mmcf_pack.py` 转成容器，引擎不读 Q4M1/`.bin`。
 
 ## 对话模板
 
@@ -58,8 +73,8 @@ python3 server.py --seq 768 --kv-pack 16
 system 轮仍是服务器的策略：Chatbox 的运行时元数据会被剥掉、客户端没给时填入中性默认值，
 所以引擎收到的永远是一份具体的 messages。
 
-TinyBrainBot 还需要 `--no-gpu-layer`：它在 VC4 上的整层 GPU 路径目前不正确
-（见 docs/benchmarks.md 的 item 12），可部署的是 CPU 路径。
+TinyBrainBot 还需要 `--no-gpu-layer`：它在 VC4 上的整层 GPU 路径目前不正确，
+可部署的是 CPU 路径。
 
 ## logprobs
 
@@ -90,7 +105,7 @@ TinyBrainBot 还需要 `--no-gpu-layer`：它在 VC4 上的整层 GPU 路径目�
 |---|---|---|
 | `{"op":"load","model":PATH}` | `loaded` | 换容器，保留 EGL 上下文与已编译程序 |
 | `{"op":"cancel","id":ID}` | `cancelled` | 停止正在跑的请求（引擎在 token 之间窥视 stdin，几个 token 内生效）；空闲时的 cancel 是确认，不是错误 |
-| `{"op":"stats"}` | `stats` | 只有引擎知道的数：`cma_free_kb`（板上最关键，它决定还能不能放下另一个模型）、`mem_available_kb`、已编译 `programs`、`seq`、`kv_pack`、`template`、`uptime_ms` |
+| `{"op":"stats"}` | `stats` | 只有引擎知道的数：`cma_free_kb`（余量信号，**不是**预算：接近上限时直接尝试加载）、`mem_available_kb`、已编译 `programs`、`seq`、`kv_pack`、`template`、`uptime_ms` |
 
 `GET /health` 还会给 `busy`/`inflight`（引擎单飞，所以就是队列）、`est_wait_ms`（近八次请求中位数 × 前面排队数；有排队但还没有已完成请求时返回 `-1`）、`last_request_ms`，以及 `engine`（引擎最近一次自报的数值）。
 
@@ -168,7 +183,8 @@ curl -sS http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application
 
 参数优先取请求里的 `tool_arguments`，否则取最后一条 user 消息（`calculate_math` 直接
 把消息当表达式，开头的 `/math` 会被去掉）。任何非法输入返回
-`{"ok": false, "error": "..."}` 和 HTTP 400，而不是被执行。
+`{"ok": false, "error": "..."}`（HTTP 200，`finish_reason: "stop"`）而不是被执行；
+只有 `POST /v1/tool` 返回 400。
 
 `--only-tool NAME` 把 prompt 里的工具列表裁到只剩一个：模型仍然在选，但选项只有一个。
 
@@ -178,13 +194,13 @@ curl -sS http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application
 python3 server/selftest.py            # 路由、SSE 与采样，不需要 GPU
 python3 server/eval_suite.py --base http://127.0.0.1:8000 --out eval.json
 python3 server/build_prefix_cache.py build  --tools system_status --out server/pfx.kv
-python3 server/build_prefix_cache.py verify --cache server/pfx.kv
+python3 server/build_prefix_cache.py verify --tools system_status --cache server/pfx.kv
 ```
 
 `selftest.py` 用 stub worker 替换引擎，1 秒内验证路由、参数校验和 SSE 分帧；
 `eval_suite.py` 对活服务跑固定用例（身份、算术、工具路由、多轮、长 prompt、流式、
-畸形请求）并写 JSON 便于对比；前缀缓存脚本会写 sidecar `.json`（引擎哈希、模型哈希、
-seq、KV 打包、prompt 哈希、工具列表），`verify` 在元数据不匹配时拒绝加载。
+畸形请求）并写 JSON 便于对比；引擎会在缓存旁边写 sidecar `.json`（容器大小与 mtime、形状、`seq`、KV 打包、
+prompt 与工具哈希、token 数）；脚本只负责触发构建，`verify` 在元数据不匹配时拒绝加载。
 
 非流式：
 
@@ -288,12 +304,12 @@ worker 的 token/KV 复用、磁盘 `MMKV1` 格式和 packed KV 模式见
 2. 如果引擎仍返回 `[context full]`，非流式路径会裁剪后重试，最多四次；单条超长
    消息会被截半，并带上 `[earlier text trimmed to fit the context window]` 标记。
 3. 只有当实在没有可裁剪的内容时才失败，返回 HTTP **400** 与
-   `code: context_length_exceeded`。
+   `type: context_length_exceeded`（`code` 为 null）。
 
 Pi 实测：单条 2880 字符消息被裁剪后正常回答（prefill 占大头，约 190 s）；两轮
 对话中第一轮是这条长消息时，丢掉第一轮后约 10 s 返回。
 
-`max_tokens` 超过窗口时由引擎钳制，不报错。
+`max_tokens` 超过窗口时先在这里被截到 256，再由引擎钳到剩余窗口，从不报错。
 
 ## 限制
 

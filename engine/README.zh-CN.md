@@ -23,11 +23,11 @@
 | `src/xformat.*` | 激活纹理布局和 GLSL X 宏 |
 | `src/shaders*.cpp` | GLSL 源码构建 |
 | `tools/` | MMCF 打包器/查看器和 numpy 参考前向（host python） |
-| `quantize/` | F16/I16/q8/q4 转换脚本（legacy 布局，由打包器串起来） |
+| `third_party/jinja/` | 内置的 llama.cpp Jinja 引擎（MIT），渲染容器的 chat 模板 |
 | `gate/` | 无需 GPU 的判定检查：文档、开关注册表、着色器摘要、q16 负轨、draw cap、target 台账、容器布局 |
 | `scripts/` | 需要 GPU 和/或模型的 oracle、测量与验收：`regression.sh`、基准脚本、`swap_matrix.py`、`check_att.py` |
 | `eval/` | 模型质量：`bench_mc.py`、`eval_ifeval.py`、`eval_translate.py` 及其 `data/` |
-| `tests/` | 编译型测试（`test_lineedit.cpp`，由 Makefile 构建） |
+| `tests/` | 编译型测试（`test_lineedit`、`test_tokenizer`、`test_xformat`，由 Makefile 构建） |
 | `probes/` | 独立 VC4 探针，不链接进引擎 |
 | `Makefile` | 本地、Pi 和探针构建参数 |
 
@@ -130,7 +130,7 @@ TinyChat15M 是 llama-2 chat 格式的 15M 模型，不是补全模型：容器�
 库里的 q8/i16 容器已于 2026-11-13 用 `--chat-template` 重新打包。它仍然是 15M 模型：
 语法和格式连贯，但内容不正确。
 
-### TinyStories 15M/42M
+### 交互式对话
 
 交互式 `--chat` 里还有 `/clear`（忘记本轮对话）、`/help` 和 **REPL 还没有的**（这是有意的清单，不是遗漏）：`--ppl` 和 `--worker` 是进程而不是对话；
 `/tools` 需要重新规范化工具列表，而那是启动时做的；`--prefix-cache` /
@@ -177,6 +177,8 @@ prefill 里（板上是其中 1.89 s），以前这段时间条子一直停在 0
 ——桌面上一两个 token 的 prefill 只会闪一下。stderr 不是终端时全部不打，设了 `SHADER_TIME`
 时也不打（它的 `STARTUP` 行是 grep 目标）。
 
+### TinyStories 15M/42M
+
 它们是 base completion 模型，不是 chat 模型；用普通 prompt，不要加 `--chat`：
 
 ```bash
@@ -185,14 +187,50 @@ GPU_LAYER=1 KV=q16 ./engine_mm3 \
   --prompt "Once upon a time" --gen 64 --greedy
 ```
 
-Pi 上 stories15M i16 约 167 ms/token、stories42M q8 约 190 ms/token，均连贯。
-`stories15M.q8` 在本仓库的转换下输出乱码，改用 i16 容器；stories42M i16 超出
-当前 CMA 预算。260K 是下限探针：约 85 ms/token，但 prefill 要 5.4 s，因为
-attention 仍然走完整的 512 位置网格。
+Pi 上 stories15M q8 约 116 ms/token、stories42M q8 约 160（行归
+`docs/benchmarks.md` 所有）；两个 q8 容器和 stories15M i16 都连贯。stories42M i16
+超出当前 CMA 预算。
+`models/llama2c/stories260K.bin` 是下限探针——5 层、512 词表、attention 走完整
+网格——所以它是 prefill 测量，不是可交互的模型；store 里只有 `.bin` 源，没有容器。
 
 这些模型来自 llama2.c fp32 `.bin` 源，打包器可以直接接受
 （`--in .../stories15M.bin --quant i16`）。`LEGACY_Q8=1` 已经不存在：
 引擎没有 legacy 读取器。
+
+### LFM2.5-230M（混合：conv + attention）
+
+唯一带 **conv** 层的模型：层类型写在 metadata key 14 里，conv 是 depthwise、
+causal、k=3，每层两行状态。融合路径是 `GPU_LAYER=1`（它选中融合层循环，conv 在那里走
+GPU 分支；串行 `GPU_LAYER=0` 在 CPU 上跑 conv，是参考路径，融合路径困惑度差 4%、快几倍，
+细节见 [docs/lfm2.5-230m.md](../docs/lfm2.5-230m.md)）：
+
+```bash
+MODEL=../models/lfm2.5-230m/qad/lfm2.5.qad.q4.mmcf SEQ=512 \
+GPU_LAYER=1 ./engine_mm3 --chat \
+  --system "You are a helpful assistant trained by Liquid AI." \
+  --prompt "What is the capital of France?" --gen 32 --greedy
+```
+
+`KV=q16` 是这个模型的默认——24-bit KV 布局不适合它的形状。困惑度、计时、模板/工具检查和
+仍未修的缺陷都在 [docs/lfm2.5-230m.md](../docs/lfm2.5-230m.md)。
+
+## Chat 模板
+
+容器可以自带模型自己的 `chat_template`（HuggingFace 的 Jinja 文本，metadata key 9，
+和 GGUF 里那个字符串一样）。有它时它就是 prompt 的构建者；容器的模板类型（metadata
+key 4）只是 key 9 出现之前那些容器的回退。引擎解析不了的模板在加载时报错拒绝，不会悄悄换成
+内置模板。
+
+```bash
+python3 tools/mmcf_dump.py ../models/minimind3/minimind3.q8.mmcf | grep -i 'chat tmpl'
+CHAT_DUMP=1 ./engine_mm3 --chat --prompt hi --gen 1 --greedy 2>&1 | grep PROMPT
+```
+
+`CHAT_DUMP=1` 一段一行打印渲染出的 prompt，标 `PROMPT[tmpl]` 或 `PROMPT[in]`。
+`[in]` 是来自消息的文本，分词器只在它们**之外**匹配特殊 token：用户消息里写
+`<|im_end|>` 只会当普通文本切，造不出回合边界。容器有模板时工具循环与模型无关——每一轮
+都用它重新渲染消息列表，所以 `--tools` 对任何 chat 容器都成立；只有没有模板的容器回退到
+字符串路径，那条路径只对 ChatML 家族有效。
 
 ## 打包一个 checkpoint
 
@@ -240,15 +278,16 @@ Pi Zero，16 token 生成（2026-11-13 在 HEAD `71cb1e0` 上的 campaign：先�
 
 | 模型 | prefill | decode |
 |---|---:|---:|
-| MiniMind3 q4 | 16.0–35.9 s | **304.4 ms/token** |
+| MiniMind3 q4 | 16.0–35.9 s | **185.7 ms/token**（2026-11-16，扁平 q4 gate） |
 | MiniMind2 i16 | 11.8–19.9 s | 216.0 ms/token |
 | MiniMind2 q8 | 7.3–7.9 s | 123.5 ms/token |
 | MiniMind2 q4 | 8.9 s | 153.7 ms/token |
 | TinyChat15M q8 | 3.6–4.5 s | 115.4 ms/token |
 
-MiniMind3 q8 未重测，最后数据是 252 ms/token（2026-11-02）。旧的 520.9 ms/token、
-42.7 s prefill 是 q16 attention 和 q4 paired residual 之前的数字；同样两个 MiniMind3
-容器的 32 token 短 prompt 测量是 195.5 / 291.7 ms/token（2026-11-05），协议不同。
+MiniMind3 q8 约 190 ms/token（188.6 是 2026-11-07 与 q4 行同一次会话里的对比）。旧的
+520.9 ms/token、42.7 s prefill 是 q16 attention 和 q4 paired residual 之前的数字；同样
+两个 MiniMind3 容器的 32 token 短 prompt 测量是 195.5 / 291.7 ms/token（2026-11-05），
+协议不同。
 
 FFN hidden 2432 超过 VC4 2048 像素 FBO 限制。
 `Model::split_ffn()` 把 W1/W3 按行、W2 按列切成 1216 宽两块；
@@ -261,7 +300,7 @@ FFN hidden 2432 超过 VC4 2048 像素 FBO 限制。
 ...  --thinking --prompt "1+1等于几？" --gen 64
 
 # 工具定义
-...  --tools-file minimind3/tools.json \
+...  --tools-file ../minimind3/tools.json \
   --prompt "现在几点了？" --gen 64 --greedy
 ```
 
@@ -273,8 +312,9 @@ FFN hidden 2432 超过 VC4 2048 像素 FBO 限制。
 - `calculate_math` — 安全的递归下降算术解析（`+ - * / % ^`、括号、
   一元运算、Python 风格 `**`）。
 
-工具循环：生成到 `<|im_end|>`，解析所有完整 `<tool_call>`，执行，
-追加一个包含 `<tool_response>` 的 user turn，再 prefill；最多 3 轮。
+工具循环：生成到本回合结束，解析所有完整 `<tool_call>`，执行，把结果追加进历史
+——容器有模板时是 `tool` message，只有 legacy 字符串路径才追加一个包含
+`<tool_response>` 的 user turn——再 prefill；最多 3 轮。
 
 64M 模型在 64 token 内经常不输出 `</think>`；工具调用更可靠。
 
@@ -298,7 +338,7 @@ FFN hidden 2432 超过 VC4 2048 像素 FBO 限制。
 | `ACT=i8` / `FFN_HID=i8` | int8 activation 实验，需 q8 权重，默认关闭 |
 
 完整列表见 [测试开关](../docs/test-hooks.md)，包括 dump 和探针开关
-（`STAGE_DUMP`、`RAW_DUMP`、`QKV_DUMP`、`ATT_DUMP`、`ATTN_DUP`、
+（`STAGE_DUMP`、`QKV_DUMP`、`ATT_DUMP`、`ATTN_DUP`、
 `PASS_DUP`、`DRAWCOUNT` 等）。
 
 Top-k 现在是采样参数而不是环境变量：`--top-k N` 在 top-p 之前只保留概率最高的
@@ -362,10 +402,10 @@ GPU_LAYER=1 KV=q16 ./engine_mm3  --ppl data/ppl_test.txt
 OpenAI 兼容服务器在 [../server/](../server/)：
 
 ```bash
-python3 server/build_prefix_cache.py build --model ../models/minimind3/minimind3.q8.mmcf \
+# 在仓库根目录执行（缓存构建器在这里启动引擎，所以路径相对仓库根目录）：
+python3 server/build_prefix_cache.py build --model models/minimind3/minimind3.q8.mmcf \
   --seq 768 --kv-pack 16 --out pfx_tools_pi768.kv        # writes pfx_tools_pi768.kv.json too
-python3 server.py --seq 768 --kv-pack 16 \
-  --prefix-cache pfx_tools_pi768.kv
+python3 server/server.py --seq 768 --kv-pack 16 --prefix-cache pfx_tools_pi768.kv
 ```
 
 见 [server/README.zh-CN.md](../server/README.zh-CN.md)。
@@ -374,4 +414,6 @@ python3 server.py --seq 768 --kv-pack 16 \
 
 `SIGINT`/`SIGTERM` 只设置标志，不在信号处理里销毁 EGL。
 当前 GPU 调用/层/token 完成后，再 `glFinish()` 并正常销毁 EGL。
+chat 模式下一次 Ctrl-C 放弃当前行、保留会话；连续第二次才退出（`Ctrl-D` 或
+`/exit` 立即退出）。
 chat 模式下 Ctrl+C 停止当前轮并回到提示符；在提示符处 Ctrl+C 退出。
