@@ -243,8 +243,8 @@ void GPU::matvec_add(const Mat& m, GLuint x, GLuint residual, Target& out, XForm
         // this bug.  Measured: every odd row gained exactly 255/256 and the reply
         // collapsed to one token.
         GLuint p = m.type == WeightType::T3
-                       ? (res_pack_ ? x_t3_add_pair(m, res_fmt_, wr)
-                                    : x_t3_add(m, res_fmt_, wr))
+                       ? (res_pack_ ? x_t3_add_pair(m, xf, res_fmt_, wr)
+                                    : x_t3_add(m, xf, res_fmt_, wr))
                   : pair4 ? x_i4_add_pair(m.rows, m.cols, xf, m.fmt4)
                   : pair ? x_q8_add_pair(m.rows, m.cols, xf, wr)
                   : (m.type == WeightType::INT8) ? x_q8_add(m.rows, m.cols, xf, wr)
@@ -501,13 +501,19 @@ GLuint GPU::x_t3(const Mat& m, bool wrow){
                       matvec_t3(m.rows, m.cols, act_fmt_, wrow, th, tiles));
     }
 
-GLuint GPU::x_t3_add(const Mat& m, XFormat rf, bool wrow){
+GLuint GPU::x_t3_add(const Mat& m, XFormat xf, XFormat rf, bool wrow){
         const int th = m.t3_tile_h > 0 ? m.t3_tile_h : m.rows;
         const int tiles = m.t3_tile_h > 0 ? m.t3_tiles() : 1;
+        // `xf` is the format of the X texture, which is NOT always act_fmt_: a
+        // w2 add reads the FFN hidden stream (FFN_HID), and the two axes differ
+        // as soon as ACT=i8 leaves the hidden on q16.  The q8 selectors have
+        // always taken xf for this reason; the t3 ones hardcoded act_fmt_ and
+        // only worked while the two formats coincided (found 2026-11-21 with
+        // ACT=i8 on the t3 body: layer 0's FFN was decoded as I8_4).
         return x_prog("xt3a_" + to_string(m.rows) + "_" + to_string(m.cols) + "_" +
-                      x_format_name(act_fmt_) + "_" + x_format_name(rf) + "_" +
+                      x_format_name(xf) + "_" + x_format_name(rf) + "_" +
                       to_string(th) + (wrow ? "_wr" : ""),
-                      matvec_t3_add(m.rows, m.cols, act_fmt_, rf, wrow, th, tiles));
+                      matvec_t3_add(m.rows, m.cols, xf, rf, wrow, th, tiles));
     }
 
 GLuint GPU::x_q6(int rows, int cols, bool wrow){
@@ -675,13 +681,13 @@ GLuint GPU::x_t3_pair(const Mat& m, bool wrow){
                       matvec_t3_pair(m.rows, m.cols, act_fmt_, wrow, th, tiles));
     }
 
-GLuint GPU::x_t3_add_pair(const Mat& m, XFormat rf, bool wrow){
+GLuint GPU::x_t3_add_pair(const Mat& m, XFormat xf, XFormat rf, bool wrow){
         const int th = m.t3_tile_h > 0 ? m.t3_tile_h : (m.rows + 1) / 2;
         const int tiles = m.t3_tiles();
         return x_prog("xt3ap_" + to_string(m.rows) + "_" + to_string(m.cols) + "_" +
-                      x_format_name(act_fmt_) + "_" + x_format_name(rf) + "_" +
+                      x_format_name(xf) + "_" + x_format_name(rf) + "_" +
                       to_string(th) + (wrow ? "_wr" : ""),
-                      matvec_t3_add_pair(m.rows, m.cols, act_fmt_, rf, wrow, th, tiles));
+                      matvec_t3_add_pair(m.rows, m.cols, xf, rf, wrow, th, tiles));
     }
 
 GLuint GPU::x_q8_add(int rows, int cols, XFormat xf, bool wrow){
