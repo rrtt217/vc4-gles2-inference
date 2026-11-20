@@ -171,6 +171,19 @@ reachable through `packHalf2x16`; it is not.
   irreducible cost of reading a packed format on hardware with no unpack/dot
   instruction: extracting the weight information costs either ALU (decode,
   cheap) or fetches (LUT, expensive here).
+- **The unused t3 code is a don't-care, but exploiting it does not beat signbit.**
+  The mag/sign encoding leaves code 2 (mag0 sign1, "negative zero") unused; it
+  can be assigned any value.  Setting it to -2 makes the weight `bit0 - 2*bit1`
+  (integer subtract + one ITOF, no bit-cast, no float multiply -- frees the mul
+  slot for the dot's FMAD).  Measured (`t3dec_probe` subtract/sub_vec): slower
+  single-row (3.13-3.57 vs signbit 3.01) and tied on the pair kernel (2.02 vs
+  2.03, within noise).  The ITOF + int-subtract costs what the bit-cast + fmul
+  costs; freeing the mul slot buys nothing.  The other theoretical use of the
+  wasted code space -- radix-3 packing, 5 trits/byte (3^5=243<256), 20% denser --
+  is counterproductive here: it needs div/mod by 3 (expensive) and the matvec is
+  decode-bound, not fetch-bound, so denser packing saves the cheap part and adds
+  to the expensive part.  The unused code is the price of the shift/mask-friendly
+  2-bit layout, and that price is worth paying on VC4.
 - Anything that needs half precision must be assembled by hand from float
   operations; there is no `packHalf2x16`, and there are no half-float textures
   either (`OES_texture_half_float` is not exposed).
