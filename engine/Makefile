@@ -179,7 +179,7 @@ probes/matvec_probe: probes/matvec_probe.cpp $(SRC)/common.cpp $(SRC)/switches.c
 
 # The board build.  matvec_probe prices the q8 decode, and the decode cost is a
 # VC4 question: a laptop run answers a different driver's question.
-probes/matvec_probe_pi: probes/matvec_probe.cpp $(SRC)/common.cpp $(SRC)/switches.cpp $(SRC)/common.h | check-cross $(HEADERS) $(PROBE_HEADERS)
+probes/matvec_probe_pi probes/qkv_rows_probe_pi: probes/matvec_probe.cpp $(SRC)/common.cpp $(SRC)/switches.cpp $(SRC)/common.h | check-cross $(HEADERS) $(PROBE_HEADERS)
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -I$(SRC) -o $@ probes/matvec_probe.cpp $(SRC)/common.cpp $(SRC)/switches.cpp $(CROSS_LDLIBS)
 
 probes/texsize_probe: probes/texsize_probe.cpp $(SRC)/common.cpp $(SRC)/switches.cpp $(SRC)/common.h $(HEADERS)
@@ -229,6 +229,14 @@ probes/att_batch_probe_pi: probes/att_batch_probe.cpp probes/egl_surfaceless.h |
 probes/att_out_probe: probes/att_out_probe.cpp probes/egl_surfaceless.h
 	$(CXX) $(ALL_CXXFLAGS) -o $@ $< $(LDLIBS)
 probes/att_out_probe_pi: probes/att_out_probe.cpp probes/egl_surfaceless.h | check-cross
+	$(CROSS_CXX) $(CROSS_CXXFLAGS) -o $@ $< $(CROSS_LDLIBS)
+
+# Does the qkv matvec's 2-row pairing leave the 2x on the table that the FFN's
+# 4-row swiglu kernel banks?  Same decode, same weights, only the rows a
+# fragment amortises it over change.
+probes/qkv_rows_probe: probes/qkv_rows_probe.cpp probes/egl_surfaceless.h $(PROBE_HEADERS)
+	$(CXX) $(ALL_CXXFLAGS) -o $@ $< $(LDLIBS)
+probes/qkv_rows_probe_pi: probes/qkv_rows_probe.cpp probes/egl_surfaceless.h | check-cross $(PROBE_HEADERS)
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -o $@ $< $(CROSS_LDLIBS)
 
 probes/t3mv_probe: probes/t3mv_probe.cpp probes/egl_surfaceless.h $(PROBE_HEADERS)

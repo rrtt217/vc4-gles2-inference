@@ -184,6 +184,25 @@ reachable through `packHalf2x16`; it is not.
   decode-bound, not fetch-bound, so denser packing saves the cheap part and adds
   to the expensive part.  The unused code is the price of the shift/mask-friendly
   2-bit layout, and that price is worth paying on VC4.
+- **More rows a fragment does not make a q8 matvec faster; independent fetches do.**
+  Measured 2026-11-21 (`probes/qkv_rows_probe`).  The engine's qkv kernel pairs
+  two output rows a fragment and its FFN gate four, and the gate runs at 1.79
+  ns/MAC against qkv's 2.87 -- which looks like qkv leaving a 2x on the table.
+  It is not: at the real shape (1280x768) a 4-row qkv kernel costs **+15% per
+  stored row** (2.700 against 2.351 ms), and a 4-row kernel with two activation
+  pairs an iteration is inside noise (2.307, -2%).  The FFN wins because its
+  four rows are two *independent* matrices (w1 and w3), so one iteration carries
+  four independent weight fetches and the scheduler has work to overlap; qkv's
+  four rows are four rows of one matrix sharing one activation pair, and the
+  decode they share was never the bottleneck.  `ACT=i8` had said the same thing
+  from the other side: halving the activation fetches (quads 2.80M -> 2.33M)
+  left the FFN's `gpu=` and `exec=` unchanged.
+  One trap in reading the probe: its 4-row arm runs the whole column loop in
+  every fragment and discards half the sums, so per *MAC executed* it reads 1.37
+  ns/MAC against qkv's 2.39 -- a 43% "win" that is the arm doing twice the work
+  for the same output.  Price a kernel per output row, never per MAC the grid
+  happened to execute.
+
 - Anything that needs half precision must be assembled by hand from float
   operations; there is no `packHalf2x16`, and there are no half-float textures
   either (`OES_texture_half_float` is not exposed).
