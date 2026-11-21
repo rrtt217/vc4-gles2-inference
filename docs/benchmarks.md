@@ -237,7 +237,7 @@ interchangeable in efficiency -- there is no outlier to attack:
 
 What that rules out is the whole family of optimisations aimed at anything but
 the per-MAC instruction count: `probes/qkv_rows_probe` shows four rows a
-fragment is 15% slower (VC4 has no MRT, so the alternatives are the grid running
+fragment is 15% slower (the GL path stores one texel a fragment, so the alternatives are the grid running
 both halves or a deeper body that costs 50% more texture quads), and halving the
 activation fetches with `ACT=i8` leaves `gpu=` and `exec=` unchanged while the
 end-to-end run gets 9% slower.  What remains is the ~0.5 ms a draw round trip
@@ -270,11 +270,23 @@ instructions a MAC gives a 0.41 GMAC/s ceiling, and the measured 0.377 is 92% of
 it.  That is why the levers aimed at bytes and draws all measured as nothing --
 they do not change the instruction count.
 
+**Bypassing GL does not raise the ceiling.**  The other way to program these
+QPUs is a hand-written kernel writing through VPM and DMA, with no render
+pipeline in the path -- [V3DLib](https://github.com/axizo-pi/V3DLib).  Its own
+benchmark (`docs/profiling.ods`; Rot3D, 1,024,000 vertices, ~18 flop each)
+reaches 0.268 GFLOP/s on a Pi3 with 4 QPUs, **0.9%** of the 28.8 GFLOP/s peak,
+against this engine's GL path at 0.754 GFLOP/s (**2.6%**) on the board.  So the
+limit is the QPU's issue rate and not the GL interface, and the interface is
+where the work is cheaper to express: the fixed-function front end packs four
+fragments into a 16-lane instruction for free, and a hand-written kernel pays
+that bookkeeping itself.
+
 **The one real difference between passes is MACs per decode.**  The FFN gate
 feeds four weight fetches from one decoded activation pair (16 MACs an
 iteration, 1.82 ns/MAC); a plain projection has two fetches to share the same
 decode (8 MACs, 2.5-2.9 ns/MAC).  Widening a projection to four rows needs a
-second output texel, i.e. MRT, and VC4 does not have it (below).
+second output texel, which the GL path cannot store; see
+[`vc4-glsl-costs.md`](vc4-glsl-costs.md) for why bypassing GL does not pay.
 
 ### The q16 decode is already minimal
 

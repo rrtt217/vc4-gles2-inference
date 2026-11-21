@@ -203,14 +203,27 @@ reachable through `packHalf2x16`; it is not.
   for the same output.  Price a kernel per output row, never per MAC the grid
   happened to execute.
 
-- **VC4 has no MRT, measured, not assumed.**  `GL_MAX_DRAW_BUFFERS` and
-  `GL_MAX_COLOR_ATTACHMENTS` both read **1**; a two-attachment FBO reports
-  COMPLETE but `glDrawBuffers(2, ...)` returns `GL_INVALID_OPERATION`, and a
-  fragment shader writing `gl_FragData[1]` fails to compile with "array index
-  must be < 1".  `GL_EXT_draw_buffers` *is* in the extension string and both
-  entry points resolve, so the query is the only way to know -- this is why a
-  kernel that wants to write four q16 a fragment (two texels) cannot: the store
-  is limited to one RGBA8 texel, i.e. two q16 values.
+- **The GL pipeline has one colour attachment.  The hardware does not.**  On
+  the GL path `GL_MAX_DRAW_BUFFERS` and `GL_MAX_COLOR_ATTACHMENTS` both read
+  **1**; a two-attachment FBO reports COMPLETE but `glDrawBuffers(2, ...)`
+  returns `GL_INVALID_OPERATION`, and `gl_FragData[1]` fails to compile with
+  "array index must be < 1".  `GL_EXT_draw_buffers` *is* in the extension string
+  and both entry points resolve, so the query is the only way to know.
+  That is the **render pipeline's** shape, not the QPU's: the architecture guide
+  describes a single tile colour buffer ("only the tile color buffer is written
+  out"), and a QPU program that bypasses the pipeline -- [V3DLib](https://github.com/axizo-pi/V3DLib),
+  which writes through VPM and DMA/TMU to any main-memory address -- has no
+  attachment count at all.  So "no MRT" is an interface limit, and the honest
+  statement is that **a fragment shader can store one RGBA8 texel, i.e. two q16
+  values**.
+  **Bypassing GL does not pay.**  V3DLib's own benchmark
+  (`docs/profiling.ods` in that repository; Rot3D, 1,024,000 vertices, ~18 flop
+  each) reaches **0.268 GFLOP/s** with 4 QPUs on a Pi3 -- **0.9%** of the
+  28.8 GFLOP/s peak -- against this engine's GL path at **0.754 GFLOP/s (2.6%)**
+  on the board.  A hand-written QPU kernel has to manage VPM transfer, register
+  allocation and instruction scheduling itself, and those costs more than eat
+  the freedom.  The same table also shows TMU write-back beating DMA by 1.7x
+  (0.069 against 0.082 s), which is the path this engine already uses.
   Consequence measured the same day (`probes/qkv_rows_probe`): every shape that
   works around it loses.  Four rows a fragment either has the grid run both
   halves (**+15%**, twice the MACs for the same stored rows) or deepens the
