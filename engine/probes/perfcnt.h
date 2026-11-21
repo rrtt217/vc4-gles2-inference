@@ -279,6 +279,12 @@ struct PerfMon {
 
     GLint max_active() const { return max_active_; }
 
+    // The picked counters, in pick() order.  A probe that wants one column
+    // back (rather than printing the raw line) indexes these against
+    // Sample::value, which is parallel to them.
+    size_t picked_count() const { return picked_.size(); }
+    const std::string& picked_name(size_t i) const { return picked_[i].tag; }
+
     // The divisor the table uses.  A fixed 12 is right on this board, but a
     // wrong constant reads as a plausible percentage, so a probe that has a
     // cheap wall-clock reference for the same region can hand it over and get

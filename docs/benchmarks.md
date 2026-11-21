@@ -187,18 +187,41 @@ else, and it is only 0.17 ms, so leave it alone.  A stage whose `gpu=` is a smal
 fraction of its ms has a dispatch problem, not a compute problem, and belongs to
 the fusion work, not to the kernel work.
 
-**3. Never compare a `PERFCNT` wall with a `PERFCNT`-less wall.**  Reading one
-monitor costs about 25 ms a stage on this board (`attn` went 16.9 -> 40.2 ms), so
-the ms column of a counter run is only good for the `gpu=`/ms ratio.  A/B the
-change itself with the counters off.
+**3. Never compare a `PERFCNT` wall with a `PERFCNT`-less wall.**  Both a
+counter run and a `*_DUP` replay add synchronisation the production path does not
+have, so the ms column of either is only good for the `gpu=`/ms ratio.  A/B the
+change itself with the counters off.  Two numbers this rule corrected after the
+fact: reading one monitor does *not* cost 25 ms a stage (`attn` reads 16.2-16.9
+ms with and without; the single 40.2 ms reading was a hiccup), and a
+`DUP_PROFILE` replay's wall is two injected `glFinish`es plus the pass, which is
+why `attn stats` priced at 1.30 ms there while replaying it end to end is *free*
+(191 against 201 ms a token, 2026-11-21).
+
+**What a draw's cost is, and what the counters cannot see.**  An engine draw
+costs 0.48-0.67 ms against `draw_probe`'s 0.008-0.019 ms pipelined null draw.
+`probes/draw_cost_probe` isolates the cause (VC4, 1216 fragments, 8 draws a
+chain, same shader and targets):
+
+| arm | ms/draw | frag | scoreboard | varyings | idle |
+|---|---:|---:|---:|---:|---:|
+| dep + finish | 0.721 | 0.128 | 0.019 | 0.000 | 0.000 |
+| dep, no finish | 0.635 | 0.127 | 0.019 | 0.000 | 0.000 |
+| indep + finish | 0.677 | 0.127 | 0.019 | 0.000 | 0.000 |
+| indep, no finish | 0.131 | 0.021 | 0.006 | 0.000 | 0.000 |
+
+The FBO -> texture dependency is 5x for identical work; a `glFinish` is a
+seventh of that; and the remaining ~0.47 ms appears in **no** counter -- `idle`
+and `waiting-varyings` both read 0, which is why those two were added.  It is
+outside the QPU's cycle accounting, consistent with a bin/render
+synchronisation.  So a fusion change is judged by its wall delta, not by a
+counter delta.
 
 **The table's shape is a triage, not a verdict.**  `ffn`+`w2` are 11.5 ms of GPU
-and 65% of the block; they are the matvec kernels, and their `exec/gpu` of 63-80%
-says a cheaper decode there is worth having -- which is what `matvec_probe`'s fast
-decode (2.08 ms against 3.82 ms, 94-97% GPU) already measured.  `attn`'s 4.4 ms of
-GPU across 7 draws is a fusion problem that no kernel rewrite can reach, and the
-12.6 ms it spends launching is the number `attn_out_probe` and the qN batching
-work exist to attack.
+and 65% of the block, but they read 1.79 and 2.53 ns/MAC, and
+`probes/qkv_rows_probe` showed the row count is not what makes the FFN fast (a
+4-row qkv kernel is 15% slower).  `attn`'s 4.4 ms of GPU across 7 draws is the
+fusion target -- and it is reachable, because what costs is the dependency, not
+the kernel: 135 draws a token each pay the ~0.5 ms round trip above.
 
 ## Per-model numbers that are state
 
