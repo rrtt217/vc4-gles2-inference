@@ -244,6 +244,55 @@ end-to-end run gets 9% slower.  What remains is the ~0.5 ms a draw round trip
 above: 135 draws a token pay it, no counter can see it, and it is judged by a
 fusion A/B's wall delta or not at all.
 
+## What limits the decode (VC4, measured against the architecture guide)
+
+The QPU's shape decides this, and `literature/broadcom/VideoCoreIV-AG100-R.pdf`
+states it: a **4-way SIMD** machine multiplexed to 16 lanes by running one
+instruction for **four clock cycles** on four 4-lane vectors, dual-issue (one
+add and one multiply a cycle).  At the board's 300 MHz that is
+
+```
+300 MHz / 4 clocks per instruction x 12 QPUs = 0.90 G instructions/s
+0.90 G x 16 lanes x 2 ops                     = 28.8 GFLOP/s = 14.4 GMAC/s
+```
+
+and the measured decode is **0.377 GMAC/s**, i.e. **2.6% of peak**.  The gap is
+not memory, and three separate measurements say so:
+
+| what was measured | result |
+|---|---|
+| L2C hit rate over a matvec | **99.9%** (270,267 hit / 218 miss; 69 B a transaction, i.e. a 64 B line) |
+| halving the weight bytes (q8 -> q4) | **2.9%** faster (190.3 -> 184.8 ms), not the 30% a bandwidth bound would give |
+| TMU utilisation | **42%** of the guide's 1 G pixel/s, so the texture units are not saturated |
+
+The kernel is **issue-bound**: 0.90 G instructions/s against roughly 2.2
+instructions a MAC gives a 0.41 GMAC/s ceiling, and the measured 0.377 is 92% of
+it.  That is why the levers aimed at bytes and draws all measured as nothing --
+they do not change the instruction count.
+
+**The one real difference between passes is MACs per decode.**  The FFN gate
+feeds four weight fetches from one decoded activation pair (16 MACs an
+iteration, 1.82 ns/MAC); a plain projection has two fetches to share the same
+decode (8 MACs, 2.5-2.9 ns/MAC).  Widening a projection to four rows needs a
+second output texel, i.e. MRT, and VC4 does not have it (below).
+
+### The q16 decode is already minimal
+
+Four `dA`/`dB` calls run per inner iteration and are over half its
+instructions, so they were priced against every alternative that stays
+bit-exact (`probes/q16dec_probe`, inside the real matvec loop):
+
+| decode | `exec=` ms | vs shipped |
+|---|---:|---:|
+| **shipped** `u>=32768.0?u-65536.0:u` | **1.99** | -- |
+| branchless `u-65536.0*step(32768.0,u)` | 2.15 | +8% |
+| uint sign-extend | 2.28 | +15% |
+| int sign-extend | 2.30 | +16% |
+
+A float select is nearly free on this ALU and an integer sign-extend is not,
+which is the same finding `probes/t3dec_probe` reached for the 2-bit sign
+decode.  Do not rewrite it.
+
 ## The logits pass
 
 The vocabulary matvec is the one pass whose wall time is worthless.  Greedy

@@ -248,6 +248,13 @@ probes/draw_cost_probe: probes/draw_cost_probe.cpp probes/egl_surfaceless.h $(PR
 probes/draw_cost_probe_pi: probes/draw_cost_probe.cpp probes/egl_surfaceless.h | check-cross $(PROBE_HEADERS)
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -o $@ $< $(CROSS_LDLIBS)
 
+# What the q16 activation decode costs, and whether the sign fix can be made
+# cheaper without changing a byte.  Runs inside the real matvec loop.
+probes/q16dec_probe: probes/q16dec_probe.cpp probes/egl_surfaceless.h $(PROBE_HEADERS)
+	$(CXX) $(ALL_CXXFLAGS) -o $@ $< $(LDLIBS)
+probes/q16dec_probe_pi: probes/q16dec_probe.cpp probes/egl_surfaceless.h | check-cross $(PROBE_HEADERS)
+	$(CROSS_CXX) $(CROSS_CXXFLAGS) -o $@ $< $(CROSS_LDLIBS)
+
 probes/qkv_rows_probe: probes/qkv_rows_probe.cpp probes/egl_surfaceless.h $(PROBE_HEADERS)
 	$(CXX) $(ALL_CXXFLAGS) -o $@ $< $(LDLIBS)
 probes/qkv_rows_probe_pi: probes/qkv_rows_probe.cpp probes/egl_surfaceless.h | check-cross $(PROBE_HEADERS)
