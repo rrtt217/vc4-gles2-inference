@@ -51,7 +51,7 @@ The rows below are the registry, one per switch, grouped by the axis they move.
 diagnostic or a pricing arm; `retired` is gone (`--dump-switches` prints the
 same table with what *this* environment resolved to).
 
-143 switches: 28 permanent, 101 probe, 14 retired; 16 legacy spellings are translated.
+144 switches: 28 permanent, 102 probe, 14 retired; 16 legacy spellings are translated.
 
 ### The activation streams
 
@@ -126,6 +126,7 @@ same table with what *this* environment resolved to).
 | `DRAWCOUNT` | value | draws per decoded token |
 | `LAYER_PROFILE` | `=1` | per-pass marks inside a layer |
 | `PAIR_PROFILE` | value | the same for the two-position prefill pair |
+| `PERFCNT` | `=1` | with LAYER_PROFILE, add the V3D hardware counters to each mark (gpu/exec/idle/quads) |
 | `READBACK_TIME` | value | the per-token logits finish/read-back time |
 | `RWKV_CHUNK_TEST` | value | sweep the RWKV channel-mix cut (probe: it moves the numbers) |
 | `RWKV_PROFILE` | `=1` | the RWKV paths' per-phase timing |
@@ -344,6 +345,18 @@ conclusion from its output.
 - `LAYER_PROFILE=1` — per-pass marks.  The `glFinish` in the lap also retires
   the draw issued before it, so use the replay probes to price a pass; keep
   `LAYER_PROFILE` for finding *which* pass moved.
+
+- `PERFCNT=1` — with `LAYER_PROFILE=1`, add the V3D hardware counters to every
+  mark: `gpu=` (fragment-shading cycles as milliseconds, `qpus * MHz`),
+  `exec=` (executing-valid-instr), `idle=` and `quads=` (TMU text quads).  This
+  is the only split available: the board exposes `GL_AMD_performance_monitor`
+  and no timer query, and a mark's own `glFinish` makes its ms
+  "QPU + submit + finish" with no way to say which.  Read `gpu=` against the
+  stage's ms to decide whether a slow pass is slow compute or expensive
+  launching — `attn` is 10-16% GPU while `ffn` is 66%, so the same 8 draws cost
+  very different things.  The `gpu=`/`exec=` columns are comparable across runs;
+  the ms is not, because reading a monitor costs ~25 ms a stage on this board.
+  The counters are whole-GPU, so no other client may be drawing.
 
 - `PAIR_PROFILE=1` — the same for the two-position prefill pair.
 

@@ -150,6 +150,56 @@ Two limits belong with these numbers: the counters are whole-GPU totals (a
 region must not overlap another client's draws), and `PERFCNT` is off by
 default, so an existing probe run reproduces its old output byte for byte.
 
+## Finding a stage worth optimising
+
+The counters exist to answer "which pass should the next hour go into", and the
+answer is not the pass with the biggest ms.  `LAYER_PROFILE=1 PERFCNT=1` prints
+a mark per stage with four numbers; the procedure is three steps and only the
+first one uses the wall time.
+
+**1. Sort by GPU milliseconds, not wall.**  A mark's wall includes the submit and
+the finish the mark itself performs, and on VC4 those are per-draw constants.  The
+`gpu=` column is fragment-shading cycles over `12 * 300 MHz`, so it is the part an
+optimisation of the stage can reach.  MiniMind3 q8, 8 layers of 768, decode, the
+same layer three ways:
+
+| stage | wall ms | gpu ms | exec ms | ms/draw | quads | exec/gpu |
+|---|---:|---:|---:|---:|---:|---:|
+| `rms_att` | 2.79 | 0.172 | 0.067 | 0.086 | 28,976 | 39% |
+| `attn` | 16.92 | 4.361 | 3.229 | 0.623 | 1,367,712 | 74% |
+| `wo` | 2.46 | 1.501 | 1.206 | 1.501 | 602,896 | 80% |
+| `rms_ffn` | 2.72 | 0.176 | 0.067 | 0.088 | 28,976 | 38% |
+| `ffn` | 9.08 | 6.715 | 4.207 | 3.357 | 2,801,664 | 63% |
+| `w2` | 6.50 | 4.779 | 3.815 | 2.390 | 1,908,256 | 80% |
+
+By wall the order is `attn` (16.9) then `ffn` (9.1) then `w2` (6.5); by GPU time
+it is `ffn` (6.7) then `w2` (4.8) then `attn` (4.4).  They disagree because
+`attn` spends 12.6 of its 16.9 ms outside the QPU -- 7 draws a stage at ~1.8 ms
+of launch each -- while `ffn`'s 9.1 ms contains 6.7 ms of shading.  The block is
+17.7 ms of GPU against 40.5 ms of wall: **more than half of a decode token is
+not arithmetic**, which is the single most useful thing these counters have said.
+
+**2. Read `exec/gpu` to pick the lever.**  A stage near 80% executing-valid is
+doing arithmetic: make the arithmetic cheaper (`t3dec_probe`'s signbit decode,
+`matvec_probe`'s fast decode) or give it fewer instructions.  A stage near 40%
+(`rms_att`) is not ALU-bound at all -- 61% of its fragment cycles are something
+else, and it is only 0.17 ms, so leave it alone.  A stage whose `gpu=` is a small
+fraction of its ms has a dispatch problem, not a compute problem, and belongs to
+the fusion work, not to the kernel work.
+
+**3. Never compare a `PERFCNT` wall with a `PERFCNT`-less wall.**  Reading one
+monitor costs about 25 ms a stage on this board (`attn` went 16.9 -> 40.2 ms), so
+the ms column of a counter run is only good for the `gpu=`/ms ratio.  A/B the
+change itself with the counters off.
+
+**The table's shape is a triage, not a verdict.**  `ffn`+`w2` are 11.5 ms of GPU
+and 65% of the block; they are the matvec kernels, and their `exec/gpu` of 63-80%
+says a cheaper decode there is worth having -- which is what `matvec_probe`'s fast
+decode (2.08 ms against 3.82 ms, 94-97% GPU) already measured.  `attn`'s 4.4 ms of
+GPU across 7 draws is a fusion problem that no kernel rewrite can reach, and the
+12.6 ms it spends launching is the number `attn_out_probe` and the qN batching
+work exist to attack.
+
 ## Per-model numbers that are state
 
 Only the rows whose numbers are *required* to run the model, or that pin a

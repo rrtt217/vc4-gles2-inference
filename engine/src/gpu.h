@@ -46,6 +46,28 @@ public:
     // hot path (SYNCCOUNT prints them; docs/test-hooks.md).  A draw is cheap to
     // issue and a sync is not, so the two are counted separately.
     long syncs() const { return syncs_; }
+    // Hardware counters (GL_AMD_performance_monitor).  A profile mark already
+    // synchronises, so the wall time it prints is "QPU work + submit + finish"
+    // with no way to split it; these four counters are what splits it, and on
+    // VC4 the split is the difference between a stage worth optimising and one
+    // whose time is the per-draw overhead.  `pc_stage()` brackets one mark and
+    // returns the cycles the QPU ran in it (0 when the driver offers no
+    // counters, which is every machine except the board and Mesa on a desktop).
+    //
+    //   PERFCNT=1        create the monitor (no cost when unset)
+    //   the box below    idle / fragment / executing-valid / TMU quads
+    // Lazily initialised on the first question: a caller asks "are
+    // counters available" before it knows whether it wants a region.
+    bool pc_available();
+    void pc_stage_begin();
+    // Returns false when the counters are off or the region was not readable.
+    bool pc_stage_end(unsigned long long& idle, unsigned long long& frag,
+                      unsigned long long& exec, unsigned long long& quads);
+    // QPU-equivalents of clock the counters are summed over, and the clock in
+    // MHz: the divisor that turns cycles into milliseconds.  Measured on the
+    // board (12 and 300); see probes/perfcnt.h for how.
+    static int pc_qpus() { return 12; }
+    static int pc_mhz() { return 300; }
     GPU();
     ~GPU();
 
@@ -367,6 +389,14 @@ private:
     bool logits_pair_ok(const vector<Mat>& tiles) const;
     void logits_pass(const vector<Mat>& tiles, GLuint x);
     vector<float> read_logits_full(const vector<Mat>& tiles);
+
+    // Counter state.  Function pointers resolved through eglGetProcAddress:
+    // GL_AMD_performance_monitor exports none through libGLESv2.
+    bool pc_ok_ = false;
+    unsigned pc_monitor_ = 0;
+    unsigned pc_group_ = 0;
+    bool pc_armed_ = false;
+    void pc_init();
 
     EGLDisplay dpy_ = EGL_NO_DISPLAY;
     EGLContext ctx_ = EGL_NO_CONTEXT;

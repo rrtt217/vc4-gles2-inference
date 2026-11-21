@@ -13,9 +13,22 @@
 #include "xformat.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
+
+#include <GLES2/gl2ext.h>
+
+// GL_AMD_performance_monitor is the only timing facility VC4 exposes: there is
+// no EXT_disjoint_timer_query on this driver (`eglinfo -s` lists no timer
+// extension at all).  The entry points come from eglGetProcAddress; the
+// constants are in gl2ext.h under their AMD names.
+#ifndef GL_PERFMON_RESULT_AVAILABLE_AMD
+#define GL_PERFMON_RESULT_AVAILABLE_AMD 0x8BC4
+#define GL_PERFMON_RESULT_SIZE_AMD      0x8BC5
+#define GL_PERFMON_RESULT_AMD           0x8BC6
+#endif
 
 static unsigned long long fnv_row(const uint8_t* p, size_t n){
         unsigned long long h = 1469598103934665603ull;
@@ -172,4 +185,133 @@ void GPU::dump_attention(int layer, int pos){
                 }
                 fprintf(stderr, "\n");
         }
+}
+
+// ---- hardware counters ----------------------------------------------------
+//
+// The four counters a profile pass needs.  `pc_stage_end` fills them in the
+// order below; a stage line then reads as "cycles the QPU ran / cycles it sat
+// idle / cycles a TMU fetch held it / texture quads it issued".  Divider is
+// pc_qpus() * pc_qhz (12 * 300e6 on the board, measured -- see
+// probes/perfcnt.h; the 4-QPU assumption is wrong for this driver's totals and
+// makes a stage report 300% of its own wall time).
+//
+// The record layout is four words a counter: {group, counter, value, 0}.  This
+// walked three at a time once, which reads the group id as the counter id.
+namespace {
+enum PcSlot { PC_IDLE = 0, PC_FRAG = 1, PC_EXEC = 2, PC_QUADS = 3, PC_N = 4 };
+
+struct PcFns {
+        void (GL_APIENTRY *gen)(GLsizei, GLuint*);
+        void (GL_APIENTRY *del)(GLsizei, const GLuint*);
+        void (GL_APIENTRY *sel)(GLuint, GLboolean, GLuint, GLsizei, const GLuint*);
+        void (GL_APIENTRY *beg)(GLuint);
+        void (GL_APIENTRY *end)(GLuint);
+        void (GL_APIENTRY *data)(GLuint, GLenum, GLsizei, GLuint*, GLint*);
+        void (GL_APIENTRY *groups)(GLint*, GLsizei, GLuint*);
+        void (GL_APIENTRY *counters)(GLuint, GLint*, GLint*, GLsizei, GLuint*);
+        void (GL_APIENTRY *cstr)(GLuint, GLuint, GLsizei, GLsizei*, GLchar*);
+};
+PcFns g_pc;
+GLuint g_pc_ids[PC_N];
+bool g_pc_ready = false;
+}
+
+static void* pc_sym(const char* n){
+        return (void*)eglGetProcAddress(n);
+}
+
+void GPU::pc_init(){
+        if (pc_ok_ || g_pc_ready) return;
+        // Off unless asked: the monitor is whole-GPU and would otherwise count
+        // another client's draws, and a probe run must not change because the
+        // engine could read counters.
+        const char* want = getenv("PERFCNT");
+        if (!want || !want[0] || !strcmp(want, "0")) return;
+        g_pc.gen = (decltype(g_pc.gen))pc_sym("glGenPerfMonitorsAMD");
+        g_pc.del = (decltype(g_pc.del))pc_sym("glDeletePerfMonitorsAMD");
+        g_pc.sel = (decltype(g_pc.sel))pc_sym("glSelectPerfMonitorCountersAMD");
+        g_pc.beg = (decltype(g_pc.beg))pc_sym("glBeginPerfMonitorAMD");
+        g_pc.end = (decltype(g_pc.end))pc_sym("glEndPerfMonitorAMD");
+        g_pc.data = (decltype(g_pc.data))pc_sym("glGetPerfMonitorCounterDataAMD");
+        g_pc.groups = (decltype(g_pc.groups))pc_sym("glGetPerfMonitorGroupsAMD");
+        g_pc.counters = (decltype(g_pc.counters))pc_sym("glGetPerfMonitorCountersAMD");
+        g_pc.cstr = (decltype(g_pc.cstr))pc_sym("glGetPerfMonitorCounterStringAMD");
+        if (!g_pc.gen || !g_pc.sel || !g_pc.beg || !g_pc.end || !g_pc.data ||
+            !g_pc.groups || !g_pc.counters || !g_pc.cstr) {
+                fprintf(stderr, "PERFCNT: no GL_AMD_performance_monitor on this driver "
+                                "(the counters are a VC4/Mesa feature; no timer query either)\n");
+                return;
+        }
+        GLint ng = 0;
+        g_pc.groups(&ng, 0, nullptr);
+        if (ng <= 0) { fprintf(stderr, "PERFCNT: the driver reports no counter groups\n"); return; }
+        GLuint gs[8] = {0};
+        g_pc.groups(&ng, 8, gs);
+        pc_group_ = gs[0];
+        GLint n = 0, mx = 0;
+        g_pc.counters(pc_group_, &n, &mx, 0, nullptr);
+        vector<GLuint> ids((size_t)n);
+        g_pc.counters(pc_group_, &n, &mx, n, ids.data());
+        // Substring match, the names the driver uses: "idle-clk-cycles",
+        // "clk-cycles-fragment-shading", "executing-valid-instr",
+        // "text-quads-processed".
+        static const char* const want_name[PC_N] = {
+                "idle-clk-cycles", "clk-cycles-fragment-shading",
+                "executing-valid-instr", "text-quads-processed" };
+        bool found[PC_N] = {false, false, false, false};
+        for (GLint i = 0; i < n; ++i) {
+                char nm[128] = {0};
+                GLsizei len = 0;
+                g_pc.cstr(pc_group_, ids[(size_t)i], sizeof(nm) - 1, &len, nm);
+                for (int k = 0; k < PC_N; ++k)
+                        if (!found[k] && strstr(nm, want_name[k])) {
+                                g_pc_ids[k] = ids[(size_t)i];
+                                found[k] = true;
+                        }
+        }
+        for (int k = 0; k < PC_N; ++k)
+                if (!found[k]) { fprintf(stderr, "PERFCNT: counter \"%s\" is not exposed\n", want_name[k]); return; }
+        g_pc.gen(1, &pc_monitor_);
+        g_pc.sel(pc_monitor_, GL_TRUE, pc_group_, PC_N, g_pc_ids);
+        g_pc_ready = true;
+        pc_ok_ = true;
+}
+
+bool GPU::pc_available(){
+        if (!pc_ok_) pc_init();
+        return pc_ok_;
+}
+
+void GPU::pc_stage_begin(){
+        if (!pc_ok_) return;
+        // The mark before this one already finished the pipeline, so the region
+        // measured is this stage's draws only.
+        pc_armed_ = true;
+        g_pc.beg(pc_monitor_);
+}
+
+bool GPU::pc_stage_end(unsigned long long& idle, unsigned long long& frag,
+                       unsigned long long& exec, unsigned long long& quads){
+        idle = frag = exec = quads = 0;
+        if (!pc_ok_ || !pc_armed_) return false;
+        pc_armed_ = false;
+        g_pc.end(pc_monitor_);
+        GLuint avail = 0;
+        GLint written = 0;
+        for (int i = 0; i < 200000 && !avail; ++i)
+                g_pc.data(pc_monitor_, GL_PERFMON_RESULT_AVAILABLE_AMD, 4, &avail, &written);
+        GLuint size = 0;
+        g_pc.data(pc_monitor_, GL_PERFMON_RESULT_SIZE_AMD, 4, &size, &written);
+        if (!avail || size < 16) return false;
+        // A fresh buffer every call: the size is not known before the read, and
+        // shrinking a reused one is the shape that faulted a standalone probe.
+        vector<GLuint> res(size / 4 + 4);
+        g_pc.data(pc_monitor_, GL_PERFMON_RESULT_AMD, size, res.data(), &written);
+        unsigned long long v[PC_N] = {0, 0, 0, 0};
+        for (size_t i = 0; i + 3 < res.size(); i += 4)
+                for (int k = 0; k < PC_N; ++k)
+                        if (res[i + 1] == g_pc_ids[k]) v[k] += res[i + 2];
+        idle = v[PC_IDLE]; frag = v[PC_FRAG]; exec = v[PC_EXEC]; quads = v[PC_QUADS];
+        return true;
 }

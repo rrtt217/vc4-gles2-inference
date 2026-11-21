@@ -1482,16 +1482,42 @@ GLuint Session::forward_gpu_hidden(int token, int pos, bool want_logits){
         // and "how many draws" are the same question when the profile says
         // attention is 45% of a block whose FLOPs are tiny.
         long draws_at_last_mark = (long)gpu_.draws();
+        // One counter region per stage.  A mark already synchronises, so its ms
+        // is QPU work plus submit plus finish; the counters split that into the
+        // part an optimisation can reach (fragment cycles, TMU stalls) and the
+        // part it cannot (the per-draw overhead).  A stage whose GPU share is
+        // near zero is not slow, it is expensive to launch.
+        const bool counters = prof && gpu_.pc_available();
         auto mark = [&](const char* name, int l) {
             if (!prof) return;
             gpu_.sync();
             auto now = Clock::now();
             const long d = (long)gpu_.draws();
-            cerr << "PROF l=" << l << " " << name << " " << elapsed_ms(pt, now)
-                 << " draws=" << (d - draws_at_last_mark) << "\n";
+            const double ms = elapsed_ms(pt, now);
+            unsigned long long idle = 0, frag = 0, exec = 0, quads = 0;
+            bool have = false;
+            if (counters) have = gpu_.pc_stage_end(idle, frag, exec, quads);
+            cerr << "PROF l=" << l << " " << name << " " << ms
+                 << " draws=" << (d - draws_at_last_mark);
+            if (have) {
+                // cycles / (qpus * MHz) = ms; the divisor is measured, not
+                // assumed (12 QPU-equivalents at 300 MHz on this board).
+                const double to_ms = 1.0 / (GPU::pc_qpus() * (double)GPU::pc_mhz() * 1000.0);
+                const double gpu_ms = (double)frag * to_ms;
+                cerr << " gpu=" << gpu_ms
+                     << " (" << (ms > 0 ? (int)(100.0 * gpu_ms / ms) : 0) << "%)"
+                     << " exec=" << ((double)exec * to_ms)
+                     << " idle=" << ((double)idle * to_ms)
+                     << " quads=" << quads;
+            }
+            cerr << "\n";
+            // Arranged so a stage's region covers that stage only: begin here,
+            // after the current pipeline is drained.
+            if (counters) gpu_.pc_stage_begin();
             draws_at_last_mark = d;
             pt = now;
         };
+        if (counters) gpu_.pc_stage_begin();
         vector<float> emb = embedding(token);
         GLuint h = gpu_.upload_hidden(emb);
         if (pass_dup("embed")) { emb = embedding(token); h = gpu_.upload_hidden(emb); }

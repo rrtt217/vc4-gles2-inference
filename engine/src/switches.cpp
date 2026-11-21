@@ -84,6 +84,8 @@ static const SwitchDef kSwitches[] = {
      "host <-> GPU synchronisations per decoded token"},
     {"LAYER_PROFILE", "", SwKind::Flag, "", SwStatus::Probe, SwAxis::Probe,
      "per-pass marks inside a layer"},
+    {"PERFCNT", "", SwKind::Flag, "", SwStatus::Probe, SwAxis::Probe,
+     "with LAYER_PROFILE, add the V3D hardware counters to each mark (gpu/exec/idle/quads)"},
     {"PAIR_PROFILE", "", SwKind::Str, "", SwStatus::Probe, SwAxis::Probe,
      "the same for the two-position prefill pair"},
     {"ATTN_DUP", "", SwKind::Str, "", SwStatus::Probe, SwAxis::Probe,
