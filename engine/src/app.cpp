@@ -28,16 +28,22 @@ void App::prepare_model() {
         model.quantize_q4_weights(getenv("Q4_SCOPE") ? getenv("Q4_SCOPE") : "all");
     if (!opt.tools_json.empty() && model.seq < 768) model.seq = 768;
     if ((opt.worker || !opt.build_cache_prompt.empty()) && model.seq < 1024 && !getenv("SEQ")) model.seq = 1024;
-    // The GL target limit bounds the *attention* score/KV textures, which are
-    // seq tall.  RWKV-7 has neither (its state is O(1): H*64*64 per layer plus two
-    // shift vectors), so it allocates no seq-sized GL target and must not be
-    // clamped here -- on VC4 that would wrongly cap its context at 2048.
+    // The GL target limit bounds the *textures* the attention block allocates,
+    // and since the long-context split (docs/long-context.md) the sequence is
+    // spread over as many of them as it needs: a segment is at most one
+    // texture, so the context is bounded by memory rather than by 2048.
+    // MAX_SEG caps the number of segments, which is the only reason to refuse a
+    // window the driver could still address.  RWKV-7 has no attention block at
+    // all (its state is O(1): H*64*64 per layer plus two shift vectors), so it
+    // allocates no seq-sized GL target and is not clamped here.
     if (!model.is_rwkv()) {
         const int target_limit = gpu.max_target_dim();
-        if (model.seq > target_limit) {
-            cerr << "SEQ " << model.seq << " exceeds GL target limit " << target_limit
-                 << "; clamping to " << target_limit << "\n";
-            model.seq = target_limit;
+        const int max_seg = env_int("MAX_SEG", 16);
+        const long capacity = (long)target_limit * (max_seg > 0 ? max_seg : 1);
+        if (model.seq > capacity) {
+            cerr << "SEQ " << model.seq << " exceeds " << max_seg << " segments of "
+                 << target_limit << " (" << capacity << "); clamping to " << capacity << "\n";
+            model.seq = (int)capacity;
         }
     }
     if (model.seq < 16) model.seq = 16;

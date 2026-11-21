@@ -41,6 +41,8 @@ bool q4_shift_wanted();   // Q4_SHIFT: ask for ESSL 3.00 q4 kernels
 // They used to be written out 14 times in gpu.cpp, each pair doing two getenv()
 // per pass, per layer, per token (docs/test-hooks.md).  These read them once.
 bool ffn_flush_wanted(bool fast_finish);  // fast_finish || FFN_FLUSH is set
+// gpu_diag.cpp: one row (or the whole target) read back as RGBA8 bytes.
+std::vector<uint8_t> gpu_read_target_row(const Target& t, int row);
 void ffn_sync();                          // glFlush+glFinish if FFN_SYNC is set
 
 // The largest number of fragments one draw may cover.  VC4 processes a fragment

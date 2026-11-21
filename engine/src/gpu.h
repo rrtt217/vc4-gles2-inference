@@ -330,7 +330,7 @@ public:
     float rms_eps() const { return rms_eps_; }
 
 private:
-    AttnConfig att_cfg() const;
+    AttnConfig att_cfg(int segk = 0) const;
     GLuint x_prog(const string& key, const string& src);
     GLuint x_q8(int rows, int cols, bool wrow = false);
     GLuint x_q8_batch(int rows, int cols, bool wrow);
@@ -365,13 +365,13 @@ private:
     GLuint x_rms_split();
     GLuint x_rms_reduce();
     GLuint x_rms_norm(bool use_eps_uniform);
-    GLuint x_v();
+    GLuint x_v(int segk = 0);
     GLuint x_vscale();
-    GLuint x_kv_rope();
+    GLuint x_kv_rope(int segk = 0);
     GLuint x_qnorm();
-    GLuint x_qrot();
-    GLuint x_score();
-    GLuint x_stats();
+    GLuint x_qrot(int segk = 0);
+    GLuint x_score(int segk = 0);
+    GLuint x_stats(int segk = 0);
     // qbatch variants: the score grid is seq/2 x heads*n; stats/v address the
     // batched score rows through the qrow0 uniform (n baked into the text).
     GLuint x_score_batch(int n);
@@ -451,6 +451,24 @@ private:
     // 8-bit KV: one per-head V step texel per position, one plane per layer.
     vector<Target> vs_targets_;
     vector<Target> kv_cache_;
+    // Long context (docs/long-context.md): the sequence is split into `att_nseg_`
+    // textures of at most `att_seg_` positions each, so the KV cache, the rope
+    // table, the V step planes and the score grid all stop at the driver's
+    // limit.  `att_nseg_ == 1` is the shipped single-texture layout.
+    int att_nseg_ = 1, att_seg_ = 0;
+    vector<Target> kv_parts_, vs_parts_;    // [layer * nseg + k]
+    vector<GLuint> rope_parts_;             // [k]
+    vector<Target> score_parts_;            // [k]
+    vector<Target> stats_parts_;            // [k] (nseg > 1 only)
+    vector<Target> v_parts_;                // [k] (nseg > 1 only)
+    Target& kv_part(int layer, int k) { return kv_parts_[(size_t)layer * att_nseg_ + k]; }
+    Target& vs_part(int layer, int k) { return vs_parts_[(size_t)layer * att_nseg_ + k]; }
+    // The segment a position lives in, and its offset inside it.
+    int seg_of(int pos) const { return att_seg_ > 0 ? pos / att_seg_ : 0; }
+    int seg_off(int pos) const { return att_seg_ > 0 ? pos - (pos / att_seg_) * att_seg_ : pos; }
+    // True when this position needs the generic (multi-segment) path.
+    bool seg_split() const { return att_nseg_ > 1; }
+    void bind_seg(int base_unit, const char* base, const std::vector<GLuint>& tex, GLuint prog);
     Target hidden_a_, hidden_b_, xb_, xbf_, xf_, rms_stats_, rms_partial_, rms_partial2_, ffn_pair_a_, ffn_pair_b_;
     // Prefill pair (7c): two hidden streams, their post-attention scratch and
     // the FFN chunk-0 intermediate.  pp_a_ is also the layer output slot, so
@@ -645,6 +663,10 @@ private:
     void att_scores(int layer, int pos);
 
     void att_stats(int pos);
+    // The multi-segment (max, sum) fold (docs/long-context.md).
+    void att_stats_fold(int pos);
+    // The multi-segment value sum (docs/long-context.md).
+    void att_v_reduce();
 
     void att_probs(int pos);
 

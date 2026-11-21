@@ -38,6 +38,21 @@ static bool attn_dup(const char* name){
     return false;
 }
 
+
+// Long context: bind the segment chain.  `nseg == 1` binds the caller's own
+// texture under its own name, which is the shipped call.  With more, sampler
+// `S` gets segment 0 and `S1..S{nseg-1}` the rest, in that order from
+// `base_unit` -- the order the builder's uniform list declares them in, because
+// set_sampler takes the name and the unit separately and a mismatch binds a
+// segment to the wrong name silently.
+void GPU::bind_seg(int base_unit, const char* base, const vector<GLuint>& tex, GLuint prog) {
+        for (int k = 0; k < att_nseg_ && base_unit + k < 8; ++k) {
+                bind_tex(base_unit + k, tex[(size_t)k]);
+                const string name = k == 0 ? string(base) : string(base) + to_string(k);
+                set_sampler(prog, name.c_str(), base_unit + k);
+        }
+}
+
 void GPU::init_attention(int dim, int kv_dim, int heads, int kv_heads, int head_dim,
                         int seq, bool rope_half, bool qk_norm, int layers,
                         const vector<float>& qn, const vector<float>& kn,
@@ -119,9 +134,40 @@ void GPU::init_attention(int dim, int kv_dim, int heads, int kv_heads, int head_
         const int half = head_dim / 2;
         const int qkv_rows = dim + 2 * kv_dim;
         qkv_target_ = make_target(att_qkv_pair_ ? (qkv_rows + 1) / 2 : qkv_rows, 1);
-        att_scores_ = make_target(seq / 2, heads);
+        // Long context: how many seq-sized textures the driver's limit forces.
+        // `seg` is the positions a texture holds, `nseg` how many textures the
+        // cache is cut into; nseg == 1 is the shipped layout and every kernel
+        // emits its text unchanged (gate/shader_hashes.sh proves it).
+        const int lim = max_target_dim() > 0 ? max_target_dim() : 2048;
+        // SEG_CAP forces a smaller segment than the driver needs, so the split
+        // can be exercised -- and diffed against the single-texture path -- on a
+        // machine whose limit is larger than the window.  It never enlarges.
+        const int cap = (int) env_int("SEG_CAP", 0);
+        const int seg_lim = (cap > 0 && cap < lim) ? cap : lim;
+        att_seg_ = std::min(seq, seg_lim);
+        att_nseg_ = (seq + att_seg_ - 1) / att_seg_;
+        // A texture holds nseg positions per row; the score grid packs two
+        // positions a texel, so its width is seg/2 and its capacity is 2*seg
+        // positions a row.  Both are bounded by the driver's limit.
+        const int score_w = (att_seg_ + 1) / 2;
+        if (score_w > lim) {
+                cerr << "SEQ " << seq << ": a " << att_nseg_ << "-segment score grid is "
+                     << score_w << " texels wide, over the GL target limit " << lim << "\n";
+                exit(1);
+        }
+        if (getenv("SEG_DUMP"))
+                fprintf(stderr, "SEGGEO seq=%d lim=%d cap=%d seg=%d nseg=%d score_w=%d\n",
+                        seq, lim, cap, att_seg_, att_nseg_, score_w);
+        score_parts_.clear();
+        for (int k = 0; k < att_nseg_; ++k) score_parts_.push_back(make_target(score_w, heads));
+        att_scores_ = score_parts_[0];
         att_stats_ = make_target(heads, 1);
-        att_probs_ = make_target(seq, heads);
+        // att_probs_ is the unfused probability texture, and the fused q16 path
+        // has not written or read it since the probability pass was retired into
+        // att_v.  Allocating it `seq` tall was the one target that would have
+        // kept SEQ clamped to the driver limit after the split, so it is sized
+        // to the fused layout's own width (one texel a head) and stays unused.
+        att_probs_ = make_target(heads, 1);
         att_out_ = make_target(x_texels(dim, act_fmt_), 1);
         // Only attention layers carry a KV cache.  A hybrid model has 8 conv
         // layers whose entries would never be read: at SEQ 2048 their share is
@@ -131,29 +177,59 @@ void GPU::init_attention(int dim, int kv_dim, int heads, int kv_heads, int head_
                 return !(layer_type && (int)layer_type->size() > l && (*layer_type)[l]);
         };
         kv_cache_.clear();
+        kv_parts_.clear();
+        vs_targets_.clear();
+        vs_parts_.clear();
         kv_cache_.reserve(layers);
-        for (int l = 0; l < layers; ++l)
-                kv_cache_.push_back(is_attn(l) ? make_target(att_kv_width_, seq) : Target());
-        if (att_kv_vstep_) {
-                vs_targets_.clear();
-                for (int l = 0; l < layers; ++l)
-                        vs_targets_.push_back(is_attn(l) ? make_target(att_kv_heads_, seq) : Target());
+        kv_parts_.reserve((size_t)layers * att_nseg_);
+        vs_targets_.reserve(layers);
+        vs_parts_.reserve((size_t)layers * att_nseg_);
+        for (int l = 0; l < layers; ++l) {
+                const bool a = is_attn(l);
+                Target first;
+                for (int k = 0; k < att_nseg_; ++k) {
+                        Target t = a ? make_target(att_kv_width_, att_seg_) : Target();
+                        if (k == 0) first = t;
+                        kv_parts_.push_back(t);
+                }
+                kv_cache_.push_back(first);
+                if (att_kv_vstep_) {
+                        Target vfirst;
+                        for (int k = 0; k < att_nseg_; ++k) {
+                                Target t = a ? make_target(att_kv_heads_, att_seg_) : Target();
+                                if (k == 0) vfirst = t;
+                                vs_parts_.push_back(t);
+                        }
+                        vs_targets_.push_back(vfirst);
+                }
         }
+        // The rope table is one texture a segment: a position's (cos, sin) pair
+        // for each rope pair, at x = pair*2, y = the position inside its segment.
+        rope_parts_.clear();
         const int rw = 2 * half;
-        vector<uint8_t> data((size_t)seq * rw * 4);
-        for (int p = 0; p < seq; ++p) {
-            for (int i = 0; i < half; ++i) {
-                int c = (int)lrintf(rcos[(size_t)p * half + i] * 4096.0f) + 8388608;
-                int s = (int)lrintf(rsin[(size_t)p * half + i] * 4096.0f) + 8388608;
-                for (int k = 0; k < 2; ++k) {
-                    int u = k == 0 ? c : s;
-                    size_t o = ((size_t)p * rw + 2 * i + k) * 4;
-                    data[o + 0] = 0; data[o + 1] = (u >> 16) & 255;
-                    data[o + 2] = (u >> 8) & 255; data[o + 3] = u & 255;
+        for (int k = 0; k < att_nseg_; ++k) {
+            const int p0 = k * att_seg_;
+            const int rows = std::min(att_seg_, seq - p0);
+            vector<uint8_t> data((size_t)rows * rw * 4);
+            for (int p = 0; p < rows; ++p) {
+                for (int i = 0; i < half; ++i) {
+                    int c = (int)lrintf(rcos[(size_t)(p0 + p) * half + i] * 4096.0f) + 8388608;
+                    int s = (int)lrintf(rsin[(size_t)(p0 + p) * half + i] * 4096.0f) + 8388608;
+                    for (int kk = 0; kk < 2; ++kk) {
+                        int u = kk == 0 ? c : s;
+                        size_t o = ((size_t)p * rw + 2 * i + kk) * 4;
+                        data[o + 0] = 0; data[o + 1] = (u >> 16) & 255;
+                        data[o + 2] = (u >> 8) & 255; data[o + 3] = u & 255;
+                    }
                 }
             }
+            if (getenv("SEG_DUMP"))
+                fprintf(stderr, "SEGROPE k=%d rows=%d rw=%d first=%d last=%d\n", k, rows, rw,
+                        data.empty() ? -1 : (int)data[1], (int)data[(size_t)(rows - 1) * rw * 4 + 1]);
+            rope_parts_.push_back(make_texture(rw, rows, data.data()));
         }
-        rope_tex_ = make_texture(rw, seq, data.data());
+        rope_tex_ = rope_parts_[0];
+
     }
 
 void GPU::att_qkv_draw(const Mat& qkv, GLuint x){
@@ -280,8 +356,20 @@ void GPU::kv_vscale(int layer, int pos){
         bind_fbo(vs_targets_[layer].fbo);
         glViewport(0, pos, att_kv_heads_, 1);
         use_program(p);
-        bind_tex(0, qkv_target_.tex);
-        set_sampler(p, "QKV", 0);
+        // Bind every sampler to the unit the *program* says it is on.  The
+        // shipped text declares QKV first, so unit 0 is QKV; a segmented text
+        // declares the segment planes first and the driver numbers the
+        // samplers in declaration order, which made QKV unit 1 and RT unit 0 --
+        // and a fixed-unit bind then read the qkv texture as the rope table.
+        const int u_qkv = uloc(p, "QKV");
+        const int u_rt = uloc(p, "RT");
+        // `bind_tex` caches by unit and `set_sampler` by (program, name), so a
+        // program whose sampler numbering differs from the shipped one can see
+        // a unit the cache believes is already bound.  Forget the binding when
+        // the numbering is not the shipped one.
+        if (u_qkv != 0 || u_rt != 1) forget_state();
+        bind_tex(u_qkv < 0 ? 0 : u_qkv, qkv_target_.tex);
+        set_sampler(p, "QKV", u_qkv < 0 ? 0 : u_qkv);
         setup_attrib(p);
         glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         att_finish();
@@ -320,15 +408,21 @@ void GPU::att_scores(int layer, int pos){
         }
         if (qrot_target_.tex == 0 || qrot_target_.w != att_dim_ / 2)
             qrot_target_ = make_target(att_dim_ / 2, 1);
-        GLuint pr = x_qrot();
+        // The rope table is segmented with the KV cache, so the rotated-Q pass
+        // reads the plane for *this* position's segment.  A one-segment session
+        // is segment 0 and the shipped text, so this is the identical call.
+        const int qseg = seg_of(pos);
+        GLuint pr = x_qrot(qseg);
         auto go_qrot = [&]{
             bind_fbo(qrot_target_.fbo);
             glViewport(0, 0, att_dim_ / 2, 1);
             use_program(pr);
-            bind_tex(0, qkv_target_.tex);
-            set_sampler(pr, "R", 0);
-            bind_tex(1, rope_tex_);
-            set_sampler(pr, "RT", 1);
+            const int u_r = uloc(pr, "R"), u_rt = uloc(pr, "RT");
+            if (u_r != 0 || u_rt != 1) forget_state();
+            bind_tex(u_r < 0 ? 0 : u_r, qkv_target_.tex);
+            set_sampler(pr, "R", u_r < 0 ? 0 : u_r);
+            bind_tex(u_rt < 0 ? 1 : u_rt, rope_parts_[qseg]);
+            set_sampler(pr, "RT", u_rt < 0 ? 1 : u_rt);
             if (att_qk_norm_) {
                 bind_tex(2, q_norm_tex_[layer]);
                 set_sampler(pr, "QN", 2);
@@ -344,19 +438,26 @@ void GPU::att_scores(int layer, int pos){
         if (attn_dup("qrot")) go_qrot();
         slap("qrot");
 
-        GLuint p = x_score();
         auto go_score = [&]{
-            bind_fbo(att_scores_.fbo);
-            glViewport(0, 0, att_seq_ / 2, att_heads_);
-            use_program(p);
-            bind_tex(0, qrot_target_.tex);
-            set_sampler(p, "Q", 0);
-            bind_tex(1, kv_cache_[layer].tex);
-            set_sampler(p, "KV", 1);
-            glUniform1f(uloc(p, "pos"), (float)pos);
-            glUniform1f(uloc(p, "invsqrt"), 1.0f / sqrtf((float)att_head_dim_));
-            setup_attrib(p);
-            glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+            // Long context: one program and one draw a segment.  Segment k's
+            // grid is `seg/2` wide and its fragments are the global positions
+            // [k*seg, (k+1)*seg); the shader's own SEGK/SEG put the causal test
+            // and the fetch on the global index, so the union of the draws is
+            // the same work the single draw did.
+            for (int k = 0; k < att_nseg_; ++k) {
+                GLuint p = x_score(k);
+                bind_fbo(score_parts_[k].fbo);
+                glViewport(0, 0, score_parts_[k].w, att_heads_);
+                use_program(p);
+                bind_tex(0, qrot_target_.tex);
+                set_sampler(p, "Q", 0);
+                bind_tex(1, kv_part(layer, k).tex);
+                set_sampler(p, "KV", 1);
+                glUniform1f(uloc(p, "pos"), (float)pos);
+                glUniform1f(uloc(p, "invsqrt"), 1.0f / sqrtf((float)att_head_dim_));
+                setup_attrib(p);
+                glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+            }
             att_finish();
         };
         go_score();
@@ -365,17 +466,97 @@ void GPU::att_scores(int layer, int pos){
     }
 
 void GPU::att_stats(int pos){
-        GLuint p = x_stats();
-        bind_fbo(att_stats_.fbo);
-        glViewport(0, 0, att_heads_, 1);
-        use_program(p);
-        bind_tex(0, att_scores_.tex);
-        set_sampler(p, "S", 0);
-        glUniform1f(uloc(p, "pos"), (float)pos);
-        setup_attrib(p);
-        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+        if (att_nseg_ == 1) {
+                // The shipped form, unchanged: one draw into att_stats_ itself.
+                GLuint p0 = x_stats();
+                bind_fbo(att_stats_.fbo);
+                glViewport(0, 0, att_heads_, 1);
+                use_program(p0);
+                bind_tex(0, att_scores_.tex);
+                set_sampler(p0, "S", 0);
+                glUniform1f(uloc(p0, "pos"), (float)pos);
+                setup_attrib(p0);
+                glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+                att_finish();
+                return;
+        }
+        // Long context: each segment scans only the positions it holds.  The
+        // (max, sum) pair is not additive -- a max of maxima is a max, but the
+        // sums were exponentiated against different maxima -- so with more than
+        // one segment the fold pass re-reads the segments against the global
+        // max.  nseg == 1 is the shipped one-draw form.
+        for (int k = 0; k < att_nseg_; ++k) {
+            if (k >= (int)stats_parts_.size()) stats_parts_.resize(att_nseg_);
+            if (stats_parts_[k].tex == 0 || stats_parts_[k].w != att_heads_)
+                stats_parts_[k] = make_target(att_heads_, 1);
+            GLuint p = x_stats(k);
+            bind_fbo(stats_parts_[k].fbo);
+            glViewport(0, 0, att_heads_, 1);
+            use_program(p);
+            bind_tex(0, score_parts_[k].tex);
+            set_sampler(p, "S", 0);
+            glUniform1f(uloc(p, "pos"), (float)pos);
+            setup_attrib(p);
+            glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+        }
         att_finish();
+        att_stats_fold(pos);
     }
+
+// Long context: fold the per-segment (max, sum) pairs into one.  The max is a
+// max of maxima; the sum is recomputed as sum_k exp(max_k - max_global) * sum_k,
+// which is exact for the same reason the softmax is: the exponentials differ by
+// a constant factor that the max has already normalised out.  Reading the
+// segment sums back as texels and doing the arithmetic on the host keeps this a
+// handful of bytes a layer rather than another shader -- and a shader would have
+// to be a second reduction over N samplers anyway.
+void GPU::att_stats_fold(int pos){
+        const int h = att_heads_;
+        vector<float> mx((size_t)att_nseg_ * h), sm((size_t)att_nseg_ * h);
+        for (int k = 0; k < att_nseg_; ++k) {
+                const vector<uint8_t> b = gpu_read_target_row(stats_parts_[k], 0);
+                for (int i = 0; i < h; ++i) {
+                        const size_t o = (size_t)i * 4;
+                        auto dec = [&](int comp) {
+                                const int v = (int)b[o + (size_t)comp * 2] * 256 +
+                                              b[o + (size_t)comp * 2 + 1];
+                                return (float)(v >= 32768 ? v - 65536 : v);
+                        };
+                        mx[(size_t)k * h + i] = dec(0) / att_score_scale_;
+                        sm[(size_t)k * h + i] = dec(1) / att_sum_scale_;
+                }
+        }
+        vector<uint8_t> out((size_t)h * 4);
+        for (int i = 0; i < h; ++i) {
+                float g = -1e30f;
+                for (int k = 0; k < att_nseg_; ++k) g = std::max(g, mx[(size_t)k * h + i]);
+                // The single-draw kernel sums in float and rounds once, on the
+                // 1/32 grid.  A fold that multiplies two already-rounded values
+                // and rounds again lands an LSB away from it, so do the whole
+                // sum in double: the segment sums are exact to 1/32 by
+                // construction, and exp(max_k - max) is the only new factor.
+                double sum = 0.0;
+                for (int k = 0; k < att_nseg_; ++k) {
+                        const float m = mx[(size_t)k * h + i];
+                        if (m <= -1e29f) continue;
+                        sum += std::exp((double)m - (double)g) * (double)sm[(size_t)k * h + i];
+                }
+                auto enc = [&](int comp, float v, float scale) {
+                        int q = (int)lrintf(v * scale);
+                        if (q < -32768) q = -32768;
+                        if (q > 32767) q = 32767;
+                        if (q < 0) q += 65536;
+                        out[(size_t)i * 4 + (size_t)comp * 2] = (uint8_t)(q >> 8);
+                        out[(size_t)i * 4 + (size_t)comp * 2 + 1] = (uint8_t)(q & 255);
+                };
+                enc(0, g, att_score_scale_);
+                enc(1, (float)sum, att_sum_scale_);
+        }
+        glBindTexture(GL_TEXTURE_2D, att_stats_.tex);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, h, 1, GL_RGBA, GL_UNSIGNED_BYTE, out.data());
+        forget_state();
+}
 
 void GPU::att_probs(int pos){
         GLuint p = x_prob();
@@ -394,54 +575,183 @@ void GPU::att_probs(int pos){
 
 void GPU::att_v(int layer, int pos){
         // q16 score/stats layout has one packed texel per head; fused decode is mandatory.
-        static const bool fuse_prob = true;
-        GLuint p = x_v();
-        bind_fbo(att_out_.fbo);
-        glViewport(0, 0, att_out_.w, 1);
-        use_program(p);
-        if (fuse_prob) {
-            bind_tex(0, att_scores_.tex);
+        if (att_nseg_ == 1) {
+                GLuint p0 = x_v();
+                bind_fbo(att_out_.fbo);
+                glViewport(0, 0, att_out_.w, 1);
+                use_program(p0);
+                bind_tex(0, att_scores_.tex);
+                set_sampler(p0, "S", 0);
+                bind_tex(2, att_stats_.tex);
+                set_sampler(p0, "ST", 2);
+                bind_tex(1, kv_cache_[layer].tex);
+                set_sampler(p0, "KV", 1);
+                if (att_kv_vstep_) {
+                        bind_tex(3, vs_targets_[layer].tex);
+                        set_sampler(p0, "VS", 3);
+                }
+                glUniform1f(uloc(p0, "pos"), (float)pos);
+                setup_attrib(p0);
+                glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+                att_finish();
+                return;
+        }
+        // Long context: the V accumulation is a sum over positions, so a segment
+        // can only produce a partial.  Each segment writes its own output row and
+        // att_v_reduce() adds them; the adds are float sums of the same products,
+        // so the result is the single-draw sum up to the order they fold in.
+        for (int k = 0; k < att_nseg_; ++k) {
+            if (k >= (int)v_parts_.size()) v_parts_.resize(att_nseg_);
+            if (v_parts_[k].tex == 0 || v_parts_[k].w != att_out_.w)
+                v_parts_[k] = make_target(att_out_.w, 1);
+            GLuint p = x_v(k);
+            bind_fbo(v_parts_[k].fbo);
+            glViewport(0, 0, att_out_.w, 1);
+            use_program(p);
+            bind_tex(0, score_parts_[k].tex);
             set_sampler(p, "S", 0);
             bind_tex(2, att_stats_.tex);
             set_sampler(p, "ST", 2);
-        } else {
-            bind_tex(0, att_probs_.tex);
-            set_sampler(p, "P", 0);
+            bind_tex(1, kv_part(layer, k).tex);
+            set_sampler(p, "KV", 1);
+            if (att_kv_vstep_) {
+                bind_tex(3, vs_part(layer, k).tex);
+                set_sampler(p, "VS", 3);
+            }
+            glUniform1f(uloc(p, "pos"), (float)pos);
+            setup_attrib(p);
+            glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         }
-        bind_tex(1, kv_cache_[layer].tex);
-        set_sampler(p, "KV", 1);
-        if (att_kv_vstep_) {
-            bind_tex(3, vs_targets_[layer].tex);
-            set_sampler(p, "VS", 3);
-        }
-        glUniform1f(uloc(p, "pos"), (float)pos);
-        setup_attrib(p);
-        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         att_finish();
+        att_v_reduce();
+    }
+
+// Long context: add the per-segment V partials into att_out_.  The formats are
+// fixed point, so the add has to happen on the decoded values and be re-encoded
+// exactly the way the kernel's own writer would have -- read the partials back,
+// sum, write one row.  It is one row of `dim` texels a layer, which is what the
+// read-back of the qkv pass already costs.
+void GPU::att_v_reduce(){
+        const int w = att_out_.w;
+        // The packed formats carry two values a texel, so the accumulator is
+        // indexed by value and not by texel -- sizing it by `w` wrote past the
+        // end for every q16 container (a heap corruption, not a wrong number).
+        const bool packed = (act_fmt_ == XFormat::I16_2 || act_fmt_ == XFormat::BF16);
+        vector<float> acc((size_t)w * (packed ? 2 : 1), 0.0f);
+        for (int k = 0; k < att_nseg_; ++k) {
+                const vector<uint8_t> b = gpu_read_target_row(v_parts_[k], 0);
+                for (int i = 0; i < w; ++i) {
+                        const size_t o = (size_t)i * 4;
+                        float v = 0.0f;
+                        if (act_fmt_ == XFormat::F32) {
+                                uint32_t u = ((uint32_t)b[o] << 24) | ((uint32_t)b[o + 1] << 16) |
+                                             ((uint32_t)b[o + 2] << 8) | (uint32_t)b[o + 3];
+                                memcpy(&v, &u, 4);
+                        } else if (act_fmt_ == XFormat::I16_2 || act_fmt_ == XFormat::BF16) {
+                                for (int c = 0; c < 2; ++c) {
+                                        const int q = (int)b[o + (size_t)c * 2] * 256 +
+                                                      b[o + (size_t)c * 2 + 1];
+                                        acc[(size_t)i * 2 + (size_t)c] +=
+                                            (float)(q >= 32768 ? q - 65536 : q) / 256.0f;
+                                }
+                                continue;
+                        } else {
+                                int64_t u = (int64_t)b[o] * 16777216 + (int64_t)b[o + 1] * 65536 +
+                                            (int64_t)b[o + 2] * 256 + b[o + 3] - 8388608;
+                                v = (float)u / 65536.0f;
+                        }
+                        acc[(size_t)i] += v;
+                }
+        }
+        vector<uint8_t> out((size_t)w * 4);
+        for (int i = 0; i < w; ++i) {
+                const size_t o = (size_t)i * 4;
+                if (act_fmt_ == XFormat::F32) {
+                        const float v = acc[(size_t)i];
+                        uint32_t u = 0;
+                        memcpy(&u, &v, 4);
+                        out[o] = (uint8_t)(u >> 24); out[o + 1] = (uint8_t)(u >> 16);
+                        out[o + 2] = (uint8_t)(u >> 8); out[o + 3] = (uint8_t)u;
+                } else if (act_fmt_ == XFormat::I16_2 || act_fmt_ == XFormat::BF16) {
+                        for (int c = 0; c < 2; ++c) {
+                                int q = (int)lrintf(acc[(size_t)i * 2 + (size_t)c] * 256.0f);
+                                if (q < -32768) q = -32768;
+                                if (q > 32767) q = 32767;
+                                if (q < 0) q += 65536;
+                                out[o + (size_t)c * 2] = (uint8_t)(q >> 8);
+                                out[o + (size_t)c * 2 + 1] = (uint8_t)(q & 255);
+                        }
+                } else {
+                        int64_t q = (int64_t)llrintf(acc[(size_t)i] * 65536.0f) + 8388608;
+                        out[o] = (uint8_t)(q >> 24); out[o + 1] = (uint8_t)(q >> 16);
+                        out[o + 2] = (uint8_t)(q >> 8); out[o + 3] = (uint8_t)q;
+                }
+        }
+        glBindTexture(GL_TEXTURE_2D, att_out_.tex);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, 1, GL_RGBA, GL_UNSIGNED_BYTE, out.data());
+        forget_state();
     }
 
 
 void GPU::kv_rope_write(int layer, int pos){
-        GLuint p = x_kv_rope();
-        bind_fbo(kv_cache_[layer].fbo);
-        glViewport(0, pos, att_kv_width_, 1);
+        // Long context: the row is written into the segment that owns `pos`, at
+        // its offset inside that segment.  The rope table and the V step plane
+        // carry the same cut, so every sampler this kernel reads is bound for
+        // the segment it is writing.
+        const int sg = seg_of(pos);
+        // The program is the one for *this* segment: SEGK is a compile-time
+        // constant in its text, so the rope table's y and the V step plane's y
+        // are both `pos - SEGK*SEG`.  Asking for segment 0's program while
+        // writing segment k's row is how every position past the first segment
+        // read the wrong rope pair (a silent, plausible-looking wrong number).
+        GLuint p = x_kv_rope(sg);
+        bind_fbo(kv_part(layer, sg).fbo);
+        // The viewport's y is where the row goes, and the kernel's rope/V-step
+        // fetch must read the *same* row of its segment-sized plane.  A
+        // one-segment session has `seg_off(pos) == pos` and the shipped shader
+        // text, so this is the identical call; a split session writes into the
+        // segment's own texture at the offset, and SEGK in the text makes the
+        // rope table agree.
+        glViewport(0, seg_off(pos), att_kv_width_, 1);
         use_program(p);
-        bind_tex(0, qkv_target_.tex);
-        set_sampler(p, "QKV", 0);
-        bind_tex(1, rope_tex_);
-        set_sampler(p, "RT", 1);
-        if (att_qk_norm_) {
-            bind_tex(2, k_norm_tex_[layer]);
-            set_sampler(p, "KN", 2);
+        // Bind every sampler to the unit the *program* declares.  The shipped
+        // text puts QKV on unit 0 and RT on 1; a segmented text declares its
+        // planes first, so the driver numbers QKV 1 and RT 0.  bind_tex caches
+        // by unit and set_sampler by (program, name), so a different numbering
+        // has to forget the unit cache or the bind is skipped as "already done"
+        // while the unit really holds the previous program's texture.
+        const int u_qkv = uloc(p, "QKV"), u_rt = uloc(p, "RT");
+        const int u_kn = uloc(p, "KN"), u_vs = uloc(p, "VS");
+        if (u_qkv != 0 || u_rt != 1) forget_state();
+        bind_tex(u_qkv < 0 ? 0 : u_qkv, qkv_target_.tex);
+        set_sampler(p, "QKV", u_qkv < 0 ? 0 : u_qkv);
+        bind_tex(u_rt < 0 ? 1 : u_rt, rope_parts_[sg]);
+        set_sampler(p, "RT", u_rt < 0 ? 1 : u_rt);
+        if (att_qk_norm_ && u_kn >= 0) {
+            bind_tex(u_kn, k_norm_tex_[layer]);
+            set_sampler(p, "KN", u_kn);
         }
-        if (att_kv_vstep_) {
-            bind_tex(3, vs_targets_[layer].tex);
-            set_sampler(p, "VS", 3);
+        if (att_kv_vstep_ && u_vs >= 0) {
+            bind_tex(u_vs, vs_part(layer, sg).tex);
+            set_sampler(p, "VS", u_vs);
         }
-        glUniform1f(uloc(p, "pos"), (float)pos);
+        // The write kernel's `pos` is the row inside its own segment: the
+        // viewport already put the draw there, and the rope table and V step
+        // plane it reads are segment-sized.  Handing it the global position
+        // read past the end of both planes for every position past the first
+        // segment.
+        if (getenv("SEG_DUMP"))
+                fprintf(stderr, "SEGU prog=%u pos=%d loc=%d RT=%d VS=%d KN=%d QKV=%d\n",
+                        p, seg_off(pos), uloc(p, "pos"), uloc(p, "RT"), uloc(p, "VS"),
+                        uloc(p, "KN"), uloc(p, "QKV"));
+        glUniform1f(uloc(p, "pos"), (float)seg_off(pos));
         setup_attrib(p);
         glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         att_finish();
+        if (getenv("SEG_DUMP"))
+                fprintf(stderr, "SEGW l=%d pos=%d seg=%d off=%d segk=%d\n",
+                        layer, pos, sg, seg_off(pos), sg);
     }
 
 // ---- Prefill query batching (PREFILL_BATCH) --------------------------------

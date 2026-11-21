@@ -51,6 +51,16 @@ f17aaa7271f6dd4b     406 attn_q8_kv16_qkvpair/att_defs
 92176772b26b4798    7731 attn_q8_kv16_qkvpair/att_v_i16_2
 b8c0a2f7008ff6d2    8385 attn_q8_kv16_qkvpair/att_v_i8_4
 de640572176c92f7    3458 attn_q8_kv16_qkvpair/att_vscale
+136dd21ad964c6c5     453 attn_q8_kv16_seg2/att_defs
+743a6b98d61018f9    6984 attn_q8_kv16_seg2/att_kv_rope
+aff8da09755e53e0    3489 attn_q8_kv16_seg2/att_prob
+1ceaee72ee026698    3507 attn_q8_kv16_seg2/att_qnorm_scale
+a5e4d485d8a667bd    4337 attn_q8_kv16_seg2/att_qrot
+44550e27f9021382    4154 attn_q8_kv16_seg2/att_score
+3dff0cfcd32ece1b    3937 attn_q8_kv16_seg2/att_stats
+3078d0e5802ffb4f    7984 attn_q8_kv16_seg2/att_v_i16_2
+c3c23321d3efb44d    8738 attn_q8_kv16_seg2/att_v_i8_4
+bf8d249282945a13    3505 attn_q8_kv16_seg2/att_vscale
 f17aaa7271f6dd4b     406 attn_q8_kv16_unpaired/att_defs
 c67087f881257ed7    6666 attn_q8_kv16_unpaired/att_kv_rope
 2d0cc8cff927782c    3442 attn_q8_kv16_unpaired/att_prob

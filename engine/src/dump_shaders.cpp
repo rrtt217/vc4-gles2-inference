@@ -227,6 +227,15 @@ vector<Case> cases() {
     c.kv_width = 384;
     add_attn(v, "attn_kv24", c);
 
+    // Long context: one segmented program per segment kind, so a change to the
+    // SEGK/SEG arithmetic is a digest and not a model difference.
+    c = attn_base();
+    c.kv_bits = 16;
+    c.nseg = 2;
+    c.seg = 1024;
+    c.segk = 1;
+    add_attn(v, "attn_q8_kv16_seg2", c);
+
     c = attn_base();
     c.qk_norm = false;
     c.rope_half = true;

@@ -40,6 +40,18 @@ GPU::GPU(){
         if (max_vp[0] > 0 && max_vp[0] < max_target_dim_) max_target_dim_ = max_vp[0];
         if (max_vp[1] > 0 && max_vp[1] < max_target_dim_) max_target_dim_ = max_vp[1];
         if (max_target_dim_ <= 0) max_target_dim_ = 2048;
+        // TEX_LIMIT lowers that bound, never raises it.  It exists so a machine
+        // with a larger limit can run the board's geometry: every seq-sized
+        // target, the FFN chunk width and the upload's row tiling are checked
+        // against max_target_dim(), so one number reproduces VC4's 2048 on Xe
+        // and the difference between the two runs is the layout and nothing
+        // else.  Clamping here, in the one place the limit is decided, is why
+        // the probe cannot disagree with what make_target() enforces.
+        const int lim = (int) env_int("TEX_LIMIT", 0);
+        if (lim > 0 && lim < max_target_dim_) max_target_dim_ = lim;
+        if (lim > 0)
+                fprintf(stderr, "GL target limit %d (driver %d, TEX_LIMIT=%d)\n",
+                        max_target_dim_, max_tex > 0 ? max_tex : max_target_dim_, lim);
     }
 
 bool GPU::gpu_attn_enabled() const{
@@ -106,7 +118,7 @@ bool GPU::needs_finish() const{
         return renderer_.find("VC4") != string::npos || renderer_.find("VideoCore") != string::npos;
     }
 
-AttnConfig GPU::att_cfg() const{
+AttnConfig GPU::att_cfg(int segk) const{
         AttnConfig c;
         c.dim = att_dim_; c.kv_dim = att_kv_dim_; c.heads = att_heads_;
         c.kv_heads = att_kv_heads_; c.head_dim = att_head_dim_; c.seq = att_seq_;
@@ -118,5 +130,9 @@ AttnConfig GPU::att_cfg() const{
         c.sum_log = att_sum_log_;
         c.exp_poly = exp_poly_enabled();   // EXP=drv|poly, one axis (shaders.cpp)
         c.qkv_pair = att_qkv_pair_;
+        // Long context: the builders need the cut to emit the segment chain.
+        c.nseg = att_nseg_;
+        c.seg = att_seg_;
+        c.segk = segk;
         return c;
     }

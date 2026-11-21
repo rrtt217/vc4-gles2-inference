@@ -89,7 +89,7 @@ vector<uint8_t> read_target_all(const Target& t){
         return b;
 }
 
-vector<uint8_t> read_target_row(const Target& t, int row){
+vector<uint8_t> gpu_read_target_row(const Target& t, int row){
         vector<uint8_t> b((size_t)t.w * 4);
         glFinish();
         glBindFramebuffer(GL_FRAMEBUFFER, t.fbo);
@@ -118,17 +118,21 @@ void GPU::dump_attention(int layer, int pos){
                 meta = false;
         }
         {
-                const vector<uint8_t> b = read_target_row(qrot_target_, 0);
+                const vector<uint8_t> b = gpu_read_target_row(qrot_target_, 0);
                 fprintf(stderr, "ATTD qrot %d %d %d", layer, pos, att_dim_);
                 for (int i = 0; i < att_dim_; ++i) fprintf(stderr, " %d", q16_at(b, i / 2, i & 1));
                 fprintf(stderr, "\n");
         }
-        // Every K/V row the score and V passes read: rows 0..pos.
+        // Every K/V row the score and V passes read: rows 0..pos, across the
+        // segments (docs/long-context.md).  A segmented session keeps them in
+        // `kv_parts_`; nseg == 1 is `kv_cache_` itself.
         for (int t = 0; t <= pos && t < att_seq_; ++t) {
                 if (layer >= (int)kv_cache_.size()) break;
                 const bool f32kv = att_kv_fmt_ == 2;
                 if (att_kv_bits_ != 16 && !f32kv) break;
-                const vector<uint8_t> b = read_target_row(kv_cache_[layer], t);
+                const Target& kt = att_nseg_ > 1 ? kv_part(layer, t / att_seg_)
+                                                 : kv_cache_[layer];
+                const vector<uint8_t> b = gpu_read_target_row(kt, att_nseg_ > 1 ? t % att_seg_ : t);
                 auto at = [&](int texel) {
                         if (!f32kv) return 0;
                         const uint8_t* p = b.data() + (size_t)texel * 4;
@@ -148,11 +152,18 @@ void GPU::dump_attention(int layer, int pos){
                 fprintf(stderr, "\n");
         }
         {
-                const vector<uint8_t> b = read_target_all(att_scores_);
-                const int w = att_scores_.w;
+                // The score grid is per segment when the sequence is split: the
+                // position's pair index inside its own texture, so the dump has
+                // to walk the segments rather than one `att_scores_`.
                 for (int h = 0; h < att_heads_; ++h) {
                         fprintf(stderr, "ATTD score %d %d %d", layer, pos, h);
-                        for (int t = 0; t <= pos; ++t) fprintf(stderr, " %d", q16_at(b, h * w + t / 2, t & 1));
+                        for (int t = 0; t <= pos; ++t) {
+                                const int k = att_nseg_ > 1 ? t / att_seg_ : 0;
+                                const int lt = att_nseg_ > 1 ? t % att_seg_ : t;
+                                const Target& st = att_nseg_ > 1 ? score_parts_[k] : att_scores_;
+                                const vector<uint8_t> b = read_target_all(st);
+                                fprintf(stderr, " %d", q16_at(b, h * st.w + lt / 2, lt & 1));
+                        }
                         fprintf(stderr, "\n");
                 }
         }
@@ -166,7 +177,7 @@ void GPU::dump_attention(int layer, int pos){
                 fprintf(stderr, "\n");
         }
         if (att_out_.tex) {
-                const vector<uint8_t> b = read_target_row(att_out_, 0);
+                const vector<uint8_t> b = gpu_read_target_row(att_out_, 0);
                 fprintf(stderr, "ATTD attout %d %d %d", layer, pos, att_dim_);
                 if (act_fmt_ == XFormat::F32) {
                         // One value a texel: print it on the q16 grid the checker

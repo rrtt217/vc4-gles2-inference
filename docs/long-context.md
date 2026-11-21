@@ -1,8 +1,7 @@
 # Long context on the Pi Zero: where 2048 comes from and what it costs to pass it
 
-Measured 2026-11-07 on the board (VC4, Mesa 26.2.2).  The short version: the
-limit is the **height of the KV-cache texture**, not the model, and the engine
-says so and clamps:
+The limit is the **height of the KV-cache texture**, not the model, and the
+engine says so and clamps:
 
 ```
 $ SEQ=4096 ./engine_mm3_pi ...
@@ -14,6 +13,8 @@ SEQ 4096 exceeds GL target limit 2048; clamping to 2048
 `GPU::max_target_dim_` is the smallest of `GL_MAX_TEXTURE_SIZE`,
 `GL_MAX_RENDERBUFFER_SIZE` and `GL_MAX_VIEWPORT_DIMS`, read at startup
 (`GPU::GPU`, which takes the smallest of the three limits).  On VC4 that is **2048**; on Iris Xe it is 16384.
+`TEX_LIMIT=N` lowers it and never raises it, so a machine with a larger limit
+runs the board's geometry and the difference between the two runs is the layout.
 
 Per session (`GPU::init_attention`):
 
@@ -21,11 +22,35 @@ Per session (`GPU::init_attention`):
 |---|---|---|
 | `kv_cache_[layer]` | `(att_kv_width, seq)` | **`seq <= 2048`** — the binding one |
 | `att_scores_` | `(seq/2, heads)` | `seq <= 4096` |
+| `rope_tex_` | `(2*half, seq)` | `seq <= 2048` — a plain texture, no FBO, same limit |
+| `vs_targets_[layer]` | `(att_kv_heads, seq)` | `seq <= 2048` — `KV=q8` with `KV_VSTEP` only |
 | `att_out` | `(heads, head_dim)` | none |
 
 So the score buffer already allows 4096; the KV cache is what stops us at 2048,
 and it stops us by its *height*, because the sequence is laid out along rows and
-the KV vector along columns.
+the KV vector along columns.  Two more targets share that height and have to
+move with it, not after it: the rope table (read by every one of the five
+attention passes at `y = pos`) and, on the 8-bit path, the per-head V step
+plane.
+
+**The limit is the hardware's, not the driver's.**  The VC4 texture
+configuration field is 11 bits (`HEIGHT` bits 30:20, `WIDTH` bits 18:8 in
+Table 16 of `literature/broadcom/VideoCoreIV-AG100-R.pdf`, with `0 = 2048`), so
+2047 is the largest dimension the format can name, and the errata entry
+`HW-2753` says a child image at width or height 2048 fails with no workaround.
+`probes/texsize_probe` on the board reads exactly that edge:
+
+```
+GL_MAX_TEXTURE_SIZE = 2048
+w=192 h=1024 -> err=0x0
+w=192 h=2048 -> err=0x0
+w=192 h=2432 -> err=0x501
+```
+
+Allocating a 2048-tall texture succeeds and *using* it is what fails, which is
+why the engine's own rule is stricter than the queried limit in two places: the
+draw strips cap at `kDrawCap` (1024) and the t3 body tiles at 1024 rows, both
+with a probe behind them (`probes/qkv_rows_probe`, `probes/t3mv_probe`).
 
 Widths for the models here (`att_kv_width` = `kv_dim` at `KV=q16`):
 
@@ -65,6 +90,14 @@ sum pass over the two (a shader with two samplers), then the existing softmax;
 and the same shape for the value pass.  That is the honest cost of "split the
 rows": **N× the attention draws plus a reduce pass**, not a config flag.
 
+The reduce is cheaper than it reads, because the two accumulators already add in
+the shader: `att_score`'s `s0`/`s1` and `att_v`'s `a0..a3` are float sums, so
+segment *k* writes its partial sum into the same grid and the pass that adds
+them is one fetch an output, not a re-run of the inner loop.  What it costs is
+what §5 measures: on this board a draw is ~0.4 ms of submission before any
+fragment is shaded, and the split multiplies the number of draws per layer per
+token by `N`.
+
 ## 3. The alternative: tile the sequence along the width
 
 A texture is 2048×2048, so laying the sequence across columns instead of rows
@@ -93,21 +126,45 @@ Two of the three models here were trained at 1024, so a container that accepts
 4096 buys **room for a prompt**, not better answers: past the training length
 the model degrades regardless of what the engine can address.
 
-## 5. Cost at runtime
+## 5. Cost at runtime, measured
 
-Attention work per generated token is linear in the context, so the decode cost
-of doubling the window is roughly the attention share of a token:
+Attention work per generated token is linear in the context, and on this board
+the linear term is no longer the small one.  MiniMind3 q8, `GPU_LAYER=1
+KV=q16`, greedy, `--gen 4..8`, one run each (`TIMING`):
 
-| context | attention share of one token (Supra2-Medium, 7 layers) |
-|---:|---:|
-| 1024 | ~10% |
-| 2048 | ~18% |
-| 4096 | ~30% |
+| machine | context | decode |
+|---|---|---:|
+| Pi Zero | ~1 token | **192.0** ms/token |
+| Pi Zero | ~1.4k tokens | **317.2** ms/token |
+| Iris Xe | ~1 token | **9.4** ms/token |
+| Iris Xe | ~1.2k tokens | **16.3** ms/token |
+| Iris Xe | ~2.4k tokens | **23.9** ms/token |
+| Iris Xe | ~4.8k tokens | **38.7** ms/token |
 
-(estimate from the per-layer shape: `heads × head_dim × context` against the
-3.1M-MAC weight stack; the engine's own `LAYER_PROFILE` can measure it.)
+Measured 2026-11-21 on the board (Mesa 26.2.2, cross-built binary) and on Iris
+Xe (Mesa 26.2.6), one run each, prompt text repeated to length, `--gen 1..8`.
+Decode is the reproducible number and prefill is not (AGENTS.md), which is why
+only decode is tabulated; the same campaign's prefill ran 11 s on the board at
+1.5k tokens and 89 s on Xe at 4.8k.
 
-So 4096 is affordable — the model's own limits arrive first.
+`LAYER_PROFILE` puts the per-layer attention block at 5.2-5.6 ms of a ~9.4 ms Xe
+token *with an empty context*, and the three model projections around it at
+1.5-1.7 ms each: the block is five dependent draws whose cost is submission and
+per-draw setup, not `pos`.  So the shape of the cost is a fixed ~0.6 ms a draw
+plus a `pos`-proportional scan, and both terms grow with what a longer window
+asks for.
+
+Extrapolating the linear part is what the design has to answer: at 38.7 ms for
+~4.8k on Xe the slope is ~6 ms a 1k, so 16k of context is ~110 ms/token against
+9.4 ms today, and the Pi's slope (~0.18 ms a token of context, from 192 at 1
+against 317 at 1.4k) reaches the same place much sooner.  **A larger window is
+affordable as a prompt, not as a conversation**: prefill pays the scan once,
+every decoded token pays it again.
+
+The window is not the only thing that grows.  The KV cache is
+`layers x kv_width x seq x 4` bytes -- 3.1 MB at SEQ 2048 for MiniMind3 q8, and
+that is the figure that decides whether the board's 320 MB CMA has room for the
+weights beside it, not the one that decides whether the texture can exist.
 
 ## 6. Recommendation
 
@@ -119,5 +176,15 @@ So 4096 is affordable — the model's own limits arrive first.
    `N` and two extra draws per layer per token.
 3. Only if 8k+ is really needed, do the width tiling — it is the design that
    scales, and it is also the one that rewrites the attention addressing.
+
+**What has to move in the same change, whichever of the two is built.**  The
+clamp lives in one place (`App::prepare_model`, and again after a `/model`
+swap), and it is applied to every model that is not RWKV-7 because the CPU
+layer loop allocates its own `seq`-sized KV.  That is why the number a user
+sees is the same with `GPU_LAYER=0`: the limit is not the GPU's to lift, it is
+the session's.  A partial change that raises the KV cache and not the rope
+table fails at the next `make_texture` with a message that names the texture,
+and one that raises both and not `att_scores_` fails on the draw that samples
+past its own height.
 
 Nothing in this file is implemented yet; it is the map, not the road.

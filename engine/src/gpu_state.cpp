@@ -133,6 +133,12 @@ void GPU::reset_targets(){
         conv_state_.clear();
         vs_targets_.clear();
         kv_cache_.clear();
+        kv_parts_.clear();
+        vs_parts_.clear();
+        rope_parts_.clear();
+        score_parts_.clear();
+        att_nseg_ = 1;
+        att_seg_ = 0;
         rwkv_tmp_.clear();
         rwkv_state_.clear();
         rwkv_shift_.clear();

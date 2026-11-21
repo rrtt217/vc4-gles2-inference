@@ -68,6 +68,8 @@ static const SwitchDef kSwitches[] = {
      "print the GLSL of every program whose key contains the substring"},
 
     // ---- Probe: what one pass costs ----------------------------------------
+    {"TEX_LIMIT", "", SwKind::Int, "0..16384", SwStatus::Probe, SwAxis::Probe,
+     "lower the GL target limit every seq-sized texture is checked against (0 = the driver's); the board's 2048, on a machine that has more"},
     {"SHADER_TIME", "", SwKind::Flag, "", SwStatus::Probe, SwAxis::Probe,
      "STARTUP phase marks and one line per program"},
     {"TIMING", "", SwKind::Str, "", SwStatus::Probe, SwAxis::Probe,
@@ -263,7 +265,11 @@ static const SwitchDef kSwitches[] = {
     {"MODEL", "", SwKind::Str, "", SwStatus::Permanent, SwAxis::Load,
      "the container to run when --model is absent"},
     {"SEQ", "", SwKind::Str, "", SwStatus::Permanent, SwAxis::Load,
-     "override the container's KV cache length"},
+     "override the container's KV cache length (split over several textures past the GL limit)"},
+    {"MAX_SEG", "", SwKind::Int, "1..64", SwStatus::Permanent, SwAxis::Load,
+     "how many seq-sized textures the context may be split into (16 = 32768 on the board)"},
+    {"SEG_CAP", "", SwKind::Int, "0..16384", SwStatus::Probe, SwAxis::Probe,
+     "force a smaller attention segment than the driver needs, to A/B the split on a machine that does not need it"},
     {"TOKENIZER", "", SwKind::Str, "", SwStatus::Permanent, SwAxis::Load,
      "override the container's tokenizer blob; nothing warns, leave it unset"},
     {"MODEL_BORROW", "", SwKind::Str, "", SwStatus::Permanent, SwAxis::Load,

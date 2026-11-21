@@ -179,13 +179,16 @@ version the board runs.
 
 The KV cache is one target per layer, `(att_kv_width, seq)`, so `seq` is capped
 by the smallest of the driver's texture, renderbuffer and viewport limits - 2048
-on VC4, 16384 on Xe - and the engine clamps `SEQ` above it with a message.  The
-score buffer `(seq/2, heads)` would allow 4096, so the KV cache is the binding
-constraint.  Splitting the cache into segments is host-side for writes but needs
-per-segment score targets and a reduce pass for reads (packed fixed point cannot
-be added by the blender), and putting the sequence along the width instead gives
-8-16k in one texture at the cost of changing every KV address.  Details,
-alternatives and cost estimates: [`docs/long-context.md`](long-context.md).
+on VC4, 16384 on Xe - and the engine clamps `SEQ` above it with a message.
+`TEX_LIMIT=N` lowers that bound so a larger machine runs the board's geometry.
+The score buffer `(seq/2, heads)` would allow 4096, so the KV cache is the binding
+constraint, and the rope table and the 8-bit V step plane share its height.
+Splitting the cache into segments is host-side for writes but needs per-segment
+score targets and a reduce pass for reads (packed fixed point cannot be added by
+the blender), and putting the sequence along the width instead gives 8-16k in one
+texture at the cost of changing every KV address.  Details, the hardware's 11-bit
+field behind the 2048, the measured cost of a longer window and the
+alternatives: [`docs/long-context.md`](long-context.md).
 
 ### 5. Texture limits: 2048 per side, no half-float, so every weight is decoded
 

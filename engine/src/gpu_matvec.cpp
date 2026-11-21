@@ -809,22 +809,29 @@ GLuint GPU::x_rms_norm(bool use_eps_uniform){
                       rms_norm(att_dim_, res_fmt_, act_fmt_, fused, use_eps_uniform));
     }
 
-GLuint GPU::x_v(){
-        return x_prog("xv_" + to_string(att_dim_) + "_" + x_format_name(act_fmt_),
-                      ::att_v(att_cfg(), act_fmt_));
+// Long context: one program a segment.  The key carries `segk` because the
+// program text does (`SEGK`), and the program cache validates the text hash on
+// every hit -- a shared key with two texts is the swap bug this cache already
+// paid for once (docs/swap-drift.md).  segk == 0 keeps the shipped key, so the
+// digest table and the cache behaviour do not move for a one-segment session.
+static string seg_suffix(int k) { return k > 0 ? "_s" + to_string(k) : string(); }
+
+GLuint GPU::x_v(int segk){
+        return x_prog("xv_" + to_string(att_dim_) + "_" + x_format_name(act_fmt_) + seg_suffix(segk),
+                      ::att_v(att_cfg(segk), act_fmt_));
     }
 
-GLuint GPU::x_kv_rope(){ return x_prog("xkv", att_kv_rope(att_cfg())); }
+GLuint GPU::x_kv_rope(int segk){ return x_prog("xkv" + seg_suffix(segk), att_kv_rope(att_cfg(segk))); }
 
 GLuint GPU::x_vscale(){ return x_prog("xvscale", ::att_vscale(att_cfg())); }
 
 GLuint GPU::x_qnorm(){ return x_prog("xqn", att_qnorm_scale(att_cfg())); }
 
-GLuint GPU::x_qrot(){ return x_prog("xqr", att_qrot(att_cfg())); }
+GLuint GPU::x_qrot(int segk){ return x_prog("xqr" + seg_suffix(segk), att_qrot(att_cfg(segk))); }
 
-GLuint GPU::x_score(){ return x_prog("xsc", att_score(att_cfg())); }
+GLuint GPU::x_score(int segk){ return x_prog("xsc" + seg_suffix(segk), att_score(att_cfg(segk))); }
 
-GLuint GPU::x_stats(){ return x_prog("xst", ::att_stats(att_cfg())); }
+GLuint GPU::x_stats(int segk){ return x_prog("xst" + seg_suffix(segk), ::att_stats(att_cfg(segk))); }
 
 // The qbatch variants bake n into the shader text (QB) and take the position's
 // row offset qrow0 as a uniform; the serial getters above stay qbatch = 1.

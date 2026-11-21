@@ -51,7 +51,7 @@ The rows below are the registry, one per switch, grouped by the axis they move.
 diagnostic or a pricing arm; `retired` is gone (`--dump-switches` prints the
 same table with what *this* environment resolved to).
 
-146 switches: 28 permanent, 104 probe, 14 retired; 16 legacy spellings are translated.
+148 switches: 29 permanent, 105 probe, 14 retired; 16 legacy spellings are translated.
 
 ### The activation streams
 
@@ -134,6 +134,7 @@ same table with what *this* environment resolved to).
 | `RWKV_PROFILE` | `=1` | the RWKV paths' per-phase timing |
 | `SHADER_TIME` | `=1` | STARTUP phase marks and one line per program |
 | `SYNCCOUNT` | value | host <-> GPU synchronisations per decoded token |
+| `TEX_LIMIT` | `0..16384` | lower the GL target limit every seq-sized texture is checked against (0 = the driver's); the board's 2048, on a machine that has more |
 | `TIMING` | value | prefill and decode timings to stderr |
 | `UPLOAD_PREFETCH` | `=1` | read the next matrix ahead of its upload (on unless set to 0) |
 | `UPLOAD_SYNC` | `=1` | one glFinish per texture upload (the pre-batch form), for an A/B |
@@ -221,9 +222,10 @@ same table with what *this* environment resolved to).
 
 | Switch | Takes | What it moves |
 |---|---|---|
+| `MAX_SEG` | `1..64` | how many seq-sized textures the context may be split into (16 = 32768 on the board) |
 | `MODEL` | value | the container to run when --model is absent |
 | `MODEL_BORROW` | value | MODEL_BORROW=0 copies the CPU weights instead of borrowing the mapping |
-| `SEQ` | value | override the container's KV cache length |
+| `SEQ` | value | override the container's KV cache length (split over several textures past the GL limit) |
 | `TOKENIZER` | value | override the container's tokenizer blob; nothing warns, leave it unset |
 | `KEEP_CPU_WEIGHTS` | value | keep the CPU weights after the upload (debugging only) |
 | `Q8_LAYERS` | value | per-layer weight precision mix at load |

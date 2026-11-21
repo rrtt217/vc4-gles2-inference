@@ -27,7 +27,7 @@ probe's output unchanged.  `draw_probe`, `matvec_probe`, `t3mv_probe` and
 | `glsl_probe` | which GLSL ES dialect does the vc4 ES2 context really give us, and can the q4 nibble unpack use integer ops? | `glsl_probe_pi` |
 | `q4fmt_probe` | what does the VC4 texture unit return for a small UNORM component?  The q4 split layout depends on the exact rounding | `q4fmt_probe_pi` |
 | `rgba4444_probe` | does this driver give a real 4-bit-per-channel texture?  The q4 weight path is 4 bits per channel.  **Answered on VC4 (2026-11-14): yes** — exact `n/15`, same component order as Xe, 144/144 nibbles right on a 1216x192 matrix; see [`docs/benchmarks.md`](../../docs/benchmarks.md) | `rgba4444_probe`, `rgba4444_probe_pi` |
-| `texsize_probe` | what texture height does this driver accept?  The engine allocates weight textures `rows` tall | `texsize_probe` |
+| `texsize_probe` | what texture height does this driver accept?  The engine allocates weight textures `rows` tall.  On the board it reproduces the hardware's 11-bit dimension field: 2048 allocates, 2432 is `GL_INVALID_VALUE` | `texsize_probe`, `texsize_probe_pi` |
 | `matvec_probe` | how much of the engine's matvec time is int8 decode?  Synthetic weights, no model.  `PERFCNT=1` separates ALU (executing-valid) from TMU (text-quads) | `matvec_probe`, `matvec_probe_pi` |
 | `q4mv_probe` | synthetic INT4 kernels at 64x64 and the fused FFN gate, with and without the unpack cost | `q4mv_probe`, `q4mv_probe_pi` |
 | `wrow_probe` | does a per-row q8 scale plane reach the fragment shader?  Drives the engine's own kernels and names the rows that differ — it is how VC4's undefined two-fetch-from-one-sampler behaviour was found | `wrow_probe`, `wrow_probe_pi` |

@@ -67,7 +67,49 @@ struct AttnConfig {
     // fragment's arithmetic is the serial kernel's; only the row it reads and
     // writes moves, which is what keeps the logits byte-identical.
     int qbatch = 1;
+    // Long context: the sequence is split into `nseg` textures of at most
+    // `seg` positions each (docs/long-context.md).  `nseg == 1` is the shipped
+    // layout and every builder emits its text unchanged -- the segment
+    // arithmetic below is all guarded on `nseg > 1`, because a state document's
+    // claim ("NSEG=1 is the old layout") has to be true of the emitted GLSL and
+    // not only of the results.  With `nseg > 1` a texture holds `nseg * seg`
+    // positions laid out k-major: position t lives in texture `t / seg` at
+    // x = `(t % seg) * stride`, where `stride` is the KV vector's texel count
+    // in the KV passes and 1 in the score passes (whose own x is the position
+    // pair).  The segment is a compile-time constant, so the sampler is chosen
+    // by a chain of `if (s == k)` and no array indexing is needed (ESSL 1.00
+    // has no indexed sampler).
+    // Each segment gets its own program (`segk`), so a kernel binds exactly one
+    // sampler per plane and scans only its own slice of the sequence -- no
+    // sampler chain (ESSL 1.00 cannot index one, and VC4 has eight units).
+    int nseg = 1;
+    int seg = 0;
+    int segk = 0;
 };
+
+// The GLSL that turns `t` (a sequence position, or a pair index for the score
+// grid) into a fetch: the sampler for texture number `t / seg`, and the
+// normalized coordinate along the sequence axis inside that texture.
+// `nseg == 1` returns the caller's own two strings, so a builder that uses this
+// emits byte-identical GLSL in the shipped layout.
+struct SegRef {
+    std::string sampler;   // the sampler expression to fetch from
+    std::string y;         // the normalized coordinate along the sequence axis
+};
+// `single` is the builder's own normalized-x text for the shipped layout; it is
+// returned unchanged when nseg == 1, which is what keeps the emitted GLSL
+// byte-identical (gate/shader_hashes.sh).
+SegRef seg_ref(const AttnConfig& c, const std::string& base, const std::string& t,
+               const std::string& single_tex, const std::string& single_y,
+               const std::string& div = "SEG");
+// The rope table's y: `ropeY` in the shipped layout (the builders' own text),
+// the segmented expression otherwise.  One helper because nine fetches in three
+// kernels read it and they must agree.
+std::string seg_rope_y(const AttnConfig& c);
+// The sampler for a one-texel-a-position plane (the rope table, the V step plane).
+std::string seg_seq_tex(const AttnConfig& c, const std::string& base);
+// `uniform sampler2D a, b;` for the segment chain (nseg == 1: `a`).
+std::string seg_uniforms(const AttnConfig& c, const std::string& base);
 
 std::string att_defs(const AttnConfig& c);
 std::string att_helpers(const AttnConfig& c);
