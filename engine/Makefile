@@ -29,6 +29,9 @@ CORE := $(SRC)/engine.cpp $(SRC)/common.cpp $(SRC)/xformat.cpp $(SRC)/switches.c
         $(SRC)/tokenizer.cpp $(SRC)/model.cpp $(SRC)/session.cpp $(SRC)/prefix_cache.cpp $(SRC)/lineedit.cpp $(SRC)/lineedit_layout.cpp \
         $(SRC)/sampling.cpp $(SRC)/tools.cpp $(SRC)/ppl.cpp $(SRC)/cli.cpp $(SRC)/chat_format.cpp $(SRC)/prefix_build.cpp $(SRC)/app.cpp $(SRC)/worker.cpp $(SRC)/chat.cpp $(SRC)/chattmpl.cpp $(JINJA)
 HEADERS := $(wildcard $(SRC)/*.h)
+# Probe-only headers (not part of the engine build).  Only the probes that
+# include one depend on it; the others are untouched.
+PROBE_HEADERS := $(wildcard probes/*.h)
 # third_party is -isystem: it is vendored code (llama.cpp's Jinja engine) and its
 # own warnings are not this repository's to fix, but they must not drown ours --
 # before this, a full build printed 11 warnings from jinja headers and 1 from src/.
@@ -171,8 +174,13 @@ probes/logits_grid_probe: probes/logits_grid_probe.cpp $(SRC)/shaders_attn.cpp \
                           $(SRC)/shaders.h $(SRC)/xformat.cpp $(SRC)/xformat.h $(HEADERS)
 	$(CXX) $(ALL_CXXFLAGS) -I$(SRC) -o $@ probes/logits_grid_probe.cpp $(SRC)/shaders_attn.cpp $(SRC)/xformat.cpp
 
-probes/matvec_probe: probes/matvec_probe.cpp $(SRC)/common.cpp $(SRC)/switches.cpp $(SRC)/common.h $(HEADERS)
+probes/matvec_probe: probes/matvec_probe.cpp $(SRC)/common.cpp $(SRC)/switches.cpp $(SRC)/common.h $(HEADERS) $(PROBE_HEADERS)
 	$(CXX) $(ALL_CXXFLAGS) -I$(SRC) -o $@ probes/matvec_probe.cpp $(SRC)/common.cpp $(SRC)/switches.cpp $(LDLIBS)
+
+# The board build.  matvec_probe prices the q8 decode, and the decode cost is a
+# VC4 question: a laptop run answers a different driver's question.
+probes/matvec_probe_pi: probes/matvec_probe.cpp $(SRC)/common.cpp $(SRC)/switches.cpp $(SRC)/common.h | check-cross $(HEADERS) $(PROBE_HEADERS)
+	$(CROSS_CXX) $(CROSS_CXXFLAGS) -I$(SRC) -o $@ probes/matvec_probe.cpp $(SRC)/common.cpp $(SRC)/switches.cpp $(CROSS_LDLIBS)
 
 probes/texsize_probe: probes/texsize_probe.cpp $(SRC)/common.cpp $(SRC)/switches.cpp $(SRC)/common.h $(HEADERS)
 	$(CXX) $(ALL_CXXFLAGS) -I$(SRC) -o $@ probes/texsize_probe.cpp $(SRC)/common.cpp $(SRC)/switches.cpp $(LDLIBS)
@@ -223,9 +231,9 @@ probes/att_out_probe: probes/att_out_probe.cpp probes/egl_surfaceless.h
 probes/att_out_probe_pi: probes/att_out_probe.cpp probes/egl_surfaceless.h | check-cross
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -o $@ $< $(CROSS_LDLIBS)
 
-probes/t3mv_probe: probes/t3mv_probe.cpp probes/egl_surfaceless.h
+probes/t3mv_probe: probes/t3mv_probe.cpp probes/egl_surfaceless.h $(PROBE_HEADERS)
 	$(CXX) $(ALL_CXXFLAGS) -o $@ $< $(LDLIBS)
-probes/t3mv_probe_pi: probes/t3mv_probe.cpp probes/egl_surfaceless.h | check-cross
+probes/t3mv_probe_pi: probes/t3mv_probe.cpp probes/egl_surfaceless.h | check-cross $(PROBE_HEADERS)
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -o $@ $< $(CROSS_LDLIBS)
 
 # The T3 decode microbenchmark: layout/fetch/accumulation fixed, only dec() varies.
@@ -247,9 +255,9 @@ probes/t3act_probe_pi: probes/t3act_probe.cpp probes/egl_surfaceless.h | check-c
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -o $@ $< $(CROSS_LDLIBS)
 
 # rmsnorm normalize draw cost: what folding it into the consumer matvec saves.
-probes/rmsfuse_probe: probes/rmsfuse_probe.cpp probes/egl_surfaceless.h
+probes/rmsfuse_probe: probes/rmsfuse_probe.cpp probes/egl_surfaceless.h $(PROBE_HEADERS)
 	$(CXX) $(ALL_CXXFLAGS) -o $@ $< $(LDLIBS)
-probes/rmsfuse_probe_pi: probes/rmsfuse_probe.cpp probes/egl_surfaceless.h | check-cross
+probes/rmsfuse_probe_pi: probes/rmsfuse_probe.cpp probes/egl_surfaceless.h | check-cross $(PROBE_HEADERS)
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -o $@ $< $(CROSS_LDLIBS)
 
 probes/rgba4444_probe: probes/rgba4444_probe.cpp probes/egl_surfaceless.h
@@ -347,7 +355,7 @@ probes/q4mv_probe: probes/q4mv_probe.cpp $(GPULIB) $(HEADERS)
 
 # Prices a draw, an rmsnorm and the q8 matvec shapes on the real driver
 # (WORKLOG item 7: the cost model behind prefill batching).
-probes/draw_probe_pi: probes/draw_probe.cpp $(GPULIB) | check-cross $(HEADERS)
+probes/draw_probe_pi: probes/draw_probe.cpp $(GPULIB) | check-cross $(HEADERS) $(PROBE_HEADERS)
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -I$(SRC) -o $@ $^ $(CROSS_LDLIBS)
 
 # Prices 2-position packing: one weight fetch feeding two positions, and the

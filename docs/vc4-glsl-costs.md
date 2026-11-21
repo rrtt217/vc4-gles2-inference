@@ -211,3 +211,33 @@ reachable through `packHalf2x16`; it is not.
   and flushes are pure overhead.  Before flattening another kernel, check
   how much independent work its inner body carries; the gate's win came from
   its wide body, not from "flat beats nested".
+
+## 7. Measuring against the hardware counters
+
+Sections 2 and 4 are source-derived; this is the other direction.  The board
+exposes `GL_AMD_performance_monitor` (one group, "V3D counters", 30 counters,
+16 selectable at once, `eglinfo -s` lists it) and no timer query, so the
+counters are the only way to attribute a draw's wall time to the QPU.
+`probes/perfcnt.h` wraps them and `PERFCNT=1` enables them per probe; the
+numbers are in [`benchmarks.md`](benchmarks.md), "What a draw's time is made
+of".
+
+What the counters say about the latency model:
+
+- **`waiting-TMU` is small on loading kernels and large on some fast ones.**
+  A 256-tap q8 matvec sits at 20% waiting-TMU with 0.8% text-cache misses,
+  i.e. the stall is TMU *issue*, not DRAM -- which is the hardware reason the
+  `t3lut_probe` LUT loses 2.4x (it turns one fetch per 16 weights into five
+  random ones) while denser packing wins.
+- **`executing-valid-instr` tracks fragment cycles closely** on ALU-bound
+  kernels (77% of fragment cycles in the 256-tap test), so the cost model's
+  instruction count is the right first-order term; the interest is in what the
+  remaining 20% is.
+- **A cheap draw does not spend its time on the QPU at all.**  The per-draw
+  overhead a probe measures at 0.4-0.5 ms is 0.004-0.03 ms of fragment shading,
+  so an optimization that removes a draw is worth the submit, not the shading --
+  and one that removes fragment work is worth the counters' 94-100% and no more.
+
+Treat a counter table as evidence about *this* driver: the record layout
+(four words a counter), the QPU divisor (12 here) and the clock (300 MHz) are
+all measured facts that a different board would have to re-measure.

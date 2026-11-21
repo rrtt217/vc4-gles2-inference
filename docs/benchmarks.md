@@ -96,6 +96,60 @@ Draw counts explain much of the difference between the two machines: SmolLM2
 is 515 draws/token on Xe against 454 on the board, and VC4 is draw-bound at
 about 0.6 ms a draw.
 
+## What a draw's time is made of (VC4 counters)
+
+A probe's ms/draw is QPU work plus the submit/finish around it, and the second
+term dominates the cheap draws.  The board has no timer query, but it does
+expose `GL_AMD_performance_monitor` with 30 V3D counters, so the split is
+measurable rather than arguable: `probes/perfcnt.h` (2026-11-21) is the shared
+wrapper and `PERFCNT=1` turns it on for `draw_probe`, `matvec_probe`,
+`t3mv_probe` and `rmsfuse_probe`.  Measured on the Pi Zero (Mesa 26.2.2, QPU
+clock 300 MHz, counters summed over 12 QPU-equivalents).
+
+**A null draw is almost all submission.**  `draw_probe` at 1216x1 fragments,
+300 draws an arm:
+
+| arm | wall ms/draw | QPU frag ms/draw | QPU idle ms/draw | GPU share |
+|---|---:|---:|---:|---:|
+| NULL 1x1 | 0.4194 | 0.0000 | 0.0066 | 0% |
+| NULL 384x1 | 0.4142 | 0.0013 | 0.0134 | 0.3% |
+| NULL 1216x1 | 0.4956 | 0.0042 | 0.0321 | 0.8% |
+
+The 0.42 ms a draw that `draw_probe`'s header calls the per-draw overhead is
+therefore ~0.4 ms of submit+finish and 4 us of fragment shading; that is why
+"fewer draws" was never a lever, and it is the same conclusion the probe reached
+from wall time alone, now with the driver's own numbers behind it.
+
+**A matvec is 94-97% QPU**, 2432x768, 3 tiled draws a matvec, 10 matvecs:
+
+| arm | wall ms/draw | QPU frag ms/draw | GPU share |
+|---|---:|---:|---:|
+| q8 act1/texel | 3.774 | 3.614 | 96% |
+| q8 act2/texel | 3.435 | 3.339 | 97% |
+| q8 fast decode | 2.102 | 1.968 | 94% |
+| q8 paired rows | 2.737 | 2.641 | 97% |
+
+The fast-decode arm moves 15.2M of 30.0M fragment cycles, so its win is the
+decode, not the fetch.  The counters also give the waiting split the ns/MAC
+numbers could not: `waiting-TMU` is 0.4% of fragment cycles on the act1/texel
+arm and 7.7% on fast decode, which is a kernel that has traded a decode for a
+stall.
+
+**t3mv's conclusion is a ratio the counters name directly**: the 2-bit arms are
+98-100% QPU, and `t3u_fetch` (no unpack) is 0.6746 ms against `t3u`'s 2.5184, so
+the decode is ~73% of the arm's GPU time.  `t3t` (the engine's tiled text) is
+100% GPU at 10.097 ms/draw -- there is no submission slack left to win there.
+
+**The rmsnorm arm confirms its own header.**  `rmsfuse_probe --dim 1024`: the
+1-fragment reduce is 13% GPU (0.0193 wall against 0.0025 QPU), `norm1` is 48%
+and `norm32` is 87%.  A pass whose wall is mostly not fragment work is exactly
+the "the overhead is the FINISH, not the normalize" claim, and it is the reason
+folding normalize into the consumer matvec saved ~0.4%.
+
+Two limits belong with these numbers: the counters are whole-GPU totals (a
+region must not overlap another client's draws), and `PERFCNT` is off by
+default, so an existing probe run reproduces its old output byte for byte.
+
 ## Per-model numbers that are state
 
 Only the rows whose numbers are *required* to run the model, or that pin a

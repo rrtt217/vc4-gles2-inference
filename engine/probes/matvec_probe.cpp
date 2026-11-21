@@ -10,6 +10,8 @@
 // worth the memory?" before risking a 128 MB model on a 426 MB board.
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
+#include "perfcnt.h"
+
 #include <GLES2/gl2.h>
 #include <GLES2/gl2ext.h>
 #include <chrono>
@@ -344,6 +346,23 @@ int main(int argc, char** argv) {
     };
     const int nc = have_half ? 5 : 4;
 
+    // PERFCNT=1: the QPU counters for the same arms the timing loop runs, so a
+    // column that is ALU-bound and one that is TMU-bound can be told apart
+    // instead of both being "ms".
+    PerfMon pm;
+    const bool want_counters = perfcnt_enabled() && !pm.missing();
+    if (want_counters)
+        pm.pick({"QPU-total-idle-clk-cycles",
+                 "QPU-total-clk-cycles-fragment-shading",
+                 "QPU-total-clk-cycles-executing-valid-instr",
+                 "QPU-total-clk-cycles-waiting-TMU",
+                 "QPU-total-clk-cycles-waiting-scoreboard",
+                 "TMU-total-text-quads-processed",
+                 "TMU-total-text-cache-miss",
+                 "L2C-total-cache-hit",
+                 "L2C-total-cache-miss"});
+    std::vector<PerfMon::Row> rows_out;
+
     printf("shape %dx%d, %d iterations, %d rows per draw\n", rows, cols, iters, tile);
     for (int ci = 0; ci < nc; ++ci) {
         Case& c = cases[ci];
@@ -362,6 +381,21 @@ int main(int argc, char** argv) {
         double macs = (double)rows * cols;
         printf("%-16s %8.2f ms/matvec   %6.2f MMAC/s\n", c.name, ms, macs / ms / 1000.0);
         fflush(stdout);
+        if (want_counters) {
+            const int draws = (rows + tile - 1) / tile;
+            pm.begin();
+            for (int i = 0; i < iters; ++i) matvec();
+            glFinish();
+            PerfMon::Row row;
+            row.sample = pm.end_and_print(c.name, iters * draws);
+            // ms is per matvec and the matvec may be several draws (tiling),
+            // so the table gets a per-draw wall time to match its columns.
+            row.wall_ms = ms / draws;
+            rows_out.push_back(row);
+        }
     }
+    // Every row measured iters * draws regions, and Row::wall_ms is per draw,
+    // so the divisor is the same total the rows were collected with.
+    if (want_counters) pm.table_rows(rows_out, iters * ((rows + tile - 1) / tile));
     return 0;
 }

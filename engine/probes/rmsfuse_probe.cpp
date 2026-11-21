@@ -21,6 +21,7 @@
 //   build:  make -C engine probes/rmsfuse_probe[_pi]
 //   run:    ./rmsfuse_probe [--dim N] [--iters K]
 #include "egl_surfaceless.h"
+#include "perfcnt.h"
 
 #include <GLES2/gl2.h>
 
@@ -166,6 +167,25 @@ int main(int argc, char** argv) {
         {"norm1 (scalar)", RW,
          "void main(){int t=int(gl_FragCoord.x);int i0=2*t;int i1=i0+1;" + ss1 + normtail, true},
     };
+    // PERFCNT=1 adds the QPU columns.  The conclusion this probe exists to
+    // support -- "the rmsnorm overhead is the finish, not the normalize
+    // fragment work" -- is exactly a comparison of the GPU time with the wall
+    // time, so the counters either confirm it or refute it.
+    PerfMon pm_storage;
+    PerfMon* pm = nullptr;
+    bool pm_on = false;
+    if (perfcnt_enabled() && !pm_storage.missing()) {
+        pm = &pm_storage;
+        pm_on = pm->pick({"QPU-total-idle-clk-cycles",
+                          "QPU-total-clk-cycles-fragment-shading",
+                          "QPU-total-clk-cycles-executing-valid-instr",
+                          "QPU-total-clk-cycles-waiting-TMU",
+                          "QPU-total-clk-cycles-waiting-scoreboard",
+                          "TMU-total-text-quads-processed",
+                          "TMU-total-text-cache-miss"});
+    }
+    std::vector<PerfMon::Row> rows_out;
+
     printf("\n%-18s %7s %9s %10s %8s\n", "arm", "frags", "ms/draw", "us/frag", "check");
     for (const Arm& a : arms) {
         const string ver = "#version 300 es\n";
@@ -218,7 +238,18 @@ int main(int argc, char** argv) {
             if (bad) printf("    %d/%d values off\n", bad, dim);
         }
         printf("%-18s %7d %9.4f %10.3f %8s\n", a.name, a.frags, ms, 1000.0 * ms / a.frags, chk);
+        if (pm_on) {
+            pm->begin();
+            for (int k = 0; k < iters; k++) glDrawArrays(GL_TRIANGLES, 0, 3);
+            glFinish();
+            PerfMon::Row row;
+            row.sample = pm->end_and_print(a.name, iters);
+            row.wall_ms = ms;
+            rows_out.push_back(row);
+        }
         glDeleteProgram(p); glDeleteShader(hvs); glDeleteShader(hfs);
     }
+    if (pm_on) pm->table_rows(rows_out, iters);
+
     return 0;
 }

@@ -32,6 +32,7 @@
 // catches -- then times K draws after one discarded warm-up.  Compare ns per
 // MAC: multiply by a token's MAC count for the weights' share of decode.
 #include "egl_surfaceless.h"
+#include "perfcnt.h"
 
 #include <GLES2/gl2.h>
 
@@ -162,6 +163,26 @@ int main(int argc, char** argv) {
     glBindBuffer(GL_ARRAY_BUFFER, vbo);
     const float verts[] = {-1, -1, 3, -1, -1, 3};
     glBufferData(GL_ARRAY_BUFFER, sizeof verts, verts, GL_STATIC_DRAW);
+
+    // Opt-in counters (PERFCNT=1); without them the probe prints what it always
+    // did and the monitor is never even created.
+    PerfMon pm_storage;
+    PerfMon* pm = nullptr;
+    bool pm_on = false;
+    if (perfcnt_enabled() && !pm_storage.missing()) {
+        pm = &pm_storage;
+        pm_on = pm->pick({"QPU-total-idle-clk-cycles",
+                          "QPU-total-clk-cycles-fragment-shading",
+                          "QPU-total-clk-cycles-executing-valid-instr",
+                          "QPU-total-clk-cycles-waiting-TMU",
+                          "QPU-total-clk-cycles-waiting-scoreboard",
+                          "TMU-total-text-quads-processed",
+                          "TMU-total-text-cache-miss",
+                          "L2C-total-cache-hit",
+                          "L2C-total-cache-miss"});
+    }
+    std::vector<PerfMon::Row> rows_out;
+    int strip_draws = 1;  // draws per call in the last row, for the table divisor
 
     printf("\n%-24s %6s %9s %10s %9s %8s\n", "variant", "texels", "ms/draw",
            "ns/MAC", "MB/draw", "check");
@@ -535,6 +556,24 @@ int main(int argc, char** argv) {
         glFinish();
         const double ms = std::chrono::duration<double, std::milli>(
                               std::chrono::steady_clock::now() - t0).count() / iters;
+        // PERFCNT=1: the same iters draws again under the monitor.  t3's story
+        // is "the 2-bit decode is cheaper than a q8 fetch", which is a claim
+        // about ALU against TMU; the two counters that separate them are
+        // executing-valid-instr and text-quads-processed.
+        if (pm && pm_on) {
+            pm->begin();
+            for (int k = 0; k < iters; k++) draw_all();
+            glFinish();
+            // --strip N splits one draw into ceil(frags/N) draws, so the
+            // region's draw count and the per-draw wall time both have to be
+            // divided by that factor or the columns are off by it.
+            const int per_call = strip > 0 ? (frags + strip - 1) / strip : 1;
+            PerfMon::Row row;
+            row.sample = pm->end_and_print(v.name, iters * per_call);
+            row.wall_ms = ms / per_call;
+            rows_out.push_back(row);
+            strip_draws = per_call;
+        }
 
         // ---- the readback against the CPU
         //
@@ -613,5 +652,7 @@ int main(int argc, char** argv) {
         glDeleteShader(hfs);
         glDeleteTextures(1, &wtex_id);
     }
+    if (pm_on) pm->table_rows(rows_out, iters * strip_draws);
+
     return 0;
 }

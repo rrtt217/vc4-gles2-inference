@@ -10,6 +10,16 @@ investigation once hand-rolled a probe that `engine/scripts/` already contained;
 the same failure is easy to repeat here, because eight of these files carry their
 own copy of the surfaceless-EGL setup.
 
+**A per-draw time is two numbers.**  The board exposes no timer query --
+`eglinfo -s` lists `GL_AMD_performance_monitor` and nothing with "timer" or
+"disjoint" -- so a probe that prints ms/draw is printing QPU work plus the
+submit/finish around it, and on VC4 the second term dominates the cheap draws.
+`perfcnt.h` is the shared wrapper: `PERFCNT=1` adds the V3D counter columns
+(QPU cycles, TMU quads, cache misses) next to the wall time, and unset leaves a
+probe's output unchanged.  `draw_probe`, `matvec_probe`, `t3mv_probe` and
+`rmsfuse_probe` are wired to it; the numbers are in
+[`docs/benchmarks.md`](../../docs/benchmarks.md), "What a draw's time is made of".
+
 | probe | answers | targets |
 |---|---|---|
 | `packunpack_probe` | which GLSL ES pack/unpack builtins does this driver actually run?  Every language feature the engine relies on, one draw each | `packunpack_probe_pi` |
@@ -18,7 +28,7 @@ own copy of the surfaceless-EGL setup.
 | `q4fmt_probe` | what does the VC4 texture unit return for a small UNORM component?  The q4 split layout depends on the exact rounding | `q4fmt_probe_pi` |
 | `rgba4444_probe` | does this driver give a real 4-bit-per-channel texture?  The q4 weight path is 4 bits per channel.  **Answered on VC4 (2026-11-14): yes** — exact `n/15`, same component order as Xe, 144/144 nibbles right on a 1216x192 matrix; see [`docs/benchmarks.md`](../../docs/benchmarks.md) | `rgba4444_probe`, `rgba4444_probe_pi` |
 | `texsize_probe` | what texture height does this driver accept?  The engine allocates weight textures `rows` tall | `texsize_probe` |
-| `matvec_probe` | how much of the engine's matvec time is int8 decode?  Synthetic weights, no model | `matvec_probe` |
+| `matvec_probe` | how much of the engine's matvec time is int8 decode?  Synthetic weights, no model.  `PERFCNT=1` separates ALU (executing-valid) from TMU (text-quads) | `matvec_probe`, `matvec_probe_pi` |
 | `q4mv_probe` | synthetic INT4 kernels at 64x64 and the fused FFN gate, with and without the unpack cost | `q4mv_probe`, `q4mv_probe_pi` |
 | `wrow_probe` | does a per-row q8 scale plane reach the fragment shader?  Drives the engine's own kernels and names the rows that differ — it is how VC4's undefined two-fetch-from-one-sampler behaviour was found | `wrow_probe`, `wrow_probe_pi` |
 | `conv_probe` | does the conv (hybrid) block's fetching work?  A: the kernel fetch patterns byte-for-byte; B/C: the shipped `conv3_act`/`mul_act` against a CPU reference | `conv_probe`, `conv_probe_pi` |
@@ -31,7 +41,7 @@ own copy of the surfaceless-EGL setup.
 | `logits_grid_probe` | does the logits grid stay in one place?  The vocabulary matrix is stored in container tiles | `logits_grid_probe` |
 | `progbinary_probe` | can a linked program be serialised on vc4, and does reloading skip the compile?  Item 6 (first-token latency) needed the answer | `progbinary_probe_pi` |
 | `load_probe` | how long does the 69 MB q8 checkpoint take to reach RAM on this board?  Buffered vs mmap | `load_probe_pi` |
-| `draw_probe` | what does one draw cost on vc4 before any real work is in it? | `draw_probe_pi` |
+| `draw_probe` | what does one draw cost on vc4 before any real work is in it, and how much of that is QPU?  `PERFCNT=1` adds the counters | `draw_probe_pi` |
 | `att_batch_probe` | does batching a prefill's N queries over one KV fetch pay?  Prices the compute: q1 (the shipped decode shape) against qN (N dot products a fragment, one KV fetch), with fetch-only arms and a q16 round-trip sanity check.  **Answered on VC4 (2026-11-19)**: ns/MAC falls linearly with N (19.03 at 1 query to 1.16 at 16) while ms/draw stays flat -- but the qN arm folds N-1 rows out of its output, so it prices the compute, not a dispatchable kernel; `att_out_probe` is the follow-up | `att_batch_probe`, `att_batch_probe_pi` |
 | `att_out_probe` | does that win survive *writing the output*?  A VC4 fragment writes one texel (two q16 scores), so N queries a KV pair cannot all come out of one fragment without MRT.  Prices the dispatchable shapes at engine fragment counts: q1, qN_serial (own query only, N passes in one draw), qN_recomp (all N queries computed, own row written, N x redundant MACs), qN_mrt (glDrawBuffers, one KV fetch).  Every row checked against a CPU dot product; run at `--heads 1` and `--heads 16` to separate the batching effect from grid occupancy | `att_out_probe`, `att_out_probe_pi` |
 | `sumorder_probe` | does the **summation order** change the answer on this driver?  A 1024-term dot product whose terms are 2^40 larger than its result (the shape MNN-Pocket's residual creates at magnitude 2300), through the four accumulation forms the engine's kernels use | `sumorder_probe`, `sumorder_probe_pi` |
@@ -39,6 +49,34 @@ own copy of the surfaceless-EGL setup.
 | `vc4_probe` | minimal FBO/texture smoke test: is the EGL/GLES path alive at all? | `vc4_probe` |
 | `vc4_ffn_probe` | minimal split-FFN / Top-2 / q16 smoke test | `vc4_ffn_probe` |
 | `vc4_topk_probe` | isolate Top-2: static texture against FBO-rendered texture, exact engine packing | `vc4_topk_probe` |
+
+## The counter wrapper
+
+`perfcnt.h` is a header, like `egl_surfaceless.h`, and for the same reason: a
+probe is one translation unit and two of them link nothing but EGL and GLESv2.
+It is not a probe and has no row above -- `check_scripts.py` maps four
+directories and `probes/` is not one of them, so this table is the map by
+convention, not by gate.
+
+Three things about the counters are load-bearing, all of them measured on the
+board (2026-11-21):
+
+- **The result record is four words a counter**, `{group, counter, value, 0}`.
+  Walking the buffer three words at a time reads the group id as a counter id
+  and reports a plausible, wrong number -- the first version of the wrapper did
+  exactly that and put `fragment-shading` at 0 for every arm while `idle` was
+  fine.  A one-counter run and a many-counter run must agree; that A/B is the
+  check.
+- **The cycle counters are summed over 12 QPU-equivalents**, not 4.  With the
+  wrong divisor a matvec reports 291% GPU time; with 12 it reports 94-97%, which
+  is also what a wall-clock reading of the same arm says.
+- **30 counters, 16 active at once.**  Pick the ones the question needs;
+  `pick()` matches on a substring of the driver's own names and prints what it
+  could not find rather than dropping it silently.
+
+The clock is `vcgencmd get_config gpu_freq` (300 MHz here).  `clock MHz` and the
+QPU count are compile-time defaults in the header; a probe on another board
+should pass a measured value instead of trusting them.
 
 ## Where the answers are written down
 

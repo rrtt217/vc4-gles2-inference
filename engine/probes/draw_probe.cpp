@@ -45,7 +45,15 @@
 //
 // build: make -C engine probes/draw_probe_pi CROSS_SYSROOT=<sysroot>
 // run:   ./draw_probe_pi              (RMS_SPLIT=1 switches the rmsnorm variant)
+//        PERFCNT=1 ./draw_probe_pi    (adds the QPU counter columns; see below)
+//
+// PERFCNT=1 asks the V3D counter group (GL_AMD_performance_monitor -- the board
+// has no timer query) for the cycles the QPU spent on each arm, and prints them
+// next to the wall time.  It is the distinction this probe's null-draw number
+// cannot make on its own: a 1216x1 null draw at 0.49 ms issue+finish is mostly
+// submit and finish, and the counter says how little of that is QPU.
 #include "gpu.h"
+#include "perfcnt.h"
 
 #include <GLES2/gl2.h>
 #include <cmath>
@@ -135,6 +143,24 @@ int main() {
     GPU gpu;
     printf("renderer %s\n", (const char*)glGetString(GL_RENDERER));
 
+    // Counters are opt-in: with PERFCNT unset this probe behaves and prints
+    // exactly as it did before they existed.
+    PerfMon pm;
+    const bool want_counters = perfcnt_enabled() && !pm.missing();
+    if (want_counters) {
+        if (!pm.pick({"QPU-total-idle-clk-cycles",
+                      "QPU-total-clk-cycles-fragment-shading",
+                      "QPU-total-clk-cycles-executing-valid-instr",
+                      "QPU-total-clk-cycles-waiting-TMU",
+                      "QPU-total-clk-cycles-waiting-scoreboard",
+                      "TMU-total-text-quads-processed",
+                      "TMU-total-text-cache-miss",
+                      "L2C-total-cache-hit",
+                      "L2C-total-cache-miss"}))
+            return 1;
+    }
+    std::vector<PerfMon::Row> null_rows;
+
     // (1) null draws -------------------------------------------------------
     GLuint tex = 0, fbo = 0;
     glGenTextures(1, &tex);
@@ -168,6 +194,25 @@ int main() {
         for (int i = 0; i < n; ++i) { glDrawArrays(GL_TRIANGLES, 0, 3); glFinish(); }
         const double sync = elapsed_ms(a, Clock::now()) / n;
         printf("NULL %4dx1 %.4f ms/draw  issue+finish %.4f ms/draw\n", vps[s], issue, sync);
+        if (want_counters) {
+            // Same shape, one monitor region around the issue loop, so the two
+            // numbers describe the same n draws.  The table is printed once
+            // after the loop: three arms in the same units read better than
+            // three headers.
+            char label[32];
+            snprintf(label, sizeof(label), "NULL %dx1", vps[s]);
+            pm.begin();
+            for (int i = 0; i < n; ++i) glDrawArrays(GL_TRIANGLES, 0, 3);
+            glFinish();
+            PerfMon::Row row;
+            row.sample = pm.end_and_print(label, n);
+            row.wall_ms = sync;
+            null_rows.push_back(row);
+        }
+    }
+    if (want_counters) {
+        pm.table_rows(null_rows, n);
+        null_rows.clear();
     }
     gpu.forget_state();
 
