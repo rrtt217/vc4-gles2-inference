@@ -33,6 +33,23 @@
 // honest comparison for a kernel is per output row, and there r4 loses.  Do not
 // quote the ns/MAC column without the executed-MAC divisor.
 //
+// A third arm closes the question.  The obvious way to bank four rows properly
+// is two colour attachments, and **VC4 has no MRT**: GL_MAX_DRAW_BUFFERS and
+// GL_MAX_COLOR_ATTACHMENTS both read 1, glDrawBuffers(2, ...) returns
+// GL_INVALID_OPERATION, and a two-target fragment shader fails to compile with
+// "array index must be < 1".  So r4x2 is the only shape left -- four rows a
+// fragment with the column loop deepened instead -- and the counters say why it
+// does not win either (same weights, same activations, 1280x768):
+//
+//   arm    frag ms   exec ms   waitTMU   quads      cache-miss
+//   r2     2.320     1.992     0.252     29,589,504 1,005,779
+//   r4x2   2.283     1.962     0.176     44,384,256 1,801,690
+//   r4     2.699     2.371     0.202     44,384,256 3,727,087
+//
+// r4x2 does shave fragment cycles and the TMU wait, and then pays for it:
+// deepening the body to four activation texels an iteration raises the texture
+// quads by 50% for the same rows stored.  The net is -2%, inside noise.
+//
 // The arms are all bit-exact against a CPU dot product of the same bytes, every
 // row, not just row 0 (the layout bug this probe was written with -- a
 // `frags == pairs` heuristic that coincides at rows == 4*quads -- is why the

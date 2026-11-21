@@ -203,6 +203,23 @@ reachable through `packHalf2x16`; it is not.
   for the same output.  Price a kernel per output row, never per MAC the grid
   happened to execute.
 
+- **VC4 has no MRT, measured, not assumed.**  `GL_MAX_DRAW_BUFFERS` and
+  `GL_MAX_COLOR_ATTACHMENTS` both read **1**; a two-attachment FBO reports
+  COMPLETE but `glDrawBuffers(2, ...)` returns `GL_INVALID_OPERATION`, and a
+  fragment shader writing `gl_FragData[1]` fails to compile with "array index
+  must be < 1".  `GL_EXT_draw_buffers` *is* in the extension string and both
+  entry points resolve, so the query is the only way to know -- this is why a
+  kernel that wants to write four q16 a fragment (two texels) cannot: the store
+  is limited to one RGBA8 texel, i.e. two q16 values.
+  Consequence measured the same day (`probes/qkv_rows_probe`): every shape that
+  works around it loses.  Four rows a fragment either has the grid run both
+  halves (**+15%**, twice the MACs for the same stored rows) or deepens the
+  column loop (**-2%**, inside noise, and texture quads +50%).  So a q8 kernel
+  amortises its activation decode over at most the two rows one texel can hold,
+  and the FFN gate's 1.79 ns/MAC is not a technique to copy: its four fetches
+  share one decode for 16 MACs where qkv's two share it for 8, which is what
+  gating two matrices together buys and a plain projection cannot.
+
 - Anything that needs half precision must be assembled by hand from float
   operations; there is no `packHalf2x16`, and there are no half-float textures
   either (`OES_texture_half_float` is not exposed).
