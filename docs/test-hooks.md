@@ -51,7 +51,7 @@ The rows below are the registry, one per switch, grouped by the axis they move.
 diagnostic or a pricing arm; `retired` is gone (`--dump-switches` prints the
 same table with what *this* environment resolved to).
 
-144 switches: 28 permanent, 102 probe, 14 retired; 16 legacy spellings are translated.
+145 switches: 28 permanent, 103 probe, 14 retired; 16 legacy spellings are translated.
 
 ### The activation streams
 
@@ -124,9 +124,10 @@ same table with what *this* environment resolved to).
 |---|---|---|
 | `ATTN_DUP` | value | replay one attention pass; the end-to-end delta is its marginal cost |
 | `DRAWCOUNT` | value | draws per decoded token |
+| `DUP_PROFILE` | `=1` | with a *_DUP replay, price the replay itself: wall against gpu cycles |
 | `LAYER_PROFILE` | `=1` | per-pass marks inside a layer |
 | `PAIR_PROFILE` | value | the same for the two-position prefill pair |
-| `PERFCNT` | `=1` | with LAYER_PROFILE, add the V3D hardware counters to each mark (gpu/exec/idle/quads) |
+| `PERFCNT` | `=1` | with LAYER_PROFILE or DUP_PROFILE, add the V3D hardware counters to each mark (gpu/exec/idle/quads) |
 | `READBACK_TIME` | value | the per-token logits finish/read-back time |
 | `RWKV_CHUNK_TEST` | value | sweep the RWKV channel-mix cut (probe: it moves the numbers) |
 | `RWKV_PROFILE` | `=1` | the RWKV paths' per-phase timing |

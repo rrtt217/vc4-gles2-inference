@@ -197,13 +197,37 @@ GLuint GPU::attention_block(const Mat& qkv, GLuint x, int layer, int pos){
             cerr << "PROFATT " << name << " " << elapsed_ms(tp, now) << "\n";
             tp = now;
         };
+        // A replay's delta is a wall delta; DUP_PROFILE=1 answers whether the
+        // replay cost QPU cycles or a finish.  Same columns as the PROF stage
+        // line (see session.cpp).
+        static const bool dup_prof = env_set("DUP_PROFILE");
+        const bool dup_c = dup_prof && pc_available();
+        auto dup_price = [&](const char* name, auto&& fn) {
+            if (!dup_prof) { fn(); return; }
+            unsigned long long idle = 0, frag = 0, exec = 0, quads = 0;
+            const auto t0 = Clock::now();
+            sync();
+            if (dup_c) pc_stage_begin();
+            fn();
+            sync();
+            const double ms = elapsed_ms(t0, Clock::now());
+            const bool have = dup_c && pc_stage_end(idle, frag, exec, quads);
+            if (have) {
+                const double to_ms = 1.0 / (GPU::pc_qpus() * (double)GPU::pc_mhz() * 1000.0);
+                cerr << "DUPA " << name << " wall=" << ms
+                     << " gpu=" << ((double)frag * to_ms)
+                     << " exec=" << ((double)exec * to_ms) << "\n";
+            } else {
+                cerr << "DUPA " << name << " wall=" << ms << "\n";
+            }
+        };
         // Two qkv rows per fragment: one activation decode feeds two dot
         // products, exactly like the paired logits pass.  The kernel writes the
         // same per-row q16 integers the 24-bit writer produced (x_st2q applies
         // the identical round/clamp), so the rope/qk-norm/qrot readers see the
         // same values.
         att_qkv_draw(qkv, x);
-        if (attn_dup("qkv")) att_qkv_draw(qkv, x);
+        if (attn_dup("qkv")) dup_price("qkv", [&]{ att_qkv_draw(qkv, x); });
         att_finish();
         lap("qkv");
         // QKV_DUMP: exact per-row q16 values of the matvec output, layout-agnostic
@@ -223,18 +247,18 @@ GLuint GPU::attention_block(const Mat& qkv, GLuint x, int layer, int pos){
         }
         if (att_kv_vstep_) { kv_vscale(layer, pos); lap("vscale"); }
         kv_rope_write(layer, pos);
-        if (attn_dup("rope")) kv_rope_write(layer, pos);
+        if (attn_dup("rope")) dup_price("rope", [&]{ kv_rope_write(layer, pos); });
         lap("rope");
         att_scores(layer, pos);
         lap("scores");
         att_stats(pos);
-        if (attn_dup("stats")) att_stats(pos);
+        if (attn_dup("stats")) dup_price("stats", [&]{ att_stats(pos); });
         lap("stats");
         // q16-packed scores/stats are decoded directly in att_v; the old
         // standalone probability pass is no longer compatible and is retired.
         lap("probs");
         att_v(layer, pos);
-        if (attn_dup("v")) att_v(layer, pos);
+        if (attn_dup("v")) dup_price("v", [&]{ att_v(layer, pos); });
         if (getenv("ATT_DUMP") && pos == atoi(getenv("ATT_DUMP"))) dump_attention(layer, pos);
         lap("v");
         return att_out_.tex;

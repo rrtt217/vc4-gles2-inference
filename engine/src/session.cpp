@@ -1518,14 +1518,51 @@ GLuint Session::forward_gpu_hidden(int token, int pos, bool want_logits){
             pt = now;
         };
         if (counters) gpu_.pc_stage_begin();
+
+        // A replay probe's delta is a wall-time delta, and a wall-time delta
+        // cannot say whether the extra pass cost QPU cycles or a finish.  This
+        // brackets the *replay* with its own counter region and prints the same
+        // columns the stage line does, so the two numbers can be compared:
+        // dup_gpu ~= delta_wall means the pass is arithmetic, dup_gpu << delta
+        // means the pass is its own synchronisation and belongs to fusion work.
+        // DUP_PROFILE=1 turns it on; without it the replay is untouched.
+        static const bool dup_prof = env_set("DUP_PROFILE");
+        // DUP_PROFILE does not need LAYER_PROFILE: it is the profiler of a
+        // replay, and a replay run with the stage marks off is the cleanest
+        // case (no other region is open to return early).
+        const bool dup_counters = dup_prof && gpu_.pc_available();
+        auto replay = [&](const char* name, int layer, auto&& fn) {
+            if (!dup_prof) { fn(); return; }
+            const auto t0 = Clock::now();
+            gpu_.sync();                       // start from a drained pipeline
+            if (dup_counters) gpu_.pc_stage_begin();
+            fn();
+            gpu_.sync();
+            const double ms = elapsed_ms(t0, Clock::now());
+            unsigned long long idle = 0, frag = 0, exec = 0, quads = 0;
+            const bool have = dup_counters && gpu_.pc_stage_end(idle, frag, exec, quads);
+            if (have) {
+                const double to_ms = 1.0 / (GPU::pc_qpus() * (double)GPU::pc_mhz() * 1000.0);
+                const double gpu_ms = (double)frag * to_ms;
+                cerr << "DUP l=" << layer << " " << name << " wall=" << ms
+                     << " gpu=" << gpu_ms
+                     << " (" << (ms > 0 ? (int)(100.0 * gpu_ms / ms) : 0) << "%)"
+                     << " exec=" << ((double)exec * to_ms)
+                     << " idle=" << ((double)idle * to_ms)
+                     << " quads=" << quads << "\n";
+            } else {
+                cerr << "DUP l=" << layer << " " << name << " wall=" << ms << "\n";
+            }
+        };
+
         vector<float> emb = embedding(token);
         GLuint h = gpu_.upload_hidden(emb);
-        if (pass_dup("embed")) { emb = embedding(token); h = gpu_.upload_hidden(emb); }
+        if (pass_dup("embed")) replay("embed", -1, [&]{ emb = embedding(token); h = gpu_.upload_hidden(emb); });
         mark("embed", -1);
         for (int l = 0; l < m_.layers; ++l) {
             if (g_stop) return h;
             GLuint xb = gpu_.rmsnorm(h, gpu_.rms_att_tex_[l], gpu_.xb_);
-            if (pass_dup("rms_att")) xb = gpu_.rmsnorm(h, gpu_.rms_att_tex_[l], gpu_.xb_);
+            if (pass_dup("rms_att")) replay("rms_att", l, [&]{ xb = gpu_.rmsnorm(h, gpu_.rms_att_tex_[l], gpu_.xb_); });
             mark("rms_att", l);
             // Dump as floats with the CPU path's printer, so GPU_LAYER=0 and
             // GPU_LAYER=1 dumps are diffable even though the GPU keeps its own
@@ -1551,7 +1588,7 @@ GLuint Session::forward_gpu_hidden(int token, int pos, bool want_logits){
                 mark("attn", l);
                 gpu_.matvec_add(m_.wo[l], att_tex, h, gpu_.hidden_b_, gpu_.act_fmt_);
                 if (matvec_dup("wo"))
-                    gpu_.matvec_add(m_.wo[l], att_tex, h, gpu_.hidden_b_, gpu_.act_fmt_);
+                    replay("wo", l, [&]{ gpu_.matvec_add(m_.wo[l], att_tex, h, gpu_.hidden_b_, gpu_.act_fmt_); });
                 if (getenv("STAGE_DUMP"))
                     gpu_.dump_cpu_row(read_hidden(gpu_.hidden_b_), gpu_.act_fmt_, "x1", 4096);
                 mark("wo", l);
@@ -1562,7 +1599,7 @@ GLuint Session::forward_gpu_hidden(int token, int pos, bool want_logits){
                 vector<uint8_t> db = gpu_.read_bytes(gpu_.xbf_, gpu_.xbf_.w, 1);
                 gpu_.dump_cpu_row(decode_act_row(db, gpu_.xbf_.w, gpu_.act_fmt_), gpu_.act_fmt_, "xbf", 4096);
             }
-            if (pass_dup("rms_ffn")) xbf = gpu_.rmsnorm(x1, gpu_.rms_ffn_tex_[l], gpu_.xbf_);
+            if (pass_dup("rms_ffn")) replay("rms_ffn", l, [&]{ xbf = gpu_.rmsnorm(x1, gpu_.rms_ffn_tex_[l], gpu_.xbf_); });
             mark("rms_ffn", l);
             int expert = -1;
             if (m_.is_moe() && getenv("MOE_FIXED")) {
@@ -1584,8 +1621,8 @@ GLuint Session::forward_gpu_hidden(int token, int pos, bool want_logits){
                 gpu_.ffn_split_chunked(*f.w1a, *f.w3a, *f.w1b, *f.w3b, xbf,
                                        m_.ffn_chunk, f.width - m_.ffn_chunk, ha, hb, hs);
                 if (matvec_dup("ffn"))
-                    gpu_.ffn_split_chunked(*f.w1a, *f.w3a, *f.w1b, *f.w3b, xbf,
-                                           m_.ffn_chunk, f.width - m_.ffn_chunk, ha, hb, hs);
+                    replay("ffn", l, [&]{ gpu_.ffn_split_chunked(*f.w1a, *f.w3a, *f.w1b, *f.w3b, xbf,
+                                           m_.ffn_chunk, f.width - m_.ffn_chunk, ha, hb, hs); });
                 if (getenv("FFN_DUMP") && l == 0) {
                     gpu_.sync();
                     gpu_.dump_target(gpu_.ffn_h_a_, "ha", 8);
@@ -1600,10 +1637,10 @@ GLuint Session::forward_gpu_hidden(int token, int pos, bool want_logits){
                 // scratch target, and w2a's happens before w2b clobbers x1.
                 gpu_.matvec_add(*f.w2a, ha, x1, gpu_.hidden_a_, gpu_.ffn_fmt_);
                 if (matvec_dup("w2"))
-                    gpu_.matvec_add(*f.w2a, ha, x1, w2_replay_, gpu_.ffn_fmt_);
+                    replay("w2a", l, [&]{ gpu_.matvec_add(*f.w2a, ha, x1, w2_replay_, gpu_.ffn_fmt_); });
                 gpu_.matvec_add(*f.w2b, hb, gpu_.hidden_a_.tex, gpu_.hidden_b_, gpu_.ffn_fmt_);
                 if (matvec_dup("w2"))
-                    gpu_.matvec_add(*f.w2b, hb, gpu_.hidden_a_.tex, w2_replay_, gpu_.ffn_fmt_);
+                    replay("w2b", l, [&]{ gpu_.matvec_add(*f.w2b, hb, gpu_.hidden_a_.tex, w2_replay_, gpu_.ffn_fmt_); });
                 mark("w2", l);
                 h = gpu_.hidden_b_.tex;
             if (getenv("HIDDEN_DUMP"))
@@ -1622,7 +1659,7 @@ GLuint Session::forward_gpu_hidden(int token, int pos, bool want_logits){
         }
         if (!want_logits) return h;
         GLuint xf = gpu_.rmsnorm(h, gpu_.rms_final_tex_, gpu_.xf_);
-        if (pass_dup("rms_final")) xf = gpu_.rmsnorm(h, gpu_.rms_final_tex_, gpu_.xf_);
+        if (pass_dup("rms_final")) replay("rms_final", -1, [&]{ xf = gpu_.rmsnorm(h, gpu_.rms_final_tex_, gpu_.xf_); });
         mark("rms_final", -1);
         return xf;
     }
