@@ -190,12 +190,19 @@ the fusion work, not to the kernel work.
 **3. Never compare a `PERFCNT` wall with a `PERFCNT`-less wall.**  Both a
 counter run and a `*_DUP` replay add synchronisation the production path does not
 have, so the ms column of either is only good for the `gpu=`/ms ratio.  A/B the
-change itself with the counters off.  Two numbers this rule corrected after the
-fact: reading one monitor does *not* cost 25 ms a stage (`attn` reads 16.2-16.9
-ms with and without; the single 40.2 ms reading was a hiccup), and a
-`DUP_PROFILE` replay's wall is two injected `glFinish`es plus the pass, which is
-why `attn stats` priced at 1.30 ms there while replaying it end to end is *free*
-(191 against 201 ms a token, 2026-11-21).
+change itself with the counters off.  Three consequences, each measured:
+
+- a `DUP_PROFILE` replay's wall is two injected `glFinish`es plus the pass, so
+  `attn stats` prices at 1.30 ms there while replaying it end to end is free
+  (191 against 201 ms a token, 2026-11-21);
+- the pass whose own `finish` drains the whole token's pipeline cannot be timed
+  by wall at all.  The logits pass reads 18.5 ms of `finish` with the counters
+  off and 0.04 ms with a counter region in front of it, because the region has
+  already retired the pipeline; its real cost is 11.61 ms of QPU time
+  (`LOGITS_PERFCNT`), see "The logits pass" below;
+- a single reading is not a measurement.  One `attn` run read 40.2 ms a stage
+  against 16.2-16.9 in every other run, and that outlier was briefly taken as
+  the cost of reading a monitor.
 
 **What a draw's cost is, and what the counters cannot see.**  An engine draw
 costs 0.48-0.67 ms against `draw_probe`'s 0.008-0.019 ms pipelined null draw.
@@ -216,12 +223,53 @@ outside the QPU's cycle accounting, consistent with a bin/render
 synchronisation.  So a fusion change is judged by its wall delta, not by a
 counter delta.
 
-**The table's shape is a triage, not a verdict.**  `ffn`+`w2` are 11.5 ms of GPU
-and 65% of the block, but they read 1.79 and 2.53 ns/MAC, and
-`probes/qkv_rows_probe` showed the row count is not what makes the FFN fast (a
-4-row qkv kernel is 15% slower).  `attn`'s 4.4 ms of GPU across 7 draws is the
-fusion target -- and it is reachable, because what costs is the dependency, not
-the kernel: 135 draws a token each pay the ~0.5 ms round trip above.
+**The table's shape is a triage, not a verdict.**  Every matvec pass in the
+table reads 1.8-2.5 ns/MAC with 62-86% of its `gpu=` in executing-valid
+instructions, so the block is arithmetic-bound and the passes are
+interchangeable in efficiency -- there is no outlier to attack:
+
+| pass | ns/MAC | exec share |
+|---|---:|---:|
+| `ffn` | 1.82 | 62% |
+| `logits` | 2.36 | 86% |
+| `wo` | 2.49 | 80% |
+| `w2` | 2.51 | 80% |
+
+What that rules out is the whole family of optimisations aimed at anything but
+the per-MAC instruction count: `probes/qkv_rows_probe` shows four rows a
+fragment is 15% slower (VC4 has no MRT, so the alternatives are the grid running
+both halves or a deeper body that costs 50% more texture quads), and halving the
+activation fetches with `ACT=i8` leaves `gpu=` and `exec=` unchanged while the
+end-to-end run gets 9% slower.  What remains is the ~0.5 ms a draw round trip
+above: 135 draws a token pay it, no counter can see it, and it is judged by a
+fusion A/B's wall delta or not at all.
+
+## The logits pass
+
+The vocabulary matvec is the one pass whose wall time is worthless.  Greedy
+decode reads its result back, so the `glFinish` before the read waits for the
+whole token's pipeline, and a wall lap charges the pass for that drain: 18.5 ms,
+against 11.61 ms of QPU time (`PERFCNT=1 LOGITS_PERFCNT=1`, MiniMind3 q8,
+6400x768, 2026-11-21).
+
+| quantity | value |
+|---|---:|
+| `gpu=` | 11.61 ms |
+| `exec=` | 9.93 ms (86%) |
+| `idle=` | 0.15 ms |
+| quads | 4,915,200 |
+| **ns/MAC** | **2.36** |
+
+2.36 ns/MAC is inside the 1.8-2.5 range every other matvec sits in, so the
+logits pass is not slow and there is nothing in it to fix.  The 2.36 ns/MAC and
+the 2.36 ns/quad agreeing is a coincidence of the kernel shape, not a
+derivation -- the `quads` counter's accounting does not match a per-`texture2D`
+model (the FFN gate reports 3x its fetch count, this pass 2x), so quads is a
+relative signal only.
+
+Greedy also has a second path, `GPU_ARGMAX=1`, which reduces on the GPU instead
+of reading the logits back.  It is a measured loss on this board (193.4 against
+190.5 ms a token) and stays opt-in.
 
 ## Per-model numbers that are state
 

@@ -291,7 +291,21 @@ void GPU::matvec_add(const Mat& m, GLuint x, GLuint residual, Target& out, XForm
     }
 
 vector<float> GPU::logits_from(const vector<Mat>& tiles, GLuint x){
+        // LOGITS_PERFCNT=1 reports the QPU cycles the logits pass really runs.
+        // Its wall time (the RBT finish line) cannot separate work from
+        // waiting, and a per-tile wall lap cannot either: every lap needs its
+        // own finish, which costs more than the tile it measures.  The monitor
+        // injects no finish -- its results appear once the draws retire.
+        unsigned long long li = 0, lf = 0, le = 0, lq = 0;
+        const bool lc = pc_available() && getenv("LOGITS_PERFCNT");
+        if (lc) pc_stage_begin();
         logits_pass(tiles, x);
+        if (lc) {
+            pc_stage_end(li, lf, le, lq);
+            const double to_ms = 1.0 / (pc_qpus() * (double)pc_mhz() * 1000.0);
+            fprintf(stderr, "LOGITS gpu=%.3f exec=%.3f idle=%.3f quads=%llu\n",
+                    (double)lf * to_ms, (double)le * to_ms, (double)li * to_ms, lq);
+        }
         const bool rt = getenv("READBACK_TIME");
         auto t0 = Clock::now();
         if (needs_finish()) { glFlush(); glFinish(); }
@@ -329,11 +343,21 @@ int GPU::logits_argmax_from(const vector<Mat>& tiles, GLuint x){
         const bool rt = getenv("READBACK_TIME");
         auto t0 = Clock::now();
         auto lap = [&](const char* n) { if (rt) { fprintf(stderr, "RBT %s %.3f ms\n", n, elapsed_ms(t0, Clock::now())); t0 = Clock::now(); } };
+        unsigned long long lc_idle = 0, lc_frag = 0, lc_exec = 0, lc_quads = 0;
+        const bool lc_on = pc_available() && getenv("LOGITS_PERFCNT");
+        if (lc_on) pc_stage_begin();
         logits_pass(tiles, x);
         // Same VC4 rule as logits_candidates_from: the reduction samples the
         // logits target as a texture, and the tile pipeline does not order
         // that sample after the FBO renders on its own.
         if (needs_finish()) { glFlush(); glFinish(); }
+        if (lc_on) {
+            pc_stage_end(lc_idle, lc_frag, lc_exec, lc_quads);
+            const double to_ms = 1.0 / (pc_qpus() * (double)pc_mhz() * 1000.0);
+            fprintf(stderr, "LOGITS gpu=%.3f exec=%.3f idle=%.3f quads=%llu\n",
+                    (double)lc_frag * to_ms, (double)lc_exec * to_ms,
+                    (double)lc_idle * to_ms, lc_quads);
+        }
         lap("logits+finish");
 
         const int chunk = 16;

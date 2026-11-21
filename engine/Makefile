@@ -236,6 +236,13 @@ probes/att_out_probe_pi: probes/att_out_probe.cpp probes/egl_surfaceless.h | che
 # fragment amortises it over change.
 # Why is an engine draw 0.48 ms when a pipelined null draw is 0.008?  Chain
 # shape, finish policy and dependency, on the same shader and target size.
+# The minimum reproducer for "a full-target-width draw is dropped": w ==
+# target_w against the engine's w-1 control, several widths, and a repeat test.
+probes/vc4_draw_drop_probe: probes/vc4_draw_drop_probe.cpp probes/egl_surfaceless.h $(PROBE_HEADERS)
+	$(CXX) $(ALL_CXXFLAGS) -o $@ $< $(LDLIBS)
+probes/vc4_draw_drop_probe_pi: probes/vc4_draw_drop_probe.cpp probes/egl_surfaceless.h | check-cross $(PROBE_HEADERS)
+	$(CROSS_CXX) $(CROSS_CXXFLAGS) -o $@ $< $(CROSS_LDLIBS)
+
 probes/draw_cost_probe: probes/draw_cost_probe.cpp probes/egl_surfaceless.h $(PROBE_HEADERS)
 	$(CXX) $(ALL_CXXFLAGS) -o $@ $< $(LDLIBS)
 probes/draw_cost_probe_pi: probes/draw_cost_probe.cpp probes/egl_surfaceless.h | check-cross $(PROBE_HEADERS)

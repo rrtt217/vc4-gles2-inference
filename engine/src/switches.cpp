@@ -86,6 +86,8 @@ static const SwitchDef kSwitches[] = {
      "per-pass marks inside a layer"},
     {"PERFCNT", "", SwKind::Flag, "", SwStatus::Probe, SwAxis::Probe,
      "with LAYER_PROFILE or DUP_PROFILE, add the V3D hardware counters to each mark (gpu/exec/idle/quads)"},
+    {"LOGITS_PERFCNT", "", SwKind::Flag, "", SwStatus::Probe, SwAxis::Probe,
+     "with PERFCNT, the logits pass's own counters (its wall time cannot separate work from waiting)"},
     {"DUP_PROFILE", "", SwKind::Flag, "", SwStatus::Probe, SwAxis::Probe,
      "with a *_DUP replay, price the replay itself: wall against gpu cycles"},
     {"PAIR_PROFILE", "", SwKind::Str, "", SwStatus::Probe, SwAxis::Probe,

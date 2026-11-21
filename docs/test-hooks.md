@@ -51,7 +51,7 @@ The rows below are the registry, one per switch, grouped by the axis they move.
 diagnostic or a pricing arm; `retired` is gone (`--dump-switches` prints the
 same table with what *this* environment resolved to).
 
-145 switches: 28 permanent, 103 probe, 14 retired; 16 legacy spellings are translated.
+146 switches: 28 permanent, 104 probe, 14 retired; 16 legacy spellings are translated.
 
 ### The activation streams
 
@@ -126,6 +126,7 @@ same table with what *this* environment resolved to).
 | `DRAWCOUNT` | value | draws per decoded token |
 | `DUP_PROFILE` | `=1` | with a *_DUP replay, price the replay itself: wall against gpu cycles |
 | `LAYER_PROFILE` | `=1` | per-pass marks inside a layer |
+| `LOGITS_PERFCNT` | `=1` | with PERFCNT, the logits pass's own counters (its wall time cannot separate work from waiting) |
 | `PAIR_PROFILE` | value | the same for the two-position prefill pair |
 | `PERFCNT` | `=1` | with LAYER_PROFILE or DUP_PROFILE, add the V3D hardware counters to each mark (gpu/exec/idle/quads) |
 | `READBACK_TIME` | value | the per-token logits finish/read-back time |
@@ -358,6 +359,15 @@ conclusion from its output.
   very different things.  The `gpu=`/`exec=` columns are comparable across runs;
   the ms is not, because reading a monitor costs ~25 ms a stage on this board.
   The counters are whole-GPU, so no other client may be drawing.
+
+- `LOGITS_PERFCNT=1` — with `PERFCNT=1`, the logits pass's own counters.
+  It exists because that pass's wall time cannot be attributed: its `finish`
+  waits for the whole token's pipeline (measured 18.5 ms with the counters
+  off, 0.04 ms with a counter region in front of it), so a wall reading says
+  nothing about the pass.  Measured on the board 2026-11-21: `gpu=11.61`,
+  `exec=9.93` (86%), `quads=4,915,200` for 6400x768 — **2.36 ns/MAC**, which
+  is inside the layer passes' 1.82-2.51 range.  The logits pass is not slow;
+  it only looked slow while it was being charged for the pipeline drain.
 
 - `PAIR_PROFILE=1` — the same for the two-position prefill pair.
 
