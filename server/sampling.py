@@ -109,10 +109,10 @@ def response_format(body: dict) -> dict | None:
     """The OpenAI ``response_format`` constraint to forward to the worker, or None.
 
     ``json_object`` and ``json_schema`` are constrained by the engine's grammar;
-    ``text`` means no constraint.  The engine is the source of truth for which
-    schema keywords it honours (it refuses unsupported ones with an error event);
-    this only validates the request shape and keeps malformed requests from
-    reaching it as a 500.
+    ``grammar`` takes raw GBNF text; ``text`` means no constraint.  The engine is
+    the source of truth for which schema keywords / GBNF constructs it honours
+    (it refuses unsupported ones with an error event); this only validates the
+    request shape and keeps malformed requests from reaching it as a 500.
     """
     rf = body.get("response_format")
     if rf is None:
@@ -129,6 +129,11 @@ def response_format(body: dict) -> dict | None:
         if not isinstance(js, dict) or not isinstance(js.get("schema"), dict):
             raise ValueError("response_format json_schema requires a json_schema.schema object")
         return {"type": "json_schema", "json_schema": js}
+    if t == "grammar":
+        g = rf.get("grammar")
+        if not isinstance(g, str) or not g.strip():
+            raise ValueError("response_format grammar requires a non-empty 'grammar' string (GBNF)")
+        return {"type": "grammar", "grammar": g}
     raise ValueError(f"unknown response_format type {t!r}")
 
 

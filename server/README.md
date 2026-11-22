@@ -577,6 +577,27 @@ multiple `type`s, and `additionalProperties` other than `false`.  As with
 `json_object`, the guarantee is shape and syntax -- a small model still chooses
 the content, and `max_tokens` must leave room to finish.
 
+### grammar (GBNF)
+
+`response_format: {"type": "grammar", "grammar": "<GBNF text>"}` constrains the
+reply to an arbitrary context-free grammar in llama.cpp's GBNF format.  This is
+the general tier: a multi-stack matcher handles ambiguous alternatives, shared
+prefixes, groups, char ranges (`[a-z]`, `[^...]`, `\xNN`) and repetition
+(`* + ? {n,m}`), so it is not limited to JSON.
+
+```json
+{"messages": [{"role": "user", "content": "Give a date in YYYY-MM-DD form."}],
+ "response_format": {"type": "grammar",
+   "grammar": "root ::= [0-9]{4} \"-\" [0-9]{2} \"-\" [0-9]{2}"},
+ "temperature": 0}
+```
+
+The grammar must define a `root` rule.  Left recursion is refused (it would loop
+the matcher).  This tier is byte-based for now: Unicode code-point ranges and
+`\uNNNN` escapes are refused by name and arrive in a later step.  It is slower
+than the JSON/schema tiers (it simulates each token through a set of stacks), so
+prefer `json_object`/`json_schema` when they fit.
+
 ## Worker protocol
 
 Request line:

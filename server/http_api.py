@@ -427,7 +427,7 @@ class Handler(BaseHTTPRequestHandler):
                 except WorkerError as e:
                     # A schema/type the engine cannot constrain is a client error
                     # (400), not a server fault; the engine's message says which.
-                    if str(e).startswith(("json_schema", "response_format")):
+                    if str(e).startswith(("json_schema", "response_format", "grammar")):
                         self._error(str(e), 400)
                     else:
                         self._worker_error(e)

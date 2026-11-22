@@ -26,6 +26,7 @@
 #include "jinja/json.h"   // -isystem third_party
 #include "grammar.h"
 #include "gbnf.h"
+#include "gbnf_full.h"
 #include "schema.h"
 #include "sampling.h"
 #include "tools.h"
@@ -255,6 +256,8 @@ int run_worker(App& app, Session& session, bool enc_bos, bool chat_dump) {
         JsonConstraint json_constraint;
         Grammar schema_grammar;
         GrammarConstraint schema_constraint;
+        GbnfGrammar gbnf_grammar;
+        GbnfConstraint gbnf_constraint;
         Constraint* active = nullptr;
         if (f.size() > 14 && !f[14].empty()) {
             const common_json rf = common_json::parse_no_throw(base64_decode(f[14]));
@@ -286,8 +289,20 @@ int run_worker(App& app, Session& session, bool enc_bos, bool chat_dump) {
                 }
                 schema_constraint.init(app.tokenizer, app.model.vocab, eos_ids, schema_grammar);
                 active = &schema_constraint;
+            } else if (rtype == "grammar") {
+                if (!rf.contains("grammar") || !rf.at("grammar").is_string()) {
+                    emit_error("grammar requires a 'grammar' string (GBNF text)");
+                    continue;
+                }
+                string gerr;
+                if (!gbnf_grammar.parse((string) rf.at("grammar"), gerr)) {
+                    emit_error("grammar: " + gerr);
+                    continue;
+                }
+                gbnf_constraint.init(app.tokenizer, app.model.vocab, eos_ids, gbnf_grammar);
+                active = &gbnf_constraint;
             } else {
-                emit_error("response_format type \"" + rtype + "\" not supported (use json_object or json_schema)");
+                emit_error("response_format type \"" + rtype + "\" not supported (use json_object, json_schema or grammar)");
                 continue;
             }
         }

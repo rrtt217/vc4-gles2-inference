@@ -124,6 +124,24 @@ required 键按固定顺序出现，optional 键可任意顺序。
 元组 `items`、多 `type`、以及非 `false` 的 `additionalProperties`。与 `json_object`
 一样，保证的是形状与语法——小模型仍自己选内容，且 `max_tokens` 要留出收尾空间。
 
+### grammar（GBNF）
+
+`response_format: {"type": "grammar", "grammar": "<GBNF 文本>"}` 把回复约束到任意
+上下文无关文法（llama.cpp 的 GBNF 格式）。这是通用档：多栈匹配器能处理歧义替代、
+共享前缀、分组、字符区间（`[a-z]`、`[^...]`、`\xNN`）与重复（`* + ? {n,m}`），
+因此不限于 JSON。
+
+```json
+{"messages": [{"role": "user", "content": "给一个 YYYY-MM-DD 形式的日期。"}],
+ "response_format": {"type": "grammar",
+   "grammar": "root ::= [0-9]{4} \"-\" [0-9]{2} \"-\" [0-9]{2}"},
+ "temperature": 0}
+```
+
+文法必须定义 `root` 规则。左递归会被拒绝（会让匹配器死循环）。本档目前是字节级：
+Unicode 码点区间与 `\uNNNN` 转义按名拒绝，留待后续步骤。它比 JSON/schema 档慢
+（要把每个 token 在一组栈上模拟），能用 `json_object`/`json_schema` 时优先用它们。
+
 ## 一个服务器多个模型
 
 `--model` 可以重复；每个容器都会出现在 `GET /v1/models` 里，`/health` 还会说明当前驻留的是哪个。
