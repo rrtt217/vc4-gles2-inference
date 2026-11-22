@@ -816,9 +816,16 @@ GLuint GPU::x_rms_norm(bool use_eps_uniform){
 // digest table and the cache behaviour do not move for a one-segment session.
 static string seg_suffix(int k) { return k > 0 ? "_s" + to_string(k) : string(); }
 
-GLuint GPU::x_v(int segk){
-        return x_prog("xv_" + to_string(att_dim_) + "_" + x_format_name(act_fmt_) + seg_suffix(segk),
-                      ::att_v(att_cfg(segk), act_fmt_));
+GLuint GPU::x_v(int segk, bool accumulate){
+        return x_prog("xv_" + to_string(att_dim_) + "_" + x_format_name(act_fmt_) +
+                          seg_suffix(segk) + (accumulate ? "_add" : ""),
+                      ::att_v(att_cfg(segk, accumulate), act_fmt_));
+    }
+
+GLuint GPU::x_v_fold(){
+        return x_prog("xvf_" + to_string(att_dim_) + "_" + x_format_name(act_fmt_) +
+                          "_" + to_string(att_nseg_),
+                      att_v_fold_shader(att_cfg(), act_fmt_, att_nseg_));
     }
 
 GLuint GPU::x_kv_rope(int segk){ return x_prog("xkv" + seg_suffix(segk), att_kv_rope(att_cfg(segk))); }

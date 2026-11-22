@@ -118,7 +118,7 @@ bool GPU::needs_finish() const{
         return renderer_.find("VC4") != string::npos || renderer_.find("VideoCore") != string::npos;
     }
 
-AttnConfig GPU::att_cfg(int segk) const{
+AttnConfig GPU::att_cfg(int segk, bool accumulate) const{
         AttnConfig c;
         c.dim = att_dim_; c.kv_dim = att_kv_dim_; c.heads = att_heads_;
         c.kv_heads = att_kv_heads_; c.head_dim = att_head_dim_; c.seq = att_seq_;
@@ -134,5 +134,6 @@ AttnConfig GPU::att_cfg(int segk) const{
         c.nseg = att_nseg_;
         c.seg = att_seg_;
         c.segk = segk;
+        c.accumulate = accumulate;
         return c;
     }

@@ -85,6 +85,9 @@ struct AttnConfig {
     int nseg = 1;
     int seg = 0;
     int segk = 0;
+    // The value kernel adds into its destination instead of overwriting it (a
+    // segmented session accumulates one slice at a time).
+    bool accumulate = false;
 };
 
 // The GLSL that turns `t` (a sequence position, or a pair index for the score
@@ -202,6 +205,9 @@ std::string att_score(const AttnConfig& c);
 std::string att_stats(const AttnConfig& c);
 std::string att_prob(const AttnConfig& c);
 std::string att_v(const AttnConfig& c, XFormat out);
+// The multi-segment value fold: sum `nseg` slices of the same target layout
+// into one row, in the format's own arithmetic.
+std::string att_v_fold_shader(const AttnConfig& c, XFormat out, int nseg);
 
 std::string top2_fast(int rows, int chunk);
 std::string top2(int rows, int chunk);

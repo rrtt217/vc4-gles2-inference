@@ -268,6 +268,8 @@ static const SwitchDef kSwitches[] = {
      "override the container's KV cache length (split over several textures past the GL limit)"},
     {"MAX_SEG", "", SwKind::Int, "1..64", SwStatus::Permanent, SwAxis::Load,
      "how many seq-sized textures the context may be split into (16 = 32768 on the board)"},
+    {"SEG_DUMP", "", SwKind::Flag, "", SwStatus::Probe, SwAxis::Probe,
+     "print the attention slice geometry at startup (seq, limit, slice length, count)"},
     {"SEG_CAP", "", SwKind::Int, "0..16384", SwStatus::Probe, SwAxis::Probe,
      "force a smaller attention segment than the driver needs, to A/B the split on a machine that does not need it"},
     {"TOKENIZER", "", SwKind::Str, "", SwStatus::Permanent, SwAxis::Load,

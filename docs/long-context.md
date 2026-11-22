@@ -166,25 +166,66 @@ The window is not the only thing that grows.  The KV cache is
 that is the figure that decides whether the board's 320 MB CMA has room for the
 weights beside it, not the one that decides whether the texture can exist.
 
-## 6. Recommendation
+## 6. What is implemented
 
-1. **Do nothing until a container needs it.** Everything here runs at 1024 and
-   the engine's `SEQ` defaults are 256-768.
-2. When a long prompt is the goal, implement **N-segment row splitting for
-   N = 2** first (4096): it reuses every existing kernel, adds one reduce pass,
-   and needs no address-arithmetic change anywhere.  The cost is a compile-time
-   `N` and two extra draws per layer per token.
-3. Only if 8k+ is really needed, do the width tiling — it is the design that
-   scales, and it is also the one that rewrites the attention addressing.
+**Two slices.**  `SEQ` may be up to twice the GL target limit: the sequence is
+cut into two textures of at most `lim` positions each, and the context is then
+bounded by memory rather than by 2048.  The layout is one texture a slice for
+the KV cache, the rope table, the 8-bit V step plane and the score grid; each
+slice gets its own program (`SEGK` is a compile-time constant), because ESSL
+1.00 cannot index a sampler and VC4 has eight texture units.
 
-**What has to move in the same change, whichever of the two is built.**  The
-clamp lives in one place (`App::prepare_model`, and again after a `/model`
+The passes combine as follows, and none of them needed a new arithmetic:
+
+| pass | a slice | the join |
+|---|---|---|
+| qkv, rope write, rotated Q | its own texture, its own program | none -- one position is in one slice |
+| score | writes its own `seg/2`-wide grid | none |
+| stats | scans the global pair range it owns, writes `(max, sum)` for its slice | a host fold: max of maxima, then `sum_k * exp(max_k - max_global)` in double |
+| value | writes its own output row | a GPU fold: one draw, `X1` of each slice summed in float and re-encoded with the format's own `XST` |
+
+Two folds are needed because neither quantity is additive as stored: the
+stats sums were exponentiated against different maxima, and the value row is a
+packed fixed-point layout that the blender cannot add channel by channel.
+
+**Three or more slices are refused**, by name, at load time.  They are not
+shown to agree with the single-texture path yet, and a wrong answer is worse
+than a refusal.
+
+**The acceptance.**  Measured 2026-11-22 on Iris Xe (Mesa 26.2.6), MiniMind3
+q8, `GPU_LAYER=1 KV=q16`, `data/ppl_test.txt`:
+
+| window | slices | PPL |
+|---|---:|---:|
+| SEQ 768 (the shipped default) | 1 | **270.3170** |
+| SEQ 4096, `SEG_CAP=2048` | 2 | **270.3170** |
+| SEQ 1024, `SEG_CAP=512` | 2 | **270.3170** |
+| SEQ 512, `SEG_CAP=256` | 2 | 270.4452 |
+
+The last row is the one that differs, by 0.05%: a two-slice window that is not
+a multiple of the slice length takes a different float summation order, and the
+stats sum is quantised on a 1/32 grid, so one LSB of it moves.  It is a
+rounding difference and not a defect -- the same window at one slice is in the
+exact-match row above -- but it is why the table quotes that row separately.
+
+`TEX_LIMIT=N` lowers the GL target limit so a machine with a larger one runs
+the board's geometry; `SEG_CAP=n` forces a smaller slice than the driver needs,
+which is how the split is exercised on Xe at all.  Both are probes, and
+`nseg == 1` emits the shipped GLSL byte for byte -- `gate/shader_hashes.sh`
+holds 164 programs whose digests did not move.
+
+## 7. What has to move in the same change
+
+The clamp lives in one place (`App::prepare_model`, and again after a `/model`
 swap), and it is applied to every model that is not RWKV-7 because the CPU
 layer loop allocates its own `seq`-sized KV.  That is why the number a user
 sees is the same with `GPU_LAYER=0`: the limit is not the GPU's to lift, it is
-the session's.  A partial change that raises the KV cache and not the rope
-table fails at the next `make_texture` with a message that names the texture,
-and one that raises both and not `att_scores_` fails on the draw that samples
-past its own height.
+the session's.
 
-Nothing in this file is implemented yet; it is the map, not the road.
+Every seq-sized target has to move together: the KV cache, the rope table, the
+V step plane and the score grid.  A change that raises the cache and not the
+rope table fails at the next `make_texture` with a message that names the
+texture; one that raises both and not the score grid fails on the draw that
+samples past its own height.  `att_probs_` was the fifth: it was allocated
+`seq` tall for a pass that has not run since the fused q16 layout retired it,
+and it alone would have kept `SEQ` clamped.

@@ -330,7 +330,7 @@ public:
     float rms_eps() const { return rms_eps_; }
 
 private:
-    AttnConfig att_cfg(int segk = 0) const;
+    AttnConfig att_cfg(int segk = 0, bool accumulate = false) const;
     GLuint x_prog(const string& key, const string& src);
     GLuint x_q8(int rows, int cols, bool wrow = false);
     GLuint x_q8_batch(int rows, int cols, bool wrow);
@@ -365,7 +365,8 @@ private:
     GLuint x_rms_split();
     GLuint x_rms_reduce();
     GLuint x_rms_norm(bool use_eps_uniform);
-    GLuint x_v(int segk = 0);
+    GLuint x_v(int segk = 0, bool accumulate = false);
+    GLuint x_v_fold();
     GLuint x_vscale();
     GLuint x_kv_rope(int segk = 0);
     GLuint x_qnorm();
@@ -461,6 +462,8 @@ private:
     vector<Target> score_parts_;            // [k]
     vector<Target> stats_parts_;            // [k] (nseg > 1 only)
     vector<Target> v_parts_;                // [k] (nseg > 1 only)
+    // The folded per-head max, one I24_1 texel a head (docs/long-context.md).
+    Target stats_gmax_;
     Target& kv_part(int layer, int k) { return kv_parts_[(size_t)layer * att_nseg_ + k]; }
     Target& vs_part(int layer, int k) { return vs_parts_[(size_t)layer * att_nseg_ + k]; }
     // The segment a position lives in, and its offset inside it.
@@ -664,9 +667,10 @@ private:
 
     void att_stats(int pos);
     // The multi-segment (max, sum) fold (docs/long-context.md).
-    void att_stats_fold(int pos);
+    void att_stats_fold(int pos, bool final);
     // The multi-segment value sum (docs/long-context.md).
-    void att_v_reduce();
+    void att_v_fold(int pos);
+    // The multi-segment value sum (docs/long-context.md).
 
     void att_probs(int pos);
 

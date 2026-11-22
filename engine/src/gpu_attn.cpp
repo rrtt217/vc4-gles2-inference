@@ -480,27 +480,40 @@ void GPU::att_stats(int pos){
                 att_finish();
                 return;
         }
-        // Long context: each segment scans only the positions it holds.  The
-        // (max, sum) pair is not additive -- a max of maxima is a max, but the
-        // sums were exponentiated against different maxima -- so with more than
-        // one segment the fold pass re-reads the segments against the global
-        // max.  nseg == 1 is the shipped one-draw form.
-        for (int k = 0; k < att_nseg_; ++k) {
-            if (k >= (int)stats_parts_.size()) stats_parts_.resize(att_nseg_);
-            if (stats_parts_[k].tex == 0 || stats_parts_[k].w != att_heads_)
-                stats_parts_[k] = make_target(att_heads_, 1);
-            GLuint p = x_stats(k);
-            bind_fbo(stats_parts_[k].fbo);
-            glViewport(0, 0, att_heads_, 1);
-            use_program(p);
-            bind_tex(0, score_parts_[k].tex);
-            set_sampler(p, "S", 0);
-            glUniform1f(uloc(p, "pos"), (float)pos);
-            setup_attrib(p);
-            glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
-        }
-        att_finish();
-        att_stats_fold(pos);
+        // Two passes a slice.  The first writes (own max, sum-on-own-max) and
+        // the fold takes the max of maxima; the second re-sums every slice
+        // against that global max, so the fold's remaining job is a plain add --
+        // one rounding on the 1/32 grid, which is what the single-draw kernel
+        // does.  A per-slice rescale instead rounds twice and lands an LSB away,
+        // and that LSB reaches att_v and every layer after it.
+        if (stats_gmax_.tex == 0 || stats_gmax_.w != att_heads_)
+                stats_gmax_ = make_target(att_heads_, 1);
+        auto pass = [&](bool use_gmax) {
+            for (int k = 0; k < att_nseg_; ++k) {
+                if (k >= (int)stats_parts_.size()) stats_parts_.resize(att_nseg_);
+                if (stats_parts_[k].tex == 0 || stats_parts_[k].w != att_heads_)
+                    stats_parts_[k] = make_target(att_heads_, 1);
+                GLuint p = x_stats(k);
+                bind_fbo(stats_parts_[k].fbo);
+                glViewport(0, 0, att_heads_, 1);
+                use_program(p);
+                bind_tex(0, score_parts_[k].tex);
+                set_sampler(p, "S", 0);
+                glUniform1f(uloc(p, "use_gmax"), use_gmax ? 1.0f : 0.0f);
+                if (use_gmax) {
+                        bind_tex(1, stats_gmax_.tex);
+                        set_sampler(p, "GM", 1);
+                }
+                glUniform1f(uloc(p, "pos"), (float)pos);
+                setup_attrib(p);
+                glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+            }
+            att_finish();
+        };
+        pass(false);
+        att_stats_fold(pos, false);   // the per-head max, into stats_gmax_
+        pass(true);
+        att_stats_fold(pos, true);    // the plain add, into att_stats_
     }
 
 // Long context: fold the per-segment (max, sum) pairs into one.  The max is a
@@ -510,7 +523,7 @@ void GPU::att_stats(int pos){
 // segment sums back as texels and doing the arithmetic on the host keeps this a
 // handful of bytes a layer rather than another shader -- and a shader would have
 // to be a second reduction over N samplers anyway.
-void GPU::att_stats_fold(int pos){
+void GPU::att_stats_fold(int pos, bool final){
         const int h = att_heads_;
         vector<float> mx((size_t)att_nseg_ * h), sm((size_t)att_nseg_ * h);
         for (int k = 0; k < att_nseg_; ++k) {
@@ -526,21 +539,38 @@ void GPU::att_stats_fold(int pos){
                         sm[(size_t)k * h + i] = dec(1) / att_sum_scale_;
                 }
         }
+        if (!final) {
+                // Pass 1: the global max per head, on the I24_1 layout xformat.h
+                // defines -- offset-binary int24 in .gba with a zero top byte,
+                // big-endian, which is what x_q24raw decodes (g*65536+b*256+a
+                // -2^23).  Writing it as r*2^24+... reads back as -2^23 and
+                // makes every sum 0.
+                vector<uint8_t> g((size_t)h * 4, 0);
+                for (int i = 0; i < h; ++i) {
+                        float m = -1e30f;
+                        for (int k = 0; k < att_nseg_; ++k)
+                                m = std::max(m, mx[(size_t)k * h + i]);
+                        long q = lrintf(m * att_score_scale_);
+                        q = std::max(-8388608L, std::min(8388607L, q)) + 8388608L;
+                        g[(size_t)i * 4 + 0] = 0;
+                        g[(size_t)i * 4 + 1] = (uint8_t)((q >> 16) & 0xFF);
+                        g[(size_t)i * 4 + 2] = (uint8_t)((q >> 8) & 0xFF);
+                        g[(size_t)i * 4 + 3] = (uint8_t)(q & 0xFF);
+                }
+                glBindTexture(GL_TEXTURE_2D, stats_gmax_.tex);
+                glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, h, 1, GL_RGBA, GL_UNSIGNED_BYTE, g.data());
+                forget_state();
+                return;
+        }
         vector<uint8_t> out((size_t)h * 4);
         for (int i = 0; i < h; ++i) {
                 float g = -1e30f;
                 for (int k = 0; k < att_nseg_; ++k) g = std::max(g, mx[(size_t)k * h + i]);
-                // The single-draw kernel sums in float and rounds once, on the
-                // 1/32 grid.  A fold that multiplies two already-rounded values
-                // and rounds again lands an LSB away from it, so do the whole
-                // sum in double: the segment sums are exact to 1/32 by
-                // construction, and exp(max_k - max) is the only new factor.
+                // Pass 2: every slice already summed against `g`, so this is a
+                // plain add of values on one grid.
                 double sum = 0.0;
-                for (int k = 0; k < att_nseg_; ++k) {
-                        const float m = mx[(size_t)k * h + i];
-                        if (m <= -1e29f) continue;
-                        sum += std::exp((double)m - (double)g) * (double)sm[(size_t)k * h + i];
-                }
+                for (int k = 0; k < att_nseg_; ++k) sum += (double)sm[(size_t)k * h + i];
                 auto enc = [&](int comp, float v, float scale) {
                         int q = (int)lrintf(v * scale);
                         if (q < -32768) q = -32768;
@@ -596,15 +626,15 @@ void GPU::att_v(int layer, int pos){
                 att_finish();
                 return;
         }
-        // Long context: the V accumulation is a sum over positions, so a segment
-        // can only produce a partial.  Each segment writes its own output row and
-        // att_v_reduce() adds them; the adds are float sums of the same products,
-        // so the result is the single-draw sum up to the order they fold in.
+        // Long context: the V accumulation is a sum over positions, so a slice
+        // can only produce a partial.  Each slice writes its OWN target -- a
+        // texture cannot be sampled while it is the render target -- and
+        // att_v_fold() sums them with the format's own X1/XST.
         for (int k = 0; k < att_nseg_; ++k) {
             if (k >= (int)v_parts_.size()) v_parts_.resize(att_nseg_);
             if (v_parts_[k].tex == 0 || v_parts_[k].w != att_out_.w)
                 v_parts_[k] = make_target(att_out_.w, 1);
-            GLuint p = x_v(k);
+            GLuint p = x_v(k, false);
             bind_fbo(v_parts_[k].fbo);
             glViewport(0, 0, att_out_.w, 1);
             use_program(p);
@@ -623,76 +653,32 @@ void GPU::att_v(int layer, int pos){
             glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         }
         att_finish();
-        att_v_reduce();
+        att_v_fold(pos);
     }
 
-// Long context: add the per-segment V partials into att_out_.  The formats are
-// fixed point, so the add has to happen on the decoded values and be re-encoded
-// exactly the way the kernel's own writer would have -- read the partials back,
-// sum, write one row.  It is one row of `dim` texels a layer, which is what the
-// read-back of the qkv pass already costs.
-void GPU::att_v_reduce(){
-        const int w = att_out_.w;
-        // The packed formats carry two values a texel, so the accumulator is
-        // indexed by value and not by texel -- sizing it by `w` wrote past the
-        // end for every q16 container (a heap corruption, not a wrong number).
-        const bool packed = (act_fmt_ == XFormat::I16_2 || act_fmt_ == XFormat::BF16);
-        vector<float> acc((size_t)w * (packed ? 2 : 1), 0.0f);
-        for (int k = 0; k < att_nseg_; ++k) {
-                const vector<uint8_t> b = gpu_read_target_row(v_parts_[k], 0);
-                for (int i = 0; i < w; ++i) {
-                        const size_t o = (size_t)i * 4;
-                        float v = 0.0f;
-                        if (act_fmt_ == XFormat::F32) {
-                                uint32_t u = ((uint32_t)b[o] << 24) | ((uint32_t)b[o + 1] << 16) |
-                                             ((uint32_t)b[o + 2] << 8) | (uint32_t)b[o + 3];
-                                memcpy(&v, &u, 4);
-                        } else if (act_fmt_ == XFormat::I16_2 || act_fmt_ == XFormat::BF16) {
-                                for (int c = 0; c < 2; ++c) {
-                                        const int q = (int)b[o + (size_t)c * 2] * 256 +
-                                                      b[o + (size_t)c * 2 + 1];
-                                        acc[(size_t)i * 2 + (size_t)c] +=
-                                            (float)(q >= 32768 ? q - 65536 : q) / 256.0f;
-                                }
-                                continue;
-                        } else {
-                                int64_t u = (int64_t)b[o] * 16777216 + (int64_t)b[o + 1] * 65536 +
-                                            (int64_t)b[o + 2] * 256 + b[o + 3] - 8388608;
-                                v = (float)u / 65536.0f;
-                        }
-                        acc[(size_t)i] += v;
-                }
-        }
-        vector<uint8_t> out((size_t)w * 4);
-        for (int i = 0; i < w; ++i) {
-                const size_t o = (size_t)i * 4;
-                if (act_fmt_ == XFormat::F32) {
-                        const float v = acc[(size_t)i];
-                        uint32_t u = 0;
-                        memcpy(&u, &v, 4);
-                        out[o] = (uint8_t)(u >> 24); out[o + 1] = (uint8_t)(u >> 16);
-                        out[o + 2] = (uint8_t)(u >> 8); out[o + 3] = (uint8_t)u;
-                } else if (act_fmt_ == XFormat::I16_2 || act_fmt_ == XFormat::BF16) {
-                        for (int c = 0; c < 2; ++c) {
-                                int q = (int)lrintf(acc[(size_t)i * 2 + (size_t)c] * 256.0f);
-                                if (q < -32768) q = -32768;
-                                if (q > 32767) q = 32767;
-                                if (q < 0) q += 65536;
-                                out[o + (size_t)c * 2] = (uint8_t)(q >> 8);
-                                out[o + (size_t)c * 2 + 1] = (uint8_t)(q & 255);
-                        }
-                } else {
-                        int64_t q = (int64_t)llrintf(acc[(size_t)i] * 65536.0f) + 8388608;
-                        out[o] = (uint8_t)(q >> 24); out[o + 1] = (uint8_t)(q >> 16);
-                        out[o + 2] = (uint8_t)(q >> 8); out[o + 3] = (uint8_t)q;
-                }
-        }
-        glBindTexture(GL_TEXTURE_2D, att_out_.tex);
-        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, 1, GL_RGBA, GL_UNSIGNED_BYTE, out.data());
+// Long context: sum the per-slice value partials into att_out_.  A GPU pass, not
+// a host decode: the packed fixed-point layouts are the format's business, and
+// re-implementing I24_1 in C++ is how its encoder drifted once already (the
+// value lives in .gba with a zero top byte; reading .rgba as a 24-bit number is
+// a different format).
+void GPU::att_v_fold(int pos){
+        if (att_nseg_ <= 1) { att_out_ = v_parts_[0]; return; }
+        GLuint p = x_v_fold();
+        bind_fbo(att_out_.fbo);
+        glViewport(0, 0, att_out_.w, 1);
+        use_program(p);
+        // The fold reuses units 0..nseg-1, which the value kernel just bound to
+        // other textures; bind_tex caches by unit, so forget first.
         forget_state();
-    }
-
+        for (int k = 0; k < att_nseg_ && k < 4; ++k) {
+                bind_tex(k, v_parts_[k].tex);
+                set_sampler(p, ("V" + std::to_string(k)).c_str(), k);
+        }
+        glUniform1f(uloc(p, "VW"), (float)att_out_.w);
+        setup_attrib(p);
+        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+        att_finish();
+}
 
 void GPU::kv_rope_write(int layer, int pos){
         // Long context: the row is written into the segment that owns `pos`, at
