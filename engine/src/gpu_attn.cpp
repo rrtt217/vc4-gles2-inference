@@ -356,18 +356,11 @@ void GPU::kv_vscale(int layer, int pos){
         bind_fbo(vs_targets_[layer].fbo);
         glViewport(0, pos, att_kv_heads_, 1);
         use_program(p);
-        // Bind every sampler to the unit the *program* says it is on.  The
-        // shipped text declares QKV first, so unit 0 is QKV; a segmented text
-        // declares the segment planes first and the driver numbers the
-        // samplers in declaration order, which made QKV unit 1 and RT unit 0 --
-        // and a fixed-unit bind then read the qkv texture as the rope table.
+        // This kernel reads one sampler, QKV, and nothing else: the rope table
+        // was never one of its inputs, so asking for RT here only produced a
+        // "uniform not found" line on the q8 KV step path.
         const int u_qkv = uloc(p, "QKV");
-        const int u_rt = uloc(p, "RT");
-        // `bind_tex` caches by unit and `set_sampler` by (program, name), so a
-        // program whose sampler numbering differs from the shipped one can see
-        // a unit the cache believes is already bound.  Forget the binding when
-        // the numbering is not the shipped one.
-        if (u_qkv != 0 || u_rt != 1) forget_state();
+        if (u_qkv != 0) forget_state();
         bind_tex(u_qkv < 0 ? 0 : u_qkv, qkv_target_.tex);
         set_sampler(p, "QKV", u_qkv < 0 ? 0 : u_qkv);
         setup_attrib(p);
@@ -424,10 +417,11 @@ void GPU::att_scores(int layer, int pos){
             bind_tex(u_rt < 0 ? 1 : u_rt, rope_parts_[qseg]);
             set_sampler(pr, "RT", u_rt < 0 ? 1 : u_rt);
             if (att_qk_norm_) {
-                bind_tex(2, q_norm_tex_[layer]);
-                set_sampler(pr, "QN", 2);
-                bind_tex(3, qscale_target_.tex);
-                set_sampler(pr, "QS", 3);
+                const int u_qn = uloc(pr, "QN"), u_qs = uloc(pr, "QS");
+                bind_tex(u_qn < 0 ? 2 : u_qn, q_norm_tex_[layer]);
+                set_sampler(pr, "QN", u_qn < 0 ? 2 : u_qn);
+                bind_tex(u_qs < 0 ? 3 : u_qs, qscale_target_.tex);
+                set_sampler(pr, "QS", u_qs < 0 ? 3 : u_qs);
             }
             glUniform1f(uloc(pr, "pos"), (float)pos);
             setup_attrib(pr);
@@ -707,37 +701,35 @@ void GPU::kv_rope_write(int layer, int pos){
         // by unit and set_sampler by (program, name), so a different numbering
         // has to forget the unit cache or the bind is skipped as "already done"
         // while the unit really holds the previous program's texture.
+        // Ask only for the uniforms this build actually emits: uloc() prints a
+        // "not found" line for a name the compiler dropped, and KN/VS are
+        // inside `if(QKNORM==1)` / `if(KVSTEP==1)` in the kernel, so a q16
+        // container legitimately has no VS at all.
         const int u_qkv = uloc(p, "QKV"), u_rt = uloc(p, "RT");
-        const int u_kn = uloc(p, "KN"), u_vs = uloc(p, "VS");
         if (u_qkv != 0 || u_rt != 1) forget_state();
         bind_tex(u_qkv < 0 ? 0 : u_qkv, qkv_target_.tex);
         set_sampler(p, "QKV", u_qkv < 0 ? 0 : u_qkv);
         bind_tex(u_rt < 0 ? 1 : u_rt, rope_parts_[sg]);
         set_sampler(p, "RT", u_rt < 0 ? 1 : u_rt);
-        if (att_qk_norm_ && u_kn >= 0) {
-            bind_tex(u_kn, k_norm_tex_[layer]);
-            set_sampler(p, "KN", u_kn);
+        if (att_qk_norm_) {
+            const int u_kn = uloc(p, "KN");
+            bind_tex(u_kn < 0 ? 2 : u_kn, k_norm_tex_[layer]);
+            set_sampler(p, "KN", u_kn < 0 ? 2 : u_kn);
         }
-        if (att_kv_vstep_ && u_vs >= 0) {
-            bind_tex(u_vs, vs_part(layer, sg).tex);
-            set_sampler(p, "VS", u_vs);
+        if (att_kv_vstep_) {
+            const int u_vs = uloc(p, "VS");
+            bind_tex(u_vs < 0 ? 3 : u_vs, vs_part(layer, sg).tex);
+            set_sampler(p, "VS", u_vs < 0 ? 3 : u_vs);
         }
         // The write kernel's `pos` is the row inside its own segment: the
         // viewport already put the draw there, and the rope table and V step
         // plane it reads are segment-sized.  Handing it the global position
         // read past the end of both planes for every position past the first
         // segment.
-        if (getenv("SEG_DUMP"))
-                fprintf(stderr, "SEGU prog=%u pos=%d loc=%d RT=%d VS=%d KN=%d QKV=%d\n",
-                        p, seg_off(pos), uloc(p, "pos"), uloc(p, "RT"), uloc(p, "VS"),
-                        uloc(p, "KN"), uloc(p, "QKV"));
         glUniform1f(uloc(p, "pos"), (float)seg_off(pos));
         setup_attrib(p);
         glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         att_finish();
-        if (getenv("SEG_DUMP"))
-                fprintf(stderr, "SEGW l=%d pos=%d seg=%d off=%d segk=%d\n",
-                        layer, pos, sg, seg_off(pos), sg);
     }
 
 // ---- Prefill query batching (PREFILL_BATCH) --------------------------------
