@@ -593,8 +593,11 @@ prefixes, groups, char ranges (`[a-z]`, `[^...]`, `\xNN`) and repetition
 ```
 
 The grammar must define a `root` rule.  Left recursion is refused (it would loop
-the matcher).  This tier is byte-based for now: Unicode code-point ranges and
-`\uNNNN` escapes are refused by name and arrive in a later step.  It is slower
+the matcher).  Terminals are Unicode code points: literals may be written
+directly (`"日本"`), ranges may span code points (`[一-鿿]`), and `\uNNNN` /
+`\UNNNNNNNN` / `\xNN` escapes work.  A multi-byte character split across two
+tokens stays legal while its partial sequence could still fit the rule, and
+end-of-turn is refused until the last continuation byte arrives.  It is slower
 than the JSON/schema tiers (it simulates each token through a set of stacks), so
 prefer `json_object`/`json_schema` when they fit.
 

@@ -18,24 +18,49 @@ inline bool is_end(const GbnfElem* pos) {
 // General matcher: a set of pushdown stacks (NFA subset construction)
 // ---------------------------------------------------------------------------
 
-// Does byte c satisfy the char range at pos (positive or inverse)?  Walks the
-// CHAR / CHAR_ALT / RNG_UPPER chain that encodes [a-z0-9_] or [^...].
-std::pair<bool, const GbnfElem*> GbnfGrammar::match_char(const GbnfElem* pos, uint8_t c) {
+// Does code point cp satisfy the char range at pos (positive or inverse)?  Walks
+// the CHAR / CHAR_ALT / RNG_UPPER chain that encodes [a-z0-9_] or [^...].
+std::pair<bool, const GbnfElem*> GbnfGrammar::match_char(const GbnfElem* pos, uint32_t cp) {
     bool found = false;
     const bool positive = pos->type == GbnfElem::CHAR || pos->type == GbnfElem::CHAR_ANY;
     do {
         if (pos[1].type == GbnfElem::RNG_UPPER) {
-            found = found || (pos->value <= c && c <= pos[1].value);
+            found = found || (pos->value <= cp && cp <= pos[1].value);
             pos += 2;
         } else if (pos->type == GbnfElem::CHAR_ANY) {
             found = true;
             pos += 1;
         } else {
-            found = found || (pos->value == c);
+            found = found || (pos->value == cp);
             pos += 1;
         }
     } while (pos->type == GbnfElem::CHAR_ALT);
     return {found == positive, pos};
+}
+
+// A partial UTF-8 prefix is legal when the range of code points its remaining
+// continuation bytes could form intersects the char rule.  This is why the first
+// byte of 一 is kept while parsing [一-鿿] instead of being rejected immediately.
+bool GbnfGrammar::match_partial(const GbnfElem* pos, PartialUtf8 partial) {
+    const bool positive = pos->type == GbnfElem::CHAR || pos->type == GbnfElem::CHAR_ANY;
+    if (partial.n_remain < 0 || (partial.n_remain == 1 && partial.value < 2)) return false;
+    uint32_t low = partial.value << (partial.n_remain * 6);
+    uint32_t high = low | ((1u << (partial.n_remain * 6)) - 1);
+    if (low == 0) {
+        if (partial.n_remain == 2) low = 1u << 11;
+        else if (partial.n_remain == 3) low = 1u << 16;
+    }
+    do {
+        if (pos[1].type == GbnfElem::RNG_UPPER) {
+            if (pos->value <= high && low <= pos[1].value) return positive;
+            pos += 2;
+        } else if (pos->type == GbnfElem::CHAR_ANY) return true;
+        else {
+            if (low <= pos->value && pos->value <= high) return positive;
+            pos += 1;
+        }
+    } while (pos->type == GbnfElem::CHAR_ALT);
+    return !positive;
 }
 
 // Expand a stack until every resulting stack ends at a terminal (or is empty).
@@ -85,13 +110,13 @@ void GbnfGrammar::advance(const Stack& stack, Stacks& out) const {
     }
 }
 
-void GbnfGrammar::accept(Stacks& s, uint8_t c) const {
+void GbnfGrammar::accept(Stacks& s, uint32_t cp) const {
     Stacks out;
     out.reserve(s.size());
     for (const Stack& stack : s) {
         if (stack.empty()) continue;
         const GbnfElem* pos = stack.back();
-        auto m = match_char(pos, c);
+        auto m = match_char(pos, cp);
         if (m.first) {
             Stack next(stack.begin(), stack.end() - 1);
             if (!is_end(m.second)) next.push_back(m.second);
@@ -101,29 +126,93 @@ void GbnfGrammar::accept(Stacks& s, uint8_t c) const {
     s = std::move(out);
 }
 
-bool GbnfGrammar::accepts(const Stacks& from, const std::string& bytes, Stacks& out) const {
+bool GbnfGrammar::accepts(const MatchState& from, const std::string& bytes, MatchState& out) const {
     out = from;
-    for (unsigned char c : bytes) {
-        accept(out, c);
-        if (out.empty()) return false;
+    uint32_t value = out.partial.value;
+    int remain = out.partial.n_remain;
+    size_t i = 0;
+
+    // Finish a character begun by an earlier token before starting a new one.
+    for (; i < bytes.size() && remain > 0; ++i) {
+        const uint8_t b = (uint8_t)bytes[i];
+        if ((b >> 6) != 2) { out.stacks.clear(); out.partial = {0, -1}; return false; }
+        value = (value << 6) | (b & 0x3f);
+        if (--remain == 0) {
+            accept(out.stacks, value);
+            if (out.stacks.empty()) { out.partial = {value, 0}; return false; }
+        }
     }
+    if (remain > 0) {
+        prune_partial(out.stacks, value, remain);
+        if (out.stacks.empty()) { out.partial = {value, remain}; return false; }
+        out.partial = {value, remain};
+        return true;
+    }
+
+    while (i < bytes.size()) {
+        const uint8_t b = (uint8_t)bytes[i++];
+        int len;
+        if (b < 0x80) len = 1;
+        else if ((b >> 5) == 6) len = 2;
+        else if ((b >> 4) == 14) len = 3;
+        else if ((b >> 3) == 30) len = 4;
+        else { out.stacks.clear(); out.partial = {0, -1}; return false; }
+        value = b & (uint8_t)((1u << (7 - (len - 1))) - 1);
+        remain = len - 1;
+        for (; i < bytes.size() && remain > 0; ++i) {
+            const uint8_t next = (uint8_t)bytes[i];
+            if ((next >> 6) != 2) { out.stacks.clear(); out.partial = {value, remain}; return false; }
+            value = (value << 6) | (next & 0x3f);
+            --remain;
+        }
+        if (remain == 0) {
+            accept(out.stacks, value);
+            if (out.stacks.empty()) { out.partial = {value, 0}; return false; }
+        } else {
+            prune_partial(out.stacks, value, remain);
+            if (out.stacks.empty()) { out.partial = {value, remain}; return false; }
+        }
+    }
+    out.partial = {value, remain};
     return true;
 }
 
-bool GbnfGrammar::done(const Stacks& s) const {
+// Keep only the stacks whose current char rule could still be satisfied by the
+// continuation bytes of a partial character.  Dropping one alternative must not
+// reject the alternative that is still alive (llama.cpp's reject_candidates only
+// rejects a token when *no* stack continues).
+void GbnfGrammar::prune_partial(Stacks& s, uint32_t value, int remain) const {
+    Stacks kept;
+    kept.reserve(s.size());
+    const PartialUtf8 p{value, remain};
+    for (const Stack& st : s) {
+        if (st.empty() || match_partial(st.back(), p)) kept.push_back(st);
+    }
+    s = std::move(kept);
+}
+
+bool GbnfGrammar::done(const MatchState& s) const {
+    if (s.partial.n_remain != 0) return false;
+    return stacks_done(s.stacks);
+}
+
+bool GbnfGrammar::stacks_done(const Stacks& s) const {
     for (const Stack& st : s) if (st.empty()) return true;
     return false;
 }
 
-GbnfGrammar::Stacks GbnfGrammar::start_stacks() const {
+GbnfGrammar::PartialUtf8 GbnfGrammar::partial_after(const MatchState& state) {
+    return state.partial;
+}
+GbnfGrammar::MatchState GbnfGrammar::start_state() const {
+    MatchState out;
     // Fork every alternative of the start rule (advance_stack only forks rule
     // *references*, so the root's own alternatives must be split here).
-    Stacks out;
     const GbnfElem* pos = rules[start].data();
     do {
         Stack stack;
         if (!is_end(pos)) stack.push_back(pos);
-        advance(stack, out);
+        advance(stack, out.stacks);
         while (!is_end(pos)) ++pos;
         if (pos->type == GbnfElem::ALT) ++pos;
         else break;
@@ -132,7 +221,7 @@ GbnfGrammar::Stacks GbnfGrammar::start_stacks() const {
 }
 
 // ---------------------------------------------------------------------------
-// GBNF text parser (byte-based; Unicode escapes refused for a later step)
+// GBNF text parser (Unicode code-point terminals and ranges)
 // ---------------------------------------------------------------------------
 
 namespace {
@@ -177,14 +266,13 @@ std::pair<uint32_t, const char*> parse_hex(const char* src, int size) {
     }
     return {v, src + size};
 }
-// One byte of a literal or range.  \u / \U are code points: refused until the
-// Unicode step rather than mis-matched as a single byte.
-std::pair<uint8_t, const char*> parse_char(const char* src) {
+// One Unicode code point of a literal or range, including \x, \u and \U escapes.
+std::pair<uint32_t, const char*> parse_char(const char* src) {
     if (*src == '\\') {
         switch (src[1]) {
-        case 'x': { auto p = parse_hex(src + 2, 2); return {(uint8_t)p.first, p.second}; }
-        case 'u': case 'U':
-            throw std::runtime_error("unicode escapes (\\u/\\U) are not supported yet");
+        case 'x': return parse_hex(src + 2, 2);
+        case 'u': return parse_hex(src + 2, 4);
+        case 'U': return parse_hex(src + 2, 8);
         case 't': return {'\t', src + 2};
         case 'r': return {'\r', src + 2};
         case 'n': return {'\n', src + 2};
@@ -193,7 +281,17 @@ std::pair<uint8_t, const char*> parse_char(const char* src) {
         default: throw std::runtime_error(std::string("unknown escape at ") + src);
         }
     }
-    if (*src) return {(uint8_t)*src, src + 1};
+    if (*src) {
+        const uint8_t b = (uint8_t)*src;
+        int len = b < 0x80 ? 1 : (b >> 5) == 6 ? 2 : (b >> 4) == 14 ? 3 : (b >> 3) == 30 ? 4 : 0;
+        if (!len || !src[len - 1]) throw std::runtime_error("invalid UTF-8 in grammar");
+        uint32_t cp = b & (uint8_t)((1u << (7 - (len - 1))) - 1);
+        for (int i = 1; i < len; ++i) {
+            if (((uint8_t)src[i] >> 6) != 2) throw std::runtime_error("invalid UTF-8 in grammar");
+            cp = (cp << 6) | ((uint8_t)src[i] & 0x3f);
+        }
+        return {cp, src + len};
+    }
     throw std::runtime_error("unexpected end of input");
 }
 
@@ -445,22 +543,22 @@ void GbnfConstraint::init(const Tokenizer& tok, int vocab, const std::vector<int
     reset();
 }
 
-void GbnfConstraint::reset() { stacks_ = g_->start_stacks(); }
+void GbnfConstraint::reset() { state_ = g_->start_state(); }
 
 bool GbnfConstraint::is_eos(int id) const {
     for (int e : eos_) if (e == id) return true;
     return false;
 }
 
-bool GbnfConstraint::done() const { return g_->done(stacks_); }
+bool GbnfConstraint::done() const { return g_->done(state_); }
 
 bool GbnfConstraint::allows(int id) const {
     if (id < 0 || id >= (int)bytes_.size()) return false;
     if (is_eos(id)) return done();
     const std::string& b = bytes_[(size_t)id];
     if (b.empty()) return false;
-    GbnfGrammar::Stacks out;
-    return g_->accepts(stacks_, b, out);
+    GbnfGrammar::MatchState out;
+    return g_->accepts(state_, b, out);
 }
 
 void GbnfConstraint::mask(std::vector<float>& logits) const {
@@ -470,6 +568,6 @@ void GbnfConstraint::mask(std::vector<float>& logits) const {
 
 void GbnfConstraint::accept(int token) {
     if (is_eos(token)) return;
-    GbnfGrammar::Stacks out;
-    if (g_->accepts(stacks_, bytes_[(size_t)token], out)) stacks_ = std::move(out);
+    GbnfGrammar::MatchState out;
+    if (g_->accepts(state_, bytes_[(size_t)token], out)) state_ = std::move(out);
 }

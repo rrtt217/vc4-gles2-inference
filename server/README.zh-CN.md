@@ -138,9 +138,12 @@ required 键按固定顺序出现，optional 键可任意顺序。
  "temperature": 0}
 ```
 
-文法必须定义 `root` 规则。左递归会被拒绝（会让匹配器死循环）。本档目前是字节级：
-Unicode 码点区间与 `\uNNNN` 转义按名拒绝，留待后续步骤。它比 JSON/schema 档慢
-（要把每个 token 在一组栈上模拟），能用 `json_object`/`json_schema` 时优先用它们。
+文法必须定义 `root` 规则。左递归会被拒绝（会让匹配器死循环）。终结符是 Unicode
+码点：字面量可直接写（`"日本"`），区间可跨码点（`[一-鿿]`），`\uNNNN` /
+`\UNNNNNNNN` / `\xNN` 转义均可用。一个多字节字符被拆到两个 token 时，只要残
+余字节仍可能满足规则就保持合法，且最后一个续字节到达前不放行回合结束。它比
+JSON/schema 档慢（要把每个 token 在一组栈上模拟），能用
+`json_object`/`json_schema` 时优先用它们。
 
 ## 一个服务器多个模型
 

@@ -14,7 +14,8 @@
 #include "tokenizer.h"
 
 namespace {
-constexpr int EOS = 256, VOCAB = 257;
+constexpr int EOS = 256, CJK_ONE = 257, CJK_TWO = 258, CJK_MID = 259,
+              CJK_TAIL = 260, CJK_BAD = 261, ASCII_X = 262, VOCAB = 263;
 
 std::vector<uint8_t> make_blob() {
     std::vector<uint8_t> b;
@@ -24,6 +25,12 @@ std::vector<uint8_t> make_blob() {
     u32(6);
     for (int i = 0; i < 256; ++i) rec(std::string(1, (char)i));
     rec("<|eos|>");
+    rec("\xe4\xb8\x80");  // CJK_ONE: complete 一
+    rec("\xe4\xb8\x8c");  // CJK_TWO: complete 二
+    rec("\xe4");          // CJK_MID: first byte of a three-byte CJK character
+    rec("\xb8\x80");      // CJK_TAIL: its continuation bytes
+    rec("\xef\xbf\xbd");  // CJK_BAD: U+FFFD, outside the CJK range
+    rec("x");             // ASCII_X
     return b;
 }
 
@@ -149,10 +156,85 @@ ws     ::= [ \t\n\r]*
         CHECK(!g.parse("root ::= root \"a\" | \"a\"", err));   // left recursion
         CHECK(err.find("recursion") != std::string::npos);
         CHECK(!g.parse("root ::= undefined_rule", err));        // undefined rule
-        CHECK(!g.parse("root ::= \"\\u0041\"", err));           // unicode deferred
-        CHECK(err.find("unicode") != std::string::npos);
         CHECK(!g.parse("foo ::= \"a\"", err));                  // no root
         CHECK(!g.parse("root ::= \"unterminated", err));        // syntax error
+    }
+
+    // --- Unicode: literals, code-point ranges and split UTF-8 tokens --------
+    GbnfGrammar unicode = parse_ok("root ::= \"\\u4E00\" | [一-鿿] | [^\\r\\n\\u2028]+");
+    CHECK(accepts(unicode, tok, "\xe4\xb8\x80"));             // 一
+    CHECK(accepts(unicode, tok, "\xe9\xbe\xbf"));             // 鿿
+    CHECK(accepts(unicode, tok, "xyz"));
+    CHECK(!accepts(unicode, tok, "\n"));
+    CHECK(accepts(unicode, tok, "\xef\xbf\xbd"));             // inverse Unicode range
+    GbnfGrammar ascii_only = parse_ok("root ::= [a-z]+");
+    CHECK(!accepts(ascii_only, tok, "\xe4\xb8\x80"));
+    GbnfGrammar literal_jp = parse_ok("root ::= \"日本\"");
+    CHECK(accepts(literal_jp, tok, "日本"));
+    CHECK(!accepts(literal_jp, tok, "日x"));
+
+    // A three-byte character may arrive as two tokens.  The first byte must be
+    // legal, but EOS remains forbidden until its continuation bytes arrive.
+    {
+        GbnfGrammar one = parse_ok("root ::= [一-鿿]");
+        GbnfConstraint jc;
+        jc.init(tok, VOCAB, {EOS}, one);
+        CHECK(jc.allows(CJK_ONE));
+        CHECK(jc.allows(CJK_TWO));
+        CHECK(jc.allows(CJK_MID));
+        CHECK(!jc.allows(CJK_BAD));
+        CHECK(!jc.allows(ASCII_X));
+        jc.accept(CJK_MID);
+        CHECK(!jc.done());
+        CHECK(!jc.allows(EOS));
+        CHECK(jc.allows(CJK_TAIL));
+        jc.accept(CJK_TAIL);
+        CHECK(jc.done());
+        CHECK(jc.allows(EOS));
+    }
+    {
+        // Invalid continuation, and a first byte whose possible range misses
+        // [一-鿿], must be rejected rather than buffered.
+        GbnfGrammar one = parse_ok("root ::= [一-鿿]");
+        GbnfConstraint jc;
+        jc.init(tok, VOCAB, {EOS}, one);
+        CHECK(!jc.allows(0xf0));   // four-byte code points are outside the range
+        jc.accept(CJK_MID);
+        CHECK(!jc.allows((int)'x'));
+        CHECK(!jc.allows(0xff));
+    }
+    {
+        // Worst case: 一 arrives as three one-byte tokens (0xe4, 0xb8, 0x80).
+        // Each step must keep the rule alive and EOS refused until the last byte.
+        GbnfGrammar one = parse_ok("root ::= [一-鿿]");
+        GbnfConstraint jc;
+        jc.init(tok, VOCAB, {EOS}, one);
+        CHECK(jc.allows(0xe4));
+        jc.accept(0xe4);
+        CHECK(!jc.allows(EOS));
+        CHECK(jc.allows(0xb8));
+        jc.accept(0xb8);
+        CHECK(!jc.allows(EOS));
+        CHECK(jc.allows(0x80));
+        jc.accept(0x80);
+        CHECK(jc.done());
+        CHECK(jc.allows(EOS));
+    }
+    {
+        // An alternative that dies on the partial bytes must not kill the one
+        // that is still alive: [一-鿿] | [\\u4e00-\\u9fff] share the range, while
+        // [^a-z]+ takes any code point and must survive a bare first byte.
+        GbnfGrammar alt = parse_ok("root ::= [a-z]+ | [^a-z]+");
+        GbnfConstraint jc;
+        jc.init(tok, VOCAB, {EOS}, alt);
+        CHECK(jc.allows(0xe4));            // [^a-z] branch still covers it
+        jc.accept(0xe4);
+        CHECK(jc.allows(0xb8));
+        jc.accept(0xb8);
+        CHECK(jc.allows(0x80));
+        jc.accept(0x80);
+        CHECK(jc.done());
+        CHECK(jc.allows(EOS));
     }
 
     if (checks::g_fail) { std::fprintf(stderr, "%d check(s) failed\n", checks::g_fail); return 1; }

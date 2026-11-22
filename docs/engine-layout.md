@@ -29,7 +29,7 @@ responsibility, not by line count:
 | `src/sampling.h/.cpp` | sampling, penalties, top-p/min-p |
 | `src/grammar.h/.cpp` | constrained decoding: a byte-level JSON pushdown automaton that masks the vocabulary above the logits boundary (the worker's `response_format` column); architecture-agnostic, no GPU or numerics change |
 | `src/gbnf.h/.cpp` | a generic deterministic (LL(1)) grammar matcher and its token-mask wrapper, sharing the `Constraint` contract with the JSON automaton; the json_schema tier runs on it |
-| `src/gbnf_full.h/.cpp` | full GBNF: a text parser and llama.cpp's general multi-stack NFA matcher (byte-based), for arbitrary user grammars via the `grammar` response_format type; ambiguous alternatives, repetition, left-recursion guard |
+| `src/gbnf_full.h/.cpp` | full GBNF: a text parser and llama.cpp's general multi-stack NFA matcher over Unicode code points (partial UTF-8 across tokens is legal while it can still fit), for arbitrary user grammars via the `grammar` response_format type; ambiguous alternatives, repetition, left-recursion guard |
 | `src/schema.h/.cpp` | JSON Schema -> grammar compiler (type/properties/required/items/enum, closed objects); trie-factors string sets so the matcher stays deterministic |
 | `src/chattmpl.h/.cpp` | renders the container's Jinja chat template; returns the prompt split into template text and caller text.  Also parses the worker's message request (column 11) |
 | `src/tools.h/.cpp` | tool JSON, restricted arithmetic, built-in handlers |
