@@ -168,7 +168,7 @@ int main() {
         "0.5", "-0.5", "1e3", "1E+3", "1e-3", "1.5e2", "true", "false", "null",
         "{\"a\":[1,{\"b\":null}]}", "[[],{},[[]]]", "{\"a\":\"\\u0041\"}",
         "{\"a\":\"line\\nbreak\"}", " { \"a\" : 1 } ", "[\n1,\t2\n]",
-        "{\"a\":-0.0e-0}", "[\"\\\"\\\\\"]",
+        "{\"a\":-0.0e-0}", "[\"\\\"\\\\\"]", "1.2e3", "123.456e+78", "0.0e0",
     };
     for (const char* s : valid) {
         jc.reset();
@@ -194,6 +194,10 @@ int main() {
         "{,}", "{\"a\"}", "{\"a\":}", "{\"a\":1,}", "[1,]", "[1 2]", "01",
         "1.a", "1e+a", "\"abc\\q\"", "\"\\u00G1\"", "truX", "nulll", "}{",
         "1 2", "{\"a\":1 \"b\":2}", "[1,,2]",
+        // a number's fraction and exponent each appear at most once: a second
+        // '.' or 'e' ends the number and the stray byte is rejected (the bug the
+        // MoE / RWKV cross-model run exposed: "1.2.3.4..." was being accepted).
+        "1.2.3", "1e2e3", "0.0.0", "1.2e3.4", "1..2", "1e2e3e4", "12.34.56", "1e2.3",
     };
     for (const char* s : invalid) {
         jc.reset();

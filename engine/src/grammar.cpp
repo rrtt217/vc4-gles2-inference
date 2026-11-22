@@ -128,9 +128,14 @@ bool JsonConstraint::step(State& s, uint8_t c) {
                 return false;
             }
             // Valid-stop phases 2/3/5/8: continue, or hand c back to the parent.
+            // Each part appears at most once and in order: more digits within the
+            // int/frac/exp; a '.' starts the fraction only after the integer; an
+            // 'e' starts the exponent only after the integer or fraction.  A second
+            // '.' or 'e' is not a continuation -- the number ends and the parent
+            // rejects the stray byte (this is what makes "1.2.3" / "1e2e3" invalid).
             if ((p == 3 || p == 5 || p == 8) && is_digit(c)) return true;
-            if ((p == 2 || p == 3 || p == 5) && c == '.') { f.phase = 4; return true; }
-            if (num_stop(p) && (c == 'e' || c == 'E')) { f.phase = 6; return true; }
+            if ((p == 2 || p == 3) && c == '.') { f.phase = 4; return true; }
+            if ((p == 2 || p == 3 || p == 5) && (c == 'e' || c == 'E')) { f.phase = 6; return true; }
             --s.n;
             continue;   // number complete; the parent consumes c
         }
