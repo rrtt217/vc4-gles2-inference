@@ -25,6 +25,8 @@
 #include "common.h"
 #include "jinja/json.h"   // -isystem third_party
 #include "grammar.h"
+#include "gbnf.h"
+#include "schema.h"
 #include "sampling.h"
 #include "tools.h"
 
@@ -247,20 +249,17 @@ int run_worker(App& app, Session& session, bool enc_bos, bool chat_dump) {
         if (g_sampling.min_p > 1.0f) g_sampling.min_p = 1.0f;
         // Column 15: base64 of the OpenAI `response_format` object.  The engine
         // is the source of truth for what it can constrain, so an unsupported
-        // type is a clear error, not a silent no-op.  Only json_object is
-        // implemented today; json_schema is a later tier.  The constraint lives
-        // above the logits boundary (a host-side mask, like the penalties), so
-        // it forces the full-logits path and is architecture-agnostic.
+        // type or schema keyword is a clear error, not a silent no-op.  Both
+        // matchers live above the logits boundary (a host-side mask, like the
+        // penalties), force the full-logits path, and are architecture-agnostic.
         JsonConstraint json_constraint;
-        bool constrained = false;
+        Grammar schema_grammar;
+        GrammarConstraint schema_constraint;
+        Constraint* active = nullptr;
         if (f.size() > 14 && !f[14].empty()) {
             const common_json rf = common_json::parse_no_throw(base64_decode(f[14]));
             const string rtype = (rf.is_object() && rf.contains("type") && rf.at("type").is_string())
                                      ? (string) rf.at("type") : string();
-            if (rtype != "json_object") {
-                emit_error("response_format type \"" + rtype + "\" not supported (use json_object)");
-                continue;
-            }
             // Mirror the turn's own EOS rule (below) so the grammar releases EOS
             // exactly when the worker would end the turn on it.
             vector<int> eos_ids;
@@ -271,9 +270,28 @@ int run_worker(App& app, Session& session, bool enc_bos, bool chat_dump) {
                 eos_ids.push_back(1);
                 eos_ids.push_back(2);
             }
-            json_constraint.init(app.tokenizer, app.model.vocab, eos_ids);
-            constrained = true;
+            if (rtype == "json_object") {
+                json_constraint.init(app.tokenizer, app.model.vocab, eos_ids);
+                active = &json_constraint;
+            } else if (rtype == "json_schema") {
+                if (!rf.contains("json_schema") || !rf.at("json_schema").is_object() ||
+                    !rf.at("json_schema").contains("schema")) {
+                    emit_error("json_schema requires a json_schema.schema object");
+                    continue;
+                }
+                string serr;
+                if (!compile_schema(rf.at("json_schema").at("schema"), schema_grammar, serr)) {
+                    emit_error("json_schema: " + serr);
+                    continue;
+                }
+                schema_constraint.init(app.tokenizer, app.model.vocab, eos_ids, schema_grammar);
+                active = &schema_constraint;
+            } else {
+                emit_error("response_format type \"" + rtype + "\" not supported (use json_object or json_schema)");
+                continue;
+            }
         }
+        const bool constrained = active != nullptr;
         // Column 11 (new): base64 of {"messages":[..],"tools":[..]}.  The
         // server sends it only when this container carries a chat template,
         // because only then can the engine be the renderer.
@@ -392,7 +410,7 @@ mt19937 rng(seed);
                 // penalties: forbidden ids become -1e30f.  It goes first so the
                 // penalties' max-relative cut (min_p) is measured over the legal
                 // set, and temperature / top-k / top-p then act on it only.
-                if (constrained) json_constraint.mask(logits);
+                if (constrained) active->mask(logits);
                 apply_sampling_penalties(logits, recent);
                 if (want_logprobs) {
                     const SampledToken s = greedy_req
@@ -408,7 +426,7 @@ mt19937 rng(seed);
             }
             // Advance the grammar by the drawn token (a no-op for EOS).  This
             // reproduces mask()'s end state, so the next step's mask is exact.
-            if (constrained) json_constraint.accept(next);
+            if (constrained) active->accept(next);
             const bool is_eos = app.model.have_specials
                     ? (next == app.model.id_eos || (app.model.id_stop >= 0 && next == app.model.id_stop))
                     : (next == 1 || next == 2);

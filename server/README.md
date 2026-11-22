@@ -544,9 +544,38 @@ Two things to know:
   (a string or a number where you wanted an object).  Prompt for the shape you
   want as well.  If `max_tokens` cuts the reply mid-structure the result is a
   valid JSON *prefix*, not a complete document — give it room to finish.
-* `{"type": "text"}` (or absent) is unconstrained.  `json_schema` is a later tier
-  and is refused with a 400 rather than silently ignored; any other type is a
-  400 too.  The engine is the source of truth for what it can constrain.
+* `{"type": "text"}` (or absent) is unconstrained; any other type is a 400.  The
+  engine is the source of truth for what it can constrain.
+
+### json_schema
+
+`response_format: {"type": "json_schema", "json_schema": {"name": "...", "schema":
+{...}}}` constrains the reply to a JSON Schema.  The engine compiles the schema to
+a grammar and masks the vocabulary to it at every step, so the reply matches the
+schema's shape and types, not just "some JSON".
+
+```json
+{"messages": [{"role": "user", "content": "Extract the person."}],
+ "response_format": {"type": "json_schema", "json_schema": {"name": "person",
+   "schema": {"type": "object",
+     "properties": {"name": {"type": "string"}, "age": {"type": "integer"}},
+     "required": ["name", "age"], "additionalProperties": false}}},
+ "temperature": 0}
+```
+
+Supported subset: `type` (object/array/string/integer/number/boolean/null),
+`properties` + `required` + `additionalProperties: false`, `items`, `enum`, and
+nested schemas.  Objects are **closed** (`additionalProperties: false`, the OpenAI
+structured-output contract); required keys are emitted in a fixed order, optional
+keys in any order.
+
+Accepted but **not enforced**: annotation keywords (`title`/`description`/
+`default`/`examples`) and the bounds (`minimum`/`maximum`/`minLength`/`maxLength`/
+`pattern`/`format`/`minItems`/`maxItems`).  Refused by name (a clear error, not a
+wrong approximation): `$ref`, `anyOf`, `oneOf`, `allOf`, `not`, tuple `items`,
+multiple `type`s, and `additionalProperties` other than `false`.  As with
+`json_object`, the guarantee is shape and syntax -- a small model still chooses
+the content, and `max_tokens` must leave room to finish.
 
 ## Worker protocol
 

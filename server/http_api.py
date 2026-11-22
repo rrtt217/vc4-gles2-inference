@@ -425,7 +425,12 @@ class Handler(BaseHTTPRequestHandler):
                     body["messages"] = trimmed
                     req = build_messages(body)
                 except WorkerError as e:
-                    self._worker_error(e)
+                    # A schema/type the engine cannot constrain is a client error
+                    # (400), not a server fault; the engine's message says which.
+                    if str(e).startswith(("json_schema", "response_format")):
+                        self._error(str(e), 400)
+                    else:
+                        self._worker_error(e)
                     return
             else:
                 self._error("prompt still exceeds the context window after trimming history",

@@ -339,7 +339,9 @@ check("absent response_format is None", rf_parse({}) is None)
 check("text is None", rf_parse({"response_format": {"type": "text"}}) is None)
 check("json_object forwards the spec",
       rf_parse({"response_format": {"type": "json_object"}}) == {"type": "json_object"})
-for bad, label in [({"type": "json_schema"}, "json_schema"),
+jspec = {"type": "json_schema", "json_schema": {"name": "person", "schema": {"type": "object"}}}
+check("json_schema forwards the spec", rf_parse({"response_format": jspec}) == jspec)
+for bad, label in [({"type": "json_schema"}, "json_schema without schema"),
                    ({"type": "yaml"}, "unknown type"),
                    ("json_object", "non-object")]:
     try:
@@ -366,8 +368,14 @@ check("text stays unconstrained", worker.last_response_format is None,
       str(worker.last_response_format))
 code, resp = http("POST", "/v1/chat/completions", {
     "messages": [{"role": "user", "content": "hi"}],
-    "response_format": {"type": "json_schema", "json_schema": {"name": "x", "schema": {}}}})
-check("json_schema is a clean 400", code == 400 and "json_schema" in str(resp), str(resp)[:150])
+    "response_format": {"type": "json_schema", "json_schema": {"name": "x", "schema": {"type": "object"}}}})
+check("json_schema forwarded", code == 200 and worker.last_response_format ==
+      {"type": "json_schema", "json_schema": {"name": "x", "schema": {"type": "object"}}},
+      str(worker.last_response_format))
+code, resp = http("POST", "/v1/chat/completions", {
+    "messages": [{"role": "user", "content": "hi"}],
+    "response_format": {"type": "json_schema"}})
+check("json_schema without schema is a 400", code == 400, str(resp)[:150])
 code, resp = http("POST", "/v1/chat/completions", {
     "messages": [{"role": "user", "content": "hi"}],
     "response_format": {"type": "yaml"}})

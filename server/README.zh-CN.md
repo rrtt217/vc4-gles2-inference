@@ -105,8 +105,24 @@ top-p 都只作用在合法集合上。只有当一个完整的顶层值解析�
 * 它保证的是**语法，不是语义**。小模型被强制进 JSON 后仍然自己选内容；弱模型可能给出
   合法但没用的值（你想要对象时它给一个字符串或数字）。请在 prompt 里也说明想要的形状。
   若 `max_tokens` 在结构中途截断，结果是合法的 JSON **前缀**而非完整文档——给它收尾的空间。
-* `{"type": "text"}`（或不填）即不约束。`json_schema` 是后续档位，会以 400 明确拒绝而不是
-  静默忽略；其它类型同样 400。能约束什么由引擎说了算。
+* `{"type": "text"}`（或不填）即不约束；其它类型同样 400。能约束什么由引擎说了算。
+
+### json_schema
+
+`response_format: {"type": "json_schema", "json_schema": {"name": "...", "schema":
+{...}}}` 把回复约束到一个 JSON Schema。引擎把 schema 编译成文法，每一步据此掩码词表，
+因此回复符合 schema 的形状与类型，而不仅仅是"某种 JSON"。
+
+支持的子集：`type`（object/array/string/integer/number/boolean/null）、
+`properties` + `required` + `additionalProperties: false`、`items`、`enum`，以及嵌套
+schema。对象是**封闭**的（`additionalProperties: false`，即 OpenAI 结构化输出约定）；
+required 键按固定顺序出现，optional 键可任意顺序。
+
+接受但**不强制**：注解类关键字（`title`/`description`/`default`/`examples`）与各种边界
+（`minimum`/`maximum`/`minLength`/`maxLength`/`pattern`/`format`/`minItems`/`maxItems`）。
+按名拒绝（明确报错，而不是错误地近似）：`$ref`、`anyOf`、`oneOf`、`allOf`、`not`、
+元组 `items`、多 `type`、以及非 `false` 的 `additionalProperties`。与 `json_object`
+一样，保证的是形状与语法——小模型仍自己选内容，且 `max_tokens` 要留出收尾空间。
 
 ## 一个服务器多个模型
 

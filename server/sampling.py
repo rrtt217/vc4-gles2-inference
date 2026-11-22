@@ -108,11 +108,11 @@ def stop_strings(body: dict) -> list[str]:
 def response_format(body: dict) -> dict | None:
     """The OpenAI ``response_format`` constraint to forward to the worker, or None.
 
-    Only ``json_object`` is implemented by the engine's grammar today; ``text``
-    means no constraint.  ``json_schema`` is a later tier -- it is rejected here
-    with a clean 400 rather than forwarded to become a 500 mid-request.  The
-    engine still guards the type itself (it is the source of truth for what it
-    can constrain); this only keeps unsupported requests from reaching it.
+    ``json_object`` and ``json_schema`` are constrained by the engine's grammar;
+    ``text`` means no constraint.  The engine is the source of truth for which
+    schema keywords it honours (it refuses unsupported ones with an error event);
+    this only validates the request shape and keeps malformed requests from
+    reaching it as a 500.
     """
     rf = body.get("response_format")
     if rf is None:
@@ -125,7 +125,10 @@ def response_format(body: dict) -> dict | None:
     if t == "json_object":
         return {"type": "json_object"}
     if t == "json_schema":
-        raise ValueError("response_format json_schema is not supported yet; use json_object")
+        js = rf.get("json_schema")
+        if not isinstance(js, dict) or not isinstance(js.get("schema"), dict):
+            raise ValueError("response_format json_schema requires a json_schema.schema object")
+        return {"type": "json_schema", "json_schema": js}
     raise ValueError(f"unknown response_format type {t!r}")
 
 
