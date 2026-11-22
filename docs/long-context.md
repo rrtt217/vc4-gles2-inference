@@ -188,9 +188,22 @@ Two folds are needed because neither quantity is additive as stored: the
 stats sums were exponentiated against different maxima, and the value row is a
 packed fixed-point layout that the blender cannot add channel by channel.
 
-**Three or more slices are refused**, by name, at load time.  They are not
-shown to agree with the single-texture path yet, and a wrong answer is worse
-than a refusal.
+**Any number of slices works.**  The value fold is the only pass whose cost
+depends on the count: its program carries one sampler a slice, so when there are
+more slices than texture units it runs in rounds, ping-ponging the running sum
+through two scratch targets (a round cannot sample the texture it renders into).
+An adding round needs a unit for that sum, so it folds one fewer slice than a
+reading round -- binding the sum to unit `n` with `n == units` is off the end and
+the driver reads unit 0, which counts the first slice twice.
+
+Two rules the sweep below found, both of which silently produce a plausible
+number when broken:
+
+- **A slice holds an even number of positions.**  The score grid packs two
+  positions a texel, so an odd slice length puts its last pair half in this
+  slice and half in the next.  The engine rounds the length down.
+- **A pair index normalises by `(SEG+1)/2`, not `SEG/2`.**  They differ by one
+  texel for an odd length, and every fetch then lands a texel short.
 
 **The acceptance.**  Measured 2026-11-22 on Iris Xe (Mesa 26.2.6), MiniMind3
 q8, `GPU_LAYER=1 KV=q16`, `data/ppl_test.txt`:
@@ -201,6 +214,12 @@ q8, `GPU_LAYER=1 KV=q16`, `data/ppl_test.txt`:
 | SEQ 4096, `SEG_CAP=2048` | 2 | **270.3170** |
 | SEQ 1024, `SEG_CAP=512` | 2 | **270.3170** |
 | SEQ 512, `SEG_CAP=256` | 2 | 270.4452 |
+
+Measured 2026-11-22 as well, the same window at every slice count from one to
+sixteen (`SEG_CAP` 2048 down to 128, MiniMind3 q8, same corpus).  Slices that
+divide the window evenly reproduce 270.3170 exactly; the others land within
+-1.4% / +2.0% of it (266.71 at fourteen, 275.79 at fifteen), which is the float
+summation order of a different number of partial sums, not a structural error.
 
 The last row is the one that differs, by 0.05%: a two-slice window that is not
 a multiple of the slice length takes a different float summation order, and the

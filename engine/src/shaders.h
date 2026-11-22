@@ -207,7 +207,8 @@ std::string att_prob(const AttnConfig& c);
 std::string att_v(const AttnConfig& c, XFormat out);
 // The multi-segment value fold: sum `nseg` slices of the same target layout
 // into one row, in the format's own arithmetic.
-std::string att_v_fold_shader(const AttnConfig& c, XFormat out, int nseg);
+std::string att_v_fold_shader(const AttnConfig& c, XFormat out, int nseg,
+                              bool accumulate = false);
 
 std::string top2_fast(int rows, int chunk);
 std::string top2(int rows, int chunk);

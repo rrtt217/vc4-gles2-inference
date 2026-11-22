@@ -140,6 +140,8 @@ void GPU::reset_targets(){
         stats_parts_.clear();
         v_parts_.clear();
         stats_gmax_ = Target();
+        v_fold_tmp_ = Target();
+        v_fold_tmp2_ = Target();
         att_nseg_ = 1;
         att_seg_ = 0;
         rwkv_tmp_.clear();

@@ -822,10 +822,10 @@ GLuint GPU::x_v(int segk, bool accumulate){
                       ::att_v(att_cfg(segk, accumulate), act_fmt_));
     }
 
-GLuint GPU::x_v_fold(){
+GLuint GPU::x_v_fold(int n, bool accumulate){
         return x_prog("xvf_" + to_string(att_dim_) + "_" + x_format_name(act_fmt_) +
-                          "_" + to_string(att_nseg_),
-                      att_v_fold_shader(att_cfg(), act_fmt_, att_nseg_));
+                          "_" + to_string(n) + (accumulate ? "_add" : ""),
+                      att_v_fold_shader(att_cfg(), act_fmt_, n, accumulate));
     }
 
 GLuint GPU::x_kv_rope(int segk){ return x_prog("xkv" + seg_suffix(segk), att_kv_rope(att_cfg(segk))); }

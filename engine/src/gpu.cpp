@@ -32,6 +32,7 @@ GPU::GPU(){
         init_egl();
         init_gl();
         GLint max_tex = 0, max_rb = 0, max_vp[2] = {0, 0};
+        glGetIntegerv(GL_MAX_TEXTURE_IMAGE_UNITS, &max_tex_units_);
         glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_tex);
         glGetIntegerv(GL_MAX_RENDERBUFFER_SIZE, &max_rb);
         glGetIntegerv(GL_MAX_VIEWPORT_DIMS, max_vp);

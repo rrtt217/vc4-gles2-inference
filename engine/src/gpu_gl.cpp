@@ -136,8 +136,10 @@ void GPU::setup_attrib(GLuint prog) {
     }
 
 GLint GPU::uloc(GLuint prog, const char* name) {
-        // Uniform names are string literals, so the pointer is a stable identity:
-        // a per-program linear scan over a handful of entries beats hashing.
+        // The cache key is the name itself, not its address: several callers
+        // pass the .c_str() of a temporary ("V" + to_string(k)), and a pointer
+        // comparison then either misses every time or, worse, matches a stale
+        // entry that a freed string's address was reused for.
         if (prog != uloc_prog_ || !uloc_tab_) {
             uloc_tab_ = &uloc_cache_[prog];
             uloc_prog_ = prog;

@@ -236,6 +236,13 @@ vector<Case> cases() {
     c.segk = 1;
     add_attn(v, "attn_q8_kv16_seg2", c);
 
+    // The value fold, for two and three slices: its text is where a slice-count
+    // bug shows up, and it is the only kernel whose sampler count depends on
+    // nseg.
+    add(v, "att_v_fold_2", [] { AttnConfig f = attn_base(); return att_v_fold_shader(f, XFormat::I16_2, 2); });
+    add(v, "att_v_fold_add2", [] { AttnConfig f = attn_base(); return att_v_fold_shader(f, XFormat::I16_2, 2, true); });
+    add(v, "att_v_fold_3", [] { AttnConfig f = attn_base(); return att_v_fold_shader(f, XFormat::I16_2, 3); });
+
     c = attn_base();
     c.qk_norm = false;
     c.rope_half = true;

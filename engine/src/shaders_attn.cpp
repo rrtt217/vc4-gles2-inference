@@ -401,10 +401,17 @@ string att_stats(const AttnConfig& c) {
     // for the same reason the softmax is: every segment's sum was taken against
     // a max that differs by a constant, and that constant is exp(max_k - max).
     const SegRef st = seg_ref(c, "S", "T", "S", "(float(T)+0.5)/float(SEQ/2)", "SEG/2");
-    const string t_lo = c.nseg > 1 ? "SEGK*SEG/2" : "0";
-    const string t_hi = c.nseg > 1 ? "min(SEQ/2,(SEGK+1)*SEG/2)" : "SEQ/2";
-    const string tloc = c.nseg > 1 ? "(T-SEGK*SEG/2)" : "T";
-    const string sdiv = c.nseg > 1 ? "SEG/2" : "SEQ/2";
+    // A slice owns the positions [SEGK*SEG, min(SEQ,(SEGK+1)*SEG)); the score
+    // grid packs two positions a texel, so the pair range is that position
+    // range halved -- floor at the start, ceil at the end.  `SEGK*SEG/2` with
+    // integer division drops the last position of every slice whose length is
+    // odd (SEG=205 lost one position in each of ten slices).
+    const string p_lo = c.nseg > 1 ? "(SEGK*SEG)/2" : "0";
+    const string p_hi = c.nseg > 1 ? "min(SEQ,(SEGK+1)*SEG)/2+1" : "SEQ/2";
+    const string t_lo = p_lo;
+    const string t_hi = p_hi;
+    const string tloc = c.nseg > 1 ? "(T-(SEGK*SEG)/2)" : "T";
+    const string sdiv = c.nseg > 1 ? "(SEG+1)/2" : "SEQ/2";
     // Pass 2 (use_gmax > 0.5) exponentiates against the folded global max, so
     // the segments' sums add directly and the fold's only rounding is the one
     // the single-draw kernel does.  Pass 1 writes its own max.
@@ -484,10 +491,11 @@ string att_v(const AttnConfig& c, XFormat out) {
     const SegRef vs1 = seg_ref(c, "VS", l1, "VS", "(float(t1)+0.5)/float(SEQ)");
     const SegRef kv0 = seg_ref(c, "KV", l0, "KV", "(float(t0)+0.5)/float(SEQ)");
     const SegRef kv1 = seg_ref(c, "KV", l1, "KV", "(float(t1)+0.5)/float(SEQ)");
-    const string t_lo = c.nseg > 1 ? "SEGK*SEG/2" : "0";
-    const string t_hi = c.nseg > 1 ? "min(SEQ/2,(SEGK+1)*SEG/2)" : "SEQ/2";
-    const string tloc = c.nseg > 1 ? "(T-SEGK*SEG/2)" : "T";
-    const string sdiv = c.nseg > 1 ? "SEG/2" : "SEQ/2";
+    // Same pairing as att_stats: the pair range is floor(start/2) .. ceil(end/2).
+    const string t_lo = c.nseg > 1 ? "(SEGK*SEG)/2" : "0";
+    const string t_hi = c.nseg > 1 ? "min(SEQ,(SEGK+1)*SEG)/2+1" : "SEQ/2";
+    const string tloc = c.nseg > 1 ? "(T-(SEGK*SEG)/2)" : "T";
+    const string sdiv = c.nseg > 1 ? "(SEG+1)/2" : "SEQ/2";
     const string prob_bind = "S,ST,KV,VS";
     const string prob_body =
         "vec4 st=texture2D(ST,vec2((float(h)+0.5)/float(HEADS),0.5));"
@@ -578,7 +586,7 @@ string att_v(const AttnConfig& c, XFormat out) {
 
 
 
-string att_v_fold_shader(const AttnConfig& c, XFormat out, int nseg) {
+string att_v_fold_shader(const AttnConfig& c, XFormat out, int nseg, bool accumulate) {
     // One fragment an output texel.  The read is the format's own X1 and the
     // write is its own XST, so a fold cannot disagree with the kernel that
     // produced the slices -- which a hand-written C++ decode did (I24_1 puts
@@ -598,8 +606,17 @@ string att_v_fold_shader(const AttnConfig& c, XFormat out, int nseg) {
                           : (N == 1) ? "gl_FragColor=XST1(" + accs + ");}"
                           : (out == XFormat::BF16) ? "gl_FragColor=x_bf16enc2(" + accs + ");}"
                           : "gl_FragColor=x_st2(" + accs + ");}";
+    // A later round adds its slices to what earlier rounds already wrote, so it
+    // reads the destination through the format's own X1 -- the same reason the
+    // value kernel cannot let the blender do this: packed fixed point does not
+    // carry across channels.
+    if (accumulate)
+        for (int v = 0; v < N; ++v)
+            reads = "a" + to_string(v) + "+=X1(ACC," + to_string(N) + "*t+" +
+                    to_string(v) + ",VW);" + reads;
     string decl, init;
     for (int k = 0; k < nseg; ++k) decl += "uniform sampler2D V" + to_string(k) + ";";
+    if (accumulate) decl += "uniform sampler2D ACC;";
     for (int v = 0; v < N; ++v) init += "float a" + to_string(v) + "=0.0;";
     return "precision highp float;\n" + x_glsl(out) +
            (out == XFormat::BF16 ? string() : x_bf16_glsl()) +

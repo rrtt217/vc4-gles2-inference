@@ -321,6 +321,8 @@ public:
     bool needs_finish() const;
     bool rms_fused() const;
     int max_target_dim() const { return max_target_dim_; }
+    // GL_MAX_TEXTURE_IMAGE_UNITS: how many samplers one draw may bind.
+    int max_texture_units() const { return max_tex_units_ > 0 ? max_tex_units_ : 8; }
     // How many programs this context has compiled.  A model swap keeps them, so
     // this is the quantity that makes the second start cheaper than the first.
     size_t program_count() const { return programs_.size(); }
@@ -366,7 +368,7 @@ private:
     GLuint x_rms_reduce();
     GLuint x_rms_norm(bool use_eps_uniform);
     GLuint x_v(int segk = 0, bool accumulate = false);
-    GLuint x_v_fold();
+    GLuint x_v_fold(int n, bool accumulate = false);
     GLuint x_vscale();
     GLuint x_kv_rope(int segk = 0);
     GLuint x_qnorm();
@@ -409,7 +411,11 @@ private:
     // model's attention shaders).
     unordered_map<string, size_t> prog_key_hash_;
     unordered_map<size_t, GLuint> text_programs_;  // program text hash -> program
-    struct ULocRec { const char* name; GLint loc; };
+    // The name is OWNED: callers pass .c_str() of a temporary std::string
+    // ("V" + to_string(k)), so storing the pointer would compare a dangling
+    // address -- and two temporaries can land on the same one, which made every
+    // V{k} in the value fold resolve to the first location the cache held.
+    struct ULocRec { std::string name; GLint loc; };
     unordered_map<GLuint, vector<ULocRec>> uloc_cache_;
     GLuint uloc_prog_ = 0;
     vector<ULocRec>* uloc_tab_ = nullptr;
@@ -464,6 +470,9 @@ private:
     vector<Target> v_parts_;                // [k] (nseg > 1 only)
     // The folded per-head max, one I24_1 texel a head (docs/long-context.md).
     Target stats_gmax_;
+    // The value fold's ping-pong pair, used only when there are more
+    // slices than texture units (docs/long-context.md).
+    Target v_fold_tmp_, v_fold_tmp2_;
     Target& kv_part(int layer, int k) { return kv_parts_[(size_t)layer * att_nseg_ + k]; }
     Target& vs_part(int layer, int k) { return vs_parts_[(size_t)layer * att_nseg_ + k]; }
     // The segment a position lives in, and its offset inside it.
@@ -510,6 +519,7 @@ private:
     int att_kv_width_ = 0;
     bool att_kv_vstep_ = false;   // 8-bit KV: per-head V grid
     int max_target_dim_ = 0;
+    int max_tex_units_ = 8;
     vector<GLuint> q_norm_tex_, k_norm_tex_;
     GLuint vbo_ = 0;
     Target probe_;

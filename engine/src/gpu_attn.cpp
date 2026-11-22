@@ -144,7 +144,16 @@ void GPU::init_attention(int dim, int kv_dim, int heads, int kv_heads, int head_
         // machine whose limit is larger than the window.  It never enlarges.
         const int cap = (int) env_int("SEG_CAP", 0);
         const int seg_lim = (cap > 0 && cap < lim) ? cap : lim;
-        att_seg_ = std::min(seq, seg_lim);
+        // A slice must hold an even number of positions.  The score grid packs
+        // two positions a texel, so an odd slice length puts its last pair half
+        // in this slice and half in the next -- the fragment then scores a
+        // position that belongs to the following slice, and the stats and value
+        // scans see it in both.  Rounding the length down keeps every pair
+        // inside one slice (and costs at most one position a slice).
+        int seg = std::min(seq, seg_lim);
+        if (seg < seq && (seg & 1)) --seg;
+        if (seg < 2) seg = 2;
+        att_seg_ = seg;
         att_nseg_ = (seq + att_seg_ - 1) / att_seg_;
         // A texture holds nseg positions per row; the score grid packs two
         // positions a texel, so its width is seg/2 and its capacity is 2*seg
@@ -440,8 +449,13 @@ void GPU::att_scores(int layer, int pos){
             // the same work the single draw did.
             for (int k = 0; k < att_nseg_; ++k) {
                 GLuint p = x_score(k);
+                // The last slice can be shorter than `seg` when the window does
+                // not divide evenly.  Drawing its full width would score pairs
+                // that hold no position, which then feed the stats scan and the
+                // value pass as if they were real.
+                const int rows = std::min(att_seg_, att_seq_ - k * att_seg_);
                 bind_fbo(score_parts_[k].fbo);
-                glViewport(0, 0, score_parts_[k].w, att_heads_);
+                glViewport(0, 0, (rows + 1) / 2, att_heads_);
                 use_program(p);
                 bind_tex(0, qrot_target_.tex);
                 set_sampler(p, "Q", 0);
@@ -657,21 +671,59 @@ void GPU::att_v(int layer, int pos){
 // a different format).
 void GPU::att_v_fold(int pos){
         if (att_nseg_ <= 1) { att_out_ = v_parts_[0]; return; }
-        GLuint p = x_v_fold();
-        bind_fbo(att_out_.fbo);
-        glViewport(0, 0, att_out_.w, 1);
-        use_program(p);
-        // The fold reuses units 0..nseg-1, which the value kernel just bound to
-        // other textures; bind_tex caches by unit, so forget first.
-        forget_state();
-        for (int k = 0; k < att_nseg_ && k < 4; ++k) {
-                bind_tex(k, v_parts_[k].tex);
-                set_sampler(p, ("V" + std::to_string(k)).c_str(), k);
+        // Every slice has to be folded in.  A slice left unbound reads unit 0,
+        // which sums the first slice again and silently loses the rest --
+        // measured at nine slices before this was a loop: PPL 59.0 against 1.2
+        // for the same text at one slice.
+        //
+        // The fold's program carries one sampler a slice, so it can only cover
+        // as many slices as there are texture units.  When there are more, the
+        // fold runs in rounds and each round adds into att_out_ (the second and
+        // later rounds use the accumulate form of the kernel).
+        // A round folds at most `units` slices when it only reads, and one fewer
+        // when it also adds, because ACC needs a unit of its own: binding ACC to
+        // unit `n` with n == units is off the end of 0..units-1 and the driver
+        // then reads unit 0, i.e. the first slice again.
+        // Eight, not the queried GL_MAX_TEXTURE_IMAGE_UNITS: Xe answers 32, but
+        // this engine's own bind path (bind_tex/set_sampler) addresses units
+        // 0..7 and the kernels are written for that ceiling.  Using the queried
+        // number asked one draw to bind sixteen samplers, most of which never
+        // reached the program.
+        const int units = std::min(8, max_texture_units());
+        const int per_round = std::max(1, units - 1);
+        if (att_nseg_ > per_round) {
+                if (v_fold_tmp_.tex == 0 || v_fold_tmp_.w != att_out_.w)
+                        v_fold_tmp_ = make_target(att_out_.w, 1);
+                if (v_fold_tmp2_.tex == 0 || v_fold_tmp2_.w != att_out_.w)
+                        v_fold_tmp2_ = make_target(att_out_.w, 1);
         }
-        glUniform1f(uloc(p, "VW"), (float)att_out_.w);
-        setup_attrib(p);
-        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
-        att_finish();
+        int round = 0;
+        for (int base = 0; base < att_nseg_; base += per_round, ++round) {
+                const int n = std::min(per_round, att_nseg_ - base);
+                const bool add = round > 0;
+                GLuint fp = x_v_fold(n, add);
+                const bool last = (base + n >= att_nseg_);
+                Target& dst = last ? att_out_
+                                   : ((round & 1) ? v_fold_tmp2_ : v_fold_tmp_);
+                const Target& src = (round & 1) ? v_fold_tmp_ : v_fold_tmp2_;
+                bind_fbo(dst.fbo);
+                glViewport(0, 0, att_out_.w, 1);
+                use_program(fp);
+                forget_state();
+                for (int k = 0; k < n; ++k) {
+                        const string nm = "V" + std::to_string(k);
+                        bind_tex(k, v_parts_[base + k].tex);
+                        set_sampler(fp, nm.c_str(), k);
+                }
+                if (add) {
+                        bind_tex(n, src.tex);
+                        set_sampler(fp, "ACC", n);
+                }
+                glUniform1f(uloc(fp, "VW"), (float)att_out_.w);
+                setup_attrib(fp);
+                glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+                att_finish();
+        }
 }
 
 void GPU::kv_rope_write(int layer, int pos){
