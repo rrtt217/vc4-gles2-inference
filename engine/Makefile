@@ -27,7 +27,7 @@ CORE := $(SRC)/engine.cpp $(SRC)/common.cpp $(SRC)/xformat.cpp $(SRC)/switches.c
         $(SRC)/shaders.cpp $(SRC)/shaders_attn.cpp $(SRC)/dump_shaders.cpp \
         $(wildcard $(SRC)/gpu*.cpp) \
         $(SRC)/tokenizer.cpp $(SRC)/model.cpp $(SRC)/session.cpp $(SRC)/prefix_cache.cpp $(SRC)/lineedit.cpp $(SRC)/lineedit_layout.cpp \
-        $(SRC)/sampling.cpp $(SRC)/grammar.cpp $(SRC)/tools.cpp $(SRC)/ppl.cpp $(SRC)/cli.cpp $(SRC)/chat_format.cpp $(SRC)/prefix_build.cpp $(SRC)/app.cpp $(SRC)/worker.cpp $(SRC)/chat.cpp $(SRC)/chattmpl.cpp $(JINJA)
+        $(SRC)/sampling.cpp $(SRC)/grammar.cpp $(SRC)/gbnf.cpp $(SRC)/schema.cpp $(SRC)/tools.cpp $(SRC)/ppl.cpp $(SRC)/cli.cpp $(SRC)/chat_format.cpp $(SRC)/prefix_build.cpp $(SRC)/app.cpp $(SRC)/worker.cpp $(SRC)/chat.cpp $(SRC)/chattmpl.cpp $(JINJA)
 HEADERS := $(wildcard $(SRC)/*.h)
 # Probe-only headers (not part of the engine build).  Only the probes that
 # include one depend on it; the others are untouched.
@@ -314,11 +314,12 @@ check: test warncheck
 # The compiled tests, built and run without warncheck's forced engine rebuild:
 # `make test` is the fast loop (a few seconds), and `check` runs it first so a
 # broken unit fails before the minute-long build.
-test: test_lineedit test_tokenizer test_xformat test_grammar
+test: test_lineedit test_tokenizer test_xformat test_grammar test_schema
 	./test_lineedit
 	./test_tokenizer
 	./test_xformat
 	./test_grammar
+	./test_schema
 
 # Warnings from src/ are a defect: -Wall -Wextra is on by default and this makes a
 # clean build an assertion rather than a hope.  Warnings from third_party/ are
@@ -369,8 +370,17 @@ test_grammar: tests/test_grammar.cpp tests/checks.h $(SRC)/grammar.cpp \
 	$(CXX) $(ALL_CXXFLAGS) $(INCS) -o $@ tests/test_grammar.cpp $(SRC)/grammar.cpp \
 	  $(SRC)/tokenizer.cpp $(SRC)/common.cpp $(SRC)/switches.cpp -lm
 
+# The generic grammar matcher and the JSON-Schema compiler: the JSON grammar must
+# reproduce test_grammar's corpus, and compiled schemas must accept/reject the
+# right instances.  Synthetic byte vocabulary, no model, no GPU.  Links the
+# vendored json.cpp for common_json (schema parsing).
+test_schema: tests/test_schema.cpp tests/checks.h $(SRC)/gbnf.cpp $(SRC)/schema.cpp \
+             $(SRC)/tokenizer.cpp $(SRC)/common.cpp $(SRC)/switches.cpp $(TP)/jinja/json.cpp $(HEADERS)
+	$(CXX) $(ALL_CXXFLAGS) $(INCS) -o $@ tests/test_schema.cpp $(SRC)/gbnf.cpp $(SRC)/schema.cpp \
+	  $(SRC)/tokenizer.cpp $(SRC)/common.cpp $(SRC)/switches.cpp $(TP)/jinja/json.cpp -lm
+
 clean:
-	rm -f engine engine_mm3 engine_mm3_pi test_lineedit test_tokenizer test_xformat test_grammar
+	rm -f engine engine_mm3 engine_mm3_pi test_lineedit test_tokenizer test_xformat test_grammar test_schema
 	rm -f probes/vc4_probe probes/vc4_ffn_probe probes/vc4_topk_probe probes/load_probe_pi
 	rm -f probes/matvec_probe probes/texsize_probe probes/q4fmt_probe_pi probes/glsl_probe_pi probes/q4mv_probe_pi probes/draw_probe_pi probes/packunpack_probe probes/packunpack_probe_pi probes/logits_grid_probe probes/wrow_probe probes/wrow_probe_pi probes/conv_probe probes/conv_probe_pi probes/t3mv_probe probes/t3mv_probe_pi probes/t3dec_probe probes/t3dec_probe_pi probes/t3lut_probe probes/t3lut_probe_pi probes/t3act_probe probes/t3act_probe_pi probes/rmsfuse_probe probes/rmsfuse_probe_pi probes/att_batch_probe probes/att_batch_probe_pi probes/att_out_probe probes/att_out_probe_pi \
 	rm -f probes/sumorder_probe probes/sumorder_probe_pi probes/q4mv_probe probes/progbinary_probe_pi probes/ffn2_probe_pi probes/rgba4444_probe probes/rgba4444_probe_pi

@@ -29,7 +29,17 @@
 
 #include "tokenizer.h"
 
-class JsonConstraint {
+// The contract both matchers present to the worker: a host-side vocabulary mask
+// applied above the logits boundary.  json_object uses the JSON automaton below;
+// json_schema uses the grammar-driven matcher in gbnf.h.
+struct Constraint {
+    virtual ~Constraint() = default;
+    virtual void mask(std::vector<float>& logits) const = 0;
+    virtual void accept(int token) = 0;
+    virtual bool done() const = 0;
+};
+
+class JsonConstraint : public Constraint {
 public:
     // Build the token->bytes table once per loaded model.  `eos_ids` are the
     // ids that end a turn (model.id_eos / id_stop); they are allowed only in an
