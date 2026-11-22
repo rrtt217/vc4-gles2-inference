@@ -17,4 +17,5 @@ suppression.
 | `test_lineedit.cpp` | the line editor's cursor arithmetic, its paste sanitiser, and the editor driven through a pty | a compiler (`make -C engine test`) — no GPU, no model, no tty | `make test`, `make check`, CI |
 | `test_tokenizer.cpp` | the `.tok` blob parser, BPE rank, special-token atomicity, the user/template split in `encode_parts`, decode and reload | a compiler — a synthetic blob, no model | `make test`, `make check`, CI |
 | `test_xformat.cpp` | the CPU half of every X format: texel counts and `x_pack`'s bytes for q16, i8, i24, f32 and bf16 | a compiler — no GPU, no model | `make test`, `make check`, CI |
-| `checks.h` | the shared assertions (`CHECK`, `CHECK_LL`, `CHECK_STR`, `CHECK_INTS`, `CHECK_BYTES`) | — | included by `test_tokenizer.cpp` and `test_xformat.cpp` |
+| `test_grammar.cpp` | the JSON constraint's byte automaton: valid/invalid/prefix JSON, tokens spanning construct boundaries, EOS-only-when-done, and 400 random valid values plus every prefix | a compiler — a synthetic byte vocabulary, no model | `make test`, `make check`, CI |
+| `checks.h` | the shared assertions (`CHECK`, `CHECK_LL`, `CHECK_STR`, `CHECK_INTS`, `CHECK_BYTES`) | — | included by `test_tokenizer.cpp`, `test_xformat.cpp` and `test_grammar.cpp` |

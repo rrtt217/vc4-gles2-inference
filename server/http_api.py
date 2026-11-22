@@ -25,7 +25,7 @@ import localtools as local_tools
 from chat_render import (DEFAULT_SYSTEM, build_messages, parse_tool_calls,
                          prune_messages, request_chars)
 from engine_bridge import LOGPROBS_KEY, ContextFull, WorkerError
-from sampling import StopFilter, apply_stop_text, sampling_penalties, stop_strings
+from sampling import StopFilter, apply_stop_text, sampling_penalties, stop_strings, response_format
 from tool_calls import build_tool_completion, deterministic_arguments, tool_choice_name
 
 def _gauged(method):
@@ -349,6 +349,7 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("only n=1 is supported")
             stops = stop_strings(body)
             penalties = sampling_penalties(body)
+            resp_format = response_format(body)
             want_logprobs = bool(body.get("logprobs", False))
             if int(body.get("top_logprobs", 0) or 0) > 0:
                 raise ValueError("top_logprobs is not implemented: logprobs=true returns "
@@ -413,7 +414,7 @@ class Handler(BaseHTTPRequestHandler):
                     text, finish, usage = self.server.worker.generate(
                         prompt, max_tokens, temperature, top_p, seed, penalties=penalties,
                         messages=req, top_k=top_k, request_id=cid,
-                        logprobs=want_logprobs)
+                        logprobs=want_logprobs, response_format=resp_format)
                     break
                 except ContextFull as e:
                     trimmed = prune_messages(body.get("messages") or [])
@@ -495,7 +496,7 @@ class Handler(BaseHTTPRequestHandler):
                 # <tool_call> block is complete; do not stream partial JSON.
                 text, finish, usage = self.server.worker.generate(
                     prompt, max_tokens, temperature, top_p, seed, penalties=penalties,
-                    messages=req, top_k=top_k, request_id=cid)
+                    messages=req, top_k=top_k, request_id=cid, response_format=resp_format)
                 if stops:
                     text, stopped = apply_stop_text(text, stops)
                     if stopped:
@@ -514,7 +515,7 @@ class Handler(BaseHTTPRequestHandler):
                 text, finish, usage = self.server.worker.generate(
                     prompt, max_tokens, temperature, top_p, seed,
                     on_token=stop_filter.feed, penalties=penalties,
-                    messages=req, top_k=top_k, request_id=cid)
+                    messages=req, top_k=top_k, request_id=cid, response_format=resp_format)
                 stop_filter.finish()
                 if stop_filter.hit:
                     finish = "stop"

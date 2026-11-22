@@ -124,7 +124,7 @@ class TinyContextWorker:
         pass
 
     def generate(self, prompt, max_tokens, temperature, top_p, seed, on_token=None, penalties=None,
-                 messages=None, top_k=0, request_id="", logprobs=False):
+                 messages=None, top_k=0, request_id="", logprobs=False, response_format=None):
         # The server sends messages and no prompt text, so the marker has to be
         # looked for in whatever actually travelled.
         sent = prompt if messages is None else json.dumps(messages, sort_keys=True)
@@ -146,6 +146,7 @@ class StubWorker:
         self.alive = True
         self.last_penalties = None
         self.last_top_k = 0
+        self.last_response_format = None
         # The engine is the only renderer, so a stub without a template would
         # make every /v1/chat/completions request a 400.
         self.chat_template = True
@@ -159,12 +160,13 @@ class StubWorker:
         return "boom: CmaFree 0 kB, allocation failed"
 
     def generate(self, prompt, max_tokens, temperature, top_p, seed, on_token=None, penalties=None,
-                 messages=None, top_k=0, request_id="", logprobs=False):
+                 messages=None, top_k=0, request_id="", logprobs=False, response_format=None):
         self.ensure_alive()
         self.last_messages = messages
         self.calls += 1
         self.last_penalties = penalties
         self.last_top_k = top_k
+        self.last_response_format = response_format
         self.last_prompt = prompt
         self.last_request_id = request_id
         self.last_logprobs_flag = logprobs
@@ -330,6 +332,46 @@ check("top_k forwarded", worker.last_top_k == 7, str(worker.last_top_k))
 code, resp = http("POST", "/v1/chat/completions", {
     "messages": [{"role": "user", "content": "hi"}], "top_k": -3})
 check("top_k clamped", worker.last_top_k == 0, str(worker.last_top_k))
+
+print("== response_format: parsing ==")
+from sampling import response_format as rf_parse  # noqa: E402
+check("absent response_format is None", rf_parse({}) is None)
+check("text is None", rf_parse({"response_format": {"type": "text"}}) is None)
+check("json_object forwards the spec",
+      rf_parse({"response_format": {"type": "json_object"}}) == {"type": "json_object"})
+for bad, label in [({"type": "json_schema"}, "json_schema"),
+                   ({"type": "yaml"}, "unknown type"),
+                   ("json_object", "non-object")]:
+    try:
+        rf_parse({"response_format": bad}); ok = False
+    except ValueError:
+        ok = True
+    check(f"response_format rejects {label}", ok)
+
+print("== response_format reaches the worker ==")
+code, resp = http("POST", "/v1/chat/completions", {
+    "messages": [{"role": "user", "content": "hi"}],
+    "response_format": {"type": "json_object"}})
+check("json_object forwarded", code == 200
+      and worker.last_response_format == {"type": "json_object"},
+      str(worker.last_response_format))
+code, resp = http("POST", "/v1/chat/completions",
+                  {"messages": [{"role": "user", "content": "hi"}]})
+check("no response_format stays unconstrained", worker.last_response_format is None,
+      str(worker.last_response_format))
+code, resp = http("POST", "/v1/chat/completions", {
+    "messages": [{"role": "user", "content": "hi"}],
+    "response_format": {"type": "text"}})
+check("text stays unconstrained", worker.last_response_format is None,
+      str(worker.last_response_format))
+code, resp = http("POST", "/v1/chat/completions", {
+    "messages": [{"role": "user", "content": "hi"}],
+    "response_format": {"type": "json_schema", "json_schema": {"name": "x", "schema": {}}}})
+check("json_schema is a clean 400", code == 400 and "json_schema" in str(resp), str(resp)[:150])
+code, resp = http("POST", "/v1/chat/completions", {
+    "messages": [{"role": "user", "content": "hi"}],
+    "response_format": {"type": "yaml"}})
+check("unknown response_format type is a 400", code == 400, str(resp)[:150])
 
 print("== stop sequences ==")
 from server import StopFilter, apply_stop_text  # noqa: E402

@@ -24,6 +24,7 @@
 
 #include "common.h"
 #include "jinja/json.h"   // -isystem third_party
+#include "grammar.h"
 #include "sampling.h"
 #include "tools.h"
 
@@ -244,6 +245,35 @@ int run_worker(App& app, Session& session, bool enc_bos, bool chat_dump) {
         if (g_sampling.no_repeat_ngram > 8) g_sampling.no_repeat_ngram = 8;
         if (g_sampling.min_p < 0.0f) g_sampling.min_p = 0.0f;
         if (g_sampling.min_p > 1.0f) g_sampling.min_p = 1.0f;
+        // Column 15: base64 of the OpenAI `response_format` object.  The engine
+        // is the source of truth for what it can constrain, so an unsupported
+        // type is a clear error, not a silent no-op.  Only json_object is
+        // implemented today; json_schema is a later tier.  The constraint lives
+        // above the logits boundary (a host-side mask, like the penalties), so
+        // it forces the full-logits path and is architecture-agnostic.
+        JsonConstraint json_constraint;
+        bool constrained = false;
+        if (f.size() > 14 && !f[14].empty()) {
+            const common_json rf = common_json::parse_no_throw(base64_decode(f[14]));
+            const string rtype = (rf.is_object() && rf.contains("type") && rf.at("type").is_string())
+                                     ? (string) rf.at("type") : string();
+            if (rtype != "json_object") {
+                emit_error("response_format type \"" + rtype + "\" not supported (use json_object)");
+                continue;
+            }
+            // Mirror the turn's own EOS rule (below) so the grammar releases EOS
+            // exactly when the worker would end the turn on it.
+            vector<int> eos_ids;
+            if (app.model.have_specials) {
+                eos_ids.push_back(app.model.id_eos);
+                if (app.model.id_stop >= 0) eos_ids.push_back(app.model.id_stop);
+            } else {
+                eos_ids.push_back(1);
+                eos_ids.push_back(2);
+            }
+            json_constraint.init(app.tokenizer, app.model.vocab, eos_ids);
+            constrained = true;
+        }
         // Column 11 (new): base64 of {"messages":[..],"tools":[..]}.  The
         // server sends it only when this container carries a chat template,
         // because only then can the engine be the renderer.
@@ -307,12 +337,13 @@ int run_worker(App& app, Session& session, bool enc_bos, bool chat_dump) {
         // answer "what was the probability of this token" over the whole
         // vocabulary; a request that asks for it uses the full logits.
         bool cand_mode = app.opt.top_k_candidates && req_top_k > 0 && !greedy_req &&
-                         !sampling_penalties_active() && !want_logprobs;
+                         !sampling_penalties_active() && !want_logprobs && !constrained;
         // Greedy fast path: the argmax runs on the GPU, only the winning id
-        // is read back.  Penalties and logprobs need the full vector, so they
-        // keep the old path (GPU_ARGMAX=0 A/Bs the reduction itself).
+        // is read back.  Penalties, logprobs and a constraint need the full
+        // vector, so they keep the old path (GPU_ARGMAX=0 A/Bs the reduction).
         const bool fast_greedy = greedy_req && !want_logprobs &&
-                                 !sampling_penalties_active() && session.greedy_fast_ok();
+                                 !sampling_penalties_active() && session.greedy_fast_ok() &&
+                                 !constrained;
         int next_fast = -1;
         vector<float> logits;
         CandidateResult cand;
@@ -357,6 +388,11 @@ mt19937 rng(seed);
             if (fast_greedy) {
                 next = next_fast;   // produced by the previous step_greedy
             } else {
+                // The grammar mask is the same kind of host-side edit as the
+                // penalties: forbidden ids become -1e30f.  It goes first so the
+                // penalties' max-relative cut (min_p) is measured over the legal
+                // set, and temperature / top-k / top-p then act on it only.
+                if (constrained) json_constraint.mask(logits);
                 apply_sampling_penalties(logits, recent);
                 if (want_logprobs) {
                     const SampledToken s = greedy_req
@@ -370,6 +406,9 @@ mt19937 rng(seed);
                                                    : sample_token(logits, wt, wp, req_top_k, rng));
                 }
             }
+            // Advance the grammar by the drawn token (a no-op for EOS).  This
+            // reproduces mask()'s end state, so the next step's mask is exact.
+            if (constrained) json_constraint.accept(next);
             const bool is_eos = app.model.have_specials
                     ? (next == app.model.id_eos || (app.model.id_stop >= 0 && next == app.model.id_stop))
                     : (next == 1 || next == 2);

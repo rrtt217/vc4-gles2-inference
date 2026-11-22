@@ -27,6 +27,7 @@ responsibility, not by line count:
 | `src/session.h/.cpp` | KV cache, RoPE, attention, transformer forward, prefix cache |
 | `src/tokenizer.h/.cpp` | llama2.c tokenizer and byte-level BPE, embedded-blob loader |
 | `src/sampling.h/.cpp` | sampling, penalties, top-p/min-p |
+| `src/grammar.h/.cpp` | constrained decoding: a byte-level JSON pushdown automaton that masks the vocabulary above the logits boundary (the worker's `response_format` column); architecture-agnostic, no GPU or numerics change |
 | `src/chattmpl.h/.cpp` | renders the container's Jinja chat template; returns the prompt split into template text and caller text.  Also parses the worker's message request (column 11) |
 | `src/tools.h/.cpp` | tool JSON, restricted arithmetic, built-in handlers |
 | `src/app.h/.cpp` | the live engine state (container, GL context, tokenizer, chat template, system prompt) and the four steps that make a loaded container runnable: `prepare_model`, `setup_from_model`, `upload_weights`, `load_prefix_cache_any`.  Startup and `/model` share them, which is why they are one object.  `Options` is held **by reference**: `setup_from_model` decides the template flags and `main` reads them back |

@@ -260,7 +260,7 @@ class EngineWorker:
     def generate(self, prompt, max_tokens: int, temperature: float,
                  top_p: float, seed: int, on_token=None, penalties: dict | None = None,
                  messages: dict | None = None, top_k: int = 0, request_id: str = "",
-                 logprobs: bool = False):
+                 logprobs: bool = False, response_format: dict | None = None):
         """Return (text, finish_reason, usage).  on_token(text) is optional.
 
         ``prompt`` is either the rendered prompt string, or ``""`` when
@@ -269,6 +269,8 @@ class EngineWorker:
 
         ``penalties`` carries the optional worker columns 6..10 and ``top_k``
         column 12; any field left out keeps the engine's process-level default.
+        ``response_format`` (column 15) is the OpenAI constraint object, e.g.
+        ``{"type": "json_object"}``; None leaves generation unconstrained.
         """
         p = penalties or {}
         def field(key, default=""):
@@ -280,6 +282,10 @@ class EngineWorker:
         if messages is not None:
             payload = json.dumps(messages, ensure_ascii=False, separators=(",", ":"))
             col11 = base64.b64encode(payload.encode("utf-8")).decode("ascii")
+        col15 = ""
+        if response_format is not None:
+            payload = json.dumps(response_format, ensure_ascii=False, separators=(",", ":"))
+            col15 = base64.b64encode(payload.encode("utf-8")).decode("ascii")
         req = "\t".join([
             "" if messages is not None else base64.b64encode(prompt.encode("utf-8")).decode("ascii"),
             str(max(0, int(max_tokens))),
@@ -295,6 +301,7 @@ class EngineWorker:
             str(int(top_k)) if top_k and top_k > 0 else "",
             request_id,
             "1" if logprobs else "",
+            col15,
         ]) + "\n"
         with self.lock:
             # A crashed worker used to surface as "engine worker exited" on every

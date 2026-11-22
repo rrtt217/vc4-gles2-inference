@@ -105,6 +105,30 @@ def stop_strings(body: dict) -> list[str]:
     return out[:4]
 
 
+def response_format(body: dict) -> dict | None:
+    """The OpenAI ``response_format`` constraint to forward to the worker, or None.
+
+    Only ``json_object`` is implemented by the engine's grammar today; ``text``
+    means no constraint.  ``json_schema`` is a later tier -- it is rejected here
+    with a clean 400 rather than forwarded to become a 500 mid-request.  The
+    engine still guards the type itself (it is the source of truth for what it
+    can constrain); this only keeps unsupported requests from reaching it.
+    """
+    rf = body.get("response_format")
+    if rf is None:
+        return None
+    if not isinstance(rf, dict):
+        raise ValueError("response_format must be an object")
+    t = rf.get("type", "text")
+    if t == "text":
+        return None
+    if t == "json_object":
+        return {"type": "json_object"}
+    if t == "json_schema":
+        raise ValueError("response_format json_schema is not supported yet; use json_object")
+    raise ValueError(f"unknown response_format type {t!r}")
+
+
 def apply_stop_text(text: str, stops: list[str]) -> tuple[str, bool]:
     """Truncate at the earliest stop occurrence.  Returns (text, stopped)."""
     cut = None

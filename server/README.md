@@ -521,6 +521,33 @@ Not implemented yet, and refused rather than silently ignored: `top_logprobs`
 (the alternatives — the engine would have to decode each candidate id back to
 text) and `logprobs` with `stream: true`.
 
+## Structured output (response_format)
+
+`response_format: {"type": "json_object"}` guarantees the reply is valid JSON.
+The engine runs a byte-level JSON automaton over the vocabulary at every decode
+step and masks every token the grammar cannot continue with, so temperature,
+top-k and top-p all act on the legal set only.  EOS is released only once a
+complete top-level value has been parsed, which is why a constrained reply that
+fits ends with `finish_reason: "stop"`.  The mask is a host-side edit at the same
+point as the sampling penalties, so it forces the full-logits read-back path and
+works on every architecture the engine runs (dense, MoE, hybrid, RWKV).
+
+```json
+{"messages": [{"role": "user", "content": "Give me a JSON object with name and age."}],
+ "response_format": {"type": "json_object"}, "temperature": 0}
+```
+
+Two things to know:
+
+* It guarantees **syntax, not semantics**.  A small model forced into JSON still
+  chooses the content; on a weak model that can be a valid-but-unhelpful value
+  (a string or a number where you wanted an object).  Prompt for the shape you
+  want as well.  If `max_tokens` cuts the reply mid-structure the result is a
+  valid JSON *prefix*, not a complete document — give it room to finish.
+* `{"type": "text"}` (or absent) is unconstrained.  `json_schema` is a later tier
+  and is refused with a 400 rather than silently ignored; any other type is a
+  400 too.  The engine is the source of truth for what it can constrain.
+
 ## Worker protocol
 
 Request line:
@@ -529,7 +556,7 @@ Request line:
 base64(prompt) \t max_tokens \t temperature \t top_p \t seed
                \t [repetition_penalty \t frequency_penalty \t presence_penalty
                   \t no_repeat_ngram \t min_p]
-               \t [base64(request JSON) \t [top_k \t [request id \t [logprobs]]]]
+               \t [base64(request JSON) \t [top_k \t [request id \t [logprobs \t [response_format]]]]]
 ```
 
 A line that starts with `{` is a **control line**, not a request: a request's
@@ -559,7 +586,7 @@ the REPL drops its `kv_tokens`: a prefix the new model never computed is not a
 prefix.  `engine/scripts/swap_matrix.py` checks that two loads inside one worker
 answer exactly like two fresh workers, including a quantisation change.
 
-The first five columns are required; columns 6-10 and 12 are optional and may be
+The first five columns are required; columns 6-10 and 12-15 are optional and may be
 empty (`\t\t`), which keeps an old server speaking to a new engine.  The engine resets
 `g_sampling` to its process defaults before applying them, so a penalty on one
 request never leaks into the next.
@@ -576,6 +603,12 @@ container's chat template — this is the only shape the server sends now.  A
 container without one is refused by the server with a 400 before the engine is
 touched (and the engine would reject it anyway, with an `error` event, rather
 than guessing a template).
+
+Column 15 is the constrained-decoding spec: base64 of the OpenAI
+`response_format` object, e.g. `{"type":"json_object"}`.  When present, the
+engine masks the vocabulary to the JSON grammar at every step (see
+[Structured output](#structured-output-response_format)).  An unsupported type
+is an `error` event, not a silent no-op.  Empty leaves generation unconstrained.
 
 Events:
 

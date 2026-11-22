@@ -87,6 +87,27 @@ TinyBrainBot 还需要 `--no-gpu-layer`：它在 VC4 上的整层 GPU 路径目�
 尚未实现、并且会明确拒绝而不是静默忽略：`top_logprobs`（备选 token 需要把候选 id 解回
 文本）和 `stream: true` 时的 `logprobs`。
 
+## 结构化输出（response_format）
+
+`response_format: {"type": "json_object"}` 保证回复是合法 JSON。引擎在每一步解码时
+用一个字节级 JSON 自动机过一遍词表，把语法无法延续的 token 全部掩掉，因此温度、top-k、
+top-p 都只作用在合法集合上。只有当一个完整的顶层值解析完毕后才放行 EOS，所以放得下的
+约束回复会以 `finish_reason: "stop"` 结束。掩码是和采样惩罚同一处的 host 侧修改，因此
+会走全 logits 读回路径，并且对引擎跑的每种架构都生效（dense、MoE、hybrid、RWKV）。
+
+```json
+{"messages": [{"role": "user", "content": "给我一个含 name 和 age 的 JSON 对象。"}],
+ "response_format": {"type": "json_object"}, "temperature": 0}
+```
+
+两点要知道：
+
+* 它保证的是**语法，不是语义**。小模型被强制进 JSON 后仍然自己选内容；弱模型可能给出
+  合法但没用的值（你想要对象时它给一个字符串或数字）。请在 prompt 里也说明想要的形状。
+  若 `max_tokens` 在结构中途截断，结果是合法的 JSON **前缀**而非完整文档——给它收尾的空间。
+* `{"type": "text"}`（或不填）即不约束。`json_schema` 是后续档位，会以 400 明确拒绝而不是
+  静默忽略；其它类型同样 400。能约束什么由引擎说了算。
+
 ## 一个服务器多个模型
 
 `--model` 可以重复；每个容器都会出现在 `GET /v1/models` 里，`/health` 还会说明当前驻留的是哪个。
