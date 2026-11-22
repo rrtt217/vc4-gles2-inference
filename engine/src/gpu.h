@@ -677,9 +677,9 @@ private:
 
     void att_stats(int pos);
     // The multi-segment (max, sum) fold (docs/long-context.md).
-    void att_stats_fold(int pos, bool final);
+    void att_stats_fold(bool final);
     // The multi-segment value sum (docs/long-context.md).
-    void att_v_fold(int pos);
+    void att_v_fold();
     // The multi-segment value sum (docs/long-context.md).
 
     void att_probs(int pos);

@@ -161,6 +161,33 @@ against 317 at 1.4k) reaches the same place much sooner.  **A larger window is
 affordable as a prompt, not as a conversation**: prefill pays the scan once,
 every decoded token pays it again.
 
+**What a split costs on the board.**  Measured 2026-11-22 on the Pi Zero with
+the shipped q8 container, the same 2048-position window at one slice and at two:
+
+| | 1 slice | 2 slices | |
+|---|---:|---:|---|
+| PPL | 271.2855 | 273.5285 | +0.83% |
+| decode | 196.4 ms/token | 291.2 ms/token | **+48%** |
+| prefill | 12.06 s | 14.99 s | +24% |
+
+The decode cost is the one that matters and it is not the estimate this page
+used to carry.  The split does not add two draws a layer as a paper calculation
+suggests: it doubles the attention block's draws (`att_score` and `att_v` go
+from one each to two, `att_stats` from one to two passes a slice, plus the value
+fold), and a board draw costs ~0.4-0.6 ms of submission before any fragment is
+shaded.  On Xe the same comparison is free -- 9.4 ms either way -- because a
+draw there costs a fraction of that.  So a split window is worth its price only
+when the window is the reason for the run: a conversation that fits in 2048 is
+faster unsplit, and `SEQ` defaults stay where they are.
+
+The PPL column's difference is the board alone and is not explained.  The same
+comparison on Xe reads the same number for both, and repeating it on the board
+with `Q16_DECODE=exact` still differs, so it is not the q16 decode's
+classification either.  What is left is the order of the partial sums: a
+two-slice window sums two halves of the stats scan and two halves of the value
+row, and on VC4's fixed-point grid that can land an LSB away from the single
+draw.
+
 The window is not the only thing that grows.  The KV cache is
 `layers x kv_width x seq x 4` bytes -- 3.1 MB at SEQ 2048 for MiniMind3 q8, and
 that is the figure that decides whether the board's 320 MB CMA has room for the

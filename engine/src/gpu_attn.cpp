@@ -519,9 +519,9 @@ void GPU::att_stats(int pos){
             att_finish();
         };
         pass(false);
-        att_stats_fold(pos, false);   // the per-head max, into stats_gmax_
+        att_stats_fold(false);        // the per-head max, into stats_gmax_
         pass(true);
-        att_stats_fold(pos, true);    // the plain add, into att_stats_
+        att_stats_fold(true);         // the plain add, into att_stats_
     }
 
 // Long context: fold the per-segment (max, sum) pairs into one.  The max is a
@@ -531,7 +531,7 @@ void GPU::att_stats(int pos){
 // segment sums back as texels and doing the arithmetic on the host keeps this a
 // handful of bytes a layer rather than another shader -- and a shader would have
 // to be a second reduction over N samplers anyway.
-void GPU::att_stats_fold(int pos, bool final){
+void GPU::att_stats_fold(bool final){
         const int h = att_heads_;
         vector<float> mx((size_t)att_nseg_ * h), sm((size_t)att_nseg_ * h);
         for (int k = 0; k < att_nseg_; ++k) {
@@ -661,7 +661,7 @@ void GPU::att_v(int layer, int pos){
             glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         }
         att_finish();
-        att_v_fold(pos);
+        att_v_fold();
     }
 
 // Long context: sum the per-slice value partials into att_out_.  A GPU pass, not
@@ -669,7 +669,7 @@ void GPU::att_v(int layer, int pos){
 // re-implementing I24_1 in C++ is how its encoder drifted once already (the
 // value lives in .gba with a zero top byte; reading .rgba as a 24-bit number is
 // a different format).
-void GPU::att_v_fold(int pos){
+void GPU::att_v_fold(){
         if (att_nseg_ <= 1) { att_out_ = v_parts_[0]; return; }
         // Every slice has to be folded in.  A slice left unbound reads unit 0,
         // which sums the first slice again and silently loses the rest --
