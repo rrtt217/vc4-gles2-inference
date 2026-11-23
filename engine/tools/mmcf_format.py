@@ -65,7 +65,10 @@ def rec_size(version):
     A longer record would therefore be 16 zero bytes per tensor, and keeping 64
     is what lets one reader parse v2/v3/v4 tables with the same field offsets.
     """
-    return REC_SIZE_V3 if version >= 3 else REC_SIZE_V2
+    # v5 is the encoder-decoder's and it keeps v2's 48-byte record: the encoder
+    # kinds carry their shape in the fields a dense record already has.  Only
+    # v3/v4 (the `aux` expert index and RWKV's) are 64.
+    return REC_SIZE_V3 if version in (3, 4) else REC_SIZE_V2
 
 
 # --- dtypes -------------------------------------------------------------

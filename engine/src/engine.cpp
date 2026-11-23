@@ -143,6 +143,15 @@ int main(int argc, char** argv) {
     // by the REPL's /model, which is why it reads `model` instead of taking it
     // as an argument.  Returns false when the container is unusable.
     if (!app.setup_from_model()) return 2;
+    // A version 5 container carries an encoder stack and a cross-attention; the
+    // decode loop that drives them is the next step of this branch, and until it
+    // exists the dense loop would read an empty rms_att and die in the upload.
+    // Refuse here, where the message can say why, instead of there.
+    if (app.model.is_encdec()) {
+        fprintf(stderr, "this container is version 5 (encoder-decoder): the read "
+                        "path is implemented, the decode loop is not yet\n");
+        return 2;
+    }
     // Tool definitions, normalised to one JSON array for the template context.
     const string tools_array = chat_tools_array(opt.tools_json);
     // BOS policy: the container states it when it can (key 10); otherwise the
