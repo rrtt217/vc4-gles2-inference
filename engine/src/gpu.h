@@ -536,6 +536,9 @@ private:
     XFormat act_fmt_ = XFormat::I16_2;
 public:
     XFormat act_fmt() const { return act_fmt_; }
+    // The attention's resolved geometry.  A scan bound is the first thing to
+    // check when a pass costs 20x the same pass on another model.
+    void att_geometry_line() const;
     XFormat res_fmt() const { return res_fmt_; }
 private:  // matvec input (qkv/wo/gate/logits)
     XFormat ffn_fmt_ = XFormat::I16_2;  // FFN hidden state (w2 input)

@@ -53,6 +53,12 @@ void GPU::bind_seg(int base_unit, const char* base, const vector<GLuint>& tex, G
         }
 }
 
+void GPU::att_geometry_line() const {
+        fprintf(stderr, "attn: dim %d seq %d heads %d head_dim %d nseg %d seg %d rope_none %d causal %d\n",
+                att_dim_, att_seq_, att_heads_, att_head_dim_, att_nseg_, att_seg_,
+                (int)att_rope_none_, (int)att_causal_);
+}
+
 void GPU::init_attention(int dim, int kv_dim, int heads, int kv_heads, int head_dim,
                         int seq, bool rope_half, bool qk_norm, int layers,
                         const vector<float>& qn, const vector<float>& kn,
