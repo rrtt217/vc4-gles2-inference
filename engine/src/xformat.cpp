@@ -384,30 +384,34 @@ std::string x_residual_glsl(XFormat f) {
     switch (f) {
         case XFormat::S24_1:
             return x_codec_glsl(XFormat::S24_1) +
-                "#define R1(T,I,TW) x_s24(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)))\n"
-                "#define R2(T,BASE,TW) vec2(R1(T,(BASE),TW),R1(T,(BASE)+1,TW))\n"
-                "#define R1Q(T,I,TW) R1(T,I,TW)\n"
-                "#define XST1Q(Q) x_s24enc(Q)\n";
+                "#define Y1(T,I,TW) x_s24(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)))\n"
+                "#define Y2(T,BASE,TW) vec2(Y1(T,(BASE),TW),Y1(T,(BASE)+1,TW))\n"
+                "#define Y1Q(T,I,TW) Y1(T,I,TW)\n"
+                "#define YST1(V) x_s24enc(V)\n"
+                "#define YST1Q(Q) x_s24enc(Q)\n";
         case XFormat::I24_1:
             return
-                "#define R1(T,I,TW) x_q24(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)))\n"
-                "#define R2(T,BASE,TW) vec2(R1(T,(BASE),TW),R1(T,(BASE)+1,TW))\n"
-                "#define R1Q(T,I,TW) x_q24raw(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)))\n"
-                "#define XST1Q(Q) x_q24encq(Q)\n";
+                "#define Y1(T,I,TW) x_q24(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)))\n"
+                "#define Y2(T,BASE,TW) vec2(Y1(T,(BASE),TW),Y1(T,(BASE)+1,TW))\n"
+                "#define Y1Q(T,I,TW) x_q24raw(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)))\n"
+                "#define YST1(V) x_q24enc(V)\n"
+                "#define YST1Q(Q) x_q24encq(Q)\n";
         case XFormat::I16_1:
             return
-                "#define R1(T,I,TW) x_i16(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)).rg)\n"
-                "#define R2(T,BASE,TW) vec2(R1(T,(BASE),TW),R1(T,(BASE)+1,TW))\n"
-                "#define R1Q(T,I,TW) x_i16raw(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)).rg)\n"
-                "#define XST1Q(Q) x_st1q(Q)\n";
+                "#define Y1(T,I,TW) x_i16(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)).rg)\n"
+                "#define Y2(T,BASE,TW) vec2(Y1(T,(BASE),TW),Y1(T,(BASE)+1,TW))\n"
+                "#define Y1Q(T,I,TW) x_i16raw(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)).rg)\n"
+                "#define YST1(V) x_st1(V)\n"
+                "#define YST1Q(Q) x_st1q(Q)\n";
         case XFormat::I16_2:
             return
-                "#define R1(T,I,TW) ((((I)/2)*2)==(I) ? x_i16(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).rg) "
+                "#define Y1(T,I,TW) ((((I)/2)*2)==(I) ? x_i16(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).rg) "
                 ": x_i16(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).ba))\n"
-                "#define R2(T,BASE,TW) x_i16pair(texture2D(T,vec2((float((BASE)/2)+0.5)/(TW),0.5)))\n"
-                "#define R1Q(T,I,TW) ((((I)/2)*2)==(I) ? x_i16raw(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).rg) "
+                "#define Y2(T,BASE,TW) x_i16pair(texture2D(T,vec2((float((BASE)/2)+0.5)/(TW),0.5)))\n"
+                "#define Y1Q(T,I,TW) ((((I)/2)*2)==(I) ? x_i16raw(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).rg) "
                 ": x_i16raw(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).ba))\n"
-                "#define XST1Q(Q) x_st1q(Q)\n";
+                "#define YST1(V) x_st1(V)\n"
+                "#define YST1Q(Q) x_st1q(Q)\n";
         case XFormat::F32:
             // Distinct helper names: a kernel can carry both x_glsl(F32) and
             // x_residual_glsl(F32), and a second definition of x_f32 would not
@@ -419,10 +423,11 @@ std::string x_residual_glsl(XFormat f) {
                 "vec4 x_f32renc(float v){uint u=floatBitsToUint(v);"
                 "return vec4(float(u>>24),float((u>>16)&255u),float((u>>8)&255u),"
                 "float(u&255u))/255.0;}\n"
-                "#define R1(T,I,TW) x_f32r(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)))\n"
-                "#define R2(T,BASE,TW) vec2(R1(T,(BASE),TW),R1(T,(BASE)+1,TW))\n"
-                "#define R1Q(T,I,TW) (R1(T,(I),TW)*256.0)\n"
-                "#define XST1Q(Q) x_f32renc((Q)/256.0)\n";
+                "#define Y1(T,I,TW) x_f32r(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)))\n"
+                "#define Y2(T,BASE,TW) vec2(Y1(T,(BASE),TW),Y1(T,(BASE)+1,TW))\n"
+                "#define Y1Q(T,I,TW) (Y1(T,(I),TW)*256.0)\n"
+                "#define YST1(V) x_f32renc(V)\n"
+                "#define YST1Q(Q) x_f32renc((Q)/256.0)\n";
         case XFormat::BF16:
             // Same two-halves-a-texel layout; the residual add stores one value
             // a texel (XST1Q) so the pair is only used for reads.
@@ -435,12 +440,13 @@ std::string x_residual_glsl(XFormat f) {
             // RES=bf16 on a q8 container, 2026-11-18; the q4 grid happened not
             // to reach that builder).  The include guard makes it idempotent.
             return x_bf16_glsl() +
-                "#define R1(T,I,TW) ((((I)/2)*2)==(I) ? "
+                "#define Y1(T,I,TW) ((((I)/2)*2)==(I) ? "
                 "x_bf16(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).rg) : "
                 "x_bf16(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).ba))\n"
-                "#define R2(T,BASE,TW) vec2(R1(T,(BASE),TW),R1(T,(BASE)+1,TW))\n"
-                "#define R1Q(T,I,TW) (R1(T,(I),(TW))*256.0)\n"
-                "#define XST1Q(Q) x_bf16enc((Q)/256.0)\n";
+                "#define Y2(T,BASE,TW) vec2(Y1(T,(BASE),TW),Y1(T,(BASE)+1,TW))\n"
+                "#define Y1Q(T,I,TW) (Y1(T,(I),(TW))*256.0)\n"
+                "#define YST1(V) x_bf16enc(V)\n"
+                "#define YST1Q(Q) x_bf16enc((Q)/256.0)\n";
         case XFormat::I8_4:
             // No residual in this format, by design and not by omission: four
             // values a texel at 1/16 is a *narrow* stream, and a residual is
