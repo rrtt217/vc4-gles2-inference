@@ -138,7 +138,12 @@ string att_defs(const AttnConfig& c) {
            (c.nseg > 1 ? "#define NSEG " + to_string(c.nseg) + "\n" +
                          "#define SEG " + to_string(c.seg) + "\n" +
                          "#define SEGK " + to_string(c.segk) + "\n" : "") +
-           (c.qbatch > 1 ? "#define QB " + to_string(c.qbatch) + "\n" : "");
+           (c.qbatch > 1 ? "#define QB " + to_string(c.qbatch) + "\n" : "") +
+           // A bidirectional (encoder) pass or a cross-attention has no future
+           // to hide: every key is visible.  Emitted only when it is off, so
+           // every decoder-only program keeps its text byte for byte
+           // (gate/shader_hashes.sh).
+           (!c.causal ? "#define NOCAUSAL 1\n" : "");
 }
 
 string att_helpers(const AttnConfig& c) {
@@ -375,7 +380,10 @@ string att_score(const AttnConfig& c) {
         "return vec4(hi/255.0,(q-hi*256.0)/255.0,0.0,1.0);}"
         "void main(){int T=int(gl_FragCoord.x);" + open +
         "int t0=T*2;int t1=t0+1;int kvh=h/GROUP;float s0=0.0,s1=0.0;"
-        "bool e0=(float(" + g0 + ")<=" + ypos + ");bool e1=(float(" + g1 + ")<=" + ypos + ");"
+        + string(c.causal
+                 ? "bool e0=(float(" + g0 + ")<=" + ypos + ");bool e1=(float(" + g1 + ")<=" + ypos + ");"
+                 : "bool e0=true;bool e1=true;") +
+        
         "if(!e0&&!e1){gl_FragColor=vec4(0.0,0.0,0.0,0.0);return;}"
         "for(int i=0;i<HEADDIM;i++){"
         "vec4 qp=texture2D(Q,vec2((float((h*HEADDIM+i)/2)+0.5)/float(DIM/2)," + qrow + "));"
@@ -434,15 +442,15 @@ string att_stats(const AttnConfig& c) {
         "if(q<0.0)q+=65536.0;float hi=floor(q/256.0);"
         "return vec2(hi/255.0,(q-hi*256.0)/255.0);}"
         "void main(){int h=int(gl_FragCoord.x);float mx=-1e30;"
-        "for(int T=" + t_lo + ";T<" + t_hi + ";T++){int t0=T*2;if(float(t0)>pos)break;"
+        "for(int T=" + t_lo + ";T<" + t_hi + ";T++){int t0=T*2;" + (c.causal ? "if(float(t0)>pos)break;" : "") +
         "vec4 c=texture2D(" + st.sampler + ",vec2((float(" + tloc + ")+0.5)/float(" + sdiv + ")," + srow + "));"
-        "mx=max(mx,dec16(c.rg)*SCSI);if(float(t0+1)<=pos)mx=max(mx,dec16(c.ba)*SCSI);}"
+        "mx=max(mx,dec16(c.rg)*SCSI);" + (c.causal ? "if(float(t0+1)<=pos)" : "") + "mx=max(mx,dec16(c.ba)*SCSI);}"
         + mx_use +
         "float sum=0.0;"
-        "for(int T=" + t_lo + ";T<" + t_hi + ";T++){int t0=T*2;if(float(t0)>pos)break;"
+        "for(int T=" + t_lo + ";T<" + t_hi + ";T++){int t0=T*2;" + (c.causal ? "if(float(t0)>pos)break;" : "") +
         "vec4 c=texture2D(" + st.sampler + ",vec2((float(" + tloc + ")+0.5)/float(" + sdiv + ")," + srow + "));"
         "sum+=" + exp_call(c) + "dec16(c.rg)*SCSI-" + mx_var + ");"
-        "if(float(t0+1)<=pos)sum+=" + exp_call(c) + "dec16(c.ba)*SCSI-" + mx_var + ");}"
+        + (c.causal ? "if(float(t0+1)<=pos)" : "") + "sum+=" + exp_call(c) + "dec16(c.ba)*SCSI-" + mx_var + ");}"
         // The sum's domain is a choice, not a decision (`AttnConfig::sum_log`):
         // the linear grid is a 1/32 step, which is 2% of a peaked softmax's sum
         // (~1.5) and a pure *gain* error on every probability in the head, while
@@ -463,7 +471,7 @@ string att_prob(const AttnConfig& c) {
         "vec4 sm=texture2D(ST,vec2((float(2*h)+0.5)/float(2*HEADS),0.5));"
         "vec4 ss=texture2D(ST,vec2((float(2*h+1)+0.5)/float(2*HEADS),0.5));"
         "float mx=dec24s(sm,SCS);float sum=dec24s(ss,SMS);float p=0.0;"
-        "if(float(t)<=pos && sum>0.0)p=" + exp_call(c) + "dec24s(texture2D(S,vec2((float(t)+0.5)/float(SEQ),(float(h)+0.5)/float(HEADS))),SCS)-mx)/sum;"
+        "if(" + string(c.causal ? "float(t)<=pos" : "true") + " && sum>0.0)p=" + exp_call(c) + "dec24s(texture2D(S,vec2((float(t)+0.5)/float(SEQ),(float(h)+0.5)/float(HEADS))),SCS)-mx)/sum;"
         "gl_FragColor=enc24s(p,65536.0);}";
 }
 
@@ -572,13 +580,13 @@ string att_v(const AttnConfig& c, XFormat out) {
         "void main(){int t=int(gl_FragCoord.x);int x0=" + to_string(N) + "*t;"
         "int h=x0/HEADDIM;int i0=x0-h*HEADDIM;int kvh=h/GROUP;" + init + heads_idx +
         prob_body +
-        "int mxT=int(pos+0.5)/2+1;"
-        "for(int T=" + t_lo + ";T<" + t_hi + ";T++){if(T>=mxT)break;"
+        (c.causal ? "int mxT=int(pos+0.5)/2+1;" : "int mxT=" + t_hi + ";") +
+        "for(int T=" + t_lo + ";T<" + t_hi + ";T++){" + (c.causal ? "if(T>=mxT)break;" : "") +
         "int t0=T*2;int t1=t0+1;"
         "vec4 sp=texture2D(" + sp.sampler + ",vec2((float(" + tloc + ")+0.5)/float(" + sdiv + ")," + srow + "));"
         "float p0=" + exp_call(c) + "dec16(sp.rg)*SCSI-mx)*invs;" + (vstep ? step0 : string("")) +
         loads0 + bodies +
-        "if(float(t1)<=pos){float p1=" + exp_call(c) + "dec16(sp.ba)*SCSI-mx)*invs;" + (vstep ? step1 : string("")) + loads1 +
+        string(c.causal ? "if(float(t1)<=pos)" : "if(true)") + "{float p1=" + exp_call(c) + "dec16(sp.ba)*SCSI-mx)*invs;" + (vstep ? step1 : string("")) + loads1 +
         "a0+=p1*v1_0;" + (N > 1 ? "a1+=p1*v1_1;" : "") + (N > 2 ? "a2+=p1*v1_2;a3+=p1*v1_3;" : "") + "}}"
         + acc_read + enc;
     return fs;

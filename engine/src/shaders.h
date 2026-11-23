@@ -24,6 +24,10 @@ struct AttnConfig {
     bool rope_half = false;
     bool qk_norm = false;
     bool qkv_pair = false;  // qkv matvec writes two q16 rows per texel
+    // Every key is visible: a bidirectional pass (the encoder) or a
+    // cross-attention.  Emitting nothing when it is true is what keeps every
+    // decoder-only program's text byte-identical (gate/shader_hashes.sh).
+    bool causal = true;
     int kv_bits = 0;
     // KV value encoding: 0 = the fixed q16 grid (KVSCALE), 1 = bf16 (same two
     // values a texel, uniform 0.1% relative precision, no scale to tune).
