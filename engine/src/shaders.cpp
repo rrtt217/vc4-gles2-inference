@@ -1809,14 +1809,14 @@ string swiglu_pair(int hidden, XFormat out, int hs) {
                "gl_FragColor=x_f32enc(actv(i)" + HM + ");}";
         // head(I16_2), not head(F32): the pair buffer A holds two q16 values a
         // texel and actv() reads it with X2.  Only the *store* is f32.
-        return head(XFormat::I16_2) + poly_src() + x_f32_store_glsl() + x_bf16_glsl() + HD +
+        return head(XFormat::I16_2) + poly_src() + x_store_glsl(XFormat::F32) + x_codec_glsl(XFormat::BF16) + HD +
            "uniform sampler2D A;" + act + body;
     }
     if (out == XFormat::BF16) {
         // Two values a texel, same pair index as the q16 form; the store is bf16.
         body = "void main(){int t=int(gl_FragCoord.x);int i0=2*t;"
                "gl_FragColor=x_bf16enc2(actv(i0)" + HM + ",actv(i0+1)" + HM + ");}";
-        return head(XFormat::I16_2) + poly_src() + x_bf16_glsl() + HD +
+        return head(XFormat::I16_2) + poly_src() + x_codec_glsl(XFormat::BF16) + HD +
                "uniform sampler2D A;" + act + body;
     }
     if (out == XFormat::I8_4) {
@@ -1826,7 +1826,7 @@ string swiglu_pair(int hidden, XFormat out, int hs) {
         body = "void main(){int t=int(gl_FragCoord.x);int i0=2*t;"
                "gl_FragColor=x_st2(actv(i0)" + HM + ",actv(i0+1)" + HM + ");}";
     }
-    return head(XFormat::I16_2) + poly_src() + x_bf16_glsl() + HD +
+    return head(XFormat::I16_2) + poly_src() + x_codec_glsl(XFormat::BF16) + HD +
            "uniform sampler2D A;" + act + body;
 }
 
@@ -1848,14 +1848,14 @@ string swiglu_2row(int hidden, XFormat out, int hs) {
         // pocket's peaks at 1005 (probe_residuals.py).
         body = "void main(){int i=int(gl_FragCoord.x);"
                "gl_FragColor=x_f32enc(yat(i)" + HM + ");}";
-        return head(XFormat::I16_2) + poly_src() + x_f32_store_glsl() + x_bf16_glsl() +
+        return head(XFormat::I16_2) + poly_src() + x_store_glsl(XFormat::F32) + x_codec_glsl(XFormat::BF16) +
                HD +
                "uniform sampler2D A;" + read + body;
     }
     if (out == XFormat::BF16) {
         body = "void main(){int t=int(gl_FragCoord.x);int i0=2*t;"
                "gl_FragColor=x_bf16enc2(yat(i0)" + HM + ",yat(i0+1)" + HM + ");}";
-        return head(XFormat::I16_2) + poly_src() + x_bf16_glsl() + HD +
+        return head(XFormat::I16_2) + poly_src() + x_codec_glsl(XFormat::BF16) + HD +
                "uniform sampler2D A;" + read + body;
     }
     if (out == XFormat::I8_4) {
@@ -1928,12 +1928,12 @@ string swiglu(int hidden, bool fused, XFormat out, int hs) {
     if (out == XFormat::F32) {
         body = "void main(){int i=int(gl_FragCoord.x);"
                "gl_FragColor=x_f32enc(yat(i)" + HM + ");}";
-        return head(XFormat::I16_2) + x_f32_store_glsl() + HD + read + body;
+        return head(XFormat::I16_2) + x_store_glsl(XFormat::F32) + HD + read + body;
     }
     if (out == XFormat::BF16) {
         body = "void main(){int t=int(gl_FragCoord.x);int i0=2*t;"
                "gl_FragColor=x_bf16enc2(yat(i0)" + HM + ",yat(i0+1)" + HM + ");}";
-        return head(XFormat::I16_2) + x_bf16_glsl() + HD + read + body;
+        return head(XFormat::I16_2) + x_codec_glsl(XFormat::BF16) + HD + read + body;
     }
     if (out == XFormat::I8_4) {
         body = "void main(){int t=int(gl_FragCoord.x);int i0=4*t;"
@@ -1942,7 +1942,7 @@ string swiglu(int hidden, bool fused, XFormat out, int hs) {
         body = "void main(){int t=int(gl_FragCoord.x);int i0=2*t;"
                "gl_FragColor=x_st2(yat(i0)" + HM + ",yat(i0+1)" + HM + ");}";
     }
-    return head(XFormat::I16_2) + poly_src() + x_bf16_glsl() + HD + read + body;
+    return head(XFormat::I16_2) + poly_src() + x_codec_glsl(XFormat::BF16) + HD + read + body;
 }
 
 string rms_stats_split(int dim, XFormat residual) {
@@ -2102,7 +2102,7 @@ string rms_norm(int dim, XFormat residual, XFormat out, bool fused_reduce,
     // every other format's text contains, and the emitted text is the
     // numerics (gate/shader_hashes.txt), so it stays exactly as it was.
     return head(residual) + encs_glsl() + x_residual_glsl(residual) +
-           (residual == XFormat::BF16 ? string() : x_bf16_glsl()) +
+           (residual == XFormat::BF16 ? string() : x_codec_glsl(XFormat::BF16)) +
         "uniform sampler2D X,W,S;uniform float dummy;" + (use_eps_uniform ? "uniform float eps;" : string()) + body;
 }
 

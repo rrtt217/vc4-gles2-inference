@@ -174,7 +174,7 @@ string att_helpers(const AttnConfig& c) {
         // round-to-nearest-even, both of which xformat already owns.
         string("vec4 encKV1(float v){return enc24s(v,KVSCALE);}\n"
                "float decKV1(vec4 c){return dec24s(c,KVSCALE);}\n") +
-        x_bf16_glsl() +
+        x_codec_glsl(XFormat::BF16) +
         "vec4 encKV(float v0,float v1){return x_bf16enc2(v0,v1);}\n"
         "float decKV(vec4 c,int odd){return (odd==1)?x_bf16(c.ba):x_bf16(c.rg);}\n"
         : string("vec4 encKV1(float v){return enc24s(v,KVSCALE);}\n"
@@ -584,7 +584,7 @@ string att_v(const AttnConfig& c, XFormat out) {
                           : "gl_FragColor=x_st2(" + accs + ");}";
 
     string fs = "precision highp float;\n" + x_glsl(out) +
-                (out == XFormat::BF16 ? string() : x_bf16_glsl()) +
+                (out == XFormat::BF16 ? string() : x_codec_glsl(XFormat::BF16)) +
                 att_defs(c) + att_helpers(c) +
         (c.nseg > 1 ? seg_uniforms(c, "S") + seg_uniforms(c, "KV") + seg_uniforms(c, "VS") +
                           "uniform sampler2D ST;"
@@ -641,7 +641,7 @@ string att_v_fold_shader(const AttnConfig& c, XFormat out, int nseg, bool accumu
     if (accumulate) decl += "uniform sampler2D ACC;";
     for (int v = 0; v < N; ++v) init += "float a" + to_string(v) + "=0.0;";
     return "precision highp float;\n" + x_glsl(out) +
-           (out == XFormat::BF16 ? string() : x_bf16_glsl()) +
+           (out == XFormat::BF16 ? string() : x_codec_glsl(XFormat::BF16)) +
            att_defs(c) + decl + "uniform float VW;"
            "void main(){int t=int(gl_FragCoord.x);" + init + reads + enc;
 }

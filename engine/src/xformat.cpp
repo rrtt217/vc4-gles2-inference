@@ -182,7 +182,9 @@ static const char* q16_pair_glsl() {
             "if(u3>=32767.5)u3-=65536.0;return vec4(u0,u1,u2,u3);}\n";
 }
 
-std::string x_bf16_glsl() {
+
+std::string x_codec_glsl(XFormat f) {
+    if (f == XFormat::BF16) {
     // Only the bf16 functions, no X1/X2 macros: a kernel that already carries
     // its own X-macros (the attention codec's activation format) still wants
     // these, and defining the macros twice is a preprocessor error.
@@ -202,10 +204,19 @@ std::string x_bf16_glsl() {
         "vec4 x_bf16enc2(float a,float b){uint ua=x_bf16i(a),ub=x_bf16i(b);"
         "return vec4(float(ua>>8)/255.0,float(ua&255u)/255.0,"
         "float(ub>>8)/255.0,float(ub&255u)/255.0);}\n"
-        "#endif\n";
-}
-
-std::string x_codec_glsl(XFormat f) {
+        "#endif\n";    }
+    if (f == XFormat::F32) {
+        // The two functions this format *is*, guarded so that both slots can
+        // carry one.  `x_residual_glsl(F32)` used to hand-copy them as
+        // `x_f32r`/`x_f32renc` because a second `x_f32` would not compile
+        // (its own comment said so).  A copy is a thing to keep in sync.
+        return
+            "\n#ifndef X_F32_GLSL\n#define X_F32_GLSL\n"
+            "float x_f32(vec4 c){uint u=(uint(int(c.x*255.0+0.5))<<24)|"
+            "(uint(int(c.y*255.0+0.5))<<16)|(uint(int(c.z*255.0+0.5))<<8)|"
+            "uint(int(c.w*255.0+0.5));return uintBitsToFloat(u);}\n"
+            "#endif\n" + x_store_glsl(XFormat::F32);
+    }
     if (f != XFormat::S24_1) return std::string();
     // The sum of squares the rms stats passes store.  Faithful to the encoder it
     // replaces (`encs` in shaders.cpp): *four* bytes, because a lane sum of
@@ -315,7 +326,7 @@ std::string x_glsl(XFormat f) {
             // scale, and the Q variants return value*256 like every other
             // format's do (the matvec kernels carry the 1/256 in their scale).
             s +=
-                x_bf16_glsl() +
+                x_codec_glsl(XFormat::BF16) +
                 "#define X1(T,I,TW) ((((I)/2)*2)==(I) ? "
                 "x_bf16(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).rg) : "
                 "x_bf16(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).ba))\n"
@@ -358,11 +369,8 @@ std::string x_glsl(XFormat f) {
             // One value a texel: the four bytes of the float, rebuilt with a
             // bit-cast.  ESSL 3.00 only (link_program finds the bit-cast and
             // es3ifies the kernel); no grid, no clamp, no scale.
+            s += x_codec_glsl(XFormat::F32);
             s +=
-                "float x_f32(vec4 c){uint u=(uint(int(c.x*255.0+0.5))<<24)|"
-                "(uint(int(c.y*255.0+0.5))<<16)|(uint(int(c.z*255.0+0.5))<<8)|"
-                "uint(int(c.w*255.0+0.5));return uintBitsToFloat(u);}\n" +
-                x_f32_store_glsl() +
                 "#define X1(T,I,TW) x_f32(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)))\n"
                 "#define X2(T,BASE,TW) vec2(X1(T,(BASE),TW),X1(T,(BASE)+1,TW))\n"
                 "#define X4(T,BASE,TW) vec4(X1(T,(BASE),TW),X1(T,(BASE)+1,TW),X1(T,(BASE)+2,TW),X1(T,(BASE)+3,TW))\n"
@@ -421,21 +429,12 @@ std::string x_residual_glsl(XFormat f) {
                 "#define YST1(V) x_st1(V)\n"
                 "#define YST1Q(Q) x_st1q(Q)\n";
         case XFormat::F32:
-            // Distinct helper names: a kernel can carry both x_glsl(F32) and
-            // x_residual_glsl(F32), and a second definition of x_f32 would not
-            // compile.
-            return
-                "float x_f32r(vec4 c){uint u=(uint(int(c.x*255.0+0.5))<<24)|"
-                "(uint(int(c.y*255.0+0.5))<<16)|(uint(int(c.z*255.0+0.5))<<8)|"
-                "uint(int(c.w*255.0+0.5));return uintBitsToFloat(u);}\n"
-                "vec4 x_f32renc(float v){uint u=floatBitsToUint(v);"
-                "return vec4(float(u>>24),float((u>>16)&255u),float((u>>8)&255u),"
-                "float(u&255u))/255.0;}\n"
-                "#define Y1(T,I,TW) x_f32r(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)))\n"
+            return x_codec_glsl(XFormat::F32) +
+                "#define Y1(T,I,TW) x_f32(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)))\n"
                 "#define Y2(T,BASE,TW) vec2(Y1(T,(BASE),TW),Y1(T,(BASE)+1,TW))\n"
                 "#define Y1Q(T,I,TW) (Y1(T,(I),TW)*256.0)\n"
-                "#define YST1(V) x_f32renc(V)\n"
-                "#define YST1Q(Q) x_f32renc((Q)/256.0)\n";
+                "#define YST1(V) x_f32enc(V)\n"
+                "#define YST1Q(Q) x_f32enc((Q)/256.0)\n";
         case XFormat::BF16:
             // Same two-halves-a-texel layout; the residual add stores one value
             // a texel (XST1Q) so the pair is only used for reads.
@@ -447,7 +446,7 @@ std::string x_residual_glsl(XFormat f) {
             // defined ("no function with name 'x_bf16'", found by running
             // RES=bf16 on a q8 container, 2026-11-18; the q4 grid happened not
             // to reach that builder).  The include guard makes it idempotent.
-            return x_bf16_glsl() +
+            return x_codec_glsl(XFormat::BF16) +
                 "#define Y1(T,I,TW) ((((I)/2)*2)==(I) ? "
                 "x_bf16(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).rg) : "
                 "x_bf16(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).ba))\n"
@@ -476,7 +475,7 @@ std::string x_pair2_glsl(XFormat f) {
     // The default is the q16 pair; bf16 uses the same layout with its own
     // rounding, so a residual stream can be bf16 without a second pair kernel.
     if (f == XFormat::BF16) {
-        return x_bf16_glsl() +
+        return x_codec_glsl(XFormat::BF16) +
             "float x_p2_a(vec4 c){return x_bf16(c.rg);}\n"
             "float x_p2_b(vec4 c){return x_bf16(c.ba);}\n"
             "vec4 x_p2_st(float a,float b){return x_bf16enc2(a,b);}\n"
@@ -495,7 +494,8 @@ std::string x_pair2_glsl(XFormat f) {
 // The f32 store helper on its own (see xformat.h).  `x_glsl(F32)` emits this
 // plus the read macros; a kernel with a fixed q16 *input* layout and an f32
 // *output* (the swiglu) emits this plus `head(XFormat::I16_2)`.
-std::string x_f32_store_glsl() {
+std::string x_store_glsl(XFormat f) {
+    if (f != XFormat::F32) return std::string();
     return "\n#ifndef X_F32_STORE_GLSL\n#define X_F32_STORE_GLSL\n"
         "vec4 x_f32enc(float v){uint u=floatBitsToUint(v);"
         "return vec4(float(u>>24),float((u>>16)&255u),float((u>>8)&255u),"
