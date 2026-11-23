@@ -558,8 +558,8 @@ private:
     Target& rwkv_tmp(RwkvTmp i) { return rwkv_tmp_[i]; }
     // Granular passes (gpu_rwkv.cpp); each writes a pre-sized scratch target.
     GLuint rwkv_mv(const Mat& m, GLuint x, Target& out);
-    GLuint rwkv_ln(GLuint x, GLuint wb, Target& out);
-    GLuint rwkv_ln_p(GLuint x, GLuint wb, Target& out);
+    GLuint ln_affine(GLuint x, GLuint wb, Target& out);
+    GLuint ln_affine_p(GLuint x, GLuint wb, Target& out);
     GLuint rwkv_first_add(GLuint x0, GLuint delta, Target& out);
     GLuint rwkv_res_add(GLuint resid, GLuint delta, Target& out);
     GLuint rwkv_upload_x0(const std::vector<float>& x0);
@@ -571,7 +571,7 @@ private:
     GLuint rwkv_sigmoid(GLuint x, GLuint bias, Target& out, int oscale);
     GLuint rwkv_decay(GLuint u, GLuint w0, Target& out);
     GLuint rwkv_vres(GLuint v, GLuint vf, GLuint u, GLuint v0, Target& out);
-    GLuint rwkv_sqrelu(GLuint x, Target& out);
+    GLuint act_sqrelu(GLuint x, Target& out);
     GLuint rwkv_mul(GLuint a, GLuint b, Target& out, int adiv);
     GLuint rwkv_rk(GLuint k, GLuint r, GLuint sc, GLuint v, GLuint y, Target& out);
     GLuint rwkv_wkv(int layer, GLuint r, GLuint k, GLuint v, GLuint a, GLuint kk,

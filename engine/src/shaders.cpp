@@ -2164,8 +2164,8 @@ string wkv_uv(const string& j, const string& row, const string& HS, const string
 }
 }  // namespace
 
-std::string rwkv_ln_stats(int dim, XFormat rf) {
-    need_dim("rwkv_ln_stats", dim);
+std::string ln_stats(int dim, XFormat rf) {
+    need_dim("ln_stats", dim);
     const string D = to_string(dim), RW = to_string(x_texels(dim, rf));
     // mean/invstd accumulate in f32 registers and are stored bit-cast f32 (ES3).
     // A fixed-point mean loses precision the invstd then amplifies: the token-
@@ -2182,8 +2182,8 @@ std::string rwkv_ln_stats(int dim, XFormat rf) {
         "if(gl_FragCoord.x<1.0)gl_FragColor=bcWr(mean);else gl_FragColor=bcWr(inv);}";
 }
 
-std::string rwkv_ln_norm(int dim, XFormat rf) {
-    need_dim("rwkv_ln_norm", dim);
+std::string ln_norm(int dim, XFormat rf) {
+    need_dim("ln_norm", dim);
     const string D = to_string(dim), RW = to_string(x_texels(dim, rf));
     return rwkv_head() + kBC + kRwkvRS +
         "uniform sampler2D X,S,W;"
@@ -2196,8 +2196,8 @@ std::string rwkv_ln_norm(int dim, XFormat rf) {
         "gl_FragColor=x_q24enc(((x-mean)*inv*w+b)*256.0);}";
 }
 
-std::string rwkv_ln_stats_p(int dim) {
-    need_dim("rwkv_ln_stats_p", dim);
+std::string ln_stats_p(int dim) {
+    need_dim("ln_stats_p", dim);
     const string D = to_string(dim);
     return rwkv_head() + kBC +
         "uniform sampler2D X;uniform float eps;"
@@ -2208,8 +2208,8 @@ std::string rwkv_ln_stats_p(int dim) {
         "if(gl_FragCoord.x<1.0)gl_FragColor=bcWr(mean);else gl_FragColor=bcWr(inv);}";
 }
 
-std::string rwkv_ln_norm_p(int dim) {
-    need_dim("rwkv_ln_norm_p", dim);
+std::string ln_norm_p(int dim) {
+    need_dim("ln_norm_p", dim);
     const string D = to_string(dim);
     return rwkv_head() + kBC + kRwkvRS +
         "uniform sampler2D X,S,W;"
@@ -2375,8 +2375,8 @@ std::string rwkv_vres(int dim) {
         "gl_FragColor=x_q24enc(v+(vf-v)*sg(u+v0));}";
 }
 
-std::string rwkv_sqrelu(int dim) {
-    need_dim("rwkv_sqrelu", dim);
+std::string act_sqrelu(int dim) {
+    need_dim("act_sqrelu", dim);
     const string D = to_string(dim);
     return rwkv_head() + poly_src() +
         "uniform sampler2D X;"

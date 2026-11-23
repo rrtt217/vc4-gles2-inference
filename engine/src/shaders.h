@@ -235,14 +235,14 @@ std::string top1_final(int groups);
 //   state  stores S*2^e_head  -> per-head exponent e_head, >=18 effective bits
 //                               (S-1: the q16/I24 1/256 grid costs +0.154 nats).
 
-std::string rwkv_ln_stats(int dim, XFormat rf);
-std::string rwkv_ln_norm(int dim, XFormat rf);
+std::string ln_stats(int dim, XFormat rf);
+std::string ln_norm(int dim, XFormat rf);
 
 // Layer 0's input is the token-normed embedding (~0.013 on g1d), far below the
 // q16 residual step (1/256 = 30% of it).  The CPU keeps it f32 until the first
 // residual add; the GPU stores it *256 in I24_1 and these read it back /256.
-std::string rwkv_ln_stats_p(int dim);
-std::string rwkv_ln_norm_p(int dim);
+std::string ln_stats_p(int dim);
+std::string ln_norm_p(int dim);
 std::string rwkv_first_add(int dim);
 std::string rwkv_res_add(int dim);
 
@@ -256,7 +256,7 @@ std::string rwkv_tanh(int dim);
 std::string rwkv_sigmoid(int dim, bool has_bias, int oscale);
 std::string rwkv_decay(int dim);
 std::string rwkv_vres(int dim);
-std::string rwkv_sqrelu(int dim);
+std::string act_sqrelu(int dim);
 std::string rwkv_mul(int dim, int adiv);
 std::string rwkv_rk_reduce(int dim, int hs);
 std::string rwkv_rk_add(int dim, int hs);

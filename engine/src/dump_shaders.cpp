@@ -257,12 +257,12 @@ vector<Case> cases() {
 
     // --- RWKV-7 (P6): the elementwise ops and the WKV7 recurrence.  dim 768,
     // head_size 64, 12 heads (the 0.1B g1d shape).  The residual is q16 (I16_1).
-    add(v, "rwkv_ln_stats_768_i16_1", [] { return rwkv_ln_stats(768, I16_1); });
-    add(v, "rwkv_ln_stats_p_768", [] { return rwkv_ln_stats_p(768); });
-    add(v, "rwkv_ln_norm_p_768", [] { return rwkv_ln_norm_p(768); });
+    add(v, "ln_stats_768_i16_1", [] { return ln_stats(768, I16_1); });
+    add(v, "ln_stats_p_768", [] { return ln_stats_p(768); });
+    add(v, "ln_norm_p_768", [] { return ln_norm_p(768); });
     add(v, "rwkv_first_add_768", [] { return rwkv_first_add(768); });
     add(v, "rwkv_res_add_768", [] { return rwkv_res_add(768); });
-    add(v, "rwkv_ln_norm_768_i16_1", [] { return rwkv_ln_norm(768, I16_1); });
+    add(v, "ln_norm_768_i16_1", [] { return ln_norm(768, I16_1); });
     add(v, "rwkv_gn_stats_768_64", [] { return rwkv_gn_stats(768, 64); });
     add(v, "rwkv_gn_norm_768_64", [] { return rwkv_gn_norm(768, 64); });
     add(v, "rwkv_lerp_768_0", [] { return rwkv_lerp(768, 0, 6); });
@@ -276,7 +276,7 @@ vector<Case> cases() {
     add(v, "rwkv_sigmoid_768_nobias1", [] { return rwkv_sigmoid(768, false, 1); });
     add(v, "rwkv_decay_768", [] { return rwkv_decay(768); });
     add(v, "rwkv_vres_768", [] { return rwkv_vres(768); });
-    add(v, "rwkv_sqrelu_768", [] { return rwkv_sqrelu(768); });
+    add(v, "act_sqrelu_768", [] { return act_sqrelu(768); });
     add(v, "rwkv_mul_768", [] { return rwkv_mul(768, 1); });
     add(v, "rwkv_mul_768_s256", [] { return rwkv_mul(768, 256); });
     add(v, "rwkv_rk_reduce_768_64", [] { return rwkv_rk_reduce(768, 64); });
