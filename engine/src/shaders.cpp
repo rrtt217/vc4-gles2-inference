@@ -2432,13 +2432,26 @@ std::string ln_apply_q16(int dim, XFormat rf, XFormat out) {
     // halves the index and divides by TW, and both 0 and 1 must land on texel 0
     // (picking .rg and .ba).  Passing the target's width instead puts index 1 at
     // texel 0.5, i.e. outside the pair.
+    // The *output* shape follows `x_per_texel(out)`, not a per-format literal:
+    // `x_f32enc2` never existed in the format module, and writing it here made
+    // every ACT=f32 run of the encoder fail to compile -- a branch that is dead
+    // until the axis actually moves, which is why v5 shipped with it.
+    const bool pr = x_per_texel(out) == 2;
+    const auto term = [&](const string& k) {
+        return "(R1(X," + k + "," + RW + ".0)-m)*inv*R1(W," + k + "," + WW
+               + ".0)+R1(B," + k + "," + WW + ".0)";
+    };
+    string body = "void main(){";
+    body += "float m=R1(S,0,1.0);float inv=R1(S,1,1.0);";
+    if (pr)
+        body += "int t=int(gl_FragCoord.x);int i0=2*t;"
+                "float v0=" + term("i0") + ";float v1=" + term("i0+1") + ";"
+                "gl_FragColor=XST2(v0,v1);";
+    else
+        body += "int i0=int(gl_FragCoord.x);"
+                "gl_FragColor=XST1(" + term("i0") + ");";
     return head(out) + x_residual_glsl(rf) +
-        "uniform sampler2D X,S,W,B;"
-        "void main(){int t=int(gl_FragCoord.x);int i0=2*t;"
-        "float m=R1(S,0,1.0);float inv=R1(S,1,1.0);"
-        "float v0=(R1(X,i0," + RW + ".0)-m)*inv*R1(W,i0," + WW + ".0)+R1(B,i0," + WW + ".0);"
-        "float v1=(R1(X,i0+1," + RW + ".0)-m)*inv*R1(W,i0+1," + WW + ".0)+R1(B,i0+1," + WW + ".0);"
-        "gl_FragColor=" + (out == XFormat::F32 ? "x_f32enc2(v0,v1)" : "XST2(v0,v1)") + ";}";
+        "uniform sampler2D X,S,W,B;" + body + "}";
 }
 
 std::string bias_add_q16(int dim, XFormat f) {
@@ -2450,27 +2463,41 @@ std::string bias_add_q16(int dim, XFormat f) {
     // Reading an I24_1 matvec output with the q16 decoder is what turned the
     // first encoder run's values into 0.058 -- the fingerprint is "everything
     // after the first projection is tiny".
+    // One value a fragment or two, by the format's own x_per_texel; the producer
+    // is the format's XST1/XST2, never a hand-written encoder.
+    const bool pr = x_per_texel(f) == 2;
+    string body = "void main(){";
+    if (pr)
+        body += "int t=int(gl_FragCoord.x);int i0=2*t;"
+                "gl_FragColor=XST2(R1(X,i0," + AS + ".0)+R1(B,i0," + AS + ".0),"
+                                  "R1(X,i0+1," + AS + ".0)+R1(B,i0+1," + AS + ".0));";
+    else
+        body += "int i0=int(gl_FragCoord.x);"
+                "gl_FragColor=XST1(R1(X,i0," + AS + ".0)+R1(B,i0," + AS + ".0));";
     return head(f) + x_residual_glsl(f) +
-        "uniform sampler2D X,B;"
-        "void main(){int t=int(gl_FragCoord.x);int i0=2*t;"
-        "float v0=R1(X,i0," + AS + ".0)+R1(B,i0," + AS + ".0);"
-        "float v1=R1(X,i0+1," + AS + ".0)+R1(B,i0+1," + AS + ".0);"
-        "gl_FragColor=" + (f == XFormat::F32 ? "x_f32enc2(v0,v1)" : "XST2(v0,v1)") + ";}";
+        "uniform sampler2D X,B;" + body + "}";
 }
 
 std::string act_swish(int dim, XFormat f) {
     need_dim("act_swish", dim);
-    const string D = to_string(dim), AS = to_string(x_texels(dim, f));
-    // The non-gated FFN's activation on a matvec's output: swish(x) =
-    // x*sigmoid(x), the same form swiglu's gate uses.  The format is the
-    // matvec's, not a literal, because ACT is an axis (I24_1 by default, I16_2
-    // under ACT=i16) and the reader below has to decode what was written.
-    return head(f) + x_residual_glsl(f) +
-        "uniform sampler2D X;"
-        "void main(){int i=int(gl_FragCoord.x);int i0=2*i;"
-        "float x0=R1(X,i0," + AS + ".0),x1=R1(X,i0+1," + AS + ".0);"
-        "gl_FragColor=" + (f == XFormat::F32 ? "x_f32enc2(x0/(1.0+" + EXP("-x0") + "),x1/(1.0+" + EXP("-x1") + "))"
-                                            : "XST2(x0/(1.0+" + EXP("-x0") + "),x1/(1.0+" + EXP("-x1") + "))") + ";}";
+    const string AS = to_string(x_texels(dim, f));
+    // swish(x) = x*sigmoid(x), two values a fragment where the format holds two
+    // and one where it holds one.  The *producer* comes from the format module
+    // (`XST1`/`XST2`), never written by hand: `x_f32enc2` was invented here to
+    // mean "F32 but two a fragment", the format has no such thing, and every
+    // `ACT=f32` run of the encoder failed to compile -- a dead branch that only
+    // shows when the axis actually moves.
+    const bool pr = x_per_texel(f) == 2;
+    string body = "void main(){";
+    if (pr)
+        body += "int t=int(gl_FragCoord.x);int i0=2*t;"
+                "float x0=R1(X,i0," + AS + ".0);float x1=R1(X,i0+1," + AS + ".0);"
+                "gl_FragColor=XST2(x0/(1.0+" + EXP("-x0") + "),x1/(1.0+" + EXP("-x1") + "));";
+    else
+        body += "int i0=int(gl_FragCoord.x);"
+                "float x0=R1(X,i0," + AS + ".0);"
+                "gl_FragColor=XST1(x0/(1.0+" + EXP("-x0") + "));";
+    return head(f) + x_residual_glsl(f) + "uniform sampler2D X;" + body + "}";
 }
 
 std::string rwkv_mul(int dim, int adiv) {
