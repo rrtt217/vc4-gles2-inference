@@ -2221,51 +2221,64 @@ void Session::encdec_encode(const vector<int>& src) {
         // "maxabs 0.00390625" -- one q16 step off zero.
         vector<GLuint> h(n);
         for (int b = 0; b < n; ++b) {
-                vector<float> x = embedding(src[b]);
+                // exact_f32: `embedding()` otherwise rounds the row onto the q16
+                // activation grid *before* the sqrt(d) scale.  A Marian
+                // embedding is ~0.03 and that grid's step is 1/256, so the row
+                // would arrive 13% off and the block would normalise the error
+                // in.  The scale belongs on the real values; the upload that
+                // follows quantises once, at the right magnitude.
+                vector<float> x = embedding(src[b], /*exact_f32=*/true);
                 const float* p = m.pos_table.data() + (size_t)b * D;
                 for (int i = 0; i < D; ++i) x[i] = x[i] * s + p[i];
                 h[b] = gpu_.upload_into(gpu_.grp_h(b, n), x);
         }
         gpu_.set_causal(false);            // the encoder sees every position
+        // POST-norm, which is the order `normalize_before: false` states and the
+        // one the numpy reference's correct translations came from:
+        //
+        //     r1 = x + attn(x)        attention reads the *raw* residual
+        //     x1 = LN1(r1)            the normalisation follows the add
+        //     r2 = x1 + fc2(swish(fc1(x1)))
+        //     x  = LN2(r2)
+        //
+        // Both loops were written pre-norm (LN before attention, no LN on the
+        // output).  It looks like a small ordering choice and it is not: with
+        // nothing normalising the stream, the residual compounds every layer,
+        // which is the 110.8 against the reference's 1.68.
         for (int l = 0; l < E; ++l) {
                 gpu_.set_qkv_bias(gpu_.enc_rows_.enc_qkv_b[l]);
                 for (int b = 0; b < n; ++b) {
-                        // The stats must be computed from the *same* device the
-                        // row passes read; a Target here has an FBO and the
-                        // read in the dump above proved h[b] holds the row.
-                        GLuint xq = gpu_.ln_q16(h[b], gpu_.enc_rows_.enc_ln1[l],
-                                                gpu_.enc_rows_.enc_ln1b[l],
-                                                gpu_.cd_a(), m.rms_eps);
-                        gpu_.att_stage(m.u_enc_qkv[l], xq, l, b, b, n);
+                        gpu_.att_stage(m.u_enc_qkv[l], h[b], l, b, b, n);
                 }
                 gpu_.set_qkv_bias(0);
-                gpu_.att_scores_batch(l, 0, n);
+                gpu_.att_scores_batch(l, n - 1, n);
                 for (int b = 0; b < n; ++b) {
-                        gpu_.att_stats_row(b, b, n);
-                        gpu_.att_v_row(l, b, b, n);
-                        // r = x + wo*att + o_bias
+                        // `pos` is the last *valid* key under NOCAUSAL (the
+                        // scan bound), not this query's position: the encoder
+                        // fills n slots of a SEQ-wide cache and the rest must
+                        // not enter the softmax.
+                        gpu_.att_stats_row(n - 1, b, n);
+                        gpu_.att_v_row(l, n - 1, b, n);
+                        // r1 = x + wo*att + o_b, then x1 = LN1(r1)
                         gpu_.matvec_add(m.u_enc_wo[l], gpu_.att_out_.tex,
                                         h[b], gpu_.cd_b(), gpu_.act_fmt_);
                         gpu_.bias_add(gpu_.cd_b().tex, gpu_.enc_rows_.enc_o_b[l], gpu_.cd_c());
-                        // x = LN2(r); h = swish(fc1*x + b1); x = r + fc2*h + b2
-                        // r lives in cd_c and must survive every step of the FFN:
-                        // the fc1 matvec goes to cd_d and its bias into cd_a (the
-                        // LN2 output, dead from here), so the residual add below
-                        // still reads r.  Clobbering it here was the first bug of
-                        // this loop: the FFN's residual add silently added the
-                        // *hidden* layer on top of itself.
-                        GLuint xq2 = gpu_.ln_q16(gpu_.cd_c().tex, gpu_.enc_rows_.enc_ln2[l],
-                                                 gpu_.enc_rows_.enc_ln2b[l], gpu_.cd_a(), m.rms_eps);
-                        gpu_.matvec_to(m.u_enc_w1[l], xq2, gpu_.cd_d());
-                        gpu_.bias_add_f(gpu_.cd_d().tex, gpu_.enc_rows_.enc_fc1_b[l], gpu_.cd_a(), F, gpu_.act_fmt_);
-                        GLuint hf = gpu_.act_swish(gpu_.cd_a().tex, gpu_.cd_d(), F, gpu_.act_fmt_);
-                        gpu_.matvec_add(m.u_enc_w2[l], hf, gpu_.cd_c().tex,
-                                        gpu_.cd_b(), gpu_.act_fmt_);
-                        // The block's output is the biased sum, written straight
-                        // into the group slot the next layer reads.
-                        gpu_.bias_add(gpu_.cd_b().tex, gpu_.enc_rows_.enc_fc2_b[l],
-                                      gpu_.grp_h(b, n));
-                        h[b] = gpu_.grp_h(b, n).tex;
+                        GLuint x1 = gpu_.ln_q16(gpu_.cd_c().tex, gpu_.enc_rows_.enc_ln1[l],
+                                                gpu_.enc_rows_.enc_ln1b[l],
+                                                gpu_.cd_a(), m.rms_eps);
+                        // f = fc2(swish(fc1(x1) + b1)) + b2, then r2 = x1 + f.
+                        // cd_b holds the fc1 side, so x1 (cd_a) survives as the
+                        // residual this adds into.
+                        gpu_.matvec_to(m.u_enc_w1[l], x1, gpu_.cd_d());
+                        gpu_.bias_add_f(gpu_.cd_d().tex, gpu_.enc_rows_.enc_fc1_b[l],
+                                        gpu_.cd_b(), F, gpu_.act_fmt_);
+                        GLuint hf = gpu_.act_swish(gpu_.cd_b().tex, gpu_.cd_d(), F, gpu_.act_fmt_);
+                        gpu_.matvec_add(m.u_enc_w2[l], hf, x1, gpu_.cd_b(), gpu_.act_fmt_);
+                        gpu_.bias_add(gpu_.cd_b().tex, gpu_.enc_rows_.enc_fc2_b[l], gpu_.cd_c());
+                        // x = LN2(r2), straight into the group slot the next layer reads.
+                        h[b] = gpu_.ln_q16(gpu_.cd_c().tex, gpu_.enc_rows_.enc_ln2[l],
+                                           gpu_.enc_rows_.enc_ln2b[l],
+                                           gpu_.grp_h(b, n), m.rms_eps);
                 }
         }
         // The encoder output and each decoder layer's cross K/V, read back once.
@@ -2273,6 +2286,17 @@ void Session::encdec_encode(const vector<int>& src) {
         for (int b = 0; b < n; ++b) {
                 vector<float> row = read_hidden(gpu_.grp_h(b, n));
                 memcpy(cd_enc_.data() + (size_t)b * D, row.data(), sizeof(float) * D);
+        }
+        // ENCDEC_DUMP: the two numbers that decide whether the encode pass is
+        // sane -- the output's magnitude (a post-norm stack ends O(1), so a
+        // value in the tens means a residual is going un-normalised) and the
+        // first decoder step's argmax, which is what a reference comparison
+        // quotes.  Both were the entire diagnosis of this block.
+        if (env_flag("ENCDEC_DUMP")) {
+                float mx = 0.0f, ss = 0.0f;
+                for (float v : cd_enc_) { mx = fabsf(v) > mx ? fabsf(v) : mx; ss += v * v; }
+                cerr << "ENCDEC enc_out maxabs " << mx << " rms "
+                     << sqrtf(ss / (float)cd_enc_.size()) << "\n";
         }
         cd_k_.assign(m.layers, {});
         cd_v_.assign(m.layers, {});
@@ -2297,24 +2321,25 @@ vector<float> Session::encdec_step(int token, int pos) {
         const Model& m = m_;
         const int D = m.dim, F = m.enc_ffn, H = m.heads, hd = m.head_dim;
         const float s = m.enc_scale_embed ? sqrtf((float)D) : 1.0f;
-        vector<float> y = embedding(token);
+        vector<float> y = embedding(token, /*exact_f32=*/true);
         const float* p = m.pos_table.data() + (size_t)pos * D;
         for (int i = 0; i < D; ++i) y[i] = y[i] * s + p[i];
         GLuint h = gpu_.upload_hidden(y);
         const int n = cd_n_;
         for (int l = 0; l < m.layers; ++l) {
-                // self-attention (causal), biased qkv
-                GLuint yq = gpu_.ln_q16(h, gpu_.enc_rows_.ln1[l], gpu_.enc_rows_.ln1b[l], gpu_.cd_a(), m.rms_eps);
+                // Same post-norm order as the encoder: self-attention on the raw
+                // residual, then LN1; cross-attention from LN1's output, then
+                // LN2; the FFN from LN2's output, then LN3.
                 gpu_.set_qkv_bias(gpu_.enc_rows_.qkv_b[l]);
-                GLuint at = gpu_.attention_block(m.qkv[l], yq, l, pos);
+                GLuint at = gpu_.attention_block(m.qkv[l], h, l, pos);
                 gpu_.set_qkv_bias(0);
                 gpu_.matvec_add(m.wo[l], at, h, gpu_.cd_b(), gpu_.act_fmt_);
                 gpu_.bias_add(gpu_.cd_b().tex, gpu_.enc_rows_.o_b[l], gpu_.cd_c());
-                // cross-attention: q from the decoder, k/v from the encoder,
-                // computed here against the read-back planes (see the note above)
-                GLuint yq2 = gpu_.ln_q16(gpu_.cd_c().tex, gpu_.enc_rows_.ln2[l], gpu_.enc_rows_.ln2b[l],
-                                         gpu_.cd_a(), m.rms_eps);
-                gpu_.matvec_to(m.u_cross_q[l], yq2, gpu_.cd_b());
+                GLuint y1 = gpu_.ln_q16(gpu_.cd_c().tex, gpu_.enc_rows_.ln1[l],
+                                        gpu_.enc_rows_.ln1b[l], gpu_.cd_a(), m.rms_eps);
+                // cross-attention: q from y1, k/v from the encoder (read-back
+                // planes; the cross kernel is the remaining host step)
+                gpu_.matvec_to(m.u_cross_q[l], y1, gpu_.cd_b());
                 gpu_.bias_add(gpu_.cd_b().tex, gpu_.enc_rows_.cq_b[l], gpu_.cd_d());
                 vector<float> q = read_hidden(gpu_.cd_d());
                 vector<float> ctx((size_t)D, 0.0f);
@@ -2330,25 +2355,30 @@ vector<float> Session::encdec_step(int token, int pos) {
                         softmax_inplace(sc.data(), n);
                         for (int b = 0; b < n; ++b) {
                                 const float* vh = cd_v_[l].data() + (size_t)b * D + hh * hd;
-                                for (int i = 0; i < hd; ++i) ctx[(size_t)hh * hd + i] += sc[b] * vh[i];
+                                for (int i = 0; i < hd; ++i)
+                                        ctx[(size_t)hh * hd + i] += sc[b] * vh[i];
                         }
                 }
                 GLuint cq = gpu_.upload_hidden(ctx);
-                gpu_.matvec_add(m.u_cross_o[l], cq, gpu_.cd_c().tex, gpu_.cd_b(), gpu_.act_fmt_);
+                gpu_.matvec_add(m.u_cross_o[l], cq, y1, gpu_.cd_b(), gpu_.act_fmt_);
                 gpu_.bias_add(gpu_.cd_b().tex, gpu_.enc_rows_.co_b[l], gpu_.cd_c());
-                // FFN: LN3, non-gated swish
-                // Same rule as the encoder: r2 (cd_c) is the residual the FFN
-                // adds into, so the fc1 side uses cd_d and cd_a.
-                GLuint yq3 = gpu_.ln_q16(gpu_.cd_c().tex, gpu_.enc_rows_.ln3[l], gpu_.enc_rows_.ln3b[l],
-                                         gpu_.cd_a(), m.rms_eps);
-                gpu_.matvec_to(m.w1[l], yq3, gpu_.cd_d());
-                gpu_.bias_add_f(gpu_.cd_d().tex, gpu_.enc_rows_.fc1_b[l], gpu_.cd_a(), F, gpu_.act_fmt_);
-                GLuint hid = gpu_.act_swish(gpu_.cd_a().tex, gpu_.cd_d(), F, gpu_.act_fmt_);
-                gpu_.matvec_add(m.w2[l], hid, gpu_.cd_c().tex, gpu_.cd_b(), gpu_.act_fmt_);
-                gpu_.bias_add(gpu_.cd_b().tex, gpu_.enc_rows_.fc2_b[l], gpu_.cd_d());
-                h = gpu_.cd_d().tex;
+                GLuint y2 = gpu_.ln_q16(gpu_.cd_c().tex, gpu_.enc_rows_.ln2[l],
+                                        gpu_.enc_rows_.ln2b[l], gpu_.cd_a(), m.rms_eps);
+                gpu_.matvec_to(m.w1[l], y2, gpu_.cd_d());
+                gpu_.bias_add_f(gpu_.cd_d().tex, gpu_.enc_rows_.fc1_b[l], gpu_.cd_b(),
+                                F, gpu_.act_fmt_);
+                GLuint hid = gpu_.act_swish(gpu_.cd_b().tex, gpu_.cd_d(), F, gpu_.act_fmt_);
+                gpu_.matvec_add(m.w2[l], hid, y2, gpu_.cd_b(), gpu_.act_fmt_);
+                gpu_.bias_add(gpu_.cd_b().tex, gpu_.enc_rows_.fc2_b[l], gpu_.cd_c());
+                h = gpu_.ln_q16(gpu_.cd_c().tex, gpu_.enc_rows_.ln3[l],
+                                gpu_.enc_rows_.ln3b[l], gpu_.cd_d(), m.rms_eps);
         }
         vector<float> lg = gpu_.logits_from(m.logits_tiles, h);
+        if (env_flag("ENCDEC_DUMP") && pos == 0 && !lg.empty()) {
+                int best = 0;
+                for (int v = 1; v < (int)lg.size(); ++v) if (lg[v] > lg[best]) best = v;
+                cerr << "ENCDEC step0 argmax " << best << "\n";
+        }
         // The container's head bias: a Marian head is `final_logits_bias` plus
         // the tied embedding, and the bias is per vocabulary row.
         for (size_t i = 0; i < lg.size() && i < m_.logits_bias.size(); ++i) lg[i] += m_.logits_bias[i];

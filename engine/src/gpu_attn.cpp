@@ -892,9 +892,12 @@ void GPU::att_stats_row(int pos, int b, int n){
         use_program(p);
         bind_tex(0, scores_batch_.tex);
         set_sampler(p, "S", 0);
-        // NOCAUSAL drops `pos` from this kernel (the scan bound becomes the
-        // texture's own), so the host does not ask for it.
-        if (att_causal_) glUniform1f(uloc(p, "pos"), (float)pos);
+        // `pos` is live in both modes: causal, it is this query's position;
+        // bidirectional, the last *valid* key (the scan is what bounds which
+        // keys enter the softmax either way).  Gating this on `causal` left the
+        // uniform at its default of 0, so every query saw exactly one key and
+        // the encoder's attention returned V of position 0.
+        glUniform1f(uloc(p, "pos"), (float)pos);
         glUniform1f(uloc(p, "qrow0"), (float)b);
         setup_attrib(p);
         glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
@@ -916,9 +919,12 @@ void GPU::att_v_row(int layer, int pos, int b, int n){
             bind_tex(3, vs_targets_[layer].tex);
             set_sampler(p, "VS", 3);
         }
-        // NOCAUSAL drops `pos` from this kernel (the scan bound becomes the
-        // texture's own), so the host does not ask for it.
-        if (att_causal_) glUniform1f(uloc(p, "pos"), (float)pos);
+        // `pos` is live in both modes: causal, it is this query's position;
+        // bidirectional, the last *valid* key (the scan is what bounds which
+        // keys enter the softmax either way).  Gating this on `causal` left the
+        // uniform at its default of 0, so every query saw exactly one key and
+        // the encoder's attention returned V of position 0.
+        glUniform1f(uloc(p, "pos"), (float)pos);
         glUniform1f(uloc(p, "qrow0"), (float)b);
         setup_attrib(p);
         glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;

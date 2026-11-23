@@ -199,6 +199,8 @@ public:
     // block rather than passed through attention_block, so the block's draw
     // sequence is untouched.
     void set_qkv_bias(GLuint b) { att_qkv_bias_ = b; }
+    // The staged qkv row (debugging): the projection's output, before rope.
+    Target& att_qkv_target() { return qkv_target_; }
     void set_causal(bool c) { att_causal_ = c; }
     // Phase 1 of a group, one position: qkv draw, V grid, KV write, rotated Q
     // staged into row b.  The serial attention_block's draws in the same order.
@@ -448,6 +450,8 @@ private:
     void note_sync() { ++syncs_; }
     GLint aloc(GLuint prog, const char* name);
     void bind_tex(int unit, GLuint tex);
+    // Force unit 0 active and bind, for a glTexSubImage2D upload.
+    void bind_upload_tex(GLuint tex);
     void bind_fbo(GLuint fbo);
     void use_program(GLuint prog);
     void set_sampler(GLuint prog, const char* name, int unit);
@@ -531,6 +535,7 @@ private:  // matvec input (qkv/wo/gate/logits)
     XFormat ffn_fmt_ = XFormat::I16_2;  // FFN hidden state (w2 input)
     XFormat res_fmt_ = XFormat::I16_1;  // residual stream layout
     GLuint hidden_in_ = 0;
+    int hidden_in_w_ = 0;
     GLuint hidden_in_b_ = 0;
     vector<GLuint> rms_att_tex_, rms_ffn_tex_;
     GLuint rms_final_tex_ = 0;

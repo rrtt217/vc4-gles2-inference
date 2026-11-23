@@ -116,7 +116,7 @@ GLuint GPU::upload_into(Target& t, const vector<float>& x){
         const int tw = x_texels((int)x.size(), res_fmt_);
         if (t.tex == 0 || t.w < tw) t = make_target(tw, 1);
         vector<uint8_t> data = x_pack(x, res_fmt_);
-        bind_tex(0, t.tex);
+        bind_upload_tex(t.tex);
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, tw, 1, GL_RGBA, GL_UNSIGNED_BYTE, data.data());
         layer_finish("NF_UPLOAD");
         return t.tex;
