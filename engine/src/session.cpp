@@ -2293,8 +2293,12 @@ void Session::encdec_encode(const vector<int>& src) {
                         // cd_b holds the fc1 side, so x1 (cd_a) survives as the
                         // residual this adds into.
                         gpu_.matvec_to(m.u_enc_w1[l], x1, gpu_.cd_d());
+                        // X is what `matvec_q8` wrote, and that kernel's
+                        // output store is I24 unconditionally -- the ACT axis
+                        // does not reach it.  Reading it as act_fmt_ is the
+                        // "FFN hidden is fine in one half only" bug.
                         gpu_.bias_add_f(gpu_.cd_d().tex, gpu_.enc_rows_.enc_fc1_b[l],
-                                        gpu_.cd_b(), F, gpu_.act_fmt_);
+                                        gpu_.cd_b(), F, XFormat::I24_1, gpu_.act_fmt_);
                         GLuint hf = gpu_.act_swish(gpu_.cd_b().tex, gpu_.cd_d(), F, gpu_.act_fmt_);
                         gpu_.matvec_add(m.u_enc_w2[l], hf, x1, gpu_.cd_b(), gpu_.act_fmt_);
                         gpu_.bias_add(gpu_.cd_b().tex, gpu_.enc_rows_.enc_fc2_b[l], gpu_.cd_c());
@@ -2389,7 +2393,7 @@ vector<float> Session::encdec_step(int token, int pos) {
                                         gpu_.enc_rows_.ln2b[l], gpu_.cd_a(), m.rms_eps);
                 gpu_.matvec_to(m.w1[l], y2, gpu_.cd_d());
                 gpu_.bias_add_f(gpu_.cd_d().tex, gpu_.enc_rows_.fc1_b[l], gpu_.cd_b(),
-                                F, gpu_.act_fmt_);
+                                F, XFormat::I24_1, gpu_.act_fmt_);
                 GLuint hid = gpu_.act_swish(gpu_.cd_b().tex, gpu_.cd_d(), F, gpu_.act_fmt_);
                 gpu_.matvec_add(m.w2[l], hid, y2, gpu_.cd_b(), gpu_.act_fmt_);
                 gpu_.bias_add(gpu_.cd_b().tex, gpu_.enc_rows_.fc2_b[l], gpu_.cd_c());

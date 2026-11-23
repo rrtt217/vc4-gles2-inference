@@ -93,7 +93,10 @@ public:
     void attach_dump_fbo(Target& t);
     GLuint bias_add(GLuint x, GLuint b, Target& out);
     GLuint bias_add_wide(GLuint x, GLuint b, Target& out, int dim);
-    GLuint bias_add_f(GLuint x, GLuint b, Target& out, int dim, XFormat f);
+    // `xf` is what wrote x (a matvec writes I24, a *add-into-residual* writes
+    // res_fmt_), `f` is the bias and the output.  They are different axes and
+    // the same format only by accident.
+    GLuint bias_add_f(GLuint x, GLuint b, Target& out, int dim, XFormat xf, XFormat f);
     GLuint act_swish(GLuint x, Target& out, int n, XFormat f);
 
     // Everything this context created that is *scene* rather than *program*:

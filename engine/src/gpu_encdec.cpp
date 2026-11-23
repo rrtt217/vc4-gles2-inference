@@ -181,14 +181,15 @@ GLuint GPU::upload_bias(const vector<float>& b, XFormat f){
 }
 
 GLuint GPU::bias_add_wide(GLuint x, GLuint b, Target& out, int dim){
-        return bias_add_f(x, b, out, dim, res_fmt_);
+        return bias_add_f(x, b, out, dim, res_fmt_, res_fmt_);
 }
 
-GLuint GPU::bias_add_f(GLuint x, GLuint b, Target& out, int dim, XFormat f){
+GLuint GPU::bias_add_f(GLuint x, GLuint b, Target& out, int dim, XFormat xf, XFormat f){
         const int tw = x_texels(dim, f);
         if (out.tex == 0 || out.w != tw) out = make_target(tw, 1);
-        GLuint p = x_prog("badd_" + to_string(dim) + "_" + to_string((int)f),
-                          bias_add_q16(dim, f));
+        GLuint p = x_prog("badd_" + to_string(dim) + "_" + to_string((int)xf) + "_" +
+                              to_string((int)f),
+                          bias_add_q16(dim, xf, f));
         bind_fbo(out.fbo);
         glViewport(0, 0, tw, 1);
         use_program(p);

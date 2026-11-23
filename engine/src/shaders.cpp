@@ -2454,27 +2454,30 @@ std::string ln_apply_q16(int dim, XFormat rf, XFormat out) {
         "uniform sampler2D X,S,W,B;" + body + "}";
 }
 
-std::string bias_add_q16(int dim, XFormat f) {
+std::string bias_add_q16(int dim, XFormat xf, XFormat f) {
     need_dim("bias_add_q16", dim);
-    const string AS = to_string(x_texels(dim, f));
-    // X and the bias row are in the *same* format (a matvec writes act_fmt_ and
-    // the bias rides it), and the sum is written in that format too: the pass
-    // that follows reads what this writes, so nothing here may assume q16.
-    // Reading an I24_1 matvec output with the q16 decoder is what turned the
-    // first encoder run's values into 0.058 -- the fingerprint is "everything
-    // after the first projection is tiny".
-    // One value a fragment or two, by the format's own x_per_texel; the producer
-    // is the format's XST1/XST2, never a hand-written encoder.
+    const string AS = to_string(x_texels(dim, xf));   // X: what the matvec wrote
+    const string BS = to_string(x_texels(dim, f));    // B and the output
+    // X is **not** the output's format, and this kernel is the one place that
+    // has to know it.  `matvec_q8` writes with `x_i24encq` unconditionally
+    // (34 emitted sites -- the output half of *every* q8 projection), while the
+    // activation axis may say I16_2.  Reading a 2048-texel I24 row as 1024 I16_2
+    // pairs is what made the non-gated FFN's first hidden layer come back as
+    // "the even values are the bias alone".
+    // B rides the output's format, because B is a host-uploaded row packed in it
+    // and the pass after this one reads what this writes.
     const bool pr = x_per_texel(f) == 2;
+    const auto val = [&](const string& k) {
+        return "R1(X," + k + "," + AS + ".0)+X1(B," + k + "," + BS + ".0)";
+    };
     string body = "void main(){";
     if (pr)
         body += "int t=int(gl_FragCoord.x);int i0=2*t;"
-                "gl_FragColor=XST2(R1(X,i0," + AS + ".0)+R1(B,i0," + AS + ".0),"
-                                  "R1(X,i0+1," + AS + ".0)+R1(B,i0+1," + AS + ".0));";
+                "gl_FragColor=XST2(" + val("i0") + "," + val("i0+1") + ");";
     else
         body += "int i0=int(gl_FragCoord.x);"
-                "gl_FragColor=XST1(R1(X,i0," + AS + ".0)+R1(B,i0," + AS + ".0));";
-    return head(f) + x_residual_glsl(f) +
+                "gl_FragColor=XST1(" + val("i0") + ");";
+    return head(f) + x_residual_glsl(xf) +
         "uniform sampler2D X,B;" + body + "}";
 }
 
