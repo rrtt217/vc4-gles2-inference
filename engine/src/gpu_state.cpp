@@ -198,6 +198,8 @@ void GPU::release_scene(){
         rwkv_in_w_.clear();
         rms_att_tex_.clear();
         rms_ffn_tex_.clear();
+        // v5: the bias and LayerNorm rows, and the two f32 metadata vectors.
+        enc_rows_.clear();
         q_norm_tex_.clear();
         k_norm_tex_.clear();
         gl_state_forget_bindings();

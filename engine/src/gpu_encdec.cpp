@@ -99,7 +99,6 @@ void GPU::upload_encdec_rows(const Model& m){
         // on the host (`Session::encdec_encode`), because a block with no
         // rotation has no kernel that would need it on the GPU.
         r.pos = 0;
-        r.ready = true;
 }
 
 // ---- v5 (encoder-decoder) row passes -------------------------------------

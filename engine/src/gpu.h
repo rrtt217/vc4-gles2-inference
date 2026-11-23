@@ -644,8 +644,20 @@ private:  // matvec input (qkv/wo/gate/logits)
         vector<GLuint> enc_qkv_b, enc_o_b, enc_fc1_b, enc_fc2_b;          // [enc layer]
         GLuint logits_b = 0;
         GLuint pos = 0;
-        bool ready = false;
-    } enc_rows_;
+        // Cleared on a release: these are the only handles of this set the
+        // ledger deletes *before* anyone reads them back, so `ready` used to sit
+        // true over deleted names.  `gate/check_target_reset.sh` cannot see a
+        // set that is not `Target`s, which is why it was missing and is now
+        // cleared by name in `release_scene()`.
+        void clear() {
+                ln1.clear(); ln1b.clear(); ln2.clear(); ln2b.clear();
+                ln3.clear(); ln3b.clear();
+                enc_ln1.clear(); enc_ln1b.clear(); enc_ln2.clear(); enc_ln2b.clear();
+                qkv_b.clear(); o_b.clear(); cq_b.clear(); ck_b.clear();
+                cv_b.clear(); co_b.clear(); fc1_b.clear(); fc2_b.clear();
+                enc_qkv_b.clear(); enc_o_b.clear(); enc_fc1_b.clear(); enc_fc2_b.clear();
+                logits_b = pos = 0;
+        }    } enc_rows_;
     GLuint rwkv_mul(GLuint a, GLuint b, Target& out, int adiv);
     GLuint rwkv_rk(GLuint k, GLuint r, GLuint sc, GLuint v, GLuint y, Target& out);
     GLuint rwkv_wkv(int layer, GLuint r, GLuint k, GLuint v, GLuint a, GLuint kk,
