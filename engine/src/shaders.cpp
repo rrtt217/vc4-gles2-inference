@@ -2384,6 +2384,74 @@ std::string act_sqrelu(int dim) {
         "gl_FragColor=x_q24enc(r*r);}";
 }
 
+
+// ---- v5 (encoder-decoder): the dense-chain row passes -----------------------
+// A post-norm block needs three things the decoder-only chain never did: a
+// LayerNorm (mean removed, not just the rms), `x += b` after a projection, and
+// a non-gated FFN activation.  They are row-elementwise on the streams the
+// block already uses -- q16 for the residual and the attention input, I24 for a
+// matvec's output -- so no kernel here knows what a transformer is.
+
+std::string ln_stats_q16(int dim, XFormat rf) {
+    need_dim("ln_stats_q16", dim);
+    const string D = to_string(dim), RW = to_string(x_texels(dim, rf));
+    // One fragment for the whole row, and (mean, invstd) as one q16 pair: the
+    // RWKV form stores them bit-cast f32 because its token-norm's values are
+    // tiny, but a post-norm residual is a unit-variance vector, so 1/16384 is
+    // 0.006% of a component and 0.006% of a mean that is already small.
+    return head(XFormat::I16_2) + x_residual_glsl(rf) +
+        "uniform sampler2D X;uniform float eps;"
+        "void main(){float s=0.0,s2=0.0;"
+        "for(int i=0;i<" + D + ";i++){float v=R1(X,i," + RW + ".0);s+=v;s2+=v*v;}"
+        "float m=s/float(" + D + ");"
+        "float inv=inversesqrt(max(s2/float(" + D + ")-m*m,0.0)+eps);"
+        "gl_FragColor=x_st2q(m,inv);}";
+}
+
+std::string ln_apply_q16(int dim, XFormat rf) {
+    need_dim("ln_apply_q16", dim);
+    const string D = to_string(dim), RW = to_string(x_texels(dim, rf));
+    const string DW = to_string(x_texels(dim, XFormat::I16_2));
+    // W is two rows: the LayerNorm weight at y=0.25 and its bias at y=0.75, so
+    // the pair the store wants is one texel from each row.
+    return head(XFormat::I16_2) + x_residual_glsl(rf) +
+        "uniform sampler2D X,S,W;"
+        "void main(){int t=int(gl_FragCoord.x);int i0=2*t;"
+        "float m=R1(S,0,1.0);float inv=R1(S,1,1.0);"
+        "vec4 wc=texture2D(W,vec2((float(t)+0.5)/float(" + DW + "),0.25));"
+        "vec4 bc=texture2D(W,vec2((float(t)+0.5)/float(" + DW + "),0.75));"
+        "float v0=(R1(X,i0," + RW + ".0)-m)*inv*x_i16(wc.rg)+x_i16(bc.rg);"
+        "float v1=(R1(X,i0+1," + RW + ".0)-m)*inv*x_i16(wc.ba)+x_i16(bc.ba);"
+        "gl_FragColor=x_st2q(v0,v1);}";
+}
+
+std::string bias_add_q16(int dim, XFormat rf) {
+    need_dim("bias_add_q16", dim);
+    const string RW = to_string(x_texels(dim, rf));
+    const string DW = to_string(x_texels(dim, XFormat::I16_2));
+    // Both sides are q16 and the bias row is uploaded with the same packer as
+    // the rmsnorm weights, so a bias is a weight vector as far as the store is
+    // concerned.  Views this wide are q/k/v (3*dim) and dim.
+    return head(XFormat::I16_2) + x_residual_glsl(rf) +
+        "uniform sampler2D X,B;"
+        "void main(){int t=int(gl_FragCoord.x);int i0=2*t;"
+        "vec4 xc=texture2D(X,vec2((float(t)+0.5)/float(" + DW + "),0.5));"
+        "vec4 bc=texture2D(B,vec2((float(t)+0.5)/float(" + DW + "),0.5));"
+        "gl_FragColor=x_st2q(x_i16(xc.rg)+x_i16(bc.rg),x_i16(xc.ba)+x_i16(bc.ba));}";
+}
+
+std::string act_swish_i24(int dim) {
+    need_dim("act_swish_i24", dim);
+    const string D = to_string(dim);
+    // The non-gated FFN's activation, on a matvec's I24 output: swish(x) =
+    // x*sigmoid(x), the same form swiglu's gate uses, so one exp per value.
+    return head(XFormat::I24_1) + q24_helpers() +
+        "uniform sampler2D X;"
+        "void main(){int i=int(gl_FragCoord.x);"
+        "float x=" + rd24("X", "i", D + ".0") + ";"
+        "gl_FragColor=x_q24enc(x/(1.0+" + EXP("-x") + "));}";
+}
+
 std::string rwkv_mul(int dim, int adiv) {
     need_dim("rwkv_mul", dim);
     const string D = to_string(dim);

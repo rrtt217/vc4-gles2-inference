@@ -261,6 +261,12 @@ std::string rwkv_sigmoid(int dim, bool has_bias, int oscale);
 std::string rwkv_decay(int dim);
 std::string rwkv_vres(int dim);
 std::string act_sqrelu(int dim);
+// v5 (encoder-decoder) dense-chain passes: LayerNorm (mean removed) in two
+// draws, x += b, and the non-gated FFN's swish.
+std::string ln_stats_q16(int dim, XFormat rf);
+std::string ln_apply_q16(int dim, XFormat rf);
+std::string bias_add_q16(int dim, XFormat rf);
+std::string act_swish_i24(int dim);
 std::string rwkv_mul(int dim, int adiv);
 std::string rwkv_rk_reduce(int dim, int hs);
 std::string rwkv_rk_add(int dim, int hs);

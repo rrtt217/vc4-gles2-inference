@@ -389,6 +389,67 @@ GLuint GPU::ln_affine(GLuint x, GLuint wb, Target& out){
         return out.tex;
 }
 
+
+// ---- v5 (encoder-decoder) row passes -------------------------------------
+// They live here because they are the same "one fullscreen draw, one row"
+// shape as the RWKV passes, and they share make_q16_pair_texture with the
+// rmsnorm weights, so a bias vector needs no new upload path.
+GLuint GPU::ln_q16(GLuint x, GLuint wb, Target& out, float eps){
+        const int dim = att_dim_;
+        const int tw = x_texels(dim, res_fmt_);
+        if (out.tex == 0 || out.w != tw) out = make_target(tw, 1);
+        if (ln_stat_.tex == 0) ln_stat_ = make_target(1, 1);
+        GLuint ps = x_prog("lns_" + to_string(dim) + "_" + to_string((int)res_fmt_),
+                           ln_stats_q16(dim, res_fmt_));
+        bind_fbo(ln_stat_.fbo);
+        glViewport(0, 0, 1, 1);
+        use_program(ps);
+        bind_tex(0, x); set_sampler(ps, "X", 0);
+        glUniform1f(uloc(ps, "eps"), eps);
+        setup_attrib(ps);
+        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+        GLuint pn = x_prog("lna_" + to_string(dim) + "_" + to_string((int)res_fmt_),
+                           ln_apply_q16(dim, res_fmt_));
+        bind_fbo(out.fbo);
+        glViewport(0, 0, tw, 1);
+        use_program(pn);
+        bind_tex(0, x); set_sampler(pn, "X", 0);
+        bind_tex(1, ln_stat_.tex); set_sampler(pn, "S", 1);
+        bind_tex(2, wb); set_sampler(pn, "W", 2);
+        setup_attrib(pn);
+        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+        return out.tex;
+}
+
+GLuint GPU::bias_add(GLuint x, GLuint b, Target& out){
+        const int dim = att_dim_;
+        const int tw = x_texels(dim, res_fmt_);
+        if (out.tex == 0 || out.w != tw) out = make_target(tw, 1);
+        GLuint p = x_prog("badd_" + to_string(dim) + "_" + to_string((int)res_fmt_),
+                          bias_add_q16(dim, res_fmt_));
+        bind_fbo(out.fbo);
+        glViewport(0, 0, tw, 1);
+        use_program(p);
+        bind_tex(0, x); set_sampler(p, "X", 0);
+        bind_tex(1, b); set_sampler(p, "B", 1);
+        setup_attrib(p);
+        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+        return out.tex;
+}
+
+GLuint GPU::act_swish(GLuint x, Target& out){
+        const int dim = att_dim_;
+        if (out.tex == 0 || out.w != dim) out = make_target(dim, 1);
+        GLuint p = x_prog("swish_" + to_string(dim), act_swish_i24(dim));
+        bind_fbo(out.fbo);
+        glViewport(0, 0, dim, 1);
+        use_program(p);
+        bind_tex(0, x); set_sampler(p, "X", 0);
+        setup_attrib(p);
+        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+        return out.tex;
+}
+
 GLuint GPU::rwkv_upload_x0(const vector<float>& x0){
         const int dim = rwkv_dim_;
         if (rwkv_x0_.tex == 0) rwkv_x0_ = make_target(dim, 1);

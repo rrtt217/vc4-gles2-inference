@@ -277,6 +277,12 @@ vector<Case> cases() {
     add(v, "rwkv_decay_768", [] { return rwkv_decay(768); });
     add(v, "rwkv_vres_768", [] { return rwkv_vres(768); });
     add(v, "act_sqrelu_768", [] { return act_sqrelu(768); });
+    // v5 (encoder-decoder) row passes.  512 is Marian's width; the kernels are
+    // dim-parameterised, so one case each is what the digest covers.
+    add(v, "ln_stats_q16_512", [] { return ln_stats_q16(512, I16_1); });
+    add(v, "ln_apply_q16_512", [] { return ln_apply_q16(512, I16_1); });
+    add(v, "bias_add_q16_512", [] { return bias_add_q16(512, I16_1); });
+    add(v, "act_swish_i24_512", [] { return act_swish_i24(512); });
     add(v, "rwkv_mul_768", [] { return rwkv_mul(768, 1); });
     add(v, "rwkv_mul_768_s256", [] { return rwkv_mul(768, 256); });
     add(v, "rwkv_rk_reduce_768_64", [] { return rwkv_rk_reduce(768, 64); });

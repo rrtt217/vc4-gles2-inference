@@ -448,6 +448,7 @@ private:
     Target sum_target_;
     Target ffn_a_, ffn_b_, ffn_h_, ffn_ab_;
     Target ffn_ab_a_, ffn_ab_b_, ffn_h_a_, ffn_h_b_;
+    Target ln_stat_;   // v5: one texel, (mean, invstd)
     Target qkv_target_, att_scores_, att_stats_, att_probs_, att_out_, qrot_target_, qscale_target_;
     // Prefill query batching: the staged rotated Q (dim/2 x n) and the batched
     // score texture (seq/2 x heads*n), plus the group's residual store.
@@ -572,6 +573,12 @@ private:
     GLuint rwkv_decay(GLuint u, GLuint w0, Target& out);
     GLuint rwkv_vres(GLuint v, GLuint vf, GLuint u, GLuint v0, Target& out);
     GLuint act_sqrelu(GLuint x, Target& out);
+    // The v5 row passes.  `wb` is one texture holding the LayerNorm weight at
+    // row 0 and its bias at row 1 (dim-wide each, q16 pairs), which is the same
+    // packing the rmsnorm weights use; `bias_add` takes a single such row.
+    GLuint ln_q16(GLuint x, GLuint wb, Target& out, float eps);
+    GLuint bias_add(GLuint x, GLuint b, Target& out);
+    GLuint act_swish(GLuint x, Target& out);
     GLuint rwkv_mul(GLuint a, GLuint b, Target& out, int adiv);
     GLuint rwkv_rk(GLuint k, GLuint r, GLuint sc, GLuint v, GLuint y, Target& out);
     GLuint rwkv_wkv(int layer, GLuint r, GLuint k, GLuint v, GLuint a, GLuint kk,

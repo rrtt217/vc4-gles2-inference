@@ -113,6 +113,8 @@ void GPU::reset_targets(){
         xbf_ = Target();
         xf_ = Target();
         rms_stats_ = Target();
+        // v5: the LayerNorm's (mean, invstd), one texel.
+        ln_stat_ = Target();
         rms_partial_ = Target();
         rms_partial2_ = Target();
         ffn_pair_a_ = Target();
