@@ -2009,6 +2009,18 @@ static vector<float> decode_act_row(const vector<uint8_t>& b, int texels, XForma
         return out;
 }
 
+// Decode one texture with an explicit format: the debugging counterpart of
+// read_hidden(), which is only right for a residual-format stream.
+// Needs a Target with an FBO, so it cannot read a bare texture: the LN weights
+// are one, which is why the dump below registers a throwaway target first.
+vector<float> dump_tex(GPU& g, GLuint tex, int dim, XFormat f) {
+        Target t;
+        t.tex = tex; t.w = x_texels(dim, f); t.h = 1;
+        g.attach_dump_fbo(t);
+        vector<uint8_t> b = g.read_bytes(t, t.w, 1);
+        return decode_act_row(b, t.w, f);
+}
+
 vector<float> Session::read_hidden(const Target& t){
         vector<uint8_t> b = gpu_.read_bytes(const_cast<Target&>(t), t.w, 1);
         return decode_act_row(b, t.w, gpu_.res_fmt_);
@@ -2201,43 +2213,80 @@ void Session::encdec_encode(const vector<int>& src) {
         // The embedding plus the position table, on the host: this block adds
         // its positions to the embedding rather than rotating q/k, so there is
         // no kernel to add them later.
+        // `h[b]` is the live handle for position b, and it moves as the layer
+        // writes its residual -- the same ping-pong `step_group` keeps.  Reading
+        // `grp_h(b,n)` instead (which is what this loop did first) reads a fresh
+        // *zero* target: upload_hidden_grp writes grp_in_[b], not grp_h_[b], and
+        // every value after that is a normalised zero.  That is the whole
+        // "maxabs 0.00390625" -- one q16 step off zero.
+        vector<GLuint> h(n);
         for (int b = 0; b < n; ++b) {
                 vector<float> x = embedding(src[b]);
                 const float* p = m.pos_table.data() + (size_t)b * D;
                 for (int i = 0; i < D; ++i) x[i] = x[i] * s + p[i];
-                gpu_.upload_hidden_grp(x, b, n);
+                h[b] = gpu_.upload_into(gpu_.grp_h(b, n), x);
         }
         if (getenv("ENCDEC_DUMP")) {
-                const int B = m.enc_row(0, 0);
-                const float* w = m.bias_dim_row(B + 4);
-                const float* bb = m.bias_dim_row(B + 5);
-                cerr << "ENCDEC roworder ln1w0 " << w[0] << " ln1b0 " << bb[0]
-                     << "  expected ln1w~1 (mean |w| ";
-                float sw = 0.0f;
-                for (int i = 0; i < m.dim; ++i) sw += fabsf(w[i]);
-                cerr << sw / m.dim << "), ln1b~0 (mean |b| ";
-                float sb = 0.0f;
-                for (int i = 0; i < m.dim; ++i) sb += fabsf(bb[i]);
-                cerr << sb / m.dim << ")\n";
-                cerr << "ENCDEC emb_scale[src0] " << m.emb_scale[src[0]]
-                     << " emb_q8[0] " << (int)m.emb_q8[0] << "\n";
+                vector<float> back = read_hidden(gpu_.grp_h(0, n));
+                cerr << "ENCDEC uploaded x[0..2] " << back[0] << " " << back[1]
+                     << " " << back[2] << "\n";
         }
         gpu_.set_causal(false);            // the encoder sees every position
         for (int l = 0; l < E; ++l) {
                 gpu_.set_qkv_bias(gpu_.enc_rows_.enc_qkv_b[l]);
                 for (int b = 0; b < n; ++b) {
-                        GLuint xq = gpu_.ln_q16(gpu_.grp_h(b, n).tex,
-                                                gpu_.enc_rows_.enc_ln1[l],
+                        // The stats must be computed from the *same* device the
+                        // row passes read; a Target here has an FBO and the
+                        // read in the dump above proved h[b] holds the row.
+                        GLuint xq = gpu_.ln_q16(h[b], gpu_.enc_rows_.enc_ln1[l],
                                                 gpu_.cd_a(), m.rms_eps);
                         if (getenv("ENCDEC_DUMP") && l == 0 && b == 0) {
-                                vector<float> v = read_hidden(gpu_.cd_a());
+                                vector<uint8_t> sb = gpu_.read_bytes(gpu_.ln_stat_probe(), 2, 1);
+                                float m0 = 0, m1 = 0;
+                                uint32_t u0 = (uint32_t)sb[0]|((uint32_t)sb[1]<<8)|((uint32_t)sb[2]<<16)|((uint32_t)sb[3]<<24);
+                                uint32_t u1 = (uint32_t)sb[4]|((uint32_t)sb[5]<<8)|((uint32_t)sb[6]<<16)|((uint32_t)sb[7]<<24);
+                                memcpy(&m0,&u0,4); memcpy(&m1,&u1,4);
+                                cerr << "ENCDEC stats mean " << m0 << " inv " << m1 << "\n";
+                                // The LayerNorm's own weight row, read back the way
+                                // the shader reads it.
+                                // Read the (w,b) texture with its own geometry:
+                                // 256 texels wide, 2 rows.  Reading it as one
+                                // 512-wide row interleaves w and b and looked
+                                // plausible, which is exactly how a wrong dump
+                                // keeps a bug alive.
+                                Target wt;
+                                wt.tex = gpu_.enc_rows_.enc_ln1[l];
+                                wt.w = x_texels(m.dim, gpu_.res_fmt_); wt.h = 2;
+                                gpu_.attach_dump_fbo(wt);
+                                vector<uint8_t> wraw = gpu_.read_bytes(wt, wt.w, 2);
+                                vector<float> r0 = decode_act_row(wraw, wt.w, gpu_.res_fmt_);
+                                vector<float> r1 = decode_act_row(
+                                    vector<uint8_t>(wraw.begin() + wraw.size() / 2, wraw.end()),
+                                    wt.w, gpu_.res_fmt_);
+                                cerr << "ENCDEC ln1 w row0[0..2] " << r0[0] << " " << r0[1]
+                                     << " " << r0[2] << "  row1(b)[0..2] " << r1[0]
+                                     << " " << r1[1] << " " << r1[2] << "\n";
+                                vector<float> outv = read_hidden(gpu_.cd_a());
+                                cerr << "ENCDEC ln OUT x0..2 " << outv[0] << " " << outv[1]
+                                     << " " << outv[2] << "\n";
+                        }
+                        if (getenv("ENCDEC_DUMP") && l == 0 && b == 0) {
+                                float m_in = 0.0f, s_in = 0.0f;
+                                vector<float> xv = read_hidden(
+                                    const_cast<Target&>(gpu_.grp_h(b, n)));
                                 float mx = 0.0f;
+                                for (float q : xv) { m_in += q; s_in += q * q;
+                                                     mx = fabsf(q) > mx ? fabsf(q) : mx; }
+                                m_in /= m_.dim; s_in /= m_.dim;
+                                cerr << "ENCDEC ln-IN maxabs " << mx
+                                     << " mean " << m_in << " ss/dim " << s_in
+                                     << " inv " << (1.0f / sqrtf(s_in - m_in * m_in + m_.rms_eps))
+                                     << " v0..2 " << xv[0] << " " << xv[1] << " " << xv[2] << "\n";
+                                vector<float> v = read_hidden(gpu_.cd_a());
+                                mx = 0.0f;
                                 for (float q : v) mx = fabsf(q) > mx ? fabsf(q) : mx;
-                                cerr << "ENCDEC ln1 maxabs " << mx << " v0..2 "
+                                cerr << "ENCDEC ln1 OUT maxabs " << mx << " v0..2 "
                                      << v[0] << " " << v[1] << " " << v[2] << "\n";
-                                vector<float> in = read_hidden(gpu_.grp_h(b, n));
-                                cerr << "ENCDEC x0..2 " << in[0] << " " << in[1]
-                                     << " " << in[2] << "\n";
                         }
                         gpu_.att_stage(m.u_enc_qkv[l], xq, l, b, b, n);
                 }
@@ -2254,7 +2303,7 @@ void Session::encdec_encode(const vector<int>& src) {
                                 cerr << "ENCDEC att maxabs " << mx << "\n";
                         }
                         gpu_.matvec_add(m.u_enc_wo[l], gpu_.att_out_.tex,
-                                        gpu_.grp_h(b, n).tex, gpu_.cd_b(), gpu_.act_fmt_);
+                                        h[b], gpu_.cd_b(), gpu_.act_fmt_);
                         gpu_.bias_add(gpu_.cd_b().tex, gpu_.enc_rows_.enc_o_b[l], gpu_.cd_c());
                         // x = LN2(r); h = swish(fc1*x + b1); x = r + fc2*h + b2
                         // r lives in cd_c and must survive every step of the FFN:
@@ -2267,13 +2316,14 @@ void Session::encdec_encode(const vector<int>& src) {
                                                  gpu_.cd_a(), m.rms_eps);
                         gpu_.matvec_to(m.u_enc_w1[l], xq2, gpu_.cd_d());
                         gpu_.bias_add_f(gpu_.cd_d().tex, gpu_.enc_rows_.enc_fc1_b[l], gpu_.cd_a(), F, gpu_.act_fmt_);
-                        GLuint h = gpu_.act_swish(gpu_.cd_a().tex, gpu_.cd_d(), F, gpu_.act_fmt_);
-                        gpu_.matvec_add(m.u_enc_w2[l], h, gpu_.cd_c().tex,
+                        GLuint hf = gpu_.act_swish(gpu_.cd_a().tex, gpu_.cd_d(), F, gpu_.act_fmt_);
+                        gpu_.matvec_add(m.u_enc_w2[l], hf, gpu_.cd_c().tex,
                                         gpu_.cd_b(), gpu_.act_fmt_);
                         // The block's output is the biased sum, written straight
                         // into the group slot the next layer reads.
                         gpu_.bias_add(gpu_.cd_b().tex, gpu_.enc_rows_.enc_fc2_b[l],
                                       gpu_.grp_h(b, n));
+                        h[b] = gpu_.grp_h(b, n).tex;
                 }
         }
         // The encoder output and each decoder layer's cross K/V, read back once.

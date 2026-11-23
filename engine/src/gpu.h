@@ -81,6 +81,20 @@ public:
     void upload_batch_end();
     // v5: build the bias and LayerNorm row textures (needs the container's rows).
     void upload_encdec_rows(const class Model& m);
+    // The v5 row passes (src/gpu_encdec.cpp).  `wb` is one texture holding a
+    // LayerNorm's weight at row 0 and its bias at row 1; each pass takes the
+    // format its *caller* uses, because a matvec output is act_fmt_ and a
+    // residual is res_fmt_ and reading one as the other silently shrinks the
+    // row to a fixed factor.
+    GLuint ln_q16(GLuint x, GLuint wb, Target& out, float eps);
+    Target& ln_stat_probe() { return ln_stat_; }
+    GLuint upload_bias(const vector<float>& b, XFormat f);
+    GLuint upload_into(Target& t, const vector<float>& x);
+    void attach_dump_fbo(Target& t);
+    GLuint bias_add(GLuint x, GLuint b, Target& out);
+    GLuint bias_add_wide(GLuint x, GLuint b, Target& out, int dim);
+    GLuint bias_add_f(GLuint x, GLuint b, Target& out, int dim, XFormat f);
+    GLuint act_swish(GLuint x, Target& out, int n, XFormat f);
 
     // Everything this context created that is *scene* rather than *program*:
     // weight textures, per-layer tables, scratch/FBO targets, the upload cache.
@@ -616,18 +630,6 @@ private:  // matvec input (qkv/wo/gate/logits)
         GLuint pos = 0;
         bool ready = false;
     } enc_rows_;
-    GLuint ln_q16(GLuint x, GLuint wb, Target& out, float eps);
-    // The row passes of a v5 block, each taking the format its *caller* uses:
-    // a matvec output is act_fmt_ and a residual is res_fmt_, and reading one
-    // as the other is how 512 values became 0.058.  The bias row is uploaded
-    // in the format of the tensor it belongs to (upload_bias).
-    GLuint upload_bias(const vector<float>& b, XFormat f);
-    GLuint bias_add(GLuint x, GLuint b, Target& out);
-    // The same pass over an arbitrary width: a qkv row is 3*dim and the FFN's
-    // 2048-row biases are not the attention's width either.
-    GLuint bias_add_wide(GLuint x, GLuint b, Target& out, int dim);
-    GLuint bias_add_f(GLuint x, GLuint b, Target& out, int dim, XFormat f);
-    GLuint act_swish(GLuint x, Target& out, int n, XFormat f);
     GLuint rwkv_mul(GLuint a, GLuint b, Target& out, int adiv);
     GLuint rwkv_rk(GLuint k, GLuint r, GLuint sc, GLuint v, GLuint y, Target& out);
     GLuint rwkv_wkv(int layer, GLuint r, GLuint k, GLuint v, GLuint a, GLuint kk,

@@ -2405,27 +2405,42 @@ std::string ln_stats_q16(int dim, XFormat rf) {
     // normalised row came out a fixed factor too small (maxabs 0.0039 where the
     // block wanted ~1).  This is the same trap the token-norm hit, from the
     // other side.
-    return head(XFormat::I16_2) + x_residual_glsl(rf) + kBC +
+    // One texel, one q16 pair: (mean, invstd).  Storing them as bit-cast f32
+    // (the RWKV form) needs ESSL 3.00's texture()/uintBitsToFloat, and this
+    // program is ESSL 1.00 like every other row pass -- reading it back with
+    // bcRd in ln_apply gave zero, which is what a 300-es builtin in a 100-es
+    // program looks like.  invstd is 1/sigma and a post-norm residual is O(1),
+    // so the q16 grid had to be *scaled* rather than dropped: the pair is
+    // stored as (mean, invstd/256) and the reader multiplies by 256.
+    return head(XFormat::I16_2) + x_residual_glsl(rf) +
         "uniform sampler2D X;uniform float eps;"
         "void main(){float s=0.0,s2=0.0;"
         "for(int i=0;i<" + D + ";i++){float v=R1(X,i," + RW + ".0);s+=v;s2+=v*v;}"
         "float m=s/float(" + D + ");"
         "float inv=inversesqrt(max(s2/float(" + D + ")-m*m,0.0)+eps);"
-        "if(gl_FragCoord.x<1.0)gl_FragColor=bcWr(m);else gl_FragColor=bcWr(inv);}";
+        "gl_FragColor=x_st2q(m,inv*0.00390625);}";
 }
 
 std::string ln_apply_q16(int dim, XFormat rf, XFormat out) {
     need_dim("ln_apply_q16", dim);
+    // R1 takes the *texel* width: for I16_2 it halves the index before dividing,
+    // so passing the value count reads at half the right pitch (every other texel,
+    // i.e. a row of zeros for indices past dim/2).  This is the one bug of the
+    // whole v5 bring-up that produced a plausible-looking, perfectly wrong row.
     const string D = to_string(dim), RW = to_string(x_texels(dim, rf));
-    const string DW = to_string(x_texels(dim, XFormat::I16_2));
+    // W's row pitch is its *own* width (dim values, I16_2), independent of what
+    // the output format is: indexing it with the output's texel count reads off
+    // the end of the row whenever act_fmt_ is not I16_2.
+    const string WW = to_string(x_texels(dim, XFormat::I16_2));
     // W is two rows: the LayerNorm weight at y=0.25 and its bias at y=0.75, so
     // the pair the store wants is one texel from each row.
-    return head(out) + x_residual_glsl(rf) + kBC +
+    return head(out) + x_residual_glsl(rf) +
         "uniform sampler2D X,S,W;"
         "void main(){int t=int(gl_FragCoord.x);int i0=2*t;"
-        "float m=bcRd(S,vec2(0.25,0.5));float inv=bcRd(S,vec2(0.75,0.5));"
-        "vec4 wc=texture2D(W,vec2((float(t)+0.5)/float(" + DW + "),0.25));"
-        "vec4 bc=texture2D(W,vec2((float(t)+0.5)/float(" + DW + "),0.75));"
+        "vec4 sc=texture2D(S,vec2(0.5,0.5));"
+        "float m=x_i16(sc.rg);float inv=x_i16(sc.ba)*256.0;"
+        "vec4 wc=texture2D(W,vec2((float(i0/2)+0.5)/float(" + WW + "),0.25));"
+        "vec4 bc=texture2D(W,vec2((float(i0/2)+0.5)/float(" + WW + "),0.75));"
         "float v0=(R1(X,i0," + RW + ".0)-m)*inv*x_i16(wc.rg)+x_i16(bc.rg);"
         "float v1=(R1(X,i0+1," + RW + ".0)-m)*inv*x_i16(wc.ba)+x_i16(bc.ba);"
         "gl_FragColor=" + (out == XFormat::F32 ? "x_f32enc2(v0,v1)" : "x_st2q(v0,v1)") + ";}";

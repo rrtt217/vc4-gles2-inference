@@ -103,15 +103,42 @@ void GPU::upload_encdec_rows(const Model& m){
 // They live here because they are the same "one fullscreen draw, one row"
 // shape as the RWKV passes, and they share make_q16_pair_texture with the
 // rmsnorm weights, so a bias vector needs no new upload path.
+// Upload a row into a *Target* rather than into a bare texture: a v5 position
+// needs its residual to be readable and to have an FBO, and `upload_hidden_grp`
+// hands back a make_texture() with no framebuffer at all -- which is fine for a
+// draw source and wrong for anything a caller later reads or draws into.  The
+// group slots (`grp_h(b, n)`) are Targets, so the encoder writes there and the
+// ping-pong is the same one the prefill group loop keeps.
+GLuint GPU::upload_into(Target& t, const vector<float>& x){
+        const int tw = x_texels((int)x.size(), res_fmt_);
+        if (t.tex == 0 || t.w < tw) t = make_target(tw, 1);
+        vector<uint8_t> data = x_pack(x, res_fmt_);
+        bind_tex(0, t.tex);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, tw, 1, GL_RGBA, GL_UNSIGNED_BYTE, data.data());
+        layer_finish("NF_UPLOAD");
+        return t.tex;
+}
+
+void GPU::attach_dump_fbo(Target& t){
+        if (t.fbo) return;
+        glGenFramebuffers(1, &t.fbo);
+        bind_fbo(t.fbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t.tex, 0);
+}
+
 GLuint GPU::ln_q16(GLuint x, GLuint wb, Target& out, float eps){
         const int dim = att_dim_;
         const int ow = x_texels(dim, act_fmt_);
         if (out.tex == 0 || out.w != ow) out = make_target(ow, 1);
-        if (ln_stat_.tex == 0 || ln_stat_.w != 2) ln_stat_ = make_target(2, 1);
+        // Two texels: the stats kernel writes mean at x<1 and invstd at x>=1,
+        // and ln_apply reads them at uv 0.25 / 0.75 (texel 0 / texel 1).  A
+        // one-wide target draws only the mean and leaves invstd at zero, which
+        // makes the LayerNorm return its bias alone.
+        if (ln_stat_.tex == 0 || ln_stat_.w != 1) ln_stat_ = make_target(1, 1);
         GLuint ps = x_prog("lns_" + to_string(dim) + "_" + to_string((int)res_fmt_),
                            ln_stats_q16(dim, res_fmt_));
         bind_fbo(ln_stat_.fbo);
-        glViewport(0, 0, 2, 1);
+        glViewport(0, 0, 1, 1);
         use_program(ps);
         bind_tex(0, x); set_sampler(ps, "X", 0);
         glUniform1f(uloc(ps, "eps"), eps);
