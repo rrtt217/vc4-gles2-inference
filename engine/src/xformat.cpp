@@ -211,14 +211,22 @@ std::string x_codec_glsl(XFormat f) {
     // replaces (`encs` in shaders.cpp): *four* bytes, because a lane sum of
     // `x^2` reaches 2048 and 2048*4096 already fills the 24 the value stream
     // uses -- `.r` is the 25th.
+    // Guarded, because this is the *only* place the format's two functions come
+    // from: `x_glsl(S24_1)` and `x_residual_glsl(S24_1)` both call it, and a
+    // kernel that carries one texture of each kind in the same format would
+    // otherwise define them twice.  That is bf16's answer (`X_BF16_GLSL`) rather
+    // than f32's (a hand-copied second name, `x_f32r`), because a copy is a
+    // thing to keep in sync and a guard is a thing that cannot drift.
     return
+        "\n#ifndef X_S24_GLSL\n#define X_S24_GLSL\n"
         "float x_s24(vec4 c){return (float(int(c.r*255.0+0.5))*16777216.0+"
         "float(int(c.g*255.0+0.5))*65536.0+float(int(c.b*255.0+0.5))*256.0+"
         "float(int(c.a*255.0+0.5))-8388608.0)/4096.0;}\n"
         "vec4 x_s24enc(float v){float q=floor(v*4096.0+0.5)+8388608.0;"
         "float r0=floor(q/16777216.0),g=floor(q/65536.0)-r0*256.0,"
         "b=floor(q/256.0)-r0*65536.0-g*256.0,a=q-r0*16777216.0-g*65536.0-b*256.0;"
-        "return vec4(r0/255.0,g/255.0,b/255.0,a/255.0);}\n";
+        "return vec4(r0/255.0,g/255.0,b/255.0,a/255.0);}\n"
+        "#endif\n";
 }
 
 std::string x_glsl(XFormat f) {
