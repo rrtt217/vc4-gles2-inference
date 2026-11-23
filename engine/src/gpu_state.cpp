@@ -419,6 +419,16 @@ GLuint GPU::make_q16_pair_texture(const vector<float>& x){
         return make_texture(x_texels((int)x.size(), XFormat::I16_2), 1, data.data());
     }
 
+// Two rows in one texture: `make_q16_pair_texture` is the one-row form the
+// rmsnorm weights use, and a LayerNorm weight plus its bias is that shape one
+// row taller.  The row pitch is the same texel count, so a caller's x and y
+// coordinates are independent and the shaders index y = 0.25 / 0.75.
+GLuint GPU::make_q16_pair2_texture(const vector<float>& x){
+        const int tw = x_texels((int)x.size() / 2, XFormat::I16_2);
+        vector<uint8_t> data = x_pack(x, XFormat::I16_2);
+        return make_texture(tw, 2, data.data());
+    }
+
 GLuint GPU::make_q16_texture(const vector<float>& x){
         vector<uint8_t> data((size_t)x.size() * 4);
         for (size_t i = 0; i < x.size(); ++i) {

@@ -178,6 +178,17 @@ void App::upload_weights() {
             add_one(e.w1b); add_one(e.w3b); add_one(e.w2b);
         }
     }
+    // v5: the encoder stack and the cross-attention are ordinary Mats; the bias
+    // rows and the LayerNorm (w,b) pairs are the two things a decoder-only
+    // container never had, and they are uploaded after the matrices.
+    add(model.u_enc_qkv);
+    add(model.u_enc_wo);
+    add(model.u_enc_w1);
+    add(model.u_enc_w2);
+    add(model.u_cross_q);
+    add(model.u_cross_k);
+    add(model.u_cross_v);
+    add(model.u_cross_o);
     add(model.logits_tiles);
     uint64_t total = 0;
     for (const Mat* m : mats) total += mat_bytes(*m);
@@ -212,6 +223,11 @@ void App::upload_weights() {
     }
     gpu.upload_batch_end();
     g_progress.end();
+    // The v5 f32 rows.  They are 60 KiB, and they are not Mats: each is a
+    // 1-row or 2-row q16 texture the row passes read as a weight plane, built
+    // after the batch because they come from metadata-sized vectors rather
+    // than from a mapping.
+    if (model.is_encdec()) gpu.upload_encdec_rows(model);
     model.release_map();
 }
 

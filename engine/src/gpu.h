@@ -79,6 +79,8 @@ public:
     // `UPLOAD_SYNC=1` restores the per-texture finish for an A/B.
     void upload_batch_begin();
     void upload_batch_end();
+    // v5: build the bias and LayerNorm row textures (needs the container's rows).
+    void upload_encdec_rows(const class Model& m);
 
     // Everything this context created that is *scene* rather than *program*:
     // weight textures, per-layer tables, scratch/FBO targets, the upload cache.
@@ -576,6 +578,19 @@ private:
     // The v5 row passes.  `wb` is one texture holding the LayerNorm weight at
     // row 0 and its bias at row 1 (dim-wide each, q16 pairs), which is the same
     // packing the rmsnorm weights use; `bias_add` takes a single such row.
+    // The v5 f32 rows, as textures the row passes read: one (w,b) pair a
+    // LayerNorm, one row a bias vector, and the position table as rows.  Built
+    // after the matrix upload because they come from metadata-sized vectors.
+
+    struct EncdecRows {
+        vector<GLuint> ln1, ln2, ln3;   // [layer] (w,b) pairs, decoders
+        vector<GLuint> enc_ln1, enc_ln2; // [enc layer]
+        vector<GLuint> qkv_b, o_b, cq_b, ck_b, cv_b, co_b, fc1_b, fc2_b;  // [layer]
+        vector<GLuint> enc_qkv_b, enc_o_b, enc_fc1_b, enc_fc2_b;          // [enc layer]
+        GLuint logits_b = 0;
+        GLuint pos = 0;
+        bool ready = false;
+    } enc_rows_;
     GLuint ln_q16(GLuint x, GLuint wb, Target& out, float eps);
     GLuint bias_add(GLuint x, GLuint b, Target& out);
     GLuint act_swish(GLuint x, Target& out);
@@ -609,6 +624,9 @@ private:
 
     static GLuint make_q16_texture(const vector<float>& x);
     static GLuint make_q16_pair_texture(const vector<float>& x);
+    // The same packing two rows tall (w at y=0, b at y=1), which is what a
+    // LayerNorm's affine needs.
+    static GLuint make_q16_pair2_texture(const vector<float>& x);
 
     Target make_target(int w, int h);
 

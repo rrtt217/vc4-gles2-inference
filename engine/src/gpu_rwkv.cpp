@@ -390,6 +390,70 @@ GLuint GPU::ln_affine(GLuint x, GLuint wb, Target& out){
 }
 
 
+// The v5 f32 rows, uploaded once per container.  A bias is a weight vector to
+// the store (one q16 pair row), and a LayerNorm is the same packing two rows
+// tall with the bias underneath -- so `ln_q16` reads y=0.25 for w and y=0.75
+// for b, and `bias_add` reads a one-row texture.
+void GPU::upload_encdec_rows(const Model& m){
+        EncdecRows& r = enc_rows_;
+        auto one = [&](const float* v, int n) {
+                return make_q16_pair_texture(vector<float>(v, v + n));
+        };
+        auto pair2 = [&](const float* w, const float* b, int n) {
+                vector<float> v(w, w + n);
+                v.insert(v.end(), b, b + n);
+                return make_q16_pair2_texture(v);
+        };
+        const int L = m.layers, E = m.enc_layers, D = m.dim, F = m.enc_ffn;
+        r.ln1.assign(L, 0); r.ln2.assign(L, 0); r.ln3.assign(L, 0);
+        r.enc_ln1.assign(E, 0); r.enc_ln2.assign(E, 0);
+        r.qkv_b.assign(L, 0); r.o_b.assign(L, 0);
+        r.cq_b.assign(L, 0); r.ck_b.assign(L, 0); r.cv_b.assign(L, 0); r.co_b.assign(L, 0);
+        r.fc1_b.assign(L, 0); r.fc2_b.assign(L, 0);
+        r.enc_qkv_b.assign(E, 0); r.enc_o_b.assign(E, 0);
+        r.enc_fc1_b.assign(E, 0); r.enc_fc2_b.assign(E, 0);
+        for (int l = 0; l < L; ++l) {
+                const int B = m.dec_bias_row(l, Model::kRowQ);
+                r.ln1[l] = pair2(m.bias_dim_row(B + Model::kRowLn1W),
+                                 m.bias_dim_row(B + Model::kRowLn1B), D);
+                r.ln2[l] = pair2(m.bias_dim_row(B + Model::kRowLn2W),
+                                 m.bias_dim_row(B + Model::kRowLn2B), D);
+                r.ln3[l] = pair2(m.bias_dim_row(B + Model::kRowLn3W),
+                                 m.bias_dim_row(B + Model::kRowLn3B), D);
+                // q/k/v are one 3*dim row in the qkv texture, so their three
+                // biases are concatenated rather than added one at a time.
+                vector<float> qkv(m.bias_dim_row(B + Model::kRowQ),
+                                  m.bias_dim_row(B + Model::kRowQ) + D);
+                qkv.insert(qkv.end(), m.bias_dim_row(B + Model::kRowK),
+                           m.bias_dim_row(B + Model::kRowK) + D);
+                qkv.insert(qkv.end(), m.bias_dim_row(B + Model::kRowV),
+                           m.bias_dim_row(B + Model::kRowV) + D);
+                r.qkv_b[l] = make_q16_pair_texture(qkv);
+                r.o_b[l] = one(m.bias_dim_row(B + Model::kRowO), D);
+                r.cq_b[l] = one(m.bias_dim_row(B + Model::kRowCQ), D);
+                r.ck_b[l] = one(m.bias_dim_row(B + Model::kRowCK), D);
+                r.cv_b[l] = one(m.bias_dim_row(B + Model::kRowCV), D);
+                r.co_b[l] = one(m.bias_dim_row(B + Model::kRowCO), D);
+                r.fc1_b[l] = one(m.bias_ffn_row(l), F);
+                r.fc2_b[l] = one(m.bias_dim_row(B + Model::kRowFc2B), D);
+        }
+        for (int l = 0; l < E; ++l) {
+                const int B = m.enc_row(l, 0);
+                r.enc_ln1[l] = pair2(m.bias_dim_row(B + 4), m.bias_dim_row(B + 5), D);
+                r.enc_ln2[l] = pair2(m.bias_dim_row(B + 6), m.bias_dim_row(B + 7), D);
+                vector<float> qkv(m.bias_dim_row(B + 0), m.bias_dim_row(B + 0) + D);
+                qkv.insert(qkv.end(), m.bias_dim_row(B + 1), m.bias_dim_row(B + 1) + D);
+                qkv.insert(qkv.end(), m.bias_dim_row(B + 2), m.bias_dim_row(B + 2) + D);
+                r.enc_qkv_b[l] = make_q16_pair_texture(qkv);
+                r.enc_o_b[l] = one(m.bias_dim_row(B + 3), D);
+                r.enc_fc1_b[l] = one(m.bias_ffn_row(L + l), F);
+                r.enc_fc2_b[l] = one(m.bias_dim_row(B + 8), D);
+        }
+        r.logits_b = make_q16_pair_texture(m.logits_bias);
+        r.pos = make_q16_pair_texture(m.pos_table);
+        r.ready = true;
+}
+
 // ---- v5 (encoder-decoder) row passes -------------------------------------
 // They live here because they are the same "one fullscreen draw, one row"
 // shape as the RWKV passes, and they share make_q16_pair_texture with the
