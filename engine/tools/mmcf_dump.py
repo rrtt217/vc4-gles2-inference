@@ -127,6 +127,17 @@ def main():
                 tmpls[vname] = body
                 first = body.split(b"\n", 1)[0].decode("utf-8", "replace")
                 print(f"chat tmpl   '{vname}' {vlen} B  {first[:64]}")
+        elif key == 20 and ln >= 6:
+            # v5: the encoder block and the four block properties a
+            # decoder-only container never had to state.
+            n_enc, flags, enc_seq, enc_ffn = struct.unpack_from("<BBHH", payload)
+            props = [n for n, bit in (("post-norm", 1), ("scale-embed", 2),
+                                      ("nogate-ffn", 4), ("no-rope", 8)) if flags & bit]
+            print(f"encoder     {n_enc} layers, seq {enc_seq}, ffn {enc_ffn}, "
+                  + (" ".join(props) if props else "no flags"))
+        elif key == 21 and ln >= 4:
+            nd, nf = struct.unpack_from("<HH", payload)
+            print(f"bias rows   {nd} of dim, {nf} of ffn (mmcf_format.BIAS_DIM_ORDER)")
         elif key == 12 and ln >= 1:
             print(f"residual    {payload[0] and 'q24 (1 value/texel, +-32768)' or 'q16 (2 per texel, +-128)'}")
         elif key == 11 and ln >= 4:
@@ -167,6 +178,11 @@ def main():
             if ln >= 3:
                 # Third byte (2026-11-18): the tokenizer's prefix policy.
                 extra = f" seg_prefix {int(payload[2])}"
+            if ln >= 4:
+                # Fourth byte: 0 = BPE merge (the historical table), 1 =
+                # SentencePiece unigram, which is what an encoder-decoder has.
+                extra += " tok " + {0: "bpe", 1: "unigram"}.get(
+                    int(payload[3]), "?%d" % int(payload[3]))
             print(f"bos/eos     add_bos {fmt(ab)} add_eos {fmt(ae)}{extra}")
         p += 8 + ln
 

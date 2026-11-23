@@ -643,15 +643,15 @@ bool Model::parse_header() {
         if (fsize_ < 64) { cerr << "mmcf: truncated header\n"; return false; }
         const uint8_t* h = fbase_;
         version_ = rd16(h + 4);
-        // 2 dense, 3 mixture of experts, 4 RWKV-7.  v4 keeps v3's 64-byte
-        // record: everything it adds is model-wide (metadata key 16) or a new
-        // tensor kind whose shape the record already carries, so no per-tensor
-        // field had to grow (docs/checkpoint-container.md, "v4").
-        if (version_ != 2 && version_ != 3 && version_ != 4) {
+        // 2 dense, 3 mixture of experts, 4 RWKV-7, 5 encoder-decoder.  v4 keeps
+        // v3's 64-byte record (everything it adds is model-wide or a new kind
+        // whose shape the record carries) and v5 keeps v2's 48: an encoder
+        // record needs no field a dense one does not have.
+        if (version_ != 2 && version_ != 3 && version_ != 4 && version_ != 5) {
                 cerr << "mmcf: unsupported version " << version_ << "\n";
                 return false;
         }
-        rec_size_ = version_ >= 3 ? MMCF_REC_V3 : MMCF_REC_V2;
+        rec_size_ = (version_ == 3 || version_ == 4) ? MMCF_REC_V3 : MMCF_REC_V2;
         if (rd16(h + 6) != 64) { cerr << "mmcf: bad header size\n"; return false; }
         n_tensors_ = rd32(h + 8);
         caps_ = rd32(h + 12);
@@ -768,6 +768,26 @@ bool Model::parse_metadata() {
                         if (e > 0.0f) { rms_eps = e; rms_eps_stated = true; }
                 } else if (key == 14 && type == 1 && len >= 1) {
                         layer_type.assign(payload, payload + len);
+                } else if (key == 20 && type == 1 && len >= 6) {
+                        // v5: encoder layers, flags, encoder sequence capacity,
+                        // encoder FFN width.
+                        enc_layers = payload[0];
+                        const int flags = payload[1];
+                        enc_post_norm = (flags & 1) != 0;
+                        enc_scale_embed = (flags & 2) != 0;
+                        enc_nogate = (flags & 4) != 0;
+                        enc_no_rope = (flags & 8) != 0;
+                        enc_seq = rd16(payload + 2);
+                        enc_ffn = rd16(payload + 4);
+                        if (enc_layers < 1 || enc_seq < 1 || enc_ffn < 1) {
+                                cerr << "mmcf: encoder block is empty (layers "
+                                     << enc_layers << " seq " << enc_seq
+                                     << " ffn " << enc_ffn << ")\n";
+                                return false;
+                        }
+                } else if (key == 21 && type == 1 && len >= 4) {
+                        bias_dim_rows = rd16(payload);
+                        bias_ffn_rows = rd16(payload + 2);
                 } else if (key == 15 && type == 1 && len >= 1) {
                         hid_scale.assign(payload, payload + len);
                 } else if (key == 10 && type == 1 && len >= 2) {
@@ -776,6 +796,15 @@ bool Model::parse_metadata() {
                         // Third byte (2026-11-18): the tokenizer's prefix policy.
                         // Two-byte payloads keep the historical behaviour.
                         sp_prefix = len >= 3 && payload[2] == 1;
+                        // Fourth byte (2026-11-23): the segmentation algorithm.
+                        // 0 = BPE merge, 1 = SentencePiece unigram.  Appended
+                        // for the same reason the third byte was.
+                        if (len >= 4 && payload[3] > 1) {
+                                cerr << "mmcf: tokenizer kind " << (int)payload[3]
+                                     << " is unknown (0 = BPE, 1 = unigram)\n";
+                                return false;
+                        }
+                        tok_unigram = len >= 4 && payload[3] == 1;
                 } else if (key == 18 && type == 1 && len >= 4 && (len % 4) == 0) {
                         // A longrope model's static per-dimension rope table.
                         rope_factors.resize(len / 4);
@@ -1059,6 +1088,16 @@ bool Model::read_tables() {
 
         vector<Mat> layers_qkv, layers_wo, layers_w1, layers_w3, layers_w13, layers_w2;
         vector<Mat> layers_conv_in, layers_conv_out;
+        // v5's two stacks.  Sized here, so a kind whose `layer` is inside its
+        // block always has a slot to land in (the switch refuses the rest).
+        vector<Mat> layers_enc_qkv, layers_enc_wo, layers_enc_w1, layers_enc_w2;
+        vector<Mat> cross_qv, cross_ov, cross_kv_k, cross_kv_v;
+        if (is_encdec()) {
+                layers_enc_qkv.resize(enc_layers); layers_enc_wo.resize(enc_layers);
+                layers_enc_w1.resize(enc_layers); layers_enc_w2.resize(enc_layers);
+                cross_qv.resize(layers); cross_ov.resize(layers);
+                cross_kv_k.resize(layers); cross_kv_v.resize(layers);
+        }
         vector<vector<float>> layers_conv_w;
         layers_qkv.resize(layers); layers_wo.resize(layers); layers_w2.resize(layers);
         layers_conv_in.resize(layers); layers_conv_out.resize(layers);
@@ -1186,6 +1225,85 @@ bool Model::read_tables() {
                         }
                         break;
                 case 0x19: if (layer < layers) as_mat(r, layers_conv_out[layer]); break;
+                // v5: the encoder stack, the cross-attention, and the f32 rows.
+                // A record outside its block (an encoder tensor in a container
+                // whose key 20 says fewer layers) is a refusal, not a skip.
+                case 0x31: case 0x32: case 0x33: case 0x34: {
+                        if (!is_encdec()) {
+                                cerr << "mmcf: encoder tensor 0x" << hex << base << dec
+                                     << " in a version " << version_ << " container\n";
+                                return false;
+                        }
+                        if (layer >= enc_layers) {
+                                cerr << "mmcf: encoder tensor 0x" << hex << base << dec
+                                     << " for layer " << layer << " of " << enc_layers << "\n";
+                                return false;
+                        }
+                        Mat& dst = (base == 0x31) ? layers_enc_qkv[layer]
+                                 : (base == 0x32) ? layers_enc_wo[layer]
+                                 : (base == 0x33) ? layers_enc_w1[layer]
+                                 : layers_enc_w2[layer];
+                        as_mat(r, dst);
+                        break;
+                }
+                case 0x35: case 0x36: case 0x37: case 0x38: {
+                        if (!is_encdec() || layer >= layers) {
+                                cerr << "mmcf: cross-attention tensor 0x" << hex << base
+                                     << dec << " is out of its block\n";
+                                return false;
+                        }
+                        Mat& dst = (base == 0x35) ? cross_qv[layer]
+                                 : (base == 0x36) ? cross_kv_k[layer]
+                                 : (base == 0x37) ? cross_kv_v[layer]
+                                 : cross_ov[layer];
+                        as_mat(r, dst);
+                        break;
+                }
+                case 0x39: case 0x3A: case 0x3B: case 0x3C: {
+                        // f32 rows: read whole, with the shape the metadata
+                        // promised.  A count mismatch is what a row order one off
+                        // looks like, so it is refused here.
+                        if (!is_encdec()) {
+                                cerr << "mmcf: v5 tensor 0x" << hex << base << dec
+                                     << " in a version " << version_ << " container\n";
+                                return false;
+                        }
+                        if (r.dtype != 0) {
+                                cerr << "mmcf: v5 tensor 0x" << hex << base << dec
+                                     << " is not f32\n";
+                                return false;
+                        }
+                        // 0x3B is the vocabulary-wide head bias, not a dim row.
+                        const int cols = (base == 0x3A) ? enc_ffn
+                                         : (base == 0x3B) ? vocab : dim;
+                        // The position table's height is its own business: it
+                        // has to cover both sequences, and its record is what
+                        // says how many rows it has.
+                        const int want_rows = (base == 0x39) ? bias_dim_rows
+                                            : (base == 0x3A) ? bias_ffn_rows
+                                            : (base == 0x3B) ? 1
+                                            : (int)r.rows;
+                        if ((base == 0x3C) && (int)r.rows < std::max(seq, enc_seq)) {
+                                cerr << "mmcf: position table has " << r.rows
+                                     << " rows; the sequences need "
+                                     << std::max(seq, enc_seq) << "\n";
+                                return false;
+                        }
+                        if ((int)r.cols != cols || (int)r.rows != want_rows ||
+                            (uint64_t)r.bytes != (uint64_t)r.rows * r.cols * 4) {
+                                cerr << "mmcf: v5 tensor 0x" << hex << base << dec
+                                     << " is " << r.rows << "x" << r.cols << ", wanted "
+                                     << want_rows << "x" << cols << "\n";
+                                return false;
+                        }
+                        vector<float>& dst = (base == 0x39) ? bias_dim
+                                           : (base == 0x3A) ? bias_ffn
+                                           : (base == 0x3B) ? logits_bias : pos_table;
+                        const float* pf = (const float*)(fbase_ + data_off_ + r.off);
+                        dst.assign(pf, pf + (size_t)r.rows * r.cols);
+                        if (base == 0x3C) pos_rows = (int)r.rows;
+                        break;
+                }
                 // RWKV-7: nine f32 vector groups and eight low-rank pairs.  The
                 // two model-wide norms (0x22/0x23) carry layer bits 0 because
                 // there is one of each for the whole model.
@@ -1414,6 +1532,72 @@ bool Model::read_tables() {
                 else w13.push_back(layers_w13[l]);
                 w2.push_back(layers_w2[l]);
         }
+        if (is_encdec()) {
+                // v5: the decoder half is the dense block without a gate, so
+                // w1/w3 must be the fc1 only and the cross stack must be whole.
+                // The same "refuse rather than run the wrong rows" rule the MoE
+                // and RWKV readers apply.
+                if (w3.empty() && !enc_nogate) {
+                        cerr << "mmcf: a v5 container with no w3 must say nogate-ffn\n";
+                        return false;
+                }
+                const int want_dim_rows = (int)layers * kDecRows + enc_layers * kEncRows;
+                const int want_ffn_rows = (int)layers + enc_layers;
+                if (bias_dim_rows != want_dim_rows || bias_ffn_rows != want_ffn_rows) {
+                        cerr << "mmcf: bias rows " << bias_dim_rows << "/" << bias_ffn_rows
+                             << ", the block wants " << want_dim_rows << "/"
+                             << want_ffn_rows << " (mmcf_format.BIAS_DIM_ORDER)\n";
+                        return false;
+                }
+                if ((int)bias_dim.size() != bias_dim_rows * dim ||
+                    (int)bias_ffn.size() != bias_ffn_rows * enc_ffn) {
+                        cerr << "mmcf: the bias tensors are missing or the wrong size\n";
+                        return false;
+                }
+                // The decoder's first token: Marian starts from its <pad>.  Set
+                // here rather than in key 20's reader because key 8 (the specials)
+                // is parsed before it only if the packer wrote them in order.
+                decoder_start_id = id_pad >= 0 ? id_pad : vocab - 1;
+                if ((int)logits_bias.size() != vocab) {
+                        cerr << "mmcf: logits bias is " << logits_bias.size()
+                             << " values, the vocabulary is " << vocab << "\n";
+                        return false;
+                }
+                if (pos_rows < std::max(seq, enc_seq)) {
+                        cerr << "mmcf: no position table covering "
+                             << std::max(seq, enc_seq) << " positions\n";
+                        return false;
+                }
+                for (int l = 0; l < enc_layers; ++l) {
+                        const Mat& a = layers_enc_qkv[l];
+                        if (a.rows != 3 * dim || a.cols != dim ||
+                            layers_enc_wo[l].rows != dim || layers_enc_wo[l].cols != dim ||
+                            layers_enc_w1[l].rows != enc_ffn || layers_enc_w1[l].cols != dim ||
+                            layers_enc_w2[l].rows != dim || layers_enc_w2[l].cols != enc_ffn) {
+                                cerr << "mmcf: encoder layer " << l
+                                     << " is missing a matrix or has the wrong shape\n";
+                                return false;
+                        }
+                        u_enc_qkv.push_back(a);
+                        u_enc_wo.push_back(layers_enc_wo[l]);
+                        u_enc_w1.push_back(layers_enc_w1[l]);
+                        u_enc_w2.push_back(layers_enc_w2[l]);
+                }
+                for (int l = 0; l < layers; ++l) {
+                        const Mat& q = cross_qv[l];
+                        if (q.rows != dim || q.cols != dim || cross_ov[l].rows != dim ||
+                            cross_kv_k[l].rows != dim || cross_kv_k[l].cols != dim ||
+                            cross_kv_v[l].rows != dim || cross_kv_v[l].cols != dim) {
+                                cerr << "mmcf: cross-attention of layer " << l
+                                     << " is missing a matrix or has the wrong shape\n";
+                                return false;
+                        }
+                        u_cross_q.push_back(q);
+                        u_cross_k.push_back(cross_kv_k[l]);
+                        u_cross_v.push_back(cross_kv_v[l]);
+                        u_cross_o.push_back(cross_ov[l]);
+                }
+        }
         if (is_rwkv()) {
                 // The shapes key 16 makes checkable.  Without this the four
                 // reused ids would load as a transformer block with an RWKV
@@ -1620,7 +1804,10 @@ bool Model::read_tables() {
         // The RMSNorm weights are a transformer tensor; an RWKV-7 container
         // carries LayerNorm w+b instead (ids 0x1D-0x1F, 0x22, 0x23) and is
         // checked above.
-        if (!is_rwkv() && (int)rms_att.size() != layers * dim) {
+        // A v5 block has no model-wide norm: every layer carries its own
+        // LayerNorm w/b as rows of the bias tensor (post-norm), so `rms_att` is
+        // absent by construction rather than missing.
+        if (!is_rwkv() && !is_encdec() && (int)rms_att.size() != layers * dim) {
                 cerr << "mmcf: missing required tensors (rms_att)\n";
                 return false;
         }

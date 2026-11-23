@@ -143,12 +143,32 @@ int main(int argc, char** argv) {
     // by the REPL's /model, which is why it reads `model` instead of taking it
     // as an argument.  Returns false when the container is unusable.
     if (!app.setup_from_model()) return 2;
+    // A version 5 container carries an encoder stack and a cross-attention; the
+    // decode loop that drives them is the next step of this branch, and until it
+    // exists the dense loop would read an empty rms_att and die in the upload.
+    // Refuse here, where the message can say why, instead of there.
+    // A v5 container has no chat path and no single-stream forward: it is a
+    // source sentence in and a target sentence out, so `--prompt` is the source.
+    const bool translate_mode = app.model.is_encdec();
     // Tool definitions, normalised to one JSON array for the template context.
     const string tools_array = chat_tools_array(opt.tools_json);
     // BOS policy: the container states it when it can (key 10); otherwise the
     // historical rule is kept, which is derived from the template kind.
     const bool enc_bos = app.model.add_bos >= 0 ? (app.model.add_bos != 0)
                                             : (!opt.qwen_template && !opt.tbb_template);
+    // --tokenize: the container's own tokenizer over one string, then exit.
+    // No BOS and with the space marker on, which is what the reference does for
+    // a bare source text; scripts/check_unigram.py is the oracle it is diffed
+    // against, and it needs the ids and nothing else on stdout.
+    if (opt.tokenize) {
+        const vector<int> ids = app.tokenizer.encode(opt.tokenize_text, /*bos=*/false,
+                                                    /*dummy_prefix=*/true);
+        for (size_t i = 0; i < ids.size(); ++i)
+            printf("%d%s", ids[i], i + 1 == ids.size() ? "\n" : " ");
+        if (ids.empty()) printf("\n");
+        fprintf(stderr, "n=%zu\n", ids.size());
+        return 0;
+    }
     // CHAT_DUMP=1 prints the rendered prompt with its input marking, which is
     // what the byte-for-byte template comparisons are run against.
     const bool chat_dump = env_set("CHAT_DUMP");
@@ -175,6 +195,36 @@ int main(int argc, char** argv) {
     if (getenv("SHADER_TIME")) fprintf(stderr, "STARTUP %7.1f ms  weights uploaded\n", run_time_ms());
 
     Session session(app.model, app.gpu);
+
+    if (translate_mode) {
+        // tokens -> encoder -> greedy decoder, with the source <eos> appended the
+        // way the reference tokenizer does it (without it the decoder repeats one
+        // token forever, docs: engine/tools/ref_encdec.py).
+        vector<int> src = app.tokenizer.encode(opt.prompt, /*bos=*/false,
+                                              /*dummy_prefix=*/true);
+        src.push_back(app.model.id_eos);
+        session.encdec_encode(src);
+        fprintf(stderr, "encdec: %zu source tokens, %d decoder layers (act %s res %s)\n",
+                src.size(), app.model.layers,
+                x_format_name(app.gpu.act_fmt()), x_format_name(app.gpu.res_fmt()));
+        vector<int> out;
+        int tok = app.model.decoder_start_id;
+        const int max_gen = opt.gen_set ? opt.gen : 32;
+        for (int i = 0; i < max_gen; ++i) {
+                vector<float> lg = session.encdec_step(tok, i);
+                if (lg.empty()) { fprintf(stderr, "encdec: no logits at %d\n", i); break; }
+                int best = 0;
+                for (int v = 1; v < (int)lg.size(); ++v) if (lg[v] > lg[best]) best = v;
+                if (best == app.model.id_eos) break;
+                out.push_back(best);
+                tok = best;
+        }
+        printf("%s\n", app.tokenizer.decode(out).c_str());
+        fprintf(stderr, "encdec: %zu target tokens:", out.size());
+        for (int t : out) fprintf(stderr, " %d", t);
+        fprintf(stderr, "\n");
+        return 0;
+    }
 
     // A cache path may be a single file or a directory.  With a directory the
     // engine picks the entry whose *header* matches this model (container size

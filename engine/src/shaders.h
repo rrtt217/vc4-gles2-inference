@@ -24,6 +24,13 @@ struct AttnConfig {
     bool rope_half = false;
     bool qk_norm = false;
     bool qkv_pair = false;  // qkv matvec writes two q16 rows per texel
+    // Every key is visible: a bidirectional pass (the encoder) or a
+    // cross-attention.  Emitting nothing when it is true is what keeps every
+    // decoder-only program's text byte-identical (gate/shader_hashes.sh).
+    bool causal = true;
+    // No rotation at all (v5): the block's positions are a table added to the
+    // embedding, so the K write and the Q stage must not rotate either.
+    bool rope_none = false;
     int kv_bits = 0;
     // KV value encoding: 0 = the fixed q16 grid (KVSCALE), 1 = bf16 (same two
     // values a texel, uniform 0.1% relative precision, no scale to tune).
@@ -235,14 +242,14 @@ std::string top1_final(int groups);
 //   state  stores S*2^e_head  -> per-head exponent e_head, >=18 effective bits
 //                               (S-1: the q16/I24 1/256 grid costs +0.154 nats).
 
-std::string rwkv_ln_stats(int dim, XFormat rf);
-std::string rwkv_ln_norm(int dim, XFormat rf);
+std::string ln_stats(int dim, XFormat rf);
+std::string ln_norm(int dim, XFormat rf);
 
 // Layer 0's input is the token-normed embedding (~0.013 on g1d), far below the
 // q16 residual step (1/256 = 30% of it).  The CPU keeps it f32 until the first
 // residual add; the GPU stores it *256 in I24_1 and these read it back /256.
-std::string rwkv_ln_stats_p(int dim);
-std::string rwkv_ln_norm_p(int dim);
+std::string ln_stats_p(int dim);
+std::string ln_norm_p(int dim);
 std::string rwkv_first_add(int dim);
 std::string rwkv_res_add(int dim);
 
@@ -256,7 +263,13 @@ std::string rwkv_tanh(int dim);
 std::string rwkv_sigmoid(int dim, bool has_bias, int oscale);
 std::string rwkv_decay(int dim);
 std::string rwkv_vres(int dim);
-std::string rwkv_sqrelu(int dim);
+std::string act_sqrelu(int dim);
+// v5 (encoder-decoder) dense-chain passes: LayerNorm (mean removed) in two
+// draws, x += b, and the non-gated FFN's swish.
+std::string ln_stats_q16(int dim, XFormat rf);
+std::string ln_apply_q16(int dim, XFormat rf, XFormat out);
+std::string bias_add_q16(int dim, XFormat xf, XFormat f);
+std::string act_swish(int dim, XFormat f);
 std::string rwkv_mul(int dim, int adiv);
 std::string rwkv_rk_reduce(int dim, int hs);
 std::string rwkv_rk_add(int dim, int hs);

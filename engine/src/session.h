@@ -44,6 +44,23 @@ public:
 
     vector<float> step(int token, int pos, bool want_logits);
 
+    // ---- v5 (encoder-decoder) -------------------------------------------
+    // The encoder runs layer-outer over all source positions (the same order
+    // the prefill group loop uses), then the decoder walks one position at a
+    // time against it.  `encdec_encode` leaves the source's output in `cd_enc_`
+    // and each decoder layer's cross K/V in `cd_k_`/`cd_v_`, on the host,
+    // because the cross-attention here reads them there (see the note in the
+    // implementation: the cross kernel is the next step, and this is the
+    // bring-up that proves the rest of the block).
+    void encdec_encode(const vector<int>& src);
+    // One decoder position: `token` at `pos`, logits including the container's
+    // head bias.  Requires `encdec_encode` to have run.
+    vector<float> encdec_step(int token, int pos);
+    int encdec_src_len() const { return cd_n_; }
+    vector<float> cd_enc_;                  // n * dim, the encoder's output
+    vector<vector<float>> cd_k_, cd_v_;     // [decoder layer][n * dim]
+    int cd_n_ = 0;
+
     // Greedy fast path: run one position and return the winning token id
     // without reading the vocabulary back.  When the GPU reduction is not
     // available (CPU path, unpacked logits, GPU_ARGMAX=0) it falls back to

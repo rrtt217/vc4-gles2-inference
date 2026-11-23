@@ -221,8 +221,18 @@ void GPU::init_persistent(int dim, int layers, const vector<float>& rms_att,
 
 GLuint GPU::upload_hidden(const vector<float>& x){
         const int tw = x_texels((int)x.size(), res_fmt_);
+        // Allocate on demand: the two slots used to be created by
+        // init_persistent(), which a v5 container skips (it has no model-wide
+        // norm), so every decoder upload went to texture 0 and every read of it
+        // came back black -- while the encoder, whose slots are Targets, was
+        // fine.  An upload helper that hands back a name it never created is a
+        // trap for the next caller too.
+        if (hidden_in_ == 0 || hidden_in_w_ != tw) {
+                hidden_in_ = make_texture(tw, 1, nullptr);
+                hidden_in_w_ = tw;
+        }
         vector<uint8_t> data = x_pack(x, res_fmt_);
-        bind_tex(0, hidden_in_);
+        bind_upload_tex(hidden_in_);
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, tw, 1, GL_RGBA, GL_UNSIGNED_BYTE, data.data());
         layer_finish("NF_UPLOAD");
         return hidden_in_;
@@ -252,7 +262,7 @@ GLuint GPU::upload_hidden_grp(const vector<float>& x, int b, int n){
         while ((int)grp_in_.size() < n) grp_in_.push_back(make_texture(rw, 1, nullptr));
         const int tw = x_texels((int)x.size(), res_fmt_);
         vector<uint8_t> data = x_pack(x, res_fmt_);
-        bind_tex(0, grp_in_[b]);
+        bind_upload_tex(grp_in_[b]);
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, tw, 1, GL_RGBA, GL_UNSIGNED_BYTE, data.data());
         layer_finish("NF_UPLOAD");
         return grp_in_[b];

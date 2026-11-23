@@ -79,6 +79,26 @@ public:
     // `UPLOAD_SYNC=1` restores the per-texture finish for an A/B.
     void upload_batch_begin();
     void upload_batch_end();
+    // v5: build the bias and LayerNorm row textures (needs the container's rows).
+    void upload_encdec_rows(const class Model& m);
+    // The v5 row passes (src/gpu_encdec.cpp).  `wb` is one texture holding a
+    // LayerNorm's weight at row 0 and its bias at row 1; each pass takes the
+    // format its *caller* uses, because a matvec output is act_fmt_ and a
+    // residual is res_fmt_ and reading one as the other silently shrinks the
+    // row to a fixed factor.
+    GLuint ln_q16(GLuint x, GLuint w, GLuint b, Target& out, float eps);
+    Target& ln_stat_probe() { return ln_stat_; }
+    GLuint upload_bias(const vector<float>& b, XFormat f);
+    GLuint upload_into(Target& t, const vector<float>& x);
+    void attach_dump_fbo(Target& t);
+    GLuint bias_add(GLuint x, GLuint b, Target& out);
+    GLuint bias_add_wide(GLuint x, GLuint b, Target& out, int dim);
+    GLuint bias_add_matvec(GLuint x, GLuint b, Target& out, int dim);
+    // `xf` is what wrote x (a matvec writes I24, a *add-into-residual* writes
+    // res_fmt_), `f` is the bias and the output.  They are different axes and
+    // the same format only by accident.
+    GLuint bias_add_f(GLuint x, GLuint b, Target& out, int dim, XFormat xf, XFormat f);
+    GLuint act_swish(GLuint x, Target& out, int n, XFormat f);
 
     // Everything this context created that is *scene* rather than *program*:
     // weight textures, per-layer tables, scratch/FBO targets, the upload cache.
@@ -166,7 +186,8 @@ public:
                         int seq, bool rope_half, bool qk_norm, int layers,
                         const vector<float>& qn, const vector<float>& kn,
                         const vector<float>& rcos, const vector<float>& rsin, bool qkv_pair,
-                        bool hybrid = false, const std::vector<uint8_t>* layer_type = nullptr);
+                        bool hybrid = false, const std::vector<uint8_t>* layer_type = nullptr,
+                        bool rope_none = false);
 
     GLuint attention_block(const Mat& qkv, GLuint x, int layer, int pos);
 
@@ -178,6 +199,13 @@ public:
     // batched score texture (phase 3).  Every kernel is the serial text with
     // the row substituted, so the logits are byte-identical.
     void att_qkv_draw(const Mat& qkv, GLuint x);
+    // v5: the q/k/v bias the next qkv draw must add, 0 for none.  Set around a
+    // block rather than passed through attention_block, so the block's draw
+    // sequence is untouched.
+    void set_qkv_bias(GLuint b) { att_qkv_bias_ = b; }
+    // The staged qkv row (debugging): the projection's output, before rope.
+    Target& att_qkv_target() { return qkv_target_; }
+    void set_causal(bool c) { att_causal_ = c; }
     // Phase 1 of a group, one position: qkv draw, V grid, KV write, rotated Q
     // staged into row b.  The serial attention_block's draws in the same order.
     void att_stage(const Mat& qkv, GLuint x, int layer, int pos, int b, int n);
@@ -426,6 +454,10 @@ private:
     void note_sync() { ++syncs_; }
     GLint aloc(GLuint prog, const char* name);
     void bind_tex(int unit, GLuint tex);
+    // Force unit 0 active and bind, for a glTexSubImage2D upload.
+    void bind_upload_tex(GLuint tex);
+    // What unit `u` currently holds (debugging a stale binding).
+    static GLuint bound_tex(int u);
     void bind_fbo(GLuint fbo);
     void use_program(GLuint prog);
     void set_sampler(GLuint prog, const char* name, int unit);
@@ -448,7 +480,18 @@ private:
     Target sum_target_;
     Target ffn_a_, ffn_b_, ffn_h_, ffn_ab_;
     Target ffn_ab_a_, ffn_ab_b_, ffn_h_a_, ffn_h_b_;
+    Target ln_stat_;   // v5: one texel, (mean, invstd)
+    Target qkv_biased_;  // v5: the biased qkv, swapped with qkv_target_
     Target qkv_target_, att_scores_, att_stats_, att_probs_, att_out_, qrot_target_, qscale_target_;
+    // v5 scratch (session.cpp): the LN output, r, the FFN hidden, one matvec
+    // output.  Owned here so release_scene()/reset_targets() cover them.
+    Target cd_a_, cd_b_, cd_c_, cd_d_;
+public:
+    Target& cd_a() { return cd_a_; }
+    Target& cd_b() { return cd_b_; }
+    Target& cd_c() { return cd_c_; }
+    Target& cd_d() { return cd_d_; }
+private:
     // Prefill query batching: the staged rotated Q (dim/2 x n) and the batched
     // score texture (seq/2 x heads*n), plus the group's residual store.
     Target qrot_batch_, scores_batch_;
@@ -490,10 +533,15 @@ private:
     Target pp_in2_, pp_g_, pp_w2_, pp_w2b_, xb2_, xbf2_;
     bool layer_fast_finish_ = false;
     bool res_pack_ = false;   // residual stream holds two int16 per texel
-    XFormat act_fmt_ = XFormat::I16_2;  // matvec input (qkv/wo/gate/logits)
+    XFormat act_fmt_ = XFormat::I16_2;
+public:
+    XFormat act_fmt() const { return act_fmt_; }
+    XFormat res_fmt() const { return res_fmt_; }
+private:  // matvec input (qkv/wo/gate/logits)
     XFormat ffn_fmt_ = XFormat::I16_2;  // FFN hidden state (w2 input)
     XFormat res_fmt_ = XFormat::I16_1;  // residual stream layout
     GLuint hidden_in_ = 0;
+    int hidden_in_w_ = 0;
     GLuint hidden_in_b_ = 0;
     vector<GLuint> rms_att_tex_, rms_ffn_tex_;
     GLuint rms_final_tex_ = 0;
@@ -513,6 +561,11 @@ private:
     bool rms_eps_stated_ = false;
     float att_kv_scale_ = 16384.0f;
     int att_kv_fmt_ = 0;                 // KV_FMT: 0 fixed grid, 1 bf16
+    // v5: the block has no rotation; its positions are a table added to the
+    // embedding (AttnConfig::rope_none, which emits #define NOROPE).
+    bool att_rope_none_ = false;
+    GLuint att_qkv_bias_ = 0;   // v5: q/k/v bias for the next qkv draw
+    bool att_causal_ = true;    // v5: false for the encoder's bidirectional pass
     float att_score_scale_ = 1024.0f;   // ATT_SCALE: score/(max) grid
     float att_sum_scale_ = 32.0f;       // ATT_SUM_SCALE: exp-sum grid (linear)
     bool att_sum_log_ = false;          // ATT_SUM=log2: sum stored as log2
@@ -558,8 +611,8 @@ private:
     Target& rwkv_tmp(RwkvTmp i) { return rwkv_tmp_[i]; }
     // Granular passes (gpu_rwkv.cpp); each writes a pre-sized scratch target.
     GLuint rwkv_mv(const Mat& m, GLuint x, Target& out);
-    GLuint rwkv_ln(GLuint x, GLuint wb, Target& out);
-    GLuint rwkv_ln_p(GLuint x, GLuint wb, Target& out);
+    GLuint ln_affine(GLuint x, GLuint wb, Target& out);
+    GLuint ln_affine_p(GLuint x, GLuint wb, Target& out);
     GLuint rwkv_first_add(GLuint x0, GLuint delta, Target& out);
     GLuint rwkv_res_add(GLuint resid, GLuint delta, Target& out);
     GLuint rwkv_upload_x0(const std::vector<float>& x0);
@@ -571,7 +624,28 @@ private:
     GLuint rwkv_sigmoid(GLuint x, GLuint bias, Target& out, int oscale);
     GLuint rwkv_decay(GLuint u, GLuint w0, Target& out);
     GLuint rwkv_vres(GLuint v, GLuint vf, GLuint u, GLuint v0, Target& out);
-    GLuint rwkv_sqrelu(GLuint x, Target& out);
+    GLuint act_sqrelu(GLuint x, Target& out);
+    // The v5 row passes.  `wb` is one texture holding the LayerNorm weight at
+    // row 0 and its bias at row 1 (dim-wide each, q16 pairs), which is the same
+    // packing the rmsnorm weights use; `bias_add` takes a single such row.
+    // The v5 f32 rows, as textures the row passes read: one (w,b) pair a
+    // LayerNorm, one row a bias vector, and the position table as rows.  Built
+    // after the matrix upload because they come from metadata-sized vectors.
+
+    struct EncdecRows {
+        // Each LayerNorm is two one-row textures: `ln1` the weight, `ln1b` the
+        // bias.  They were one two-row texture until the format audit: no
+        // XFORMAT macro addresses a second row, so that shape forced two
+        // hand-written fetches inside a kernel whose neighbours all read like
+        // `R1(W, i, TW)`.
+        vector<GLuint> ln1, ln1b, ln2, ln2b, ln3, ln3b;
+        vector<GLuint> enc_ln1, enc_ln1b, enc_ln2, enc_ln2b;
+        vector<GLuint> qkv_b, o_b, cq_b, ck_b, cv_b, co_b, fc1_b, fc2_b;  // [layer]
+        vector<GLuint> enc_qkv_b, enc_o_b, enc_fc1_b, enc_fc2_b;          // [enc layer]
+        GLuint logits_b = 0;
+        GLuint pos = 0;
+        bool ready = false;
+    } enc_rows_;
     GLuint rwkv_mul(GLuint a, GLuint b, Target& out, int adiv);
     GLuint rwkv_rk(GLuint k, GLuint r, GLuint sc, GLuint v, GLuint y, Target& out);
     GLuint rwkv_wkv(int layer, GLuint r, GLuint k, GLuint v, GLuint a, GLuint kk,
@@ -602,6 +676,9 @@ private:
 
     static GLuint make_q16_texture(const vector<float>& x);
     static GLuint make_q16_pair_texture(const vector<float>& x);
+    // The same packing two rows tall (w at y=0, b at y=1), which is what a
+    // LayerNorm's affine needs.
+    static GLuint make_q16_pair2_texture(const vector<float>& x);
 
     Target make_target(int w, int h);
 

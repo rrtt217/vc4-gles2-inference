@@ -138,7 +138,16 @@ string att_defs(const AttnConfig& c) {
            (c.nseg > 1 ? "#define NSEG " + to_string(c.nseg) + "\n" +
                          "#define SEG " + to_string(c.seg) + "\n" +
                          "#define SEGK " + to_string(c.segk) + "\n" : "") +
-           (c.qbatch > 1 ? "#define QB " + to_string(c.qbatch) + "\n" : "");
+           (c.qbatch > 1 ? "#define QB " + to_string(c.qbatch) + "\n" : "") +
+           // A bidirectional (encoder) pass or a cross-attention has no future
+           // to hide: every key is visible.  Emitted only when it is off, so
+           // every decoder-only program keeps its text byte for byte
+           // (gate/shader_hashes.sh).
+           (!c.causal ? "#define NOCAUSAL 1\n" : "") +
+           // No rotation at all (v5: a Marian block carries its positions as a
+           // table added to the embedding).  The same rule as the causal flag:
+           // emitted only when off, so no shipped program's text moves.
+           (c.rope_none ? "#define NOROPE 1\n" : "");
 }
 
 string att_helpers(const AttnConfig& c) {
@@ -165,7 +174,7 @@ string att_helpers(const AttnConfig& c) {
         // round-to-nearest-even, both of which xformat already owns.
         string("vec4 encKV1(float v){return enc24s(v,KVSCALE);}\n"
                "float decKV1(vec4 c){return dec24s(c,KVSCALE);}\n") +
-        x_bf16_glsl() +
+        x_codec_glsl(XFormat::BF16) +
         "vec4 encKV(float v0,float v1){return x_bf16enc2(v0,v1);}\n"
         "float decKV(vec4 c,int odd){return (odd==1)?x_bf16(c.ba):x_bf16(c.rg);}\n"
         : string("vec4 encKV1(float v){return enc24s(v,KVSCALE);}\n"
@@ -225,7 +234,8 @@ string att_kv_rope(const AttnConfig& c) {
         "vec4 rs=texture2D(" + rt + ",vec2((float(2*ti+1)+0.5)/float(2*HALF)," + rty + "));"
         "float co=dec24s(rc,4096.0),sn=dec24s(rs,4096.0);"
         "bool first=(ROPEHALF==1)?(li<HALF):(even==0);"
-        "float oo=first?vv*co-bb*sn:bb*sn+vv*co;if(k==0)o0=oo;else if(k==1)o1=oo;else if(k==2)o2=oo;else o3=oo;}"
+         + string(c.rope_none ? "float oo=vv;" : "float oo=first?vv*co-bb*sn:bb*sn+vv*co;") +
+        "if(k==0)o0=oo;else if(k==1)o1=oo;else if(k==2)o2=oo;else o3=oo;}"
         "gl_FragColor=encKV8(o0,o1,o2,o3);return;}"
         "int vb=4*(x-KVDIM/4);"
         "int vh=vb/HEADDIM;"
@@ -256,7 +266,8 @@ string att_kv_rope(const AttnConfig& c) {
         "vec4 rs=texture2D(" + rt + ",vec2((float(2*ti+1)+0.5)/float(2*HALF)," + rty + "));"
         "float co=dec24s(rc,4096.0),sn=dec24s(rs,4096.0);"
         "bool first=(ROPEHALF==1)?(li<HALF):(even==0);"
-        "float oo=first?vv*co-bb*sn:bb*sn+vv*co;if(k==0)o0=oo;else o1=oo;}"
+         + string(c.rope_none ? "float oo=vv;" : "float oo=first?vv*co-bb*sn:bb*sn+vv*co;") +
+        "if(k==0)o0=oo;else o1=oo;}"
         "gl_FragColor=encKV(o0,o1);return;}"
         "int vb=2*(x-KVDIM/2);"
         "float v0=QKVQ(DIM+KVDIM+vb);"
@@ -335,9 +346,10 @@ string att_qrot(const AttnConfig& c) {
         "b=b*rq*dec16(texture2D(QN,vec2((float(j)+0.5)/float(HEADDIM),0.5)).rg);}"
         "vec4 rc=texture2D(" + rt + ",vec2((float(2*ti)+0.5)/float(2*HALF)," + rty + "));"
         "vec4 rs=texture2D(" + rt + ",vec2((float(2*ti+1)+0.5)/float(2*HALF)," + rty + "));"
-        "float co=dec24s(rc,4096.0),sn=dec24s(rs,4096.0);"
-        "bool first=(ROPEHALF==1)?(i<HALF):(even==0);"
-        "return first?qv*co-b*sn:b*sn+qv*co;}"
+        + string(c.rope_none ? "return qv;}"
+                : "float co=dec24s(rc,4096.0),sn=dec24s(rs,4096.0);"
+                  "bool first=(ROPEHALF==1)?(i<HALF):(even==0);"
+                  "return first?qv*co-b*sn:b*sn+qv*co;}") +
         "void main(){int x=int(gl_FragCoord.x);int h=x/(HEADDIM/2);int i0=(x-h*(HEADDIM/2))*2;"
         "vec4 p0=q16(qval(h,i0)),p1=q16(qval(h,i0+1));"
         "gl_FragColor=vec4(p0.r,p0.g,p1.r,p1.g);}";
@@ -375,7 +387,12 @@ string att_score(const AttnConfig& c) {
         "return vec4(hi/255.0,(q-hi*256.0)/255.0,0.0,1.0);}"
         "void main(){int T=int(gl_FragCoord.x);" + open +
         "int t0=T*2;int t1=t0+1;int kvh=h/GROUP;float s0=0.0,s1=0.0;"
-        "bool e0=(float(" + g0 + ")<=" + ypos + ");bool e1=(float(" + g1 + ")<=" + ypos + ");"
+        // Bidirectional: score every key.  The *scan* in att_stats/att_v is
+        // what bounds which keys count, and that is `pos` = last valid key.
+        + string(c.causal
+                 ? "bool e0=(float(" + g0 + ")<=" + ypos + ");bool e1=(float(" + g1 + ")<=" + ypos + ");"
+                 : "bool e0=true;bool e1=true;") +
+        
         "if(!e0&&!e1){gl_FragColor=vec4(0.0,0.0,0.0,0.0);return;}"
         "for(int i=0;i<HEADDIM;i++){"
         "vec4 qp=texture2D(Q,vec2((float((h*HEADDIM+i)/2)+0.5)/float(DIM/2)," + qrow + "));"
@@ -434,6 +451,11 @@ string att_stats(const AttnConfig& c) {
         "if(q<0.0)q+=65536.0;float hi=floor(q/256.0);"
         "return vec2(hi/255.0,(q-hi*256.0)/255.0);}"
         "void main(){int h=int(gl_FragCoord.x);float mx=-1e30;"
+        // `pos` bounds the scan in *both* modes: causal, it is this query's
+        // position; bidirectional, the host sets it to the last *valid* key.
+        // Removing the bound instead scans the whole SEQ, and the positions past
+        // the sentence are whatever the KV texture held -- they then enter the
+        // softmax and the encoder's attention came out 100x too large.
         "for(int T=" + t_lo + ";T<" + t_hi + ";T++){int t0=T*2;if(float(t0)>pos)break;"
         "vec4 c=texture2D(" + st.sampler + ",vec2((float(" + tloc + ")+0.5)/float(" + sdiv + ")," + srow + "));"
         "mx=max(mx,dec16(c.rg)*SCSI);if(float(t0+1)<=pos)mx=max(mx,dec16(c.ba)*SCSI);}"
@@ -463,7 +485,7 @@ string att_prob(const AttnConfig& c) {
         "vec4 sm=texture2D(ST,vec2((float(2*h)+0.5)/float(2*HEADS),0.5));"
         "vec4 ss=texture2D(ST,vec2((float(2*h+1)+0.5)/float(2*HEADS),0.5));"
         "float mx=dec24s(sm,SCS);float sum=dec24s(ss,SMS);float p=0.0;"
-        "if(float(t)<=pos && sum>0.0)p=" + exp_call(c) + "dec24s(texture2D(S,vec2((float(t)+0.5)/float(SEQ),(float(h)+0.5)/float(HEADS))),SCS)-mx)/sum;"
+        "if(" + string(c.causal ? "float(t)<=pos" : "true") + " && sum>0.0)p=" + exp_call(c) + "dec24s(texture2D(S,vec2((float(t)+0.5)/float(SEQ),(float(h)+0.5)/float(HEADS))),SCS)-mx)/sum;"
         "gl_FragColor=enc24s(p,65536.0);}";
 }
 
@@ -562,7 +584,7 @@ string att_v(const AttnConfig& c, XFormat out) {
                           : "gl_FragColor=x_st2(" + accs + ");}";
 
     string fs = "precision highp float;\n" + x_glsl(out) +
-                (out == XFormat::BF16 ? string() : x_bf16_glsl()) +
+                (out == XFormat::BF16 ? string() : x_codec_glsl(XFormat::BF16)) +
                 att_defs(c) + att_helpers(c) +
         (c.nseg > 1 ? seg_uniforms(c, "S") + seg_uniforms(c, "KV") + seg_uniforms(c, "VS") +
                           "uniform sampler2D ST;"
@@ -573,7 +595,7 @@ string att_v(const AttnConfig& c, XFormat out) {
         "int h=x0/HEADDIM;int i0=x0-h*HEADDIM;int kvh=h/GROUP;" + init + heads_idx +
         prob_body +
         "int mxT=int(pos+0.5)/2+1;"
-        "for(int T=" + t_lo + ";T<" + t_hi + ";T++){if(T>=mxT)break;"
+        "for(int T=" + t_lo + ";T<" + t_hi + ";T++){if(T>=mxT)break;" +
         "int t0=T*2;int t1=t0+1;"
         "vec4 sp=texture2D(" + sp.sampler + ",vec2((float(" + tloc + ")+0.5)/float(" + sdiv + ")," + srow + "));"
         "float p0=" + exp_call(c) + "dec16(sp.rg)*SCSI-mx)*invs;" + (vstep ? step0 : string("")) +
@@ -619,7 +641,7 @@ string att_v_fold_shader(const AttnConfig& c, XFormat out, int nseg, bool accumu
     if (accumulate) decl += "uniform sampler2D ACC;";
     for (int v = 0; v < N; ++v) init += "float a" + to_string(v) + "=0.0;";
     return "precision highp float;\n" + x_glsl(out) +
-           (out == XFormat::BF16 ? string() : x_bf16_glsl()) +
+           (out == XFormat::BF16 ? string() : x_codec_glsl(XFormat::BF16)) +
            att_defs(c) + decl + "uniform float VW;"
            "void main(){int t=int(gl_FragCoord.x);" + init + reads + enc;
 }

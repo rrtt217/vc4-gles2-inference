@@ -14,6 +14,7 @@ const char* x_format_name(XFormat f) {
         case XFormat::I16_2: return "x16_2";
         case XFormat::I8_4: return "x8_4";
         case XFormat::I24_1: return "x24_1";
+        case XFormat::S24_1: return "s24_1";
         case XFormat::F32: return "f32";
         case XFormat::BF16: return "bf16";
     }
@@ -26,6 +27,7 @@ int x_per_texel(XFormat f) {
         case XFormat::I16_2: return 2;
         case XFormat::I8_4: return 4;
         case XFormat::I24_1: return 1;
+        case XFormat::S24_1: return 1;
         case XFormat::F32: return 1;
         case XFormat::BF16: return 2;
     }
@@ -38,7 +40,10 @@ int x_texels(int count, XFormat f) {
 }
 
 bool x_is_int8(XFormat f) { return f == XFormat::I8_4; }
-bool x_is_int24(XFormat f) { return f == XFormat::I24_1; }
+// A 24-bit *integer in an RGBA8*: the value form and the sum form share that
+// packing (four bytes, a byte an integer), so the question is about the texture's
+// storage, not about which quantity it holds.
+bool x_is_int24(XFormat f) { return f == XFormat::I24_1 || f == XFormat::S24_1; }
 bool x_is_f32(XFormat f) { return f == XFormat::F32; }
 bool x_is_bf16(XFormat f) { return f == XFormat::BF16; }
 
@@ -84,6 +89,18 @@ std::vector<uint8_t> x_pack(const float* values, int count, XFormat f) {
                 p[2 * k] = (uint8_t)(r >> 8);
                 p[2 * k + 1] = (uint8_t)(r & 0xFF);
             }
+        } else if (f == XFormat::S24_1) {
+            // Played on a value a texel, 1/4096: the sum form's step.  Nothing
+            // host-packs a sum today (the rms partial sums are written by the
+            // shader), and it is here because "a format has every row of the
+            // contract" is the rule -- the alternative is this function silently
+            // returning I8_4 bytes, which is what it did before.
+            long q = lrintf(values[t] * 4096.0f);
+            q = std::max(0L, std::min(16777215L, q + 8388608L));
+            p[0] = (uint8_t)((q >> 24) & 0xFF);
+            p[1] = (uint8_t)((q >> 16) & 0xFF);
+            p[2] = (uint8_t)((q >> 8) & 0xFF);
+            p[3] = (uint8_t)(q & 0xFF);
         } else if (f == XFormat::I16_2) {
             const int16_t q0 = quantize_act(values[2 * t]);
             const int16_t q1 = 2 * t + 1 < count ? quantize_act(values[2 * t + 1]) : 0;
@@ -91,13 +108,20 @@ std::vector<uint8_t> x_pack(const float* values, int count, XFormat f) {
             p[1] = (uint8_t)q0;
             p[2] = (uint8_t)((uint16_t)q1 >> 8);
             p[3] = (uint8_t)q1;
-        } else {
+        } else if (f == XFormat::I8_4) {
             for (int k = 0; k < 4; ++k) {
                 const int i = 4 * t + k;
                 int q = i < count ? (int)lrintf(values[i] * 16.0f) : 0;
                 q = std::max(-127, std::min(127, q));
                 p[k] = (uint8_t)(q + 128);
             }
+        } else {
+            // An explicit stop, not a default: `else` meant `I8_4` and a format
+            // the packer did not know wrote 8-bit bytes that every reader then
+            // decoded as its own -- the one failure mode this API exists to
+            // make impossible.  The contract in xformat.h is the list.
+            fprintf(stderr, "x_pack: %s has no host pack\n", x_format_name(f));
+            abort();
         }
     }
     return out;
@@ -158,7 +182,9 @@ static const char* q16_pair_glsl() {
             "if(u3>=32767.5)u3-=65536.0;return vec4(u0,u1,u2,u3);}\n";
 }
 
-std::string x_bf16_glsl() {
+
+std::string x_codec_glsl(XFormat f) {
+    if (f == XFormat::BF16) {
     // Only the bf16 functions, no X1/X2 macros: a kernel that already carries
     // its own X-macros (the attention codec's activation format) still wants
     // these, and defining the macros twice is a preprocessor error.
@@ -178,6 +204,42 @@ std::string x_bf16_glsl() {
         "vec4 x_bf16enc2(float a,float b){uint ua=x_bf16i(a),ub=x_bf16i(b);"
         "return vec4(float(ua>>8)/255.0,float(ua&255u)/255.0,"
         "float(ub>>8)/255.0,float(ub&255u)/255.0);}\n"
+        "#endif\n";    }
+    if (f == XFormat::F32) {
+        // The two functions this format *is*, guarded so that both slots can
+        // carry one.  `x_residual_glsl(F32)` used to hand-copy them as
+        // `x_f32r`/`x_f32renc` because a second `x_f32` would not compile
+        // (its own comment said so).  A copy is a thing to keep in sync.
+        return
+            "\n#ifndef X_F32_GLSL\n#define X_F32_GLSL\n"
+            "float x_f32(vec4 c){uint u=(uint(int(c.x*255.0+0.5))<<24)|"
+            "(uint(int(c.y*255.0+0.5))<<16)|(uint(int(c.z*255.0+0.5))<<8)|"
+            "uint(int(c.w*255.0+0.5));return uintBitsToFloat(u);}\n"
+            "vec4 x_f32enc(float v){uint u=floatBitsToUint(v);"
+            "return vec4(float(u>>24),float((u>>16)&255u),float((u>>8)&255u),"
+            "float(u&255u))/255.0;}\n"
+            "#endif\n";
+    }
+    if (f != XFormat::S24_1) return std::string();
+    // The sum of squares the rms stats passes store.  Faithful to the encoder it
+    // replaces (`encs` in shaders.cpp): *four* bytes, because a lane sum of
+    // `x^2` reaches 2048 and 2048*4096 already fills the 24 the value stream
+    // uses -- `.r` is the 25th.
+    // Guarded, because this is the *only* place the format's two functions come
+    // from: `x_glsl(S24_1)` and `x_residual_glsl(S24_1)` both call it, and a
+    // kernel that carries one texture of each kind in the same format would
+    // otherwise define them twice.  That is bf16's answer (`X_BF16_GLSL`) rather
+    // than f32's (a hand-copied second name, `x_f32r`), because a copy is a
+    // thing to keep in sync and a guard is a thing that cannot drift.
+    return
+        "\n#ifndef X_S24_GLSL\n#define X_S24_GLSL\n"
+        "float x_s24(vec4 c){return (float(int(c.r*255.0+0.5))*16777216.0+"
+        "float(int(c.g*255.0+0.5))*65536.0+float(int(c.b*255.0+0.5))*256.0+"
+        "float(int(c.a*255.0+0.5))-8388608.0)/4096.0;}\n"
+        "vec4 x_s24enc(float v){float q=floor(v*4096.0+0.5)+8388608.0;"
+        "float r0=floor(q/16777216.0),g=floor(q/65536.0)-r0*256.0,"
+        "b=floor(q/256.0)-r0*65536.0-g*256.0,a=q-r0*16777216.0-g*65536.0-b*256.0;"
+        "return vec4(r0/255.0,g/255.0,b/255.0,a/255.0);}\n"
         "#endif\n";
 }
 
@@ -233,6 +295,20 @@ std::string x_glsl(XFormat f) {
         "vec4 x_q24encq(float q){return x_q24enc(q/256.0);}\n";
 
     switch (f) {
+        case XFormat::S24_1:
+            s += x_codec_glsl(XFormat::S24_1);
+            s +=
+                "#define X1(T,I,TW) x_s24(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)))\n"
+                "#define X2(T,BASE,TW) vec2(X1(T,(BASE),TW),X1(T,(BASE)+1,TW))\n"
+                "#define X4(T,BASE,TW) vec4(X1(T,(BASE),TW),X1(T,(BASE)+1,TW),"
+                "X1(T,(BASE)+2,TW),X1(T,(BASE)+3,TW))\n"
+                "#define XST1(V) x_s24enc(V)\n"
+                "#define XST2(A,B) vec4(0.0)\n"
+                "#define XST4(A,B,C,D) vec4(0.0)\n"
+                "#define X1Q(T,I,TW) X1(T,I,TW)\n"
+                "#define X2Q(T,B,TW) X2(T,B,TW)\n"
+                "#define X4Q(T,B,TW) X4(T,B,TW)\n";
+            break;
         case XFormat::I24_1:
             s +=
                 "#define X1(T,I,TW) x_q24(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)))\n"
@@ -253,7 +329,7 @@ std::string x_glsl(XFormat f) {
             // scale, and the Q variants return value*256 like every other
             // format's do (the matvec kernels carry the 1/256 in their scale).
             s +=
-                x_bf16_glsl() +
+                x_codec_glsl(XFormat::BF16) +
                 "#define X1(T,I,TW) ((((I)/2)*2)==(I) ? "
                 "x_bf16(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).rg) : "
                 "x_bf16(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).ba))\n"
@@ -296,11 +372,8 @@ std::string x_glsl(XFormat f) {
             // One value a texel: the four bytes of the float, rebuilt with a
             // bit-cast.  ESSL 3.00 only (link_program finds the bit-cast and
             // es3ifies the kernel); no grid, no clamp, no scale.
+            s += x_codec_glsl(XFormat::F32);
             s +=
-                "float x_f32(vec4 c){uint u=(uint(int(c.x*255.0+0.5))<<24)|"
-                "(uint(int(c.y*255.0+0.5))<<16)|(uint(int(c.z*255.0+0.5))<<8)|"
-                "uint(int(c.w*255.0+0.5));return uintBitsToFloat(u);}\n" +
-                x_f32_store_glsl() +
                 "#define X1(T,I,TW) x_f32(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)))\n"
                 "#define X2(T,BASE,TW) vec2(X1(T,(BASE),TW),X1(T,(BASE)+1,TW))\n"
                 "#define X4(T,BASE,TW) vec4(X1(T,(BASE),TW),X1(T,(BASE)+1,TW),X1(T,(BASE)+2,TW),X1(T,(BASE)+3,TW))\n"
@@ -328,41 +401,43 @@ std::string x_glsl(XFormat f) {
 
 std::string x_residual_glsl(XFormat f) {
     switch (f) {
+        case XFormat::S24_1:
+            return x_codec_glsl(XFormat::S24_1) +
+                "#define Y1(T,I,TW) x_s24(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)))\n"
+                "#define Y2(T,BASE,TW) vec2(Y1(T,(BASE),TW),Y1(T,(BASE)+1,TW))\n"
+                "#define Y1Q(T,I,TW) Y1(T,I,TW)\n"
+                "#define YST1(V) x_s24enc(V)\n"
+                "#define YST1Q(Q) x_s24enc(Q)\n";
         case XFormat::I24_1:
             return
-                "#define R1(T,I,TW) x_q24(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)))\n"
-                "#define R2(T,BASE,TW) vec2(R1(T,(BASE),TW),R1(T,(BASE)+1,TW))\n"
-                "#define R1Q(T,I,TW) x_q24raw(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)))\n"
-                "#define XST1Q(Q) x_q24encq(Q)\n";
+                "#define Y1(T,I,TW) x_q24(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)))\n"
+                "#define Y2(T,BASE,TW) vec2(Y1(T,(BASE),TW),Y1(T,(BASE)+1,TW))\n"
+                "#define Y1Q(T,I,TW) x_q24raw(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)))\n"
+                "#define YST1(V) x_q24enc(V)\n"
+                "#define YST1Q(Q) x_q24encq(Q)\n";
         case XFormat::I16_1:
             return
-                "#define R1(T,I,TW) x_i16(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)).rg)\n"
-                "#define R2(T,BASE,TW) vec2(R1(T,(BASE),TW),R1(T,(BASE)+1,TW))\n"
-                "#define R1Q(T,I,TW) x_i16raw(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)).rg)\n"
-                "#define XST1Q(Q) x_st1q(Q)\n";
+                "#define Y1(T,I,TW) x_i16(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)).rg)\n"
+                "#define Y2(T,BASE,TW) vec2(Y1(T,(BASE),TW),Y1(T,(BASE)+1,TW))\n"
+                "#define Y1Q(T,I,TW) x_i16raw(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)).rg)\n"
+                "#define YST1(V) x_st1(V)\n"
+                "#define YST1Q(Q) x_st1q(Q)\n";
         case XFormat::I16_2:
             return
-                "#define R1(T,I,TW) ((((I)/2)*2)==(I) ? x_i16(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).rg) "
+                "#define Y1(T,I,TW) ((((I)/2)*2)==(I) ? x_i16(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).rg) "
                 ": x_i16(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).ba))\n"
-                "#define R2(T,BASE,TW) x_i16pair(texture2D(T,vec2((float((BASE)/2)+0.5)/(TW),0.5)))\n"
-                "#define R1Q(T,I,TW) ((((I)/2)*2)==(I) ? x_i16raw(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).rg) "
+                "#define Y2(T,BASE,TW) x_i16pair(texture2D(T,vec2((float((BASE)/2)+0.5)/(TW),0.5)))\n"
+                "#define Y1Q(T,I,TW) ((((I)/2)*2)==(I) ? x_i16raw(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).rg) "
                 ": x_i16raw(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).ba))\n"
-                "#define XST1Q(Q) x_st1q(Q)\n";
+                "#define YST1(V) x_st1(V)\n"
+                "#define YST1Q(Q) x_st1q(Q)\n";
         case XFormat::F32:
-            // Distinct helper names: a kernel can carry both x_glsl(F32) and
-            // x_residual_glsl(F32), and a second definition of x_f32 would not
-            // compile.
-            return
-                "float x_f32r(vec4 c){uint u=(uint(int(c.x*255.0+0.5))<<24)|"
-                "(uint(int(c.y*255.0+0.5))<<16)|(uint(int(c.z*255.0+0.5))<<8)|"
-                "uint(int(c.w*255.0+0.5));return uintBitsToFloat(u);}\n"
-                "vec4 x_f32renc(float v){uint u=floatBitsToUint(v);"
-                "return vec4(float(u>>24),float((u>>16)&255u),float((u>>8)&255u),"
-                "float(u&255u))/255.0;}\n"
-                "#define R1(T,I,TW) x_f32r(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)))\n"
-                "#define R2(T,BASE,TW) vec2(R1(T,(BASE),TW),R1(T,(BASE)+1,TW))\n"
-                "#define R1Q(T,I,TW) (R1(T,(I),TW)*256.0)\n"
-                "#define XST1Q(Q) x_f32renc((Q)/256.0)\n";
+            return x_codec_glsl(XFormat::F32) +
+                "#define Y1(T,I,TW) x_f32(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)))\n"
+                "#define Y2(T,BASE,TW) vec2(Y1(T,(BASE),TW),Y1(T,(BASE)+1,TW))\n"
+                "#define Y1Q(T,I,TW) (Y1(T,(I),TW)*256.0)\n"
+                "#define YST1(V) x_f32enc(V)\n"
+                "#define YST1Q(Q) x_f32enc((Q)/256.0)\n";
         case XFormat::BF16:
             // Same two-halves-a-texel layout; the residual add stores one value
             // a texel (XST1Q) so the pair is only used for reads.
@@ -374,14 +449,22 @@ std::string x_residual_glsl(XFormat f) {
             // defined ("no function with name 'x_bf16'", found by running
             // RES=bf16 on a q8 container, 2026-11-18; the q4 grid happened not
             // to reach that builder).  The include guard makes it idempotent.
-            return x_bf16_glsl() +
-                "#define R1(T,I,TW) ((((I)/2)*2)==(I) ? "
+            return x_codec_glsl(XFormat::BF16) +
+                "#define Y1(T,I,TW) ((((I)/2)*2)==(I) ? "
                 "x_bf16(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).rg) : "
                 "x_bf16(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).ba))\n"
-                "#define R2(T,BASE,TW) vec2(R1(T,(BASE),TW),R1(T,(BASE)+1,TW))\n"
-                "#define R1Q(T,I,TW) (R1(T,(I),(TW))*256.0)\n"
-                "#define XST1Q(Q) x_bf16enc((Q)/256.0)\n";
+                "#define Y2(T,BASE,TW) vec2(Y1(T,(BASE),TW),Y1(T,(BASE)+1,TW))\n"
+                "#define Y1Q(T,I,TW) (Y1(T,(I),(TW))*256.0)\n"
+                "#define YST1(V) x_bf16enc(V)\n"
+                "#define YST1Q(Q) x_bf16enc((Q)/256.0)\n";
         case XFormat::I8_4:
+            // No residual in this format, by design and not by omission: four
+            // values a texel at 1/16 is a *narrow* stream, and a residual is
+            // the one that has to survive every layer unscaled (the q16 residual
+            // rails at +-128, which is why the wide formats exist at all).  An
+            // empty set here is the answer "this format is not a residual", and
+            // a caller that asks for one gets a program that does not compile --
+            // the loudest available failure.
             return {};
     }
 
@@ -395,7 +478,7 @@ std::string x_pair2_glsl(XFormat f) {
     // The default is the q16 pair; bf16 uses the same layout with its own
     // rounding, so a residual stream can be bf16 without a second pair kernel.
     if (f == XFormat::BF16) {
-        return x_bf16_glsl() +
+        return x_codec_glsl(XFormat::BF16) +
             "float x_p2_a(vec4 c){return x_bf16(c.rg);}\n"
             "float x_p2_b(vec4 c){return x_bf16(c.ba);}\n"
             "vec4 x_p2_st(float a,float b){return x_bf16enc2(a,b);}\n"
@@ -414,10 +497,3 @@ std::string x_pair2_glsl(XFormat f) {
 // The f32 store helper on its own (see xformat.h).  `x_glsl(F32)` emits this
 // plus the read macros; a kernel with a fixed q16 *input* layout and an f32
 // *output* (the swiglu) emits this plus `head(XFormat::I16_2)`.
-std::string x_f32_store_glsl() {
-    return "\n#ifndef X_F32_STORE_GLSL\n#define X_F32_STORE_GLSL\n"
-        "vec4 x_f32enc(float v){uint u=floatBitsToUint(v);"
-        "return vec4(float(u>>24),float((u>>16)&255u),float((u>>8)&255u),"
-        "float(u&255u))/255.0;}\n"
-        "#endif\n";
-}

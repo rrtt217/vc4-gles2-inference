@@ -73,7 +73,46 @@ public:
         // architecture's own 64e-5: it is not a parameter of the model.
         float norm_eps = 1e-5f;
     };
+    // Version 5: an encoder-decoder.  The encoder block is bidirectional and
+    // has no cross-attention; the decoder's blocks are post-norm and carry one.
+    // The bias vectors and the position table are f32 rows because a quantised
+    // LayerNorm weight is a systematic per-channel gain, and because there are
+    // only 60 KiB of them (docs/checkpoint-container.md, "v5").
+    int enc_layers = 0, enc_ffn = 0, enc_seq = 0;
+    bool enc_post_norm = false, enc_scale_embed = false, enc_nogate = false;
+    // key 20 bit 1's neighbour: a v5 block has no rotation at all (the position
+    // table carries the order), so the K write and the Q stage must not rotate.
+    bool enc_no_rope = false;
+    // The uploaded views: the reader fills these after validating the shapes,
+    // so the session never iterates a half-populated stack.
+    vector<Mat> u_enc_qkv, u_enc_wo, u_enc_w1, u_enc_w2;   // [enc_layers]
+    vector<Mat> u_cross_q, u_cross_k, u_cross_v, u_cross_o; // [layers]
+    int bias_dim_rows = 0, bias_ffn_rows = 0;       // metadata key 21
+    vector<float> bias_dim, bias_ffn;               // rows x dim, rows x enc_ffn
+    vector<float> logits_bias;                      // [vocab], added on the host
+    vector<float> pos_table;                        // [pos_rows * dim]
+    int pos_rows = 0;
+    // The dim-wide row a block role lives at.  The order is the packer's
+    // `mmcf_format.BIAS_DIM_ORDER`: every decoder layer first (15 rows), then
+    // every encoder layer (9), and the two counts in key 21 are checked against
+    // these formulas at load, so a row index cannot run past the tensor.
+    static constexpr int kDecRows = 15, kEncRows = 9;
+    static constexpr int kRowQ = 0, kRowK = 1, kRowV = 2, kRowO = 3;
+    static constexpr int kRowCQ = 4, kRowCK = 5, kRowCV = 6, kRowCO = 7;
+    static constexpr int kRowLn1W = 8, kRowLn1B = 9, kRowLn2W = 10, kRowLn2B = 11;
+    static constexpr int kRowLn3W = 12, kRowLn3B = 13, kRowFc2B = 14;
+    int dec_bias_row(int l, int which) const { return l * kDecRows + which; }
+    int enc_bias_row(int l, int which) const {
+        return (int)layers * kDecRows + l * kEncRows + (which == kRowO ? 3 : which);
+    }
+    // The encoder layer's rows are q,k,v,o,ln1w,ln1b,ln2w,ln2b,fc2b: the first
+    // four and the last are the decoder's indices, so `which` above maps o->3.
+    int enc_row(int l, int off) const { return (int)layers * kDecRows + l * kEncRows + off; }
+    const float* bias_dim_row(int r) const { return bias_dim.data() + (size_t)r * dim; }
+    const float* bias_ffn_row(int r) const { return bias_ffn.data() + (size_t)r * enc_ffn; }
+
     Rwkv rwkv;
+    bool is_encdec() const { return version_ == 5; }
     bool is_rwkv() const { return rwkv.arch != 0; }
     // One row per layer, cols = count*dim, groups in the HF/GGUF order (so a
     // row can be compared against llama.cpp's tensor by tensor name).  The
@@ -149,6 +188,11 @@ public:
     // SentencePiece vocabulary needs this ("user" and "\u2581user" are
     // different tokens); a byte-level one does not notice either way.
     bool sp_prefix = false;
+    // Metadata key 10's fourth byte: 1 = SentencePiece unigram, which is what
+    // an encoder-decoder's tokenizer is; absent (every container before this
+    // byte grew) is the BPE merge pass.  Distinct from `tok_kind` above, which
+    // is key 4's tokenizer *name*.
+    bool tok_unigram = false;
     // How much of the body arrived as a 2-bit ternary record (dtype 7) and had
     // to be expanded to q8 on the host.  Zero for every other container; a load
     // that leaves it non-zero says so, because until the GPU kernel exists
@@ -200,6 +244,9 @@ public:
     // such metadata and keep the historical 1 = BOS, 2 = EOS guess.
     bool have_specials = false;
     int id_bos = 1, id_eos = 2, id_stop = -1, id_pad = -1, id_unk = -1, id_im_start = -1;
+    // v5: the decoder starts from its own token (Marian: 65000, its <pad>), and
+    // the encoder's input gets an <eos> appended that is not the decoder's EOS.
+    int decoder_start_id = -1;
     // (these defaults reproduce the historical 1 = BOS, 2 = EOS behaviour)
     bool load(const string& path);
     // Header and metadata only, for a caller that has to decide whether a

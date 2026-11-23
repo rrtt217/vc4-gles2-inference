@@ -118,6 +118,7 @@ bool App::setup_from_model() {
     // -- and this function is the one the REPL's /model calls again, which is
     // what makes a swap out of (or into) an RWKV container set it correctly.
     tokenizer.set_rwkv(model.is_rwkv());
+    tokenizer.set_unigram(model.tok_unigram);
     return true;
 }
 
@@ -177,6 +178,17 @@ void App::upload_weights() {
             add_one(e.w1b); add_one(e.w3b); add_one(e.w2b);
         }
     }
+    // v5: the encoder stack and the cross-attention are ordinary Mats; the bias
+    // rows and the LayerNorm (w,b) pairs are the two things a decoder-only
+    // container never had, and they are uploaded after the matrices.
+    add(model.u_enc_qkv);
+    add(model.u_enc_wo);
+    add(model.u_enc_w1);
+    add(model.u_enc_w2);
+    add(model.u_cross_q);
+    add(model.u_cross_k);
+    add(model.u_cross_v);
+    add(model.u_cross_o);
     add(model.logits_tiles);
     uint64_t total = 0;
     for (const Mat* m : mats) total += mat_bytes(*m);
@@ -211,6 +223,10 @@ void App::upload_weights() {
     }
     gpu.upload_batch_end();
     g_progress.end();
+    // The v5 bias/LayerNorm rows are NOT uploaded here: they are packed in the
+    // container's formats, which the Session decides, so Session's constructor
+    // uploads them after it has.  Doing it here sent them out one-value-a-texel
+    // in front of an I16_2 reader.
     model.release_map();
 }
 

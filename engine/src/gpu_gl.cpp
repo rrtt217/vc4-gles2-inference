@@ -95,6 +95,21 @@ void GPU::bind_tex(int unit, GLuint tex) {
         g_bound_tex[unit] = tex;
     }
 
+// Bind a texture for a *client upload*.  `bind_tex()` skips the glActiveTexture
+// when the unit already holds that texture, which is right for a draw and wrong
+// here: glTexSubImage2D writes into the texture bound on the *active* unit, and
+// the active unit is whatever the last bind left.  A caller that uploaded the
+// same texture twice in a row (the decoder's residual, then the cross-attention
+// context) therefore wrote the second upload into the previous unit's texture
+// and kept reading the old bytes.
+void GPU::bind_upload_tex(GLuint tex) {
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        g_bound_tex[0] = tex;
+}
+
+GLuint GPU::bound_tex(int u) { return (u >= 0 && u < 8) ? g_bound_tex[u] : 0; }
+
 void GPU::bind_fbo(GLuint fbo) {
         if (g_cur_fbo == fbo) return;
         glBindFramebuffer(GL_FRAMEBUFFER, fbo);

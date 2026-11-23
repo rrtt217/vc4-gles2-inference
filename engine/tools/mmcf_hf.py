@@ -37,6 +37,11 @@ DT_F32, DT_I16, DT_Q8I8, DT_Q4, DT_Q6, DT_T3 = 0, 1, 3, 4, 6, 7
 T_EMB, T_EMB_SCALE, T_RMS_ATT, T_RMS_FFN, T_RMS_FINAL = 1, 2, 3, 4, 5
 T_Q_NORM, T_K_NORM = 6, 7
 T_QKV, T_WO, T_W1, T_W3, T_W13, T_W2 = 0x10, 0x11, 0x12, 0x13, 0x14, 0x15
+# Version 5 (encoder-decoder): the encoder stack, the cross-attention, and the
+# f32 rows a decoder-only block never needed.  Same names as mmcf_format.KINDS.
+(T_ENC_QKV, T_ENC_WO, T_ENC_W1, T_ENC_W2) = (0x31, 0x32, 0x33, 0x34)
+(T_CROSS_Q, T_CROSS_K, T_CROSS_V, T_CROSS_O) = (0x35, 0x36, 0x37, 0x38)
+T_BIAS_DIM, T_BIAS_FFN, T_LOGITS_BIAS, T_POS = 0x39, 0x3A, 0x3B, 0x3C
 T_ROUTER = 0x16   # the per-layer MoE gate: rows = experts, cols = dim
 # LFM2's "conv" blocks (the Liquid implicit convolution): a 3*dim projection,
 # a depthwise causal kernel, and a dim projection back.  A reader that predates
@@ -1655,8 +1660,153 @@ def fold_scale_constants(m):
     return m
 
 
+
+def load_marian(model_dir, seq=64, enc_seq=64):
+    """Read a Marian encoder-decoder directory (OPUS-MT, `MarianMTModel`).
+
+    The block is not a transformer decoder: `normalize_before: false` puts the
+    LayerNorm *after* every residual add (post-norm), the decoder carries a
+    cross-attention whose q is its own projection, the FFN is a plain
+    fc1(swish)/fc2 with biases, and the head is `shared` plus a learned
+    `final_logits_bias` (max |b| = 8.7, so it is not optional).  Positions are a
+    *learned* sinusoid added to the embedding, identical for encoder and
+    decoder, so there is no RoPE and no rope metadata.
+
+    The checkpoint is a pre-1.6 bare pickle: `pth_legacy.py` reads it, because
+    `zipfile` refuses the file.
+
+    What the container gets, and why:
+      * bias vectors and the position table as **f32 rows** (they are read once
+        per layer and a quantised LayerNorm weight is a systematic channel
+        gain), the matrices through the same q8/q4 path as every other model;
+      * one row set for the dim-wide vectors and one for the ffn-wide ones,
+        in the fixed order `BIAS_DIM_ORDER` / `BIAS_FFN_ORDER` documents;
+      * encoder layers under their own kind ids, so the reader dispatches on
+        the version and a v2 reader cannot half-load this.
+    """
+    import numpy as np
+    from pth_legacy import load as load_legacy
+    with open(model_dir + '/config.json') as f:
+        cfg = json.load(f)
+    w = load_legacy(model_dir + '/pytorch_model.bin')
+
+    def g(name):
+        if name not in w:
+            raise SystemExit("%s: the checkpoint has no %s; this is not the "
+                             "Marian layout this loader maps" % (model_dir, name))
+        return np.asarray(w[name], np.float32)
+
+    dim = int(cfg['d_model'])
+    layers = int(cfg['decoder_layers'])
+    enc_layers = int(cfg['encoder_layers'])
+    ffn = int(cfg['encoder_ffn_dim'])
+    heads = int(cfg['encoder_attention_heads'])
+    vocab = int(cfg['vocab_size'])
+    post_norm = not bool(cfg.get('normalize_before', False))
+    scale_emb = bool(cfg.get('scale_embedding', False))
+    swish = cfg.get('activation_function', 'swish') == 'swish'
+    if int(cfg['decoder_ffn_dim']) != ffn:
+        raise SystemExit("%s: encoder and decoder FFN widths differ (%d/%d); "
+                         "the container carries one" % (model_dir, ffn,
+                                                        cfg['decoder_ffn_dim']))
+    if not post_norm:
+        raise SystemExit("%s: normalize_before is true; the post-norm block is "
+                         "the only one this reader implements" % model_dir)
+    if not swish:
+        raise SystemExit("%s: activation %r; the shader carries swish"
+                         % (model_dir, cfg.get('activation_function')))
+
+    shared = g('model.shared.weight')
+    if not np.array_equal(shared, g('model.encoder.embed_tokens.weight')):
+        raise SystemExit("%s: the encoder embedding is not `shared`; a tied "
+                         "head is what this container assumes" % model_dir)
+
+    m = dict(dim=dim, hidden=ffn, layers=layers, heads=heads, kv=heads,
+             vocab=vocab, seq=seq, theta=10000.0, half=False, qk_norm=False,
+             emb=shared, wcls=None, untied=False, arch='marian')
+    m['enc'] = dict(layers=enc_layers, ffn=ffn, seq=enc_seq)
+    m['post_norm'] = post_norm
+    m['scale_embed'] = scale_emb
+    m['nogate'] = True
+    m['encdec'] = dict(enc_layers=enc_layers, enc_ffn=ffn, enc_seq=enc_seq,
+                       post_norm=1 if post_norm else 0,
+                       scale_embed=1 if scale_emb else 0, nogate=1)
+
+    # Encoder: [q,k,v,o], fc1/fc2, two LayerNorms (post-norm).
+    m['enc_qkv'], m['enc_wo'], m['enc_w1'], m['enc_w2'] = [], [], [], []
+    m['enc_bias'], m['enc_bias_ffn'] = [], []
+    for l in range(enc_layers):
+        p = 'model.encoder.layers.%d.' % l
+        m['enc_qkv'].append(np.concatenate(
+            [g(p + 'self_attn.q_proj.weight'), g(p + 'self_attn.k_proj.weight'),
+             g(p + 'self_attn.v_proj.weight')], axis=0))
+        m['enc_wo'].append(g(p + 'self_attn.out_proj.weight'))
+        m['enc_w1'].append(g(p + 'fc1.weight'))
+        m['enc_w2'].append(g(p + 'fc2.weight'))
+        m['enc_bias'].append([g(p + 'self_attn.q_proj.bias'),
+                              g(p + 'self_attn.k_proj.bias'),
+                              g(p + 'self_attn.v_proj.bias'),
+                              g(p + 'self_attn.out_proj.bias'),
+                              g(p + 'self_attn_layer_norm.weight'),
+                              g(p + 'self_attn_layer_norm.bias'),
+                              g(p + 'final_layer_norm.weight'),
+                              g(p + 'final_layer_norm.bias'),
+                              g(p + 'fc2.bias')])
+        m['enc_bias_ffn'].append([g(p + 'fc1.bias')])
+
+    # Decoder: self-attention, cross-attention (its own q/k/v/o), fc1/fc2,
+    # three LayerNorms.
+    m['wq'], m['wk'], m['wv'], m['wo'] = [], [], [], []
+    m['cross_q'], m['cross_k'], m['cross_v'], m['cross_o'] = [], [], [], []
+    m['w1'], m['w2'] = [], []
+    m['dec_bias'], m['dec_bias_ffn'] = [], []
+    for l in range(layers):
+        p = 'model.decoder.layers.%d.' % l
+        m['wq'].append(g(p + 'self_attn.q_proj.weight'))
+        m['wk'].append(g(p + 'self_attn.k_proj.weight'))
+        m['wv'].append(g(p + 'self_attn.v_proj.weight'))
+        m['wo'].append(g(p + 'self_attn.out_proj.weight'))
+        m['cross_q'].append(g(p + 'encoder_attn.q_proj.weight'))
+        m['cross_k'].append(g(p + 'encoder_attn.k_proj.weight'))
+        m['cross_v'].append(g(p + 'encoder_attn.v_proj.weight'))
+        m['cross_o'].append(g(p + 'encoder_attn.out_proj.weight'))
+        m['w1'].append(g(p + 'fc1.weight'))
+        m['w2'].append(g(p + 'fc2.weight'))
+        m['dec_bias'].append([g(p + 'self_attn.q_proj.bias'),
+                              g(p + 'self_attn.k_proj.bias'),
+                              g(p + 'self_attn.v_proj.bias'),
+                              g(p + 'self_attn.out_proj.bias'),
+                              g(p + 'encoder_attn.q_proj.bias'),
+                              g(p + 'encoder_attn.k_proj.bias'),
+                              g(p + 'encoder_attn.v_proj.bias'),
+                              g(p + 'encoder_attn.out_proj.bias'),
+                              g(p + 'self_attn_layer_norm.weight'),
+                              g(p + 'self_attn_layer_norm.bias'),
+                              g(p + 'encoder_attn_layer_norm.weight'),
+                              g(p + 'encoder_attn_layer_norm.bias'),
+                              g(p + 'final_layer_norm.weight'),
+                              g(p + 'final_layer_norm.bias'),
+                              g(p + 'fc2.bias')])
+        m['dec_bias_ffn'].append([g(p + 'fc1.bias')])
+
+    m['pos'] = g('model.encoder.embed_positions.weight')
+    if not np.array_equal(m['pos'], g('model.decoder.embed_positions.weight')):
+        raise SystemExit("%s: the two position tables differ; the container "
+                         "carries one" % model_dir)
+    if m['pos'].shape[0] < max(seq, enc_seq):
+        raise SystemExit("%s: the position table has %d rows, the container "
+                         "needs %d" % (model_dir, m['pos'].shape[0],
+                                       max(seq, enc_seq)))
+    m['logits_bias'] = g('final_logits_bias').reshape(-1)
+    m['start_id'] = int(cfg['decoder_start_token_id'])
+    m['eos_id'] = int(cfg['eos_token_id'])
+    m['specials'] = dict(bos=None, eos=m['eos_id'], stop=-1,
+                         pad=int(cfg['pad_token_id']), unk=1, im_start=-1)
+    return m
+
+
 def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit=None,
-                    q8_row=False, head_dedup=False, head_q6=False):
+                    q8_row=False, head_dedup=False, head_q6=False, enc_seq=64):
     """Build the tensor list directly from an HF safetensors directory.
 
     Same list shape the legacy reader produces, so build() cannot tell them
@@ -1673,6 +1823,8 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
             m = load_rwkv7(model_dir, seq)
         elif _cfg.get('model_type') == 'lfm2':
             m = load_lfm2(model_dir, seq)
+        elif _cfg.get('model_type') == 'marian':
+            m = load_marian(model_dir, seq, enc_seq=enc_seq)
         else:
             m = load_minimind(model_dir, seq)
     # HF pads the embedding to a multiple of its own choosing (16408 for a
@@ -1699,6 +1851,15 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
     # 0x10/0x11/0x12/0x15 for its four big matrices and has no w3 at all, so
     # the container always says split_w13 and never writes a fused pair.
     rwkv = m.get('arch') == 'rwkv7'
+    encdec = m.get('arch') == 'marian'
+    enc_layers = int(m['enc']['layers']) if encdec else 0
+    if encdec:
+        # No rail measurement: every residual add in a post-norm block is
+        # followed by a LayerNorm, so the stream is normalised at every layer
+        # boundary and there is no growing sum to probe.  (The decoder-only
+        # check exists because a pre-norm stream *does* grow; docs/benchmarks.md
+        # has the two cases that had to be scaled.)
+        rail_check = False
     # The FFN width that is written to the file is the expert width for a MoE
     # container: the dense mlp does not exist there.
     ffn_w = moe['hidden'] if moe else hidden
@@ -1707,7 +1868,7 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
     # from the block, not from the dense 2*hidden > 2048 rule.  Without the
     # `moe` term a Qwen3-MoE whose expert width is <= 1024 packs split_w13 = 0
     # and the engine then refuses the file the packer just wrote.
-    split = 1 if (moe or rwkv or 2 * ffn_w > 2048) else 0
+    split = 1 if (moe or rwkv or encdec or 2 * ffn_w > 2048) else 0
     meta = dict(dim=dim, hidden=hidden, layers=layers, heads=heads, kv_heads=kv,
                 vocab=vocab, seq=seq, head_dim=head_dim,
                 theta=float(m['theta']), half=bool(m['half']), qk_norm=bool(qk),
@@ -1723,6 +1884,14 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
         meta['top_k'] = int(moe['top_k'])
         meta['moe_hidden'] = int(moe['hidden'])
         meta['norm_topk'] = bool(moe['norm_topk'])
+    if encdec:
+        # Metadata key 20: the encoder block and the four block properties the
+        # decoder-only path takes for granted.  key 21 is the two bias row
+        # counts, whose row order mmcf_format.BIAS_DIM_ORDER documents.
+        meta['encdec'] = dict(m['encdec'])
+        meta['bias_rows'] = dict(
+            n_dim=layers * len(m['dec_bias'][0]) + enc_layers * len(m['enc_bias'][0]),
+            n_ffn=layers * 1 + enc_layers * 1)
     if rwkv:
         # Metadata key 16: arch, head width, flags, LayerNorm eps, four ranks.
         # The container is version 4 and its rectype is v3's 64-byte one.
@@ -1889,6 +2058,11 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
                 T.append((tid, DT_F32, 1, int(a.size), 0, f32(a), 0.0))
             else:
                 T.append((tid, DT_F32, layers, int(a.size) // layers, 0, f32(a), 0.0))
+    elif encdec:
+        # A post-norm block has no model-wide norm to carry: its LayerNorm
+        # weights and biases are rows of the bias tensor, per layer, because
+        # every layer has its own (three on the decoder, two on the encoder).
+        pass
     else:
         T.append((T_RMS_ATT, DT_F32, layers, dim, 0, f32(m['rms_att']), 0.0))
         T.append((T_RMS_FFN, DT_F32, layers, dim, 0, f32(m['rms_ffn']), 0.0))
@@ -1932,6 +2106,21 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
 
     ltypes = m.get('layer_types') or []
     for l in range(layers):
+        if encdec:
+            # The decoder half is the dense block minus the gate: w1 is fc1 and
+            # there is no w3 (`nogate`), because the FFN is fc2(swish(fc1(x))).
+            mat(T_QKV, l, np.concatenate([m['wq'][l], m['wk'][l], m['wv'][l]],
+                                         axis=0))
+            mat(T_WO, l, m['wo'][l])
+            mat(T_W1, l, m['w1'][l])
+            mat(T_W2, l, m['w2'][l])
+            # Cross-attention: q from the decoder, k/v from the encoder, so all
+            # four are the decoder's own matrices.
+            mat(T_CROSS_Q, l, m['cross_q'][l])
+            mat(T_CROSS_K, l, m['cross_k'][l])
+            mat(T_CROSS_V, l, m['cross_v'][l])
+            mat(T_CROSS_O, l, m['cross_o'][l])
+            continue
         if rwkv:
             # 0x10 holds [W_r; W_k; W_v] as one row block (the plan's rkv
             # slot); 0x12/0x15 are the channel mix's key/value pair.  The four
@@ -1980,6 +2169,30 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
             mat(T_W13, l, np.concatenate([m['w1'][l], m['w3'][l]], axis=0))
         if not moe:
             mat(T_W2, l, m['w2'][l])
+    if encdec:
+        for l in range(m['enc']['layers']):
+            mat(T_ENC_QKV, l, m['enc_qkv'][l])
+            mat(T_ENC_WO, l, m['enc_wo'][l])
+            mat(T_ENC_W1, l, m['enc_w1'][l])
+            mat(T_ENC_W2, l, m['enc_w2'][l])
+        # The bias rows, in the order mmcf_format.BIAS_DIM_ORDER names: every
+        # decoder layer first, then every encoder layer.  An f32 row is 2 KiB,
+        # and the engine reads these once at load.
+        dim_rows = []
+        for l in range(layers):
+            dim_rows.extend(m['dec_bias'][l])
+        for l in range(m['enc']['layers']):
+            dim_rows.extend(m['enc_bias'][l])
+        ffn_rows = []
+        for l in range(layers):
+            ffn_rows.extend(m['dec_bias_ffn'][l])
+        for l in range(m['enc']['layers']):
+            ffn_rows.extend(m['enc_bias_ffn'][l])
+        T.append((T_BIAS_DIM, DT_F32, len(dim_rows), dim, 0,
+                  np.asarray(dim_rows, np.float32).tobytes(), 0.0))
+        # The fc1 biases are `hidden` wide, which is the container's FFN width.
+        T.append((T_BIAS_FFN, DT_F32, len(ffn_rows), int(ffn_rows[0].size), 0,
+                  np.asarray(ffn_rows, np.float32).tobytes(), 0.0))
     # Logits: q8 from the float weights in a q4 container (the vocabulary head
     # stays 8-bit there), but i16-then-q8 in a q8 container -- the two-step order
     # again, and it is visible in the shipped files.
@@ -1991,6 +2204,18 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
         raise SystemExit("--head-dedup needs a tied head: this checkpoint ships a "
                          "separate lm_head, so the logits cannot reuse the "
                          "embedding rows")
+    if encdec:
+        # The head *is* the embedding, so `--head-dedup` is the only form: the
+        # logits come from the embedding rows and the learned bias is one f32
+        # row under T_LOGITS_BIAS.  (A separate copy would be 33 MB of the same
+        # bytes.)
+        head_dedup = True
+        T.append((T_LOGITS_BIAS, DT_F32, 1, vocab, 0,
+                  f32(m['logits_bias']), 0.0))
+        np_pos, dim_p = m['pos'].shape
+        T.append((T_POS, DT_F32, int(min(np_pos, max(seq, m['enc']['seq']))),
+                  dim, 0, f32(m['pos'][:min(np_pos, max(seq, m['enc']['seq']))]),
+                  0.0))
     if not head_dedup:
         for i, st in enumerate(range(0, vocab, LOGITS_GRID)):
             w = m['wcls'][st:st + LOGITS_GRID]

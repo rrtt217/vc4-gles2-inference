@@ -172,6 +172,12 @@ vector<Case> cases() {
     add(v, "swiglu_pair_2432_i16_2", [] { return swiglu_pair(2432, I16_2); });
     add(v, "swiglu_pair_2432_i8_4", [] { return swiglu_pair(2432, I8_4); });
     add(v, "swiglu_2row_2432_i16_2", [] { return swiglu_2row(2432, I16_2); });
+    // The two formats with a codec of their own: bf16 and f32 had **no** entry
+    // here, so `gate/shader_hashes.sh` could not see the day one of them
+    // changed (`x_f32r` was a hand copy and nothing compared it).  One program
+    // each, at the shape the FFN's hidden uses.
+    add(v, "swiglu_2row_2432_bf16", [] { return swiglu_2row(2432, XFormat::BF16); });
+    add(v, "swiglu_2row_2432_f32", [] { return swiglu_2row(2432, XFormat::F32); });
     add(v, "swiglu_2432_fused_i16_2", [] { return swiglu(2432, true, I16_2); });
     add(v, "swiglu_2432_split_i8_4", [] { return swiglu(2432, false, I8_4); });
     add(v, "rms_stats_split_768_i16_1", [] { return rms_stats_split(768, I16_1); });
@@ -257,12 +263,12 @@ vector<Case> cases() {
 
     // --- RWKV-7 (P6): the elementwise ops and the WKV7 recurrence.  dim 768,
     // head_size 64, 12 heads (the 0.1B g1d shape).  The residual is q16 (I16_1).
-    add(v, "rwkv_ln_stats_768_i16_1", [] { return rwkv_ln_stats(768, I16_1); });
-    add(v, "rwkv_ln_stats_p_768", [] { return rwkv_ln_stats_p(768); });
-    add(v, "rwkv_ln_norm_p_768", [] { return rwkv_ln_norm_p(768); });
+    add(v, "ln_stats_768_i16_1", [] { return ln_stats(768, I16_1); });
+    add(v, "ln_stats_p_768", [] { return ln_stats_p(768); });
+    add(v, "ln_norm_p_768", [] { return ln_norm_p(768); });
     add(v, "rwkv_first_add_768", [] { return rwkv_first_add(768); });
     add(v, "rwkv_res_add_768", [] { return rwkv_res_add(768); });
-    add(v, "rwkv_ln_norm_768_i16_1", [] { return rwkv_ln_norm(768, I16_1); });
+    add(v, "ln_norm_768_i16_1", [] { return ln_norm(768, I16_1); });
     add(v, "rwkv_gn_stats_768_64", [] { return rwkv_gn_stats(768, 64); });
     add(v, "rwkv_gn_norm_768_64", [] { return rwkv_gn_norm(768, 64); });
     add(v, "rwkv_lerp_768_0", [] { return rwkv_lerp(768, 0, 6); });
@@ -276,7 +282,13 @@ vector<Case> cases() {
     add(v, "rwkv_sigmoid_768_nobias1", [] { return rwkv_sigmoid(768, false, 1); });
     add(v, "rwkv_decay_768", [] { return rwkv_decay(768); });
     add(v, "rwkv_vres_768", [] { return rwkv_vres(768); });
-    add(v, "rwkv_sqrelu_768", [] { return rwkv_sqrelu(768); });
+    add(v, "act_sqrelu_768", [] { return act_sqrelu(768); });
+    // v5 (encoder-decoder) row passes.  512 is Marian's width; the kernels are
+    // dim-parameterised, so one case each is what the digest covers.
+    add(v, "ln_stats_q16_512", [] { return ln_stats_q16(512, I16_1); });
+    add(v, "ln_apply_q16_512", [] { return ln_apply_q16(512, XFormat::I16_1, XFormat::I24_1); });
+    add(v, "bias_add_q16_512", [] { return bias_add_q16(512, XFormat::I24_1, I16_1); });
+    add(v, "act_swish_i24_512", [] { return act_swish(512, XFormat::I24_1); });
     add(v, "rwkv_mul_768", [] { return rwkv_mul(768, 1); });
     add(v, "rwkv_mul_768_s256", [] { return rwkv_mul(768, 256); });
     add(v, "rwkv_rk_reduce_768_64", [] { return rwkv_rk_reduce(768, 64); });

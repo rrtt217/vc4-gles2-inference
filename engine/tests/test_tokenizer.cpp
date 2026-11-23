@@ -10,6 +10,7 @@
 //   3. encode_parts() matches specials only in template text -- a user message
 //      that contains "<|s|>" must not be able to forge one;
 //   4. a reload replaces the vocabulary (the failure load_memory() resets for).
+//   5. unigram mode segments by summed score, so the longest piece can lose.
 #include <cstdint>
 #include <cstring>
 #include <iostream>
@@ -171,6 +172,45 @@ void test_seg_prefix() {
     CHECK_INTS(single.encode_parts(parts, false, true), 11, 5, 0);
 }
 
+
+// Unigram segmentation.  The scores here are log probabilities, and the point of
+// the test is that the winner is NOT the longest piece: a greedy longest-match
+// (which is what encode_greedy does for RWKV) would take "abc" and this must not.
+void test_unigram() {
+    const std::vector<Entry> uni = {
+        {"a", -0.1f},     // 0
+        {"ab", -0.2f},    // 1
+        {"bc", -0.1f},    // 2
+        {"c", -0.1f},     // 3
+        {"abc", -1.5f},   // 4: the longest piece, and the worst segmentation
+        {" ", -2.0f},     // 5
+        {" a", -0.5f},    // 6: the marker joined to "a", which BPE could not use
+        {" b", -3.0f},    // 7
+        {"<|s|>", 0.0f},  // 8
+        {"b", -0.1f},     // 9
+    };
+    Tokenizer t = load(uni);
+    t.set_unigram(true);
+    // a + bc = -0.2 against abc = -1.5 and ab + c = -0.3.
+    CHECK_INTS(t.encode("abc", false, false), 0, 2);
+    // ab + c is worse than a + bc but still better than abc.
+    CHECK_INTS(t.encode("ab", false, false), 0, 9);
+    // The marker is part of the first piece: " a" + "b" = -0.6, against
+    // " " + "a" + "b" = -2.2.  The BPE path pushes " " as its own token and
+    // relies on the merge pass; Viterbi must see the bytes.
+    CHECK_INTS(t.encode("ab", false, true), 6, 9);
+    // Same rule per run: after a special the marker starts a new piece.
+    t.set_seg_prefix(true);
+    const std::vector<PromptPart> parts = {
+        {"a", false},
+        {"<|s|>", false},
+        {"a", true},
+    };
+    CHECK_INTS(t.encode_parts(parts, false, true), 6, 8, 6);
+    // A byte no piece covers is dropped, not turned into a run of junk ids.
+    CHECK_INTS(t.encode("abz", false, false), 0, 9);
+}
+
 }  // namespace
 
 int main() {
@@ -181,10 +221,11 @@ int main() {
     test_reload_replaces();
     test_truncated();
     test_seg_prefix();
+    test_unigram();
     if (checks::g_fail) {
         std::fprintf(stderr, "test_tokenizer: %d check(s) failed\n", checks::g_fail);
         return 1;
     }
-    std::printf("test_tokenizer: blob, BPE rank, specials, parts, decode and reload pass\n");
+    std::printf("test_tokenizer: blob, BPE rank, unigram, specials, parts, decode and reload pass\n");
     return 0;
 }

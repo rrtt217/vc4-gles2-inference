@@ -52,6 +52,7 @@ from mmcf_format import (MAGIC, REC_SIZE_V2, REC_SIZE_V3, HEADER_SIZE, TEMPLATE_
                          rec_unpack, pack_rec, tlv, crc32,
                          DT_F32, DT_I16, DT_Q8U8, DT_Q8I8, DT_Q4, DT_BLOB,
                          VERSION_DENSE, VERSION_MOE, VERSION_RWKV7,
+                         VERSION_ENCDEC,
                          KEY_RWKV, KEY_LOGIT_SHIFT, KEY_ROPE_FACTORS,
                          RWKV_FLAG_GATE, pack_rwkv_meta, pack_rope_factors)
 from mmcf_hf import T_EMB, T_EMB_I16, T_LOGITS  # noqa: E402
@@ -329,15 +330,37 @@ def build(meta, tensors, tok_blob, args):
         md += tlv(12, 1, struct.pack("<B", 1))
     if args.rms_eps is not None:
         md += tlv(11, 1, struct.pack("<f", args.rms_eps))
+    # key 20: the encoder-decoder block (version 5).  <BBHH>: encoder layers,
+    # flags (bit0 post-norm, bit1 scale-embedding, bit2 non-gated FFN), the
+    # encoder's sequence capacity, its FFN width.  key 21 is the two bias row
+    # counts; mmcf_format.BIAS_DIM_ORDER is the row order.
+    if meta.get('encdec'):
+        e = meta['encdec']
+        # Bit 3 says the block has no rotation at all: a Marian block carries
+        # its positions as a table added to the embedding, so the K write and
+        # the Q stage must not rotate (AttnConfig::rope_none, #define NOROPE).
+        flags = (1 if e.get('post_norm') else 0) | \
+                (2 if e.get('scale_embed') else 0) | \
+                (4 if e.get('nogate') else 0) | \
+                (8 if e.get('no_rope', True) else 0)
+        md += tlv(20, 1, struct.pack("<BBHH", int(e['enc_layers']), flags,
+                                     int(e['enc_seq']), int(e['enc_ffn'])))
+        br = meta['bias_rows']
+        md += tlv(21, 1, struct.pack("<HH", int(br['n_dim']), int(br['n_ffn'])))
     # key 10: the BOS/EOS policy, and (third byte, added 2026-11-18) whether the
     # tokenizer prefixes *every* text run with its space marker.  A reader that
     # only looks at two bytes sees the old policy, which is why the byte is
     # appended rather than put in a key of its own.
     if (args.add_bos is not None or args.add_eos is not None
-            or meta.get("sp_prefix")):
+            or meta.get("sp_prefix") or meta.get("tok_unigram")):
         body = struct.pack("<BB", 255 if args.add_bos is None else args.add_bos,
                            255 if args.add_eos is None else args.add_eos)
-        if meta.get("sp_prefix"):
+        # Third byte: the per-run space marker.  Fourth: the segmentation
+        # algorithm (1 = SentencePiece unigram), because the same blob layout
+        # carries both and only the kind says how the score column reads.
+        if meta.get("sp_prefix") or meta.get("tok_unigram"):
+            body += struct.pack("<B", 1 if meta.get("sp_prefix") else 0)
+        if meta.get("tok_unigram"):
             body += struct.pack("<B", 1)
         md += tlv(10, 1, body)
     # key 14: one byte per layer, 0 = attention, 1 = the LFM2 conv block.
@@ -391,7 +414,8 @@ def build(meta, tensors, tok_blob, args):
     meta_off = HEADER_SIZE
     table_off = meta_off + len(md)
     table_off = (table_off + ALIGN - 1) // ALIGN * ALIGN
-    version = (VERSION_RWKV7 if meta.get("rwkv") else
+    version = (VERSION_ENCDEC if meta.get("encdec") else
+               VERSION_RWKV7 if meta.get("rwkv") else
                VERSION_MOE if meta.get("experts") else VERSION_DENSE)
     rsize = rec_size(version)
     table = bytearray()
@@ -443,7 +467,8 @@ def verify(path, tensors, tok=None):
     if raw[:4] != MAGIC:
         raise SystemExit("verify: bad magic")
     ver, hsz, n, caps, mo, ms, doff, fsz, _crc = struct.unpack("<HHIIIIQQI", raw[4:44])
-    if ver not in (VERSION_DENSE, VERSION_MOE, VERSION_RWKV7) or hsz != HEADER_SIZE:
+    if ver not in (VERSION_DENSE, VERSION_MOE, VERSION_RWKV7, VERSION_ENCDEC) \
+            or hsz != HEADER_SIZE:
         raise SystemExit("verify: header mismatch")
     hcrc, = struct.unpack("<I", raw[40:44])
     if zlib.crc32(raw[:40]) & 0xFFFFFFFF != hcrc:
@@ -501,6 +526,11 @@ def main():
     ap.add_argument("--in", dest="src", required=True,
                     help="a legacy checkpoint, or a HuggingFace directory (config.json + "
                          "model.safetensors) to quantize directly; see --quant")
+    ap.add_argument("--tok-unigram", action="store_true",
+                    help="the embedded .tok is a SentencePiece unigram table "
+                         "(key 10 byte 4); build it with make_tok_spm.py")
+    ap.add_argument("--enc-seq", type=int, default=64,
+                    help="encoder sequence capacity (v5 only); SEQ is the decoder's")
     ap.add_argument("--tok")
     ap.add_argument("--out", required=True)
     ap.add_argument("--name", default="model")
@@ -583,7 +613,10 @@ def main():
                                         vocab_limit=_ntok or None,
                                         q8_row=args.q8_row_scale,
                                         head_dedup=args.head_dedup,
-                                        head_q6=args.head_q6)
+                                        head_q6=args.head_q6,
+                                        enc_seq=args.enc_seq)
+        if args.tok_unigram:
+            meta['tok_unigram'] = True
         if _cfg.get("tie_word_embeddings") is False:
             # load_minimind refuses a false tie with no lm_head, so reaching here
             # means the head really is the checkpoint's own matrix.

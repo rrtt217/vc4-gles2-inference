@@ -28,7 +28,7 @@ RENAME = re.compile(
 # The order axes are rendered in: the ones a person reaches for first, then the
 # campaign axes, then the bookkeeping.
 AXES = ["act", "att", "kv", "res", "ffn", "place", "probe", "dump", "q4", "rwkv",
-        "prefill", "load", "tok", "gen", "prefix", "env", "retired"]
+        "prefill", "encdec", "load", "tok", "gen", "prefix", "env", "retired"]
 
 AXIS_TITLES = {
     "act": "The activation streams",
@@ -42,6 +42,7 @@ AXIS_TITLES = {
     "q4": "The 4-bit weight kernels",
     "rwkv": "RWKV-7",
     "prefill": "Prefill batching",
+    "encdec": "The encoder-decoder block (v5)",
     "load": "Loading, memory and the container",
     "tok": "The tokenizer",
     "gen": "Sampling and generation",

@@ -168,7 +168,40 @@ models/
                                  prefill 87 s).  T3_EXPAND=1 restores the host
                                  expansion, which is the oracle it was accepted
                                  against.  Docs: docs/bitcpm.md
+
+  opus-mt-en-zh/                 encoder-decoder source, NO container: the
+                                 engine has no encoder, cross-attention or
+                                 unigram tokenizer (see the note below)
+    config.json, generation_config.json, metadata.json, source.spm,
+    target.spm, vocab.json       Marian 6+6, d 512, ffn 2048, 8 heads, 65,001
+                                 vocab, learned sinusoidal position tables
+    pytorch_model.bin            312 MB, rev 408d9bc4: a *pre-1.6 bare-pickle*
+                                 checkpoint (not a zip), readable with
+                                 engine/tools/pth_legacy.py
+
+  t5-small/                      encoder-decoder source, NO container
+    config.json, generation_config.json, tokenizer.json, spiece.model
+                                 T5 6+6, d 512, ffn 2048, 8 heads, 32,128
+                                 vocab, 32 relative-position buckets
+    model.safetensors            242 MB, rev df1b051c
 ```
+
+## The two encoder-decoder sources
+
+`opus-mt-en-zh/` and `t5-small/` are sources for an architecture the engine does
+not run.  They are here because they are the adaptation target, not because a
+container can be packed from them yet: `mmcf_pack.py` has no Marian or T5
+reader, no container version carries an encoder, and `Tokenizer` merges BPE
+pairs, while both models' tokenizers are SentencePiece **unigram** (Viterbi over
+piece scores — `source.spm`, `target.spm`, `spiece.model` and T5's
+`tokenizer.json` all say `model_type=UNIGRAM`).  Treat them as inputs that a
+future `--in <dir>` will accept.
+
+Both fit the board's shape rather than its speed: 78.0M and 60.5M unique values,
+`d 512`, 8 heads of 64, and a 2048-wide FFN — exactly the VC4 texture height, so
+one chunk and no `split_ffn`.  Their decoder vocabulary is the cost, not their
+depth: 65,001 logits against a 512-wide embedding is 33.3M MAC a token, 55% of a
+decoder token, the same trade MiniMind3's 6,400-row head makes in reverse.
 
 `smollm2-135m/` was source-only until 2026-11-18: weights, config and a
 `smollm.tok` that had never been rebuilt or checked.  The tokenizer is now

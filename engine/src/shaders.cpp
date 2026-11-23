@@ -43,27 +43,10 @@ static std::string rms_store_glsl() {
             "\n#define S_ST(V) s_st(V)\n"
             "#define S_LD(C) s_ld(C)\n");
     }
-    return "\n#define S_ST(V) encs(V)\n"
-           "#define S_LD(C) (x_i24raw(C)/4096.0)\n";
+    return "\n#define S_ST(V) x_s24enc(V)\n"
+           "#define S_LD(C) x_s24(C)\n";
 }
 
-string q24_helpers() {
-    return
-        "float x_i24raw(vec4 c){return float(int(c.r*255.0+0.5))*16777216.0+"
-        "float(int(c.g*255.0+0.5))*65536.0+float(int(c.b*255.0+0.5))*256.0+"
-        "float(int(c.a*255.0+0.5))-8388608.0;}\n"
-        "float x_i24q(vec4 c){return x_i24raw(c)/256.0;}\n"
-        "vec4 x_i24enc(float v){float q=floor(v*256.0+0.5)+8388608.0;"
-        "float r0=floor(q/16777216.0),g=floor(q/65536.0)-r0*256.0,"
-        "b=floor(q/256.0)-r0*65536.0-g*256.0,"
-        "a=q-r0*16777216.0-g*65536.0-b*256.0;"
-        "return vec4(r0/255.0,g/255.0,b/255.0,a/255.0);}\n"
-        "vec4 x_i24encq(float q){q=clamp(floor(q+0.5),-32768.0,32767.0)+8388608.0;"
-        "float r0=floor(q/16777216.0),g=floor(q/65536.0)-r0*256.0,"
-        "b=floor(q/256.0)-r0*65536.0-g*256.0,"
-        "a=q-r0*16777216.0-g*65536.0-b*256.0;"
-        "return vec4(r0/255.0,g/255.0,b/255.0,a/255.0);}\n";
-}
 
 // Shared GLSL fragments.  These are constants rather than GLSL helper
 // functions on purpose: the hot matvec loops must keep the decode inline (VC4
@@ -153,7 +136,7 @@ const string kEncs4096 =
     "return vec4(r0/255.0,g/255.0,b/255.0,a/255.0);}";
 // The 24-bit encoder plus the S_ST/S_LD pair `RMS_STORE` selects: every builder
 // that writes or reads an rms partial sum emits this, once.
-static string encs_glsl() { return kEncs4096 + rms_store_glsl(); }
+static string encs_glsl() { return x_codec_glsl(XFormat::S24_1) + rms_store_glsl(); }
 
 // Shape contract.  The q8 kernels step the column loop by four; the q4 kernels
 // take eight weights per texel in groups of 32.  A width that is not a multiple
@@ -404,7 +387,7 @@ string matvec_q8(int rows, int cols, XFormat xf, bool wrow) {
                "float a=v-g*65536.0-b*256.0;"
                "gl_FragColor=vec4(0.0,g/255.0,b/255.0,a/255.0);}";
     }
-    return head(xf) + q24_helpers() +
+    return head(xf) +
         "uniform sampler2D W,X;uniform float ws;" + WD +
         "void main(){int r=int(gl_FragCoord.x);float s=0.0;"
         "for(int q=0;q<" + COLS4 + ";q++){"
@@ -413,7 +396,7 @@ string matvec_q8(int rows, int cols, XFormat xf, bool wrow) {
         "vec4 w=c*255.0-128.0;"
         "vec4 x=X4Q(X,q*4," + AXW + ".0);"
         "s+=w.x*x.x+w.y*x.y+w.z*x.z+w.w*x.w;}"
-        "gl_FragColor=x_i24encq(s*" + SC + ");}";
+        "gl_FragColor=x_q24encq(s*" + SC + ");}";
 }
 
 // The batched matvec: one draw for N inputs (RWKV-7 chunked prefill, P1).
@@ -509,7 +492,7 @@ string matvec_t3(int rows, int cols, XFormat xf, bool wrow, int t3_th, int t3_ti
     const string AXW = to_string(axw);
     const string WD = wrow ? wrow_scale(rows) : "";
     const string SC = wrow ? "wsr(r)" : "ws";
-    return "//T3\n" + head(xf) + "precision highp int;\n" + t3_dec_def() + q24_helpers() +
+    return "//T3\n" + head(xf) + "precision highp int;\n" + t3_dec_def() +
            "uniform sampler2D W,X;uniform float ws;" + WD +
            "void main(){int r=int(gl_FragCoord.x);int t=r/2;float h=float(r-2*t);float s=0.0;"
            "for(int g=0;g<" + to_string(nq) + ";g++){"
@@ -521,7 +504,7 @@ string matvec_t3(int rows, int cols, XFormat xf, bool wrow, int t3_th, int t3_ti
            "vec4 xa=X4Q(X,g*8," + AXW + ".0);"
            "vec4 xb=X4Q(X,g*8+4," + AXW + ".0);"
            "s+=dot(" + t3_byte("bb.x") + ",xa)+dot(" + t3_byte("bb.y") + ",xb);}"
-           "gl_FragColor=x_i24encq(s*" + SC + ");}";
+           "gl_FragColor=x_q24encq(s*" + SC + ");}";
 }
 
 string matvec_t3_add(int rows, int cols, XFormat xf, XFormat rf, bool wrow, int t3_th, int t3_tiles) {
@@ -540,8 +523,8 @@ string matvec_t3_add(int rows, int cols, XFormat xf, XFormat rf, bool wrow, int 
            "vec4 xa=X4Q(X,g*8," + AXW + ".0);"
            "vec4 xb=X4Q(X,g*8+4," + AXW + ".0);"
            "s+=dot(" + t3_byte("bb.x") + ",xa)+dot(" + t3_byte("bb.y") + ",xb);}"
-           "float res=R1Q(R,r," + to_string(x_texels(rows, rf)) + ".0);"
-           "gl_FragColor=XST1Q(s*" + SC + "+res);}";
+           "float res=Y1Q(R,r," + to_string(x_texels(rows, rf)) + ".0);"
+           "gl_FragColor=YST1Q(s*" + SC + "+res);}";
 }
 
 // The 2-bit pair kernel: two output rows a fragment, so all four bytes of one
@@ -587,8 +570,8 @@ string matvec_t3_add_pair(int rows, int cols, XFormat xf, XFormat rf, bool wrow,
            "uniform sampler2D W,X,R;uniform float ws;" + WD +
            "void main(){int t=int(gl_FragCoord.x);int r0=2*t;int r1=min(r0+1," +
            to_string(rows - 1) + ");" + SP +
-           "float res0=R1Q(R,r0," + to_string(rw) + ".0);"
-           "float res1=R1Q(R,r1," + to_string(rw) + ".0);"
+           "float res0=Y1Q(R,r0," + to_string(rw) + ".0);"
+           "float res1=Y1Q(R,r1," + to_string(rw) + ".0);"
            "float s0=0.0,s1=0.0;"
            "for(int g=0;g<" + to_string(nq) + ";g++){"
            "vec4 c=" + t3_fetch("float(g)", "float(t)", nq, t3_th, t3_tiles) + ";"
@@ -643,14 +626,14 @@ string matvec_q8_batch(int rows, int cols, XFormat xf, bool wrow) {
             return "x_i16raw(texture2D(X,vec2((float(" + i + ")+0.5)/xw,ay)).rg)";
         return "((texture2D(X,vec2((float((" + i + ")/4)+0.5)/xw,ay))*255.0-128.0)*16.0)";
     };
-    return head(xf) + q24_helpers() +
+    return head(xf) +
         "uniform sampler2D W,X;uniform float ws;uniform float xh;uniform float xw;" + WD +
         "void main(){int r=int(gl_FragCoord.x);" + AY + "float s=0.0;"
         "for(int q=0;q<" + COLS4 + ";q++){" + WROW +
         "vec4 x=vec4(" + fetch("q*4") + "," + fetch("q*4+1") + ","
         + fetch("q*4+2") + "," + fetch("q*4+3") + ");"
         "s+=w.x*x.x+w.y*x.y+w.z*x.z+w.w*x.w;}"
-        "gl_FragColor=x_i24encq(s*" + SC + ");}";
+        "gl_FragColor=x_q24encq(s*" + SC + ");}";
 }
 
 string matvec_q8_pair(int rows, int cols, XFormat xf, bool wrow) {
@@ -902,21 +885,21 @@ string matvec_q8_p2(int rows, int cols, bool wrow) {
 //
 // Exactness: the per-position sum of squares is the same 32 partials of 24
 // values in the same order as rms_stats_split, and the normalising expression
-// is the same R1(X,i)*inv*w[i] encoded by the same x_st2.  Only the layout the
+// is the same Y1(X,i)*inv*w[i] encoded by the same x_st2.  Only the layout the
 // result lands in changes, so the gate sees the q16 integers the serial
 // rmsnorm would have produced.
 string rms_stats2(int dim, XFormat rf) {
     need_dim("rms_stats2", dim);
     const string D = to_string(dim);
     const string RW = to_string(x_texels(dim, rf));
-    return head(XFormat::I16_2) + x_residual_glsl(rf) + q24_helpers() +
+    return head(XFormat::I16_2) + x_residual_glsl(rf) +
         "uniform sampler2D XA,XB;"
                + encs_glsl() +
         "void main(){int pid=int(gl_FragCoord.x);int per=(" + D + "+31)/32;"
         "int i0=(pid-(pid/32)*32)*per;"
         "float s=0.0;"
         "for(int k=0;k<per;k++){int i=i0+k;if(i<" + D + "){"
-        "float v=(pid<32)?R1(XA,i," + RW + ".0):R1(XB,i," + RW + ".0);s+=v*v;}}"
+        "float v=(pid<32)?Y1(XA,i," + RW + ".0):Y1(XB,i," + RW + ".0);s+=v*v;}}"
         "gl_FragColor=S_ST(s);}";
 }
 
@@ -926,7 +909,7 @@ string rms_norm_pair2(int dim, XFormat rf, bool use_eps_uniform) {
     const string D = to_string(dim);
     const string RW = to_string(x_texels(dim, rf));
     const string DW = to_string(x_texels(dim, XFormat::I16_2));
-    return head(XFormat::I16_2) + rms_store_glsl() + x_residual_glsl(rf) + x_pair2_glsl(rf) + q24_helpers() +
+    return head(XFormat::I16_2) + encs_glsl() + x_residual_glsl(rf) + x_pair2_glsl(rf) +
         (use_eps_uniform ? "uniform sampler2D XA,XB,W,S;uniform float eps;"
                          : "uniform sampler2D XA,XB,W,S;") +
         "void main(){int k=int(gl_FragCoord.x);"
@@ -938,8 +921,8 @@ string rms_norm_pair2(int dim, XFormat rf, bool use_eps_uniform) {
         "float invb=inversesqrt(ssb/float(" + D + ")+" + eps_src + ");"
         "vec4 wc=texture2D(W,vec2((float(k/2)+0.5)/float(" + DW + "),0.5));"
         "float wk=((k/2)*2==k)?x_i16(wc.rg):x_i16(wc.ba);"
-        "float va=R1(XA,k," + RW + ".0)*inva*wk;"
-        "float vb=R1(XB,k," + RW + ".0)*invb*wk;"
+        "float va=Y1(XA,k," + RW + ".0)*inva*wk;"
+        "float vb=Y1(XB,k," + RW + ".0)*invb*wk;"
         "gl_FragColor=x_p2_st(va,vb);}";
 }
 
@@ -1041,7 +1024,7 @@ string matvec_q8_p2_add(int rows, int cols, XFormat rf, bool wrow) {
         "float b0=x_p2_b(t0),b1=x_p2_b(t1),b2=x_p2_b(t2),b3=x_p2_b(t3);"
         "sa+=w.x*a0+w.y*a1+w.z*a2+w.w*a3;"
         "sb+=w.x*b0+w.y*b1+w.z*b2+w.w*b3;}"
-        "float ra=R1Q(RA,r," + RW + ".0),rb=R1Q(RB,r," + RW + ".0);"
+        "float ra=Y1Q(RA,r," + RW + ".0),rb=Y1Q(RB,r," + RW + ".0);"
         "gl_FragColor=x_p2_stq(sa*" + SC + "+ra,sb*" + SC + "+rb);}";
 }
 
@@ -1154,8 +1137,8 @@ string matvec_q8_add(int rows, int cols, XFormat xf, XFormat rf, bool wrow) {
         "vec4 w=c*255.0-128.0;"
         "vec4 x=X4Q(X,q*4," + AXW + ".0);"
         "s+=w.x*x.x+w.y*x.y+w.z*x.z+w.w*x.w;}"
-        "float res=R1Q(R,r," + to_string(x_texels(rows, rf)) + ".0);"
-        "gl_FragColor=XST1Q(s*" + SC + "+res);}";
+        "float res=Y1Q(R,r," + to_string(x_texels(rows, rf)) + ".0);"
+        "gl_FragColor=YST1Q(s*" + SC + "+res);}";
 }
 
 string matvec_q8_add_pair(int rows, int cols, XFormat xf, XFormat rf, bool inl, bool wrow) {
@@ -1198,8 +1181,8 @@ string matvec_q8_add_pair(int rows, int cols, XFormat xf, XFormat rf, bool inl, 
     return head(xf) + x_pair2_glsl(rf) + x_residual_glsl(rf) +
         "uniform sampler2D W,X,R;uniform float ws;" + WD +
         "void main(){int t=int(gl_FragCoord.x);int r0=2*t;int r1=r0+1;" + SP +
-        "float res0=R1Q(R,r0," + to_string(rw) + ".0);"
-        "float res1=R1Q(R,r1," + to_string(rw) + ".0);"
+        "float res0=Y1Q(R,r0," + to_string(rw) + ".0);"
+        "float res1=Y1Q(R,r1," + to_string(rw) + ".0);"
         "float s0=0.0,s1=0.0;"
         "for(int q=0;q<" + to_string(cols / 4) + ";q++){"
         "vec4 c0=texture2D(W,vec2((float(q)+0.5)/float(" + to_string(cols / 4) + "),"
@@ -1217,7 +1200,7 @@ string matvec_i16(int rows, int cols, XFormat xf) {
     need_shape("matvec_i16", rows, cols, 1);
     const int tw = (cols + 1) / 2;
     const int axw = x_texels(cols, xf);
-    return head(xf) + q24_helpers() +
+    return head(xf) +
         "uniform sampler2D W,X;uniform float ws;"
         "void main(){int r=int(gl_FragCoord.x);float s=0.0;"
         "for(int q=0;q<" + to_string(tw) + ";q++){"
@@ -1226,7 +1209,7 @@ string matvec_i16(int rows, int cols, XFormat xf) {
         "float u0=x_i16raw(c.gr);float u1=x_i16raw(c.ab);"
         "vec2 x=X2Q(X,2*q," + to_string(axw) + ".0);"
         "s+=u0*x.x;if(2*q+1<" + to_string(cols) + ")s+=u1*x.y;}"
-        "gl_FragColor=x_i24encq(s*ws);}";
+        "gl_FragColor=x_q24encq(s*ws);}";
 }
 
 string matvec_i16_add(int rows, int cols, XFormat xf, XFormat rf) {
@@ -1242,15 +1225,15 @@ string matvec_i16_add(int rows, int cols, XFormat xf, XFormat rf) {
         "float u0=x_i16raw(c.gr);float u1=x_i16raw(c.ab);"
         "vec2 x=X2Q(X,2*q," + to_string(axw) + ".0);"
         "s+=u0*x.x;if(2*q+1<" + to_string(cols) + ")s+=u1*x.y;}"
-        "float res=R1Q(R,r," + to_string(x_texels(rows, rf)) + ".0);"
-        "gl_FragColor=XST1Q(s*ws+res);}";
+        "float res=Y1Q(R,r," + to_string(x_texels(rows, rf)) + ".0);"
+        "gl_FragColor=YST1Q(s*ws+res);}";
 }
 
 string matvec_i4(int rows, int cols, XFormat xf, bool inl) {
     need_shape("matvec_i4", rows, cols, 32);
     const int texw = cols / 8;
     const int groups = (cols + 31) / 32;
-    return q4_head(xf, inl) + q24_helpers() +
+    return q4_head(xf, inl) +
         "uniform sampler2D W,P,X;uniform float ps;"
         "void main(){int r=int(gl_FragCoord.x);float s=0.0;"
         "for(int g=0;g<" + to_string(groups) + ";g++){"
@@ -1270,7 +1253,7 @@ string matvec_i4(int rows, int cols, XFormat xf, bool inl) {
         "float d2=l2*xb.x+h2*xb.y;"
         "float d3=l3*xb.z+h3*xb.w;"
         "s+=sc*(d0+d1+d2+d3)" + q4_mint() + ";}}"
-        "gl_FragColor=x_i24encq(s);}";
+        "gl_FragColor=x_q24encq(s);}";
 }
 
 string matvec_i6(int rows, int cols, XFormat xf, bool wrow) {
@@ -1286,7 +1269,7 @@ string matvec_i6(int rows, int cols, XFormat xf, bool wrow) {
     const string SC = wrow ? "wsr(r)" : "ws";
     // The scale uniforms must be declared before the wrow helper that uses
     // them (the q8 kernels order it that way; GLSL has no forward declaration).
-    return head(xf) + q24_helpers() +
+    return head(xf) +
         "uniform sampler2D W,W2,X;uniform float ws;" + WD +
         "void main(){int r=int(gl_FragCoord.x);float s=0.0;float sc=" + SC + ";"
         "for(int q=0;q<" + to_string(lo_w) + ";q++){"
@@ -1313,7 +1296,7 @@ string matvec_i6(int rows, int cols, XFormat xf, bool wrow) {
         "vec4 xa=X4Q(X,q*8," + to_string(axw) + ".0);"
         "vec4 xb=X4Q(X,q*8+4," + to_string(axw) + ".0);"
         "s+=v0*xa.x+v1*xa.y+v2*xa.z+v3*xa.w+v4*xb.x+v5*xb.y+v6*xb.z+v7*xb.w;}"
-        "gl_FragColor=x_i24encq(s*sc);}";
+        "gl_FragColor=x_q24encq(s*sc);}";
 }
 
 // q4 residual-add, two rows per fragment: rows 2t and 2t+1 share one activation
@@ -1349,7 +1332,7 @@ string matvec_i4_add_pair(int rows, int cols, XFormat xf, XFormat rf, bool inl) 
         "(float(r1)+0.5)/float(" + to_string(rows) + ")));"
         "dotb+=dot4(w0,xa,xb);}"
         "s0+=sa*dota+ma*xsum;s1+=sb*dotb+mb*xsum;}"
-        "float res0=R1Q(R,r0," + to_string(rw) + ".0),res1=R1Q(R,r1," + to_string(rw) + ".0);"
+        "float res0=Y1Q(R,r0," + to_string(rw) + ".0),res1=Y1Q(R,r1," + to_string(rw) + ".0);"
         "gl_FragColor=x_p2_stq(s0+res0,s1+res1);}";
 }
 
@@ -1384,7 +1367,7 @@ string matvec_i4_add_pair_4x4(int rows, int cols, XFormat xf, XFormat rf, bool i
         "vec4 wr0=texture2D(W,vec2(c0,v1r)),wr1=texture2D(W,vec2(c1,v1r));"
         "dotb+=wr0.x*xa.x+wr0.y*xa.y+wr0.z*xa.z+wr0.w*xa.w+wr1.x*xb.x+wr1.y*xb.y+wr1.z*xb.z+wr1.w*xb.w;}"
         "s0+=sa*dota+ma*xsum;s1+=sb*dotb+mb*xsum;}"
-        "float res0=R1Q(R,r0," + to_string(rw) + ".0),res1=R1Q(R,r1," + to_string(rw) + ".0);"
+        "float res0=Y1Q(R,r0," + to_string(rw) + ".0),res1=Y1Q(R,r1," + to_string(rw) + ".0);"
         "gl_FragColor=x_p2_stq(s0+res0,s1+res1);}";
 }
 
@@ -1671,7 +1654,7 @@ static string i4_qkv_flat(int rows, int cols, XFormat xf, bool inl) {
     const int groups = (cols + 31) / 32;
     const string ROWS = to_string(rows), GROUPS = to_string(groups),
                  TEXW = to_string(texw), ITERS = to_string(cols / 8);
-    return q4_head(xf, inl) + q24_helpers() +
+    return q4_head(xf, inl) +
         "uniform sampler2D W,P,X;uniform float ps;"
         "void main(){int r=int(gl_FragCoord.x);float s=0.0;"
         "float vr=(float(r)+0.5)/float(" + ROWS + "),itw=1.0/float(" + TEXW + ");"
@@ -1688,7 +1671,7 @@ static string i4_qkv_flat(int rows, int cols, XFormat xf, bool inl) {
         "vec4 w0=texture2D(W,vec2(c0,vr)),w1=texture2D(W,vec2(c1,vr));"
         "d+=w0.x*xa.x+w0.y*xa.y+w0.z*xa.z+w0.w*xa.w+w1.x*xb.x+w1.y*xb.y+w1.z*xb.z+w1.w*xb.w;"
         "if(q-g*4==3){s+=sc*d+mn*xsum;}}"
-        "gl_FragColor=x_i24encq(s);}";
+        "gl_FragColor=x_q24encq(s);}";
 }
 
 string matvec_i4_4x4(int rows, int cols, XFormat xf, bool inl) {
@@ -1699,7 +1682,7 @@ string matvec_i4_4x4(int rows, int cols, XFormat xf, bool inl) {
     const string ROWS = to_string(rows), GROUPS = to_string(groups), TEXW = to_string(texw);
     const bool nom = q4_nomin();
     const string MA = nom ? "" : "+mn*xsum";
-    return q4_head(xf, inl) + q24_helpers() +
+    return q4_head(xf, inl) +
         "uniform sampler2D W,P,X;uniform float ps;"
         "void main(){int r=int(gl_FragCoord.x);float s=0.0;"
         "float vr=(float(r)+0.5)/float(" + ROWS + "),itw=1.0/float(" + TEXW + ");"
@@ -1714,7 +1697,7 @@ string matvec_i4_4x4(int rows, int cols, XFormat xf, bool inl) {
         "vec4 w0=texture2D(W,vec2(c0,vr)),w1=texture2D(W,vec2(c1,vr));"
         "d+=w0.x*xa.x+w0.y*xa.y+w0.z*xa.z+w0.w*xa.w+w1.x*xb.x+w1.y*xb.y+w1.z*xb.z+w1.w*xb.w;}"
         "s+=sc*d" + MA + ";}"
-        "gl_FragColor=x_i24encq(s);}";
+        "gl_FragColor=x_q24encq(s);}";
 }
 
 // Flat 8-wide w2/wo residual-add matvec, byte-identical to the nested
@@ -1747,8 +1730,8 @@ static string i4_w2_flat(int rows, int cols, XFormat xf, XFormat rf) {
         "vec4 w0=texture2D(W,vec2(c0,vr)),w1=texture2D(W,vec2(c1,vr));"
         "d+=w0.x*xa.x+w0.y*xa.y+w0.z*xa.z+w0.w*xa.w+w1.x*xb.x+w1.y*xb.y+w1.z*xb.z+w1.w*xb.w;"
         "if(q-g*4==3){s+=sc*d+mn*xsum;}}"
-        "float res=R1Q(R,r," + to_string(x_texels(rows, rf)) + ".0);"
-        "gl_FragColor=XST1Q(s+res);}";
+        "float res=Y1Q(R,r," + to_string(x_texels(rows, rf)) + ".0);"
+        "gl_FragColor=YST1Q(s+res);}";
 }
 
 string matvec_i4_add_4x4(int rows, int cols, XFormat xf, XFormat rf) {
@@ -1777,8 +1760,8 @@ string matvec_i4_add_4x4(int rows, int cols, XFormat xf, XFormat rf) {
         "vec4 w0=texture2D(W,vec2(c0,vr)),w1=texture2D(W,vec2(c1,vr));"
         "d+=w0.x*xa.x+w0.y*xa.y+w0.z*xa.z+w0.w*xa.w+w1.x*xb.x+w1.y*xb.y+w1.z*xb.z+w1.w*xb.w;}"
         "s+=sc*d" + MA + ";}"
-        "float res=R1Q(R,r," + to_string(x_texels(rows, rf)) + ".0);"
-        "gl_FragColor=XST1Q(s+res);}";
+        "float res=Y1Q(R,r," + to_string(x_texels(rows, rf)) + ".0);"
+        "gl_FragColor=YST1Q(s+res);}";
 }
 
 string matvec_i4_add(int rows, int cols, XFormat xf, XFormat rf) {
@@ -1807,8 +1790,8 @@ string matvec_i4_add(int rows, int cols, XFormat xf, XFormat rf) {
         "float d2=l2*xb.x+h2*xb.y;"
         "float d3=l3*xb.z+h3*xb.w;"
         "s+=sc*(d0+d1+d2+d3)" + q4_mint() + ";}}"
-        "float res=R1Q(R,r," + to_string(x_texels(rows, rf)) + ".0);"
-        "gl_FragColor=XST1Q(s+res);}";
+        "float res=Y1Q(R,r," + to_string(x_texels(rows, rf)) + ".0);"
+        "gl_FragColor=YST1Q(s+res);}";
 }
 
 
@@ -1826,14 +1809,14 @@ string swiglu_pair(int hidden, XFormat out, int hs) {
                "gl_FragColor=x_f32enc(actv(i)" + HM + ");}";
         // head(I16_2), not head(F32): the pair buffer A holds two q16 values a
         // texel and actv() reads it with X2.  Only the *store* is f32.
-        return head(XFormat::I16_2) + poly_src() + x_f32_store_glsl() + x_bf16_glsl() + HD +
+        return head(XFormat::I16_2) + poly_src() + x_codec_glsl(XFormat::F32) + x_codec_glsl(XFormat::BF16) + HD +
            "uniform sampler2D A;" + act + body;
     }
     if (out == XFormat::BF16) {
         // Two values a texel, same pair index as the q16 form; the store is bf16.
         body = "void main(){int t=int(gl_FragCoord.x);int i0=2*t;"
                "gl_FragColor=x_bf16enc2(actv(i0)" + HM + ",actv(i0+1)" + HM + ");}";
-        return head(XFormat::I16_2) + poly_src() + x_bf16_glsl() + HD +
+        return head(XFormat::I16_2) + poly_src() + x_codec_glsl(XFormat::BF16) + HD +
                "uniform sampler2D A;" + act + body;
     }
     if (out == XFormat::I8_4) {
@@ -1843,7 +1826,7 @@ string swiglu_pair(int hidden, XFormat out, int hs) {
         body = "void main(){int t=int(gl_FragCoord.x);int i0=2*t;"
                "gl_FragColor=x_st2(actv(i0)" + HM + ",actv(i0+1)" + HM + ");}";
     }
-    return head(XFormat::I16_2) + poly_src() + x_bf16_glsl() + HD +
+    return head(XFormat::I16_2) + poly_src() + x_codec_glsl(XFormat::BF16) + HD +
            "uniform sampler2D A;" + act + body;
 }
 
@@ -1855,7 +1838,7 @@ string swiglu_2row(int hidden, XFormat out, int hs) {
         "float yat(int i){float x=float(i);"
         "vec4 ca=texture2D(A,vec2((x+0.5)/float(" + H + "),0.25));"
         "vec4 cb=texture2D(A,vec2((x+0.5)/float(" + H + "),0.75));"
-        "float a=x_i24q(ca),b=x_i24q(cb);"
+        "float a=x_q24(ca),b=x_q24(cb);"
         "return (a/(1.0+" + EXP("-a") + "))*b;}";
     string body;
     if (out == XFormat::F32) {
@@ -1865,14 +1848,14 @@ string swiglu_2row(int hidden, XFormat out, int hs) {
         // pocket's peaks at 1005 (probe_residuals.py).
         body = "void main(){int i=int(gl_FragCoord.x);"
                "gl_FragColor=x_f32enc(yat(i)" + HM + ");}";
-        return head(XFormat::I16_2) + poly_src() + x_f32_store_glsl() + x_bf16_glsl() +
-               HD + q24_helpers() +
+        return head(XFormat::I16_2) + poly_src() + x_codec_glsl(XFormat::F32) + x_codec_glsl(XFormat::BF16) +
+               HD +
                "uniform sampler2D A;" + read + body;
     }
     if (out == XFormat::BF16) {
         body = "void main(){int t=int(gl_FragCoord.x);int i0=2*t;"
                "gl_FragColor=x_bf16enc2(yat(i0)" + HM + ",yat(i0+1)" + HM + ");}";
-        return head(XFormat::I16_2) + poly_src() + x_bf16_glsl() + HD + q24_helpers() +
+        return head(XFormat::I16_2) + poly_src() + x_codec_glsl(XFormat::BF16) + HD +
                "uniform sampler2D A;" + read + body;
     }
     if (out == XFormat::I8_4) {
@@ -1882,7 +1865,7 @@ string swiglu_2row(int hidden, XFormat out, int hs) {
         body = "void main(){int t=int(gl_FragCoord.x);int i0=2*t;"
                "gl_FragColor=x_st2(yat(i0)" + HM + ",yat(i0+1)" + HM + ");}";
     }
-    return head(XFormat::I16_2) + HD + q24_helpers() + "uniform sampler2D A;" + read + body;
+    return head(XFormat::I16_2) + HD + "uniform sampler2D A;" + read + body;
 }
 
 // swiglu over the two rows of a buffer that holds **q16 pairs** (x_st2q): row 0
@@ -1931,26 +1914,26 @@ string swiglu(int hidden, bool fused, XFormat out, int hs) {
                "float yat(int i){float x=float(i);"
                "vec4 ca=texture2D(A,vec2((x+0.5)/float(" + to_string(2 * hidden) + "),0.5));"
                "vec4 cb=texture2D(A,vec2((x+0.5+float(" + H + "))/float(" + to_string(2 * hidden) + "),0.5));"
-               "float a=x_i24q(ca),b=x_i24q(cb);"
+               "float a=x_q24(ca),b=x_q24(cb);"
                "return (a/(1.0+" + EXP("-a") + "))*b;}";
     } else {
         read = "uniform sampler2D A,B;"
                "float yat(int i){float x=float(i);"
                "vec4 ca=texture2D(A,vec2((x+0.5)/float(" + H + "),0.5));"
                "vec4 cb=texture2D(B,vec2((x+0.5)/float(" + H + "),0.5));"
-               "float a=x_i24q(ca),b=x_i24q(cb);"
+               "float a=x_q24(ca),b=x_q24(cb);"
                "return (a/(1.0+" + EXP("-a") + "))*b;}";
     }
     string body;
     if (out == XFormat::F32) {
         body = "void main(){int i=int(gl_FragCoord.x);"
                "gl_FragColor=x_f32enc(yat(i)" + HM + ");}";
-        return head(XFormat::I16_2) + x_f32_store_glsl() + HD + q24_helpers() + read + body;
+        return head(XFormat::I16_2) + x_codec_glsl(XFormat::F32) + HD + read + body;
     }
     if (out == XFormat::BF16) {
         body = "void main(){int t=int(gl_FragCoord.x);int i0=2*t;"
                "gl_FragColor=x_bf16enc2(yat(i0)" + HM + ",yat(i0+1)" + HM + ");}";
-        return head(XFormat::I16_2) + x_bf16_glsl() + HD + q24_helpers() + read + body;
+        return head(XFormat::I16_2) + x_codec_glsl(XFormat::BF16) + HD + read + body;
     }
     if (out == XFormat::I8_4) {
         body = "void main(){int t=int(gl_FragCoord.x);int i0=4*t;"
@@ -1959,7 +1942,7 @@ string swiglu(int hidden, bool fused, XFormat out, int hs) {
         body = "void main(){int t=int(gl_FragCoord.x);int i0=2*t;"
                "gl_FragColor=x_st2(yat(i0)" + HM + ",yat(i0+1)" + HM + ");}";
     }
-    return head(XFormat::I16_2) + poly_src() + x_bf16_glsl() + HD + q24_helpers() + read + body;
+    return head(XFormat::I16_2) + poly_src() + x_codec_glsl(XFormat::BF16) + HD + read + body;
 }
 
 string rms_stats_split(int dim, XFormat residual) {
@@ -1972,7 +1955,7 @@ string rms_stats_split(int dim, XFormat residual) {
         "void main(){int pid=int(gl_FragCoord.x);int per=(" + D + "+31)/32;"
         "int i0=pid*per;float s=0.0;"
         "for(int k=0;k<per;k++){int i=i0+k;if(i<" + D + "){"
-        "float v=R1(X,i," + RW + ".0);s+=v*v;}}"
+        "float v=Y1(X,i," + RW + ".0);s+=v*v;}}"
         "gl_FragColor=S_ST(s);}";
 }
 
@@ -1981,7 +1964,7 @@ string rms_stats_reduce() {
     // RMS_STORE=f32 changes what is in those texels, and a hardcoded decoder
     // here silently read the float bytes as fixed point (PPL 6399 instead of
     // 270.32, found 2026-11-18).
-    return std::string("precision highp float;\n") + q24_helpers() +
+    return std::string("precision highp float;\n") +
         "uniform sampler2D S;" + encs_glsl() +
         "void main(){float s=0.0;for(int p=0;p<32;p++){"
         "s+=S_LD(texture2D(S,vec2((float(p)+0.5)/32.0,0.5)));}"
@@ -2004,8 +1987,8 @@ static string mul_act_read(const char* tex, const char* var, XFormat f, int dim,
                ",vec2((float(q)+0.5)/" + TW + ".0,0.5)))/256.0;";
     // Both operands can be 24-bit, so the coordinate gets a per-operand name.
     return string("vec2 ") + var + "=vec2(0.0);{float t=(float(2*q)+0.5)/" + AW + ".0;"
-                  + var + "=vec2(x_i24q(texture2D(" + tex + ",vec2(t,0.5))),"
-               "x_i24q(texture2D(" + tex + ",vec2(t+1.0/" + AW + ".0,0.5))));}";
+                  + var + "=vec2(x_q24(texture2D(" + tex + ",vec2(t,0.5))),"
+               "x_q24(texture2D(" + tex + ",vec2(t+1.0/" + AW + ".0,0.5))));}";
 }
 
 string mul_act(int dim, XFormat xf, XFormat af, XFormat bf) {
@@ -2016,7 +1999,7 @@ string mul_act(int dim, XFormat xf, XFormat af, XFormat bf) {
     // for both mixes; an I16_2 operand is raw q16, hence the /256.
     const string ra = mul_act_read("A", "av", af, dim, x_texels(dim, af));
     const string rb = mul_act_read("B", "bv", bf, dim, x_texels(dim, bf));
-    return head(xf) + q24_helpers() +
+    return head(xf) +
         "uniform sampler2D A,B;"
         "void main(){int q=int(gl_FragCoord.x);" + ra + rb +
         "gl_FragColor=x_st2(av.x*bv.x,av.y*bv.y);}";
@@ -2032,7 +2015,7 @@ string conv3_act(int dim, XFormat xf) {
     // q16 pair the second gate reads -- one rounding here instead of a 24-bit
     // store and a decode in the gate, at the cost of the sub-q16 fraction that
     // the gate then had to multiply anyway.
-    return head(xf) + q24_helpers() +
+    return head(xf) +
         "uniform sampler2D S0,S1,G,K;"
         "void main(){int q=int(gl_FragCoord.x);"
         "float u=(float(q)+0.5)/float(" + to_string(tw) + ");"
@@ -2085,10 +2068,10 @@ string rms_norm(int dim, XFormat residual, XFormat out, bool fused_reduce,
             "float inv=inversesqrt(ss/float(" + D + ")+" + eps_src + ");"
             "vec4 wa=texture2D(W,vec2((float(2*t)+0.5)/float(" + DW + "),0.5));"
             "vec4 wb=texture2D(W,vec2((float(2*t+1)+0.5)/float(" + DW + "),0.5));"
-            "float v0=R1(X,i0," + RW + ".0)*inv*x_i16(wa.rg);"
-            "float v1=R1(X,i0+1," + RW + ".0)*inv*x_i16(wa.ba);"
-            "float v2=R1(X,i0+2," + RW + ".0)*inv*x_i16(wb.rg);"
-            "float v3=R1(X,i0+3," + RW + ".0)*inv*x_i16(wb.ba);"
+            "float v0=Y1(X,i0," + RW + ".0)*inv*x_i16(wa.rg);"
+            "float v1=Y1(X,i0+1," + RW + ".0)*inv*x_i16(wa.ba);"
+            "float v2=Y1(X,i0+2," + RW + ".0)*inv*x_i16(wb.rg);"
+            "float v3=Y1(X,i0+3," + RW + ".0)*inv*x_i16(wb.ba);"
             "gl_FragColor=x_i8enc4(v0,v1,v2,v3);}";
     } else if (out == XFormat::F32) {
         // One value a texel: the q16 pair store below would write two values into
@@ -2103,14 +2086,14 @@ string rms_norm(int dim, XFormat residual, XFormat out, bool fused_reduce,
             "int tw=t/2;int lo2=t-tw*2;"
             "vec4 wc=texture2D(W,vec2((float(tw)+0.5)/float(" + DW + "),0.5));"
             "float w=(lo2==0)?x_i16(wc.rg):x_i16(wc.ba);"
-            "gl_FragColor=rms_f32enc(R1(X,t," + RW + ".0)*inv*w);}";
+            "gl_FragColor=rms_f32enc(Y1(X,t," + RW + ".0)*inv*w);}";
     } else {
         body =
             "void main(){int t=int(gl_FragCoord.x);int i0=2*t;int i1=i0+1;"
             + ss_read +
             "float inv=inversesqrt(ss/float(" + D + ")+" + eps_src + ");" + wsplit +
-            "float v0=R1(X,i0," + RW + ".0)*inv*w0;"
-            "float v1=0.0;if(i1<" + D + ")v1=R1(X,i1," + RW + ".0)*inv*w1;" +
+            "float v0=Y1(X,i0," + RW + ".0)*inv*w0;"
+            "float v1=0.0;if(i1<" + D + ")v1=Y1(X,i1," + RW + ".0)*inv*w1;" +
             (out == XFormat::BF16 ? string("gl_FragColor=x_bf16enc2(v0,v1);}")
                                   : string("gl_FragColor=x_st2(v0,v1);}"));
     }
@@ -2118,8 +2101,8 @@ string rms_norm(int dim, XFormat residual, XFormat out, bool fused_reduce,
     // conditional below is redundant for that one format -- but it is what
     // every other format's text contains, and the emitted text is the
     // numerics (gate/shader_hashes.txt), so it stays exactly as it was.
-    return head(residual) + rms_store_glsl() + x_residual_glsl(residual) +
-           (residual == XFormat::BF16 ? string() : x_bf16_glsl()) + q24_helpers() +
+    return head(residual) + encs_glsl() + x_residual_glsl(residual) +
+           (residual == XFormat::BF16 ? string() : x_codec_glsl(XFormat::BF16)) +
         "uniform sampler2D X,W,S;uniform float dummy;" + (use_eps_uniform ? "uniform float eps;" : string()) + body;
 }
 
@@ -2164,8 +2147,8 @@ string wkv_uv(const string& j, const string& row, const string& HS, const string
 }
 }  // namespace
 
-std::string rwkv_ln_stats(int dim, XFormat rf) {
-    need_dim("rwkv_ln_stats", dim);
+std::string ln_stats(int dim, XFormat rf) {
+    need_dim("ln_stats", dim);
     const string D = to_string(dim), RW = to_string(x_texels(dim, rf));
     // mean/invstd accumulate in f32 registers and are stored bit-cast f32 (ES3).
     // A fixed-point mean loses precision the invstd then amplifies: the token-
@@ -2182,8 +2165,8 @@ std::string rwkv_ln_stats(int dim, XFormat rf) {
         "if(gl_FragCoord.x<1.0)gl_FragColor=bcWr(mean);else gl_FragColor=bcWr(inv);}";
 }
 
-std::string rwkv_ln_norm(int dim, XFormat rf) {
-    need_dim("rwkv_ln_norm", dim);
+std::string ln_norm(int dim, XFormat rf) {
+    need_dim("ln_norm", dim);
     const string D = to_string(dim), RW = to_string(x_texels(dim, rf));
     return rwkv_head() + kBC + kRwkvRS +
         "uniform sampler2D X,S,W;"
@@ -2196,8 +2179,8 @@ std::string rwkv_ln_norm(int dim, XFormat rf) {
         "gl_FragColor=x_q24enc(((x-mean)*inv*w+b)*256.0);}";
 }
 
-std::string rwkv_ln_stats_p(int dim) {
-    need_dim("rwkv_ln_stats_p", dim);
+std::string ln_stats_p(int dim) {
+    need_dim("ln_stats_p", dim);
     const string D = to_string(dim);
     return rwkv_head() + kBC +
         "uniform sampler2D X;uniform float eps;"
@@ -2208,8 +2191,8 @@ std::string rwkv_ln_stats_p(int dim) {
         "if(gl_FragCoord.x<1.0)gl_FragColor=bcWr(mean);else gl_FragColor=bcWr(inv);}";
 }
 
-std::string rwkv_ln_norm_p(int dim) {
-    need_dim("rwkv_ln_norm_p", dim);
+std::string ln_norm_p(int dim) {
+    need_dim("ln_norm_p", dim);
     const string D = to_string(dim);
     return rwkv_head() + kBC + kRwkvRS +
         "uniform sampler2D X,S,W;"
@@ -2231,7 +2214,7 @@ std::string rwkv_res_add(int dim) {
     return head(XFormat::I24_1) + x_residual_glsl(XFormat::I16_1) +
         "uniform sampler2D R,D;"
         "void main(){int i=int(gl_FragCoord.x);"
-        "float r=R1(R,i," + D + ".0);"
+        "float r=Y1(R,i," + D + ".0);"
         "float d=" + rd24("D", "i", D + ".0") + ";"
         "gl_FragColor=x_st1(r+d);}";
 }
@@ -2375,13 +2358,132 @@ std::string rwkv_vres(int dim) {
         "gl_FragColor=x_q24enc(v+(vf-v)*sg(u+v0));}";
 }
 
-std::string rwkv_sqrelu(int dim) {
-    need_dim("rwkv_sqrelu", dim);
+std::string act_sqrelu(int dim) {
+    need_dim("act_sqrelu", dim);
     const string D = to_string(dim);
     return rwkv_head() + poly_src() +
         "uniform sampler2D X;"
         "void main(){int i=int(gl_FragCoord.x);float r=max(" + rd24("X", "i", D + ".0") + ",0.0);"
         "gl_FragColor=x_q24enc(r*r);}";
+}
+
+
+// ---- v5 (encoder-decoder): the dense-chain row passes -----------------------
+// A post-norm block needs three things the decoder-only chain never did: a
+// LayerNorm (mean removed, not just the rms), `x += b` after a projection, and
+// a non-gated FFN activation.  They are row-elementwise on the streams the
+// block already uses -- q16 for the residual and the attention input, I24 for a
+// matvec's output -- so no kernel here knows what a transformer is.
+
+std::string ln_stats_q16(int dim, XFormat rf) {
+    need_dim("ln_stats_q16", dim);
+    const string D = to_string(dim), RW = to_string(x_texels(dim, rf));
+    // One fragment, one XST2 store: the pair is (mean, invstd) in .rg/.ba of a
+    // single I16_2 texel.  XFORMAT's rule is that producers use XST* and
+    // consumers use X1/X2/X4; the RWKV bit-cast form (kBC) looked available
+    // because it is a helper in this file, but it is a *private* codec of that
+    // block -- using it here forces the whole program to ESSL 3.00 while the
+    // matching reader below is ESSL 1.00, which is exactly the mixed-language
+    // kernel the format module exists to prevent.
+    //
+    // The q16 grid is fine for this pair because both are O(1) after a
+    // normalisation: mean is a *mean* of a normalised row and invstd is
+    // 1/sigma with sigma O(1) for a post-norm residual.  A model whose
+    // residual is far from O(1) would need ACT=f32 here (the ACT axis), not a
+    // second private codec.
+    return head(XFormat::I16_2) + x_residual_glsl(rf) +
+        "uniform sampler2D X;uniform float eps;"
+        "void main(){float s=0.0,s2=0.0;"
+        "for(int i=0;i<" + D + ";i++){float v=Y1(X,i," + RW + ".0);s+=v;s2+=v*v;}"
+        "float m=s/float(" + D + ");"
+        "float inv=inversesqrt(max(s2/float(" + D + ")-m*m,0.0)+eps);"
+        "gl_FragColor=XST2(m,inv);}";
+}
+
+std::string ln_apply_q16(int dim, XFormat rf, XFormat out) {
+    need_dim("ln_apply_q16", dim);
+    const string RW = to_string(x_texels(dim, rf));
+    const string WW = to_string(x_texels(dim, XFormat::I16_2));
+    // XFORMAT-clean: every fetch is a macro, and each tensor is its own texture
+    // in its own format.  W (the LayerNorm weight) and B (its bias) used to
+    // share one two-row texture, which no macro can read -- `R1` addresses
+    // y = 0.5 only -- so that "optimisation" forced two hand-written
+    // `texture2D` fetches with a row pitch guessed from a comment, which is
+    // exactly what the format module exists to stop.  Two one-row textures cost
+    // 2 KiB and read like every other weight.
+    // S is ONE I16_2 texel holding both members, so its `TW` is 1 -- the macro
+    // halves the index and divides by TW, and both 0 and 1 must land on texel 0
+    // (picking .rg and .ba).  Passing the target's width instead puts index 1 at
+    // texel 0.5, i.e. outside the pair.
+    // The *output* shape follows `x_per_texel(out)`, not a per-format literal:
+    // `x_f32enc2` never existed in the format module, and writing it here made
+    // every ACT=f32 run of the encoder fail to compile -- a branch that is dead
+    // until the axis actually moves, which is why v5 shipped with it.
+    const bool pr = x_per_texel(out) == 2;
+    const auto term = [&](const string& k) {
+        return "(Y1(X," + k + "," + RW + ".0)-m)*inv*Y1(W," + k + "," + WW
+               + ".0)+Y1(B," + k + "," + WW + ".0)";
+    };
+    string body = "void main(){";
+    body += "float m=Y1(S,0,1.0);float inv=Y1(S,1,1.0);";
+    if (pr)
+        body += "int t=int(gl_FragCoord.x);int i0=2*t;"
+                "float v0=" + term("i0") + ";float v1=" + term("i0+1") + ";"
+                "gl_FragColor=XST2(v0,v1);";
+    else
+        body += "int i0=int(gl_FragCoord.x);"
+                "gl_FragColor=XST1(" + term("i0") + ");";
+    return head(out) + x_residual_glsl(rf) +
+        "uniform sampler2D X,S,W,B;" + body + "}";
+}
+
+std::string bias_add_q16(int dim, XFormat xf, XFormat f) {
+    need_dim("bias_add_q16", dim);
+    const string AS = to_string(x_texels(dim, xf));   // X: what the matvec wrote
+    const string BS = to_string(x_texels(dim, f));    // B and the output
+    // X is **not** the output's format, and this kernel is the one place that
+    // has to know it.  `matvec_q8` writes with `x_i24encq` unconditionally
+    // (34 emitted sites -- the output half of *every* q8 projection), while the
+    // activation axis may say I16_2.  Reading a 2048-texel I24 row as 1024 I16_2
+    // pairs is what made the non-gated FFN's first hidden layer come back as
+    // "the even values are the bias alone".
+    // B rides the output's format, because B is a host-uploaded row packed in it
+    // and the pass after this one reads what this writes.
+    const bool pr = x_per_texel(f) == 2;
+    const auto val = [&](const string& k) {
+        return "Y1(X," + k + "," + AS + ".0)+X1(B," + k + "," + BS + ".0)";
+    };
+    string body = "void main(){";
+    if (pr)
+        body += "int t=int(gl_FragCoord.x);int i0=2*t;"
+                "gl_FragColor=XST2(" + val("i0") + "," + val("i0+1") + ");";
+    else
+        body += "int i0=int(gl_FragCoord.x);"
+                "gl_FragColor=XST1(" + val("i0") + ");";
+    return head(f) + x_residual_glsl(xf) +
+        "uniform sampler2D X,B;" + body + "}";
+}
+
+std::string act_swish(int dim, XFormat f) {
+    need_dim("act_swish", dim);
+    const string AS = to_string(x_texels(dim, f));
+    // swish(x) = x*sigmoid(x), two values a fragment where the format holds two
+    // and one where it holds one.  The *producer* comes from the format module
+    // (`XST1`/`XST2`), never written by hand: `x_f32enc2` was invented here to
+    // mean "F32 but two a fragment", the format has no such thing, and every
+    // `ACT=f32` run of the encoder failed to compile -- a dead branch that only
+    // shows when the axis actually moves.
+    const bool pr = x_per_texel(f) == 2;
+    string body = "void main(){";
+    if (pr)
+        body += "int t=int(gl_FragCoord.x);int i0=2*t;"
+                "float x0=Y1(X,i0," + AS + ".0);float x1=Y1(X,i0+1," + AS + ".0);"
+                "gl_FragColor=XST2(x0/(1.0+" + EXP("-x0") + "),x1/(1.0+" + EXP("-x1") + "));";
+    else
+        body += "int i0=int(gl_FragCoord.x);"
+                "float x0=Y1(X,i0," + AS + ".0);"
+                "gl_FragColor=XST1(x0/(1.0+" + EXP("-x0") + "));";
+    return head(f) + x_residual_glsl(f) + "uniform sampler2D X;" + body + "}";
 }
 
 std::string rwkv_mul(int dim, int adiv) {

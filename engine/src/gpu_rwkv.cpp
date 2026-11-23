@@ -38,7 +38,7 @@ void GPU::init_rwkv(const Model& m){
 
         // Low-rank widths (the t intermediates); uniform across layers, but take
         // the max so a ragged container cannot undersize a scratch target.
-        // The channel-mix scratch is sized per *chunk*: rwkv_sqrelu draws
+        // The channel-mix scratch is sized per *chunk*: act_sqrelu draws
         // out.w fragments, so a target as wide as the widest chunk would make
         // the narrow chunk's relu^2 as expensive as the wide one's.  With
         // split_rwkv's even cut the two widths are equal (as before); with
@@ -372,15 +372,15 @@ void GPU::rwkv_copy(GLuint src, Target& dst){
         rwkv_draw1(p, tw);
 }
 
-GLuint GPU::rwkv_ln(GLuint x, GLuint wb, Target& out){
+GLuint GPU::ln_affine(GLuint x, GLuint wb, Target& out){
         const int dim = rwkv_dim_;
         Target& stat = rwkv_tmp(RT_LNSTAT);
-        GLuint ps = x_prog("rwkv_lns_" + to_string(dim), rwkv_ln_stats(dim, res_fmt_));
+        GLuint ps = x_prog("lns_" + to_string(dim), ln_stats(dim, res_fmt_));
         bind_fbo(stat.fbo); use_program(ps);
         bind_tex(0, x); set_sampler(ps, "X", 0);
         glUniform1f(uloc(ps, "eps"), rwkv_eps_);
         rwkv_draw1(ps, 2);
-        GLuint pn = x_prog("rwkv_lnn_" + to_string(dim), rwkv_ln_norm(dim, res_fmt_));
+        GLuint pn = x_prog("lnn_" + to_string(dim), ln_norm(dim, res_fmt_));
         bind_fbo(out.fbo); use_program(pn);
         bind_tex(0, x); set_sampler(pn, "X", 0);
         bind_tex(1, stat.tex); set_sampler(pn, "S", 1);
@@ -388,6 +388,7 @@ GLuint GPU::rwkv_ln(GLuint x, GLuint wb, Target& out){
         rwkv_draw1(pn, dim);
         return out.tex;
 }
+
 
 GLuint GPU::rwkv_upload_x0(const vector<float>& x0){
         const int dim = rwkv_dim_;
@@ -400,15 +401,15 @@ GLuint GPU::rwkv_upload_x0(const vector<float>& x0){
         return rwkv_x0_.tex;
 }
 
-GLuint GPU::rwkv_ln_p(GLuint x, GLuint wb, Target& out){
+GLuint GPU::ln_affine_p(GLuint x, GLuint wb, Target& out){
         const int dim = rwkv_dim_;
         Target& stat = rwkv_tmp(RT_LNSTAT);
-        GLuint ps = x_prog("rwkv_lnsp_" + to_string(dim), ::rwkv_ln_stats_p(dim));
+        GLuint ps = x_prog("lnsp_" + to_string(dim), ::ln_stats_p(dim));
         bind_fbo(stat.fbo); use_program(ps);
         bind_tex(0, x); set_sampler(ps, "X", 0);
         glUniform1f(uloc(ps, "eps"), rwkv_eps_);
         rwkv_draw1(ps, 2);
-        GLuint pn = x_prog("rwkv_lnp_" + to_string(dim), ::rwkv_ln_norm_p(dim));
+        GLuint pn = x_prog("lnp_" + to_string(dim), ::ln_norm_p(dim));
         bind_fbo(out.fbo); use_program(pn);
         bind_tex(0, x); set_sampler(pn, "X", 0);
         bind_tex(1, stat.tex); set_sampler(pn, "S", 1);
@@ -536,8 +537,8 @@ GLuint GPU::rwkv_vres(GLuint v, GLuint vf, GLuint u, GLuint v0, Target& out){
         return out.tex;
 }
 
-GLuint GPU::rwkv_sqrelu(GLuint x, Target& out){
-        GLuint p = x_prog("rwkv_sqrelu_" + to_string(out.w), ::rwkv_sqrelu(out.w));
+GLuint GPU::act_sqrelu(GLuint x, Target& out){
+        GLuint p = x_prog("act_sqrelu_" + to_string(out.w), ::act_sqrelu(out.w));
         bind_fbo(out.fbo); use_program(p);
         bind_tex(0, x); set_sampler(p, "X", 0);
         rwkv_draw1(p, out.w);
@@ -686,8 +687,8 @@ GLuint GPU::rwkv_block(int l, const Model& m, GLuint resid, float* cpu_wkv_state
         };
         Target& shA = sh(0, ppar);              // previous token's xn (the lerp's SH)
         Target& xnT = pp ? sh(0, par) : rwkv_tmp(RT_XN);
-        GLuint xn = (l == 0) ? rwkv_ln_p(resid, rwkv_const(l, RC_ATTNorm), xnT)
-                             : rwkv_ln(resid, rwkv_const(l, RC_ATTNorm), xnT);
+        GLuint xn = (l == 0) ? ln_affine_p(resid, rwkv_const(l, RC_ATTNorm), xnT)
+                             : ln_affine(resid, rwkv_const(l, RC_ATTNorm), xnT);
         lap(RS_LN);
         GLuint xr = rwkv_lerp(xn, shA.tex, lp, 0, 6, rwkv_tmp(RT_XR));
         GLuint xw = rwkv_lerp(xn, shA.tex, lp, 1, 6, rwkv_tmp(RT_XW));
@@ -826,7 +827,7 @@ GLuint GPU::rwkv_block(int l, const Model& m, GLuint resid, float* cpu_wkv_state
         // O20-O22: ffn norm, its token shift and the channel-mix lerp.
         Target& shF = sh(1, ppar);              // previous token's xn2 (the lerp's SH)
         Target& xn2T = pp ? sh(1, par) : rwkv_tmp(RT_XN2);
-        GLuint xn2 = rwkv_ln(resid, rwkv_const(l, RC_ATTNorm2), xn2T);
+        GLuint xn2 = ln_affine(resid, rwkv_const(l, RC_ATTNorm2), xn2T);
         GLuint xk2 = rwkv_lerp(xn2, shF.tex, rwkv_const(l, RC_CMLERP), 0, 1, rwkv_tmp(RT_XR));
         if (!pp) rwkv_copy(xn2, shF);
         cm_lap(CMP_PRE);
@@ -837,11 +838,11 @@ GLuint GPU::rwkv_block(int l, const Model& m, GLuint resid, float* cpu_wkv_state
         if (m.ffn_chunked) {
             GLuint ha = rwkv_mv(m.w1a[l], xk2, rwkv_tmp(RT_CMH));
             cm_lap(CMP_KEY_A);
-            ha = rwkv_sqrelu(ha, rwkv_tmp(RT_CMH2));
+            ha = act_sqrelu(ha, rwkv_tmp(RT_CMH2));
             cm_lap(CMP_SQ_A);
             GLuint hb = rwkv_mv(m.w1b[l], xk2, rwkv_tmp(RT_CMH3));
             cm_lap(CMP_KEY_B);
-            hb = rwkv_sqrelu(hb, rwkv_tmp(RT_CMH4));
+            hb = act_sqrelu(hb, rwkv_tmp(RT_CMH4));
             cm_lap(CMP_SQ_B);
             // mid != resid; the final add reuses resid's (now dead) buffer.
             Target& mid = (resid == rwkv_tmp(RT_RES).tex) ? rwkv_tmp(RT_RES2) : rwkv_tmp(RT_RES);
@@ -867,7 +868,7 @@ GLuint GPU::rwkv_block(int l, const Model& m, GLuint resid, float* cpu_wkv_state
         }
         GLuint h = rwkv_mv(m.w1[l], xk2, rwkv_tmp(RT_CMH));
         cm_lap(CMP_KEY);
-        h = rwkv_sqrelu(h, rwkv_tmp(RT_CMH2));
+        h = act_sqrelu(h, rwkv_tmp(RT_CMH2));
         cm_lap(CMP_SQ);
         Target& cm_out = (resid == rwkv_tmp(RT_RES).tex) ? rwkv_tmp(RT_RES2) : rwkv_tmp(RT_RES);
         if (needs_finish()) {
