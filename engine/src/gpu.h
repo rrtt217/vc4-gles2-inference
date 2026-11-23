@@ -168,7 +168,8 @@ public:
                         int seq, bool rope_half, bool qk_norm, int layers,
                         const vector<float>& qn, const vector<float>& kn,
                         const vector<float>& rcos, const vector<float>& rsin, bool qkv_pair,
-                        bool hybrid = false, const std::vector<uint8_t>* layer_type = nullptr);
+                        bool hybrid = false, const std::vector<uint8_t>* layer_type = nullptr,
+                        bool rope_none = false);
 
     GLuint attention_block(const Mat& qkv, GLuint x, int layer, int pos);
 
@@ -516,6 +517,9 @@ private:
     bool rms_eps_stated_ = false;
     float att_kv_scale_ = 16384.0f;
     int att_kv_fmt_ = 0;                 // KV_FMT: 0 fixed grid, 1 bf16
+    // v5: the block has no rotation; its positions are a table added to the
+    // embedding (AttnConfig::rope_none, which emits #define NOROPE).
+    bool att_rope_none_ = false;
     float att_score_scale_ = 1024.0f;   // ATT_SCALE: score/(max) grid
     float att_sum_scale_ = 32.0f;       // ATT_SUM_SCALE: exp-sum grid (linear)
     bool att_sum_log_ = false;          // ATT_SUM=log2: sum stored as log2

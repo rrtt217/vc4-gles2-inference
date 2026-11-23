@@ -132,7 +132,7 @@ def main():
             # decoder-only container never had to state.
             n_enc, flags, enc_seq, enc_ffn = struct.unpack_from("<BBHH", payload)
             props = [n for n, bit in (("post-norm", 1), ("scale-embed", 2),
-                                      ("nogate-ffn", 4)) if flags & bit]
+                                      ("nogate-ffn", 4), ("no-rope", 8)) if flags & bit]
             print(f"encoder     {n_enc} layers, seq {enc_seq}, ffn {enc_ffn}, "
                   + (" ".join(props) if props else "no flags"))
         elif key == 21 and ln >= 4:

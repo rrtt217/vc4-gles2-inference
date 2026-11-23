@@ -28,6 +28,9 @@ struct AttnConfig {
     // cross-attention.  Emitting nothing when it is true is what keeps every
     // decoder-only program's text byte-identical (gate/shader_hashes.sh).
     bool causal = true;
+    // No rotation at all (v5): the block's positions are a table added to the
+    // embedding, so the K write and the Q stage must not rotate either.
+    bool rope_none = false;
     int kv_bits = 0;
     // KV value encoding: 0 = the fixed q16 grid (KVSCALE), 1 = bf16 (same two
     // values a texel, uniform 0.1% relative precision, no scale to tune).

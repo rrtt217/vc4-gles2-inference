@@ -336,9 +336,13 @@ def build(meta, tensors, tok_blob, args):
     # counts; mmcf_format.BIAS_DIM_ORDER is the row order.
     if meta.get('encdec'):
         e = meta['encdec']
+        # Bit 3 says the block has no rotation at all: a Marian block carries
+        # its positions as a table added to the embedding, so the K write and
+        # the Q stage must not rotate (AttnConfig::rope_none, #define NOROPE).
         flags = (1 if e.get('post_norm') else 0) | \
                 (2 if e.get('scale_embed') else 0) | \
-                (4 if e.get('nogate') else 0)
+                (4 if e.get('nogate') else 0) | \
+                (8 if e.get('no_rope', True) else 0)
         md += tlv(20, 1, struct.pack("<BBHH", int(e['enc_layers']), flags,
                                      int(e['enc_seq']), int(e['enc_ffn'])))
         br = meta['bias_rows']

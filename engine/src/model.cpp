@@ -776,6 +776,7 @@ bool Model::parse_metadata() {
                         enc_post_norm = (flags & 1) != 0;
                         enc_scale_embed = (flags & 2) != 0;
                         enc_nogate = (flags & 4) != 0;
+                        enc_no_rope = (flags & 8) != 0;
                         enc_seq = rd16(payload + 2);
                         enc_ffn = rd16(payload + 4);
                         if (enc_layers < 1 || enc_seq < 1 || enc_ffn < 1) {

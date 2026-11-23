@@ -80,6 +80,9 @@ public:
     // only 60 KiB of them (docs/checkpoint-container.md, "v5").
     int enc_layers = 0, enc_ffn = 0, enc_seq = 0;
     bool enc_post_norm = false, enc_scale_embed = false, enc_nogate = false;
+    // key 20 bit 1's neighbour: a v5 block has no rotation at all (the position
+    // table carries the order), so the K write and the Q stage must not rotate.
+    bool enc_no_rope = false;
     // The uploaded views: the reader fills these after validating the shapes,
     // so the session never iterates a half-populated stack.
     vector<Mat> u_enc_qkv, u_enc_wo, u_enc_w1, u_enc_w2;   // [enc_layers]

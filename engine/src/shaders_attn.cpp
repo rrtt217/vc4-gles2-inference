@@ -143,7 +143,11 @@ string att_defs(const AttnConfig& c) {
            // to hide: every key is visible.  Emitted only when it is off, so
            // every decoder-only program keeps its text byte for byte
            // (gate/shader_hashes.sh).
-           (!c.causal ? "#define NOCAUSAL 1\n" : "");
+           (!c.causal ? "#define NOCAUSAL 1\n" : "") +
+           // No rotation at all (v5: a Marian block carries its positions as a
+           // table added to the embedding).  The same rule as the causal flag:
+           // emitted only when off, so no shipped program's text moves.
+           (c.rope_none ? "#define NOROPE 1\n" : "");
 }
 
 string att_helpers(const AttnConfig& c) {
@@ -230,7 +234,8 @@ string att_kv_rope(const AttnConfig& c) {
         "vec4 rs=texture2D(" + rt + ",vec2((float(2*ti+1)+0.5)/float(2*HALF)," + rty + "));"
         "float co=dec24s(rc,4096.0),sn=dec24s(rs,4096.0);"
         "bool first=(ROPEHALF==1)?(li<HALF):(even==0);"
-        "float oo=first?vv*co-bb*sn:bb*sn+vv*co;if(k==0)o0=oo;else if(k==1)o1=oo;else if(k==2)o2=oo;else o3=oo;}"
+         + string(c.rope_none ? "float oo=vv;" : "float oo=first?vv*co-bb*sn:bb*sn+vv*co;") +
+        "if(k==0)o0=oo;else if(k==1)o1=oo;else if(k==2)o2=oo;else o3=oo;}"
         "gl_FragColor=encKV8(o0,o1,o2,o3);return;}"
         "int vb=4*(x-KVDIM/4);"
         "int vh=vb/HEADDIM;"
@@ -261,7 +266,8 @@ string att_kv_rope(const AttnConfig& c) {
         "vec4 rs=texture2D(" + rt + ",vec2((float(2*ti+1)+0.5)/float(2*HALF)," + rty + "));"
         "float co=dec24s(rc,4096.0),sn=dec24s(rs,4096.0);"
         "bool first=(ROPEHALF==1)?(li<HALF):(even==0);"
-        "float oo=first?vv*co-bb*sn:bb*sn+vv*co;if(k==0)o0=oo;else o1=oo;}"
+         + string(c.rope_none ? "float oo=vv;" : "float oo=first?vv*co-bb*sn:bb*sn+vv*co;") +
+        "if(k==0)o0=oo;else o1=oo;}"
         "gl_FragColor=encKV(o0,o1);return;}"
         "int vb=2*(x-KVDIM/2);"
         "float v0=QKVQ(DIM+KVDIM+vb);"
@@ -340,9 +346,10 @@ string att_qrot(const AttnConfig& c) {
         "b=b*rq*dec16(texture2D(QN,vec2((float(j)+0.5)/float(HEADDIM),0.5)).rg);}"
         "vec4 rc=texture2D(" + rt + ",vec2((float(2*ti)+0.5)/float(2*HALF)," + rty + "));"
         "vec4 rs=texture2D(" + rt + ",vec2((float(2*ti+1)+0.5)/float(2*HALF)," + rty + "));"
-        "float co=dec24s(rc,4096.0),sn=dec24s(rs,4096.0);"
-        "bool first=(ROPEHALF==1)?(i<HALF):(even==0);"
-        "return first?qv*co-b*sn:b*sn+qv*co;}"
+        + string(c.rope_none ? "return qv;}"
+                : "float co=dec24s(rc,4096.0),sn=dec24s(rs,4096.0);"
+                  "bool first=(ROPEHALF==1)?(i<HALF):(even==0);"
+                  "return first?qv*co-b*sn:b*sn+qv*co;}") +
         "void main(){int x=int(gl_FragCoord.x);int h=x/(HEADDIM/2);int i0=(x-h*(HEADDIM/2))*2;"
         "vec4 p0=q16(qval(h,i0)),p1=q16(qval(h,i0+1));"
         "gl_FragColor=vec4(p0.r,p0.g,p1.r,p1.g);}";

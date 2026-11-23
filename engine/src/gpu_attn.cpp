@@ -57,7 +57,10 @@ void GPU::init_attention(int dim, int kv_dim, int heads, int kv_heads, int head_
                         int seq, bool rope_half, bool qk_norm, int layers,
                         const vector<float>& qn, const vector<float>& kn,
                         const vector<float>& rcos, const vector<float>& rsin, bool qkv_pair,
-                        bool hybrid, const vector<uint8_t>* layer_type){
+                        bool hybrid, const vector<uint8_t>* layer_type, bool rope_none){
+        // v5: no rotation at all.  The causal/rope flags are AttnConfig, so the
+        // builders emit NOROPE only for this caller.
+        att_rope_none_ = rope_none;
         att_dim_ = dim; att_kv_dim_ = kv_dim; att_heads_ = heads;
         att_kv_heads_ = kv_heads; att_head_dim_ = head_dim; att_seq_ = seq;
         att_rope_half_ = rope_half; att_qk_norm_ = qk_norm;

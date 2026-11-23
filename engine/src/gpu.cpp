@@ -131,6 +131,7 @@ AttnConfig GPU::att_cfg(int segk, bool accumulate) const{
         c.sum_log = att_sum_log_;
         c.exp_poly = exp_poly_enabled();   // EXP=drv|poly, one axis (shaders.cpp)
         c.qkv_pair = att_qkv_pair_;
+        c.rope_none = att_rope_none_;
         // Long context: the builders need the cut to emit the segment chain.
         c.nseg = att_nseg_;
         c.seg = att_seg_;
