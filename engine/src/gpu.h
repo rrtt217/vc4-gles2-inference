@@ -93,6 +93,7 @@ public:
     void attach_dump_fbo(Target& t);
     GLuint bias_add(GLuint x, GLuint b, Target& out);
     GLuint bias_add_wide(GLuint x, GLuint b, Target& out, int dim);
+    GLuint bias_add_matvec(GLuint x, GLuint b, Target& out, int dim);
     // `xf` is what wrote x (a matvec writes I24, a *add-into-residual* writes
     // res_fmt_), `f` is the bias and the output.  They are different axes and
     // the same format only by accident.

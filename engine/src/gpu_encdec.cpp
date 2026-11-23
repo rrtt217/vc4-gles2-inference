@@ -184,6 +184,15 @@ GLuint GPU::bias_add_wide(GLuint x, GLuint b, Target& out, int dim){
         return bias_add_f(x, b, out, dim, res_fmt_, res_fmt_);
 }
 
+// A bias on a *projection's* output: the matvec wrote I24 (its store is hardcoded,
+// 34 emitted sites), and the bias and the result ride the residual format
+// because that is what the next reader decodes.  This is the pair of formats
+// every `matvec_to` + bias site needs, named once so the three of them cannot
+// drift apart.
+GLuint GPU::bias_add_matvec(GLuint x, GLuint b, Target& out, int dim){
+        return bias_add_f(x, b, out, dim, XFormat::I24_1, res_fmt_);
+}
+
 GLuint GPU::bias_add_f(GLuint x, GLuint b, Target& out, int dim, XFormat xf, XFormat f){
         const int tw = x_texels(dim, f);
         if (out.tex == 0 || out.w != tw) out = make_target(tw, 1);

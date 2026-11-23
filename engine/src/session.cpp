@@ -2331,12 +2331,15 @@ void Session::encdec_encode(const vector<int>& src) {
                 cd_k_[l].assign((size_t)n * D, 0.0f);
                 cd_v_[l].assign((size_t)n * D, 0.0f);
                 for (int b = 0; b < n; ++b) {
+                        // matvec_to writes I24 (see bias_add_matvec)
                         gpu_.matvec_to(m.u_cross_k[l], gpu_.grp_h(b, n).tex, gpu_.cd_b());
-                        gpu_.bias_add(gpu_.cd_b().tex, gpu_.enc_rows_.ck_b[l], gpu_.cd_c());
+                        gpu_.bias_add_matvec(gpu_.cd_b().tex, gpu_.enc_rows_.ck_b[l],
+                                             gpu_.cd_c(), D);
                         vector<float> k = read_hidden(gpu_.cd_c());
                         memcpy(cd_k_[l].data() + (size_t)b * D, k.data(), sizeof(float) * D);
                         gpu_.matvec_to(m.u_cross_v[l], gpu_.grp_h(b, n).tex, gpu_.cd_b());
-                        gpu_.bias_add(gpu_.cd_b().tex, gpu_.enc_rows_.cv_b[l], gpu_.cd_c());
+                        gpu_.bias_add_matvec(gpu_.cd_b().tex, gpu_.enc_rows_.cv_b[l],
+                                             gpu_.cd_c(), D);
                         vector<float> v = read_hidden(gpu_.cd_c());
                         memcpy(cd_v_[l].data() + (size_t)b * D, v.data(), sizeof(float) * D);
                 }
@@ -2367,7 +2370,8 @@ vector<float> Session::encdec_step(int token, int pos) {
                 // cross-attention: q from y1, k/v from the encoder (read-back
                 // planes; the cross kernel is the remaining host step)
                 gpu_.matvec_to(m.u_cross_q[l], y1, gpu_.cd_b());
-                gpu_.bias_add(gpu_.cd_b().tex, gpu_.enc_rows_.cq_b[l], gpu_.cd_d());
+                gpu_.bias_add_matvec(gpu_.cd_b().tex, gpu_.enc_rows_.cq_b[l],
+                                     gpu_.cd_d(), D);
                 vector<float> q = read_hidden(gpu_.cd_d());
                 vector<float> ctx((size_t)D, 0.0f);
                 for (int hh = 0; hh < H; ++hh) {
