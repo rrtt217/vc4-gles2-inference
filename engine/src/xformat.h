@@ -71,9 +71,25 @@ enum class XFormat : uint8_t {
 // through the one that matches what it already has (a value or an
 // integer) and reads through either.
 //
-// X1 and R1 are the *same* decoder.  The X/R split names which store
-// travels with a texture, not two decodes -- which is why both can be in
-// one program, and why F32/BF16 carry a second helper name there.
+// X and R are **two format slots**, not two APIs for one.  Every builder
+// in shaders.cpp calls `head(...)` for the stream it decodes and
+// `x_residual_glsl(rf)` for the second one it touches, and the two
+// names carry the fact that they must not collide: `head(I16_2)` is the
+// q16 activation, `x_residual_glsl(I24_1)` the 24-bit residual, and one
+// kernel decodes both.  A single call could not say which is which.
+//
+// What is *not* honest is the prefix: `X` and `R` name the slot, and the
+// store kind is then tied to it (`XST1` = a value, `XST1Q` = a q, and
+// the R slot only offers the q one).  Anything that needs a value store
+// in the second slot has none, and a reader has to know the coupling
+// from memory.  The X1/R1 decoders underneath are the *same* formula,
+// which is why the coupling reads as an accident rather than a design.
+//
+// The next step is the orthogonal spelling: slot in the prefix (X/ Y),
+// store kind in the suffix (ST1 = a value, ST1Q = a q), both slots
+// offering both.  It is a rename only -- same bytes, same numbers -- and
+// it moves every digest, so it is its own commit with its own
+// re-baseline.
 // ===================================================================
 
 struct XLayout {
