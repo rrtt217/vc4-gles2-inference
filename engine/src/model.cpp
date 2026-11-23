@@ -776,6 +776,15 @@ bool Model::parse_metadata() {
                         // Third byte (2026-11-18): the tokenizer's prefix policy.
                         // Two-byte payloads keep the historical behaviour.
                         sp_prefix = len >= 3 && payload[2] == 1;
+                        // Fourth byte (2026-11-23): the segmentation algorithm.
+                        // 0 = BPE merge, 1 = SentencePiece unigram.  Appended
+                        // for the same reason the third byte was.
+                        if (len >= 4 && payload[3] > 1) {
+                                cerr << "mmcf: tokenizer kind " << (int)payload[3]
+                                     << " is unknown (0 = BPE, 1 = unigram)\n";
+                                return false;
+                        }
+                        tok_unigram = len >= 4 && payload[3] == 1;
                 } else if (key == 18 && type == 1 && len >= 4 && (len % 4) == 0) {
                         // A longrope model's static per-dimension rope table.
                         rope_factors.resize(len / 4);

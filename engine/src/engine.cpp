@@ -149,6 +149,19 @@ int main(int argc, char** argv) {
     // historical rule is kept, which is derived from the template kind.
     const bool enc_bos = app.model.add_bos >= 0 ? (app.model.add_bos != 0)
                                             : (!opt.qwen_template && !opt.tbb_template);
+    // --tokenize: the container's own tokenizer over one string, then exit.
+    // No BOS and with the space marker on, which is what the reference does for
+    // a bare source text; scripts/check_unigram.py is the oracle it is diffed
+    // against, and it needs the ids and nothing else on stdout.
+    if (opt.tokenize) {
+        const vector<int> ids = app.tokenizer.encode(opt.tokenize_text, /*bos=*/false,
+                                                    /*dummy_prefix=*/true);
+        for (size_t i = 0; i < ids.size(); ++i)
+            printf("%d%s", ids[i], i + 1 == ids.size() ? "\n" : " ");
+        if (ids.empty()) printf("\n");
+        fprintf(stderr, "n=%zu\n", ids.size());
+        return 0;
+    }
     // CHAT_DUMP=1 prints the rendered prompt with its input marking, which is
     // what the byte-for-byte template comparisons are run against.
     const bool chat_dump = env_set("CHAT_DUMP");

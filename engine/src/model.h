@@ -149,6 +149,11 @@ public:
     // SentencePiece vocabulary needs this ("user" and "\u2581user" are
     // different tokens); a byte-level one does not notice either way.
     bool sp_prefix = false;
+    // Metadata key 10's fourth byte: 1 = SentencePiece unigram, which is what
+    // an encoder-decoder's tokenizer is; absent (every container before this
+    // byte grew) is the BPE merge pass.  Distinct from `tok_kind` above, which
+    // is key 4's tokenizer *name*.
+    bool tok_unigram = false;
     // How much of the body arrived as a 2-bit ternary record (dtype 7) and had
     // to be expanded to q8 on the host.  Zero for every other container; a load
     // that leaves it non-zero says so, because until the GPU kernel exists

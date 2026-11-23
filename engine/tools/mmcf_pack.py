@@ -334,10 +334,15 @@ def build(meta, tensors, tok_blob, args):
     # only looks at two bytes sees the old policy, which is why the byte is
     # appended rather than put in a key of its own.
     if (args.add_bos is not None or args.add_eos is not None
-            or meta.get("sp_prefix")):
+            or meta.get("sp_prefix") or meta.get("tok_unigram")):
         body = struct.pack("<BB", 255 if args.add_bos is None else args.add_bos,
                            255 if args.add_eos is None else args.add_eos)
-        if meta.get("sp_prefix"):
+        # Third byte: the per-run space marker.  Fourth: the segmentation
+        # algorithm (1 = SentencePiece unigram), because the same blob layout
+        # carries both and only the kind says how the score column reads.
+        if meta.get("sp_prefix") or meta.get("tok_unigram"):
+            body += struct.pack("<B", 1 if meta.get("sp_prefix") else 0)
+        if meta.get("tok_unigram"):
             body += struct.pack("<B", 1)
         md += tlv(10, 1, body)
     # key 14: one byte per layer, 0 = attention, 1 = the LFM2 conv block.

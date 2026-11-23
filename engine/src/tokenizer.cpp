@@ -182,6 +182,85 @@ void Tokenizer::encode_greedy(const string& text, vector<int>& t) const {
         }
 }
 
+// SentencePiece unigram segmentation: the piece sequence with the largest sum
+// of log probabilities.  dp[i] is the best score for text[i..], so the pass runs
+// backwards and the emit pass forwards.
+//
+// The tie rule is part of the contract: the reference walks the lattice in
+// piece-length order and keeps the first maximum, so a strict `>` here keeps the
+// shorter piece at equal score, which is the same choice.  `>` rather than `>=`
+// is therefore deliberate, and a Python Viterbi that uses it agrees token for
+// token (engine/scripts/check_unigram.py is the oracle).
+//
+// A blob built from BPE merges stores score = 1e6 - rank, which is monotone in
+// merge order, so this loop on such a blob would segment by rank instead of by
+// likelihood.  That is why the container says which kind it is (metadata key
+// 10's fourth byte) and why this path is opt-in.
+void Tokenizer::encode_unigram(const string& text, vector<int>& out) const {
+        const size_t n = text.size();
+        if (!n) return;
+        const float NEG = -3.0e38f;
+        vector<float> dp(n + 1, NEG);
+        vector<int> pick(n + 1, -1);
+        vector<int> plen(n + 1, 0);
+        dp[n] = 0.0f;
+        for (size_t i = n; i-- > 0;) {
+            size_t cap = max_len_ < n - i ? max_len_ : n - i;
+            const size_t first = first_max_[(unsigned char)text[i]];
+            if (first < cap) cap = first;
+            for (size_t L = 1; L <= cap; ++L) {
+                auto it = lookup_.find(text.substr(i, L));
+                if (it == lookup_.end()) continue;
+                if (dp[i + L] <= NEG) continue;
+                const float v = scores_[it->second] + dp[i + L];
+                if (v > dp[i]) { dp[i] = v; pick[i] = it->second; plen[i] = L; }
+            }
+            // A hole in the table would leave dp[i] at NEG and silently drop
+            // the rest of the string; cost this byte instead (the greedy path's
+            // guard).  Both spm blobs carry every single byte, so this is a
+            // guard, not a routine case.
+            if (pick[i] < 0 && dp[i + 1] > NEG) { dp[i] = dp[i + 1]; plen[i] = 0; }
+        }
+        for (size_t i = 0; i < n;) {
+            if (plen[i] == 0) { ++i; continue; }
+            out.push_back(pick[i]);
+            i += (size_t)plen[i];
+        }
+}
+
+void Tokenizer::encode_into_unigram(const string& text, bool allow_specials,
+                                    vector<int>& out, bool lead, bool per_run) const {
+        string seg;
+        auto flush = [&](bool marker) {
+            if (seg.empty()) return;
+            // The space marker belongs to the first *piece*: "▁the" is one
+            // entry, and Viterbi can only see the marker if it is part of the
+            // string being segmented.  Pushing it as its own token -- which is
+            // what the BPE path does, relying on the merge pass to put it back
+            // -- would make every marker-carrying piece unreachable.
+            encode_unigram(marker ? (" " + seg) : seg, out);
+            seg.clear();
+        };
+        for (size_t i = 0; i < text.size();) {
+            bool matched = false;
+            if (allow_specials) {
+                for (auto& sp : specials_) {
+                    if (text.compare(i, sp.first.size(), sp.first) == 0) {
+                        flush(lead);
+                        out.push_back(sp.second);
+                        i += sp.first.size();
+                        matched = true;
+                        lead = per_run;
+                        break;
+                    }
+                }
+            }
+            if (matched) continue;
+            seg.push_back(text[i++]);
+        }
+        flush(lead);
+}
+
 void Tokenizer::bpe_merge(vector<int>& t) const {
         while (true) {
             float best = -1e30f; int bid = -1, ba = -1, bb = -1;
@@ -215,6 +294,12 @@ vector<int> Tokenizer::encode(const string& text, bool bos , bool dummy_prefix )
         // else; the vocabulary already carries the <|...|> markers as ordinary
         // entries, so matching them first could only ever shorten a match.
         if (rwkv_) { encode_greedy(text, t); return t; }
+        if (unigram_) {
+            encode_into_unigram(text, /*allow_specials=*/true, t,
+                                /*lead=*/dummy_prefix && !text.empty(),
+                                /*per_run=*/seg_prefix_ && dummy_prefix);
+            return t;
+        }
         // GPT-2/SmolLM/Qwen style tokenizers fold the leading space into the
         // first word (" capital" is one token), so it must be prepended to the
         // text and not emitted as its own token.  TOK_SPACE_FOLD=1 selects that;
@@ -252,6 +337,17 @@ vector<int> Tokenizer::encode_parts(const vector<PromptPart>& parts, bool bos, b
             string all;
             for (auto& p : parts) all += p.text;
             encode_greedy(all, t);
+            return t;
+        }
+        if (unigram_) {
+            const bool per_run = seg_prefix_ && dummy_prefix;
+            bool lead = dummy_prefix;
+            for (auto& p : parts) {
+                if (p.text.empty()) continue;
+                encode_into_unigram(p.text, /*allow_specials=*/!p.is_input, t,
+                                    lead, per_run);
+                lead = per_run;
+            }
             return t;
         }
         bool nonempty = false;

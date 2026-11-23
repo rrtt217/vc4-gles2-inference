@@ -78,6 +78,8 @@ static const FlagDef kFlags[] = {
      "print every shader builder's GLSL digest (or the text with =raw)"},
     {CliOpt::DumpSwitches, "--dump-switches", "", 0, "", "Diagnostics",
      "print the environment-switch registry (no GPU, no model)"},
+    {CliOpt::Tokenize, "--tokenize", "", 1, "TEXT", "Diagnostics",
+     "print the token ids of TEXT and exit"},
 
     {CliOpt::Quiet, "--quiet", "-q", 0, "", "Process",
      "no informational lines on stderr"},
@@ -214,6 +216,7 @@ static bool apply(CliOpt id, const char* const* v, int n, Options& opt, bool& qu
             }
             break;
         case CliOpt::DumpSwitches: opt.dump_switches = true; break;
+        case CliOpt::Tokenize: opt.tokenize = true; opt.tokenize_text = v[0]; break;
         case CliOpt::Quiet: quiet = true; break;
         case CliOpt::Version:
             printf("engine_mm3 %s (MMCF v2)\n", kVersion);

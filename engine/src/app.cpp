@@ -118,6 +118,7 @@ bool App::setup_from_model() {
     // -- and this function is the one the REPL's /model calls again, which is
     // what makes a swap out of (or into) an RWKV container set it correctly.
     tokenizer.set_rwkv(model.is_rwkv());
+    tokenizer.set_unigram(model.tok_unigram);
     return true;
 }
 

@@ -26,7 +26,7 @@ enum class CliOpt {
     RepeatPenalty, FrequencyPenalty, PresencePenalty, NoRepeatNgram,
     Thinking, Tools, ToolsFile,
     PrefixCache, BuildPrefixCache,
-    DumpShaders, DumpSwitches,
+    DumpShaders, DumpSwitches, Tokenize,
     Quiet, Version, Help,
 };
 
@@ -46,6 +46,12 @@ struct Options {
     int gen = 8;
     int dump_mode = 0;   // --dump-shaders: 1 = digests, 2 = raw GLSL
     bool dump_switches = false;  // --dump-switches: the registry, then exit
+    // --tokenize TEXT: print the token ids the container's tokenizer produces,
+    // then exit.  The unigram path is a segmentation algorithm, so "the ids
+    // look plausible" is not a check -- scripts/check_unigram.py compares this
+    // output against a Viterbi oracle, and a flag is the only way to see it.
+    bool tokenize = false;
+    std::string tokenize_text;        // the text --tokenize was given
     bool prompt_set = false, gen_set = false;
     bool chat = false, qwen_template = false, minimind3_template = false, greedy = false, worker = false;
     bool tbb_template = false;   // <|user|>/<|assistant|>/<|end|>, no system turn, no BOS

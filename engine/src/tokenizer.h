@@ -29,6 +29,13 @@ public:
     // bytes verbatim.  Set it *after* load(), like set_qwen() -- reset()
     // rebuilds the object and a mode set before a reload is lost.
     void set_rwkv(bool r);
+    // SentencePiece **unigram** (metadata key 10's fourth byte).  The sentence
+    // is the segmentation that maximises the sum of the pieces' log
+    // probabilities, so the blob's score column is load-bearing -- which is what
+    // `make_tok_spm.py` writes and what a BPE blob (score = 1e6 - rank) would
+    // turn into a segmentation by merge order.
+    void set_unigram(bool u) { unigram_ = u; }
+    bool unigram() const { return unigram_; }
     bool rwkv() const { return rwkv_; }
 
     vector<int> encode(const string& text, bool bos = true, bool dummy_prefix = true);
@@ -56,6 +63,12 @@ private:
     void bpe_merge(vector<int>& t) const;
     // RWKV mode: longest entry that fits, at every position.
     void encode_greedy(const string& text, vector<int>& out) const;
+    // Unigram mode: the maximum-score segmentation of one run, over raw bytes.
+    void encode_unigram(const string& text, vector<int>& out) const;
+    // Unigram mode with the special-token scan.  `lead` puts the space marker on
+    // the first run, `per_run` on every run after a special.
+    void encode_into_unigram(const string& text, bool allow_specials,
+                             vector<int>& out, bool lead, bool per_run) const;
     bool is_special_id(int id) const;
     vector<string> vocab_;
     vector<float> scores_;
@@ -71,6 +84,7 @@ private:
     bool bytelevel_ = false;
     bool seg_prefix_ = false;
     bool rwkv_ = false;
+    bool unigram_ = false;
     // Longest entry in the blob.  Greedy matching scans downwards from
     // min(maxlen, bytes left); taken from the entries themselves, not from the
     // header's i32, so a stale header cannot hide a long entry.
