@@ -47,6 +47,12 @@ REC_SIZE_V3 = 64
 VERSION_DENSE = 2
 VERSION_MOE = 3
 VERSION_RWKV7 = 4
+# 5 is the encoder-decoder family (a Marian checkpoint: an encoder stack, a
+# cross-attention in every decoder layer, bias vectors and a learned position
+# table).  It reuses v2's 48-byte record -- nothing here needs an `aux` -- and
+# its dispatch is on the header version for the same reason v4's is: a v2
+# reader must not half-load it.
+VERSION_ENCDEC = 5
 
 
 def rec_size(version):
@@ -103,6 +109,15 @@ KINDS = {
     0x28: "time_mix_a1", 0x29: "time_mix_a2",
     0x2A: "time_mix_g1", 0x2B: "time_mix_g2",
     0x30: "tokenizer_blob",
+    # Version 5 (encoder-decoder).  The encoder layers get their own kinds
+    # rather than reusing the decoder's `layer` bits, because the layer field is
+    # what a reader indexes `qkv[l]` with and an encoder block is not that
+    # matrix.  The bias vectors and the position table are f32 rows: a
+    # quantised LayerNorm weight is a systematic per-channel gain, and there are
+    # only 60 KiB of them.
+    0x31: "enc_qkv", 0x32: "enc_wo", 0x33: "enc_w1", 0x34: "enc_w2",
+    0x35: "cross_q", 0x36: "cross_k", 0x37: "cross_v", 0x38: "cross_o",
+    0x39: "bias_dim", 0x3A: "bias_ffn", 0x3B: "logits_bias", 0x3C: "pos_table",
 }
 
 # Kinds a per-layer record uses (the layer bits are 0 for the model-wide
@@ -146,6 +161,24 @@ RWKV_VECTORS = {
 }
 # The model-wide ones (rows = 1, layer bits 0).
 RWKV_GLOBAL_VECTORS = (K_RWKV_TOK_NORM, K_RWKV_OUT_NORM)
+
+# --- v5 bias rows (metadata key 21) -------------------------------------
+# `bias_dim` is one f32 row a vector, cols = dim; `bias_ffn` the same for the
+# 2048-wide fc1 biases.  The rows are grouped by block, in this order, and a
+# reader indexes them arithmetically -- there is no table in the file:
+#
+#   dim rows: decoder layer l at  l*15,  rows q, k, v, o, cq, ck, cv, co,
+#             ln1_w, ln1_b, ln2_w, ln2_b, ln3_w, ln3_b, fc2_b
+#             encoder layer m at  layers*15 + m*9, rows q, k, v, o,
+#             ln1_w, ln1_b, ln2_w, ln2_b, fc2_b
+#   ffn rows: decoder layer l at l, encoder layer m at layers + m
+#
+# The two counts are metadata key 21's <HH>.  A reader that finds a different
+# count refuses the file rather than indexing past the tensor.
+BIAS_DIM_ORDER = ("q", "k", "v", "o", "cq", "ck", "cv", "co",
+                  "ln1_w", "ln1_b", "ln2_w", "ln2_b", "ln3_w", "ln3_b", "fc2_b")
+BIAS_ENC_DIM_ORDER = ("q", "k", "v", "o", "ln1_w", "ln1_b", "ln2_w", "ln2_b",
+                      "fc2_b")
 
 # --- RWKV-7 metadata (key 16) -------------------------------------------
 # One record per model, 16 bytes: the architecture, the WKV head width, a flag
