@@ -842,19 +842,28 @@ GLuint GPU::x_stats(int segk){ return x_prog("xst" + seg_suffix(segk), ::att_sta
 
 // The qbatch variants bake n into the shader text (QB) and take the position's
 // row offset qrow0 as a uniform; the serial getters above stay qbatch = 1.
+// A key is not a program: `causal` and `rope_none` both change the emitted
+// text, so two modes that share a key get the first one's program for ever.  The
+// encoder runs `xscb_<n>` bidirectionally and the decode loop asks for the same
+// n, causal -- and got the encoder's text ("uniform 'pos' not found", because
+// the bidirectional build prunes it).  The dump's labels are the registry's, not
+// these, so the name is free to grow.
 GLuint GPU::x_score_batch(int n){
         AttnConfig c = att_cfg(); c.qbatch = n;
-        return x_prog("xscb_" + to_string(n), att_score(c));
+        return x_prog("xscb_" + to_string(n) + (c.causal ? "_c" : "_bi") +
+                          (c.rope_none ? "_nr" : ""), att_score(c));
 }
 
 GLuint GPU::x_stats_row(int n){
         AttnConfig c = att_cfg(); c.qbatch = n;
-        return x_prog("xstr_" + to_string(n), ::att_stats(c));
+        return x_prog("xstr_" + to_string(n) + (c.causal ? "_c" : "_bi") +
+                          (c.rope_none ? "_nr" : ""), ::att_stats(c));
 }
 
 GLuint GPU::x_v_row(int n){
         AttnConfig c = att_cfg(); c.qbatch = n;
-        return x_prog("xvr_" + to_string(n) + "_" + x_format_name(act_fmt_),
+        return x_prog("xvr_" + to_string(n) + "_" + x_format_name(act_fmt_) +
+                          (c.causal ? "_c" : "_bi") + (c.rope_none ? "_nr" : ""),
                       ::att_v(c, act_fmt_));
 }
 

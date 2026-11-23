@@ -878,7 +878,10 @@ void GPU::att_scores_batch(int layer, int pos0, int n){
         set_sampler(p, "Q", 0);
         bind_tex(1, kv_cache_[layer].tex);
         set_sampler(p, "KV", 1);
-        glUniform1f(uloc(p, "pos"), (float)pos0);
+        // The bidirectional build has no clip to make, so the compiler prunes
+        // `pos` out and uloc() prints "uniform not found" -- which is the
+        // warning a typo produces, so a deliberate absence has to be silent.
+        if (att_causal_) glUniform1f(uloc(p, "pos"), (float)pos0);
         glUniform1f(uloc(p, "invsqrt"), 1.0f / sqrtf((float)att_head_dim_));
         setup_attrib(p);
         glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
