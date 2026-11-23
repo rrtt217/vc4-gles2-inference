@@ -244,6 +244,9 @@ public:
     // such metadata and keep the historical 1 = BOS, 2 = EOS guess.
     bool have_specials = false;
     int id_bos = 1, id_eos = 2, id_stop = -1, id_pad = -1, id_unk = -1, id_im_start = -1;
+    // v5: the decoder starts from its own token (Marian: 65000, its <pad>), and
+    // the encoder's input gets an <eos> appended that is not the decoder's EOS.
+    int decoder_start_id = -1;
     // (these defaults reproduce the historical 1 = BOS, 2 = EOS behaviour)
     bool load(const string& path);
     // Header and metadata only, for a caller that has to decide whether a

@@ -1554,6 +1554,10 @@ bool Model::read_tables() {
                         cerr << "mmcf: the bias tensors are missing or the wrong size\n";
                         return false;
                 }
+                // The decoder's first token: Marian starts from its <pad>.  Set
+                // here rather than in key 20's reader because key 8 (the specials)
+                // is parsed before it only if the packer wrote them in order.
+                decoder_start_id = id_pad >= 0 ? id_pad : vocab - 1;
                 if ((int)logits_bias.size() != vocab) {
                         cerr << "mmcf: logits bias is " << logits_bias.size()
                              << " values, the vocabulary is " << vocab << "\n";

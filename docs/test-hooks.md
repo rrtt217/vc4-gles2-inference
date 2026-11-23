@@ -51,7 +51,7 @@ The rows below are the registry, one per switch, grouped by the axis they move.
 diagnostic or a pricing arm; `retired` is gone (`--dump-switches` prints the
 same table with what *this* environment resolved to).
 
-150 switches: 29 permanent, 107 probe, 14 retired; 16 legacy spellings are translated.
+151 switches: 29 permanent, 108 probe, 14 retired; 16 legacy spellings are translated.
 
 ### The activation streams
 
@@ -219,6 +219,12 @@ same table with what *this* environment resolved to).
 | `PAIR_WROW` | value | keep the single-position prefill for a model with per-row scale planes |
 | `PREFILL_BATCH` | `0..16` | fuse N positions' attention score passes into one draw (0 = off); the residual chain stays serial |
 | `PREFILL_REPEAT` | value | replay the prefill n times, for timing |
+
+### The encoder-decoder block (v5)
+
+| Switch | Takes | What it moves |
+|---|---|---|
+| `ENCDEC_DUMP` | `=1` | print the encoder/decoder stage magnitudes and the first step's argmax |
 
 ### Loading, memory and the container
 

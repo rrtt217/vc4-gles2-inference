@@ -270,6 +270,15 @@ void GPU::att_qkv_draw(const Mat& qkv, GLuint x){
         } else {
             matvec_to(qkv, x, qkv_target_);
         }
+        // v5: a block whose projection carries a bias (Marian biases q/k/v
+        // separately).  The add writes into a second target and the two swap, so
+        // kv_rope_write and att_qrot_stage keep reading `qkv_target_` and none of
+        // their text moves -- the same "flag, not a new kernel" rule the causal
+        // and rope switches follow.
+        if (att_qkv_bias_) {
+                bias_add_wide(qkv_target_.tex, att_qkv_bias_, qkv_biased_, 3 * att_dim_);
+                std::swap(qkv_target_, qkv_biased_);
+        }
 }
 
 GLuint GPU::attention_block(const Mat& qkv, GLuint x, int layer, int pos){
@@ -422,12 +431,17 @@ void GPU::att_scores(int layer, int pos){
             bind_fbo(qrot_target_.fbo);
             glViewport(0, 0, att_dim_ / 2, 1);
             use_program(pr);
-            const int u_r = uloc(pr, "R"), u_rt = uloc(pr, "RT");
+            // NOROPE: the compiler drops RT and pos, so the host does not ask
+            // for them (a "uniform not found" here reads like a typo).
+            const int u_r = uloc(pr, "R");
+            const int u_rt = att_rope_none_ ? -1 : uloc(pr, "RT");
             if (u_r != 0 || u_rt != 1) forget_state();
             bind_tex(u_r < 0 ? 0 : u_r, qkv_target_.tex);
             set_sampler(pr, "R", u_r < 0 ? 0 : u_r);
-            bind_tex(u_rt < 0 ? 1 : u_rt, rope_parts_[qseg]);
-            set_sampler(pr, "RT", u_rt < 0 ? 1 : u_rt);
+            if (!att_rope_none_) {
+                bind_tex(u_rt < 0 ? 1 : u_rt, rope_parts_[qseg]);
+                set_sampler(pr, "RT", u_rt < 0 ? 1 : u_rt);
+            }
             if (att_qk_norm_) {
                 const int u_qn = uloc(pr, "QN"), u_qs = uloc(pr, "QS");
                 bind_tex(u_qn < 0 ? 2 : u_qn, q_norm_tex_[layer]);
@@ -435,7 +449,7 @@ void GPU::att_scores(int layer, int pos){
                 bind_tex(u_qs < 0 ? 3 : u_qs, qscale_target_.tex);
                 set_sampler(pr, "QS", u_qs < 0 ? 3 : u_qs);
             }
-            glUniform1f(uloc(pr, "pos"), (float)pos);
+            if (!att_rope_none_) glUniform1f(uloc(pr, "pos"), (float)pos);
             setup_attrib(pr);
             glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
             att_finish();
@@ -760,12 +774,19 @@ void GPU::kv_rope_write(int layer, int pos){
         // "not found" line for a name the compiler dropped, and KN/VS are
         // inside `if(QKNORM==1)` / `if(KVSTEP==1)` in the kernel, so a q16
         // container legitimately has no VS at all.
-        const int u_qkv = uloc(p, "QKV"), u_rt = uloc(p, "RT");
+        const int u_qkv = uloc(p, "QKV");
+        // With NOROPE the rotation is dead code to the compiler, so RT (and the
+        // write kernel's pos) are pruned out of the program: asking for them
+        // prints "uniform not found", which for a *deliberately* removed fetch
+        // reads like a typo.  The host knows, so it does not ask.
+        const int u_rt = att_rope_none_ ? -1 : uloc(p, "RT");
         if (u_qkv != 0 || u_rt != 1) forget_state();
         bind_tex(u_qkv < 0 ? 0 : u_qkv, qkv_target_.tex);
         set_sampler(p, "QKV", u_qkv < 0 ? 0 : u_qkv);
-        bind_tex(u_rt < 0 ? 1 : u_rt, rope_parts_[sg]);
-        set_sampler(p, "RT", u_rt < 0 ? 1 : u_rt);
+        if (!att_rope_none_) {
+                bind_tex(u_rt < 0 ? 1 : u_rt, rope_parts_[sg]);
+                set_sampler(p, "RT", u_rt < 0 ? 1 : u_rt);
+        }
         if (att_qk_norm_) {
             const int u_kn = uloc(p, "KN");
             bind_tex(u_kn < 0 ? 2 : u_kn, k_norm_tex_[layer]);
@@ -781,7 +802,7 @@ void GPU::kv_rope_write(int layer, int pos){
         // plane it reads are segment-sized.  Handing it the global position
         // read past the end of both planes for every position past the first
         // segment.
-        glUniform1f(uloc(p, "pos"), (float)seg_off(pos));
+        if (!att_rope_none_) glUniform1f(uloc(p, "pos"), (float)seg_off(pos));
         setup_attrib(p);
         glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         att_finish();
@@ -829,15 +850,17 @@ void GPU::att_qrot_stage(int layer, int pos, int b, int n){
         use_program(pr);
         bind_tex(0, qkv_target_.tex);
         set_sampler(pr, "R", 0);
-        bind_tex(1, rope_tex_);
-        set_sampler(pr, "RT", 1);
+        if (!att_rope_none_) {
+                bind_tex(1, rope_tex_);
+                set_sampler(pr, "RT", 1);
+        }
         if (att_qk_norm_) {
             bind_tex(2, q_norm_tex_[layer]);
             set_sampler(pr, "QN", 2);
             bind_tex(3, qscale_target_.tex);
             set_sampler(pr, "QS", 3);
         }
-        glUniform1f(uloc(pr, "pos"), (float)pos);
+        if (!att_rope_none_) glUniform1f(uloc(pr, "pos"), (float)pos);
         setup_attrib(pr);
         glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         att_finish();
@@ -869,7 +892,9 @@ void GPU::att_stats_row(int pos, int b, int n){
         use_program(p);
         bind_tex(0, scores_batch_.tex);
         set_sampler(p, "S", 0);
-        glUniform1f(uloc(p, "pos"), (float)pos);
+        // NOCAUSAL drops `pos` from this kernel (the scan bound becomes the
+        // texture's own), so the host does not ask for it.
+        if (att_causal_) glUniform1f(uloc(p, "pos"), (float)pos);
         glUniform1f(uloc(p, "qrow0"), (float)b);
         setup_attrib(p);
         glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
@@ -891,7 +916,9 @@ void GPU::att_v_row(int layer, int pos, int b, int n){
             bind_tex(3, vs_targets_[layer].tex);
             set_sampler(p, "VS", 3);
         }
-        glUniform1f(uloc(p, "pos"), (float)pos);
+        // NOCAUSAL drops `pos` from this kernel (the scan bound becomes the
+        // texture's own), so the host does not ask for it.
+        if (att_causal_) glUniform1f(uloc(p, "pos"), (float)pos);
         glUniform1f(uloc(p, "qrow0"), (float)b);
         setup_attrib(p);
         glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;

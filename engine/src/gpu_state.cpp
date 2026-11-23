@@ -115,6 +115,12 @@ void GPU::reset_targets(){
         rms_stats_ = Target();
         // v5: the LayerNorm's (mean, invstd), one texel.
         ln_stat_ = Target();
+        qkv_biased_ = Target();
+        // v5 scratch
+        cd_a_ = Target();
+        cd_b_ = Target();
+        cd_c_ = Target();
+        cd_d_ = Target();
         rms_partial_ = Target();
         rms_partial2_ = Target();
         ffn_pair_a_ = Target();

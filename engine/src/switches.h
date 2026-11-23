@@ -50,6 +50,7 @@ enum class SwAxis {
     Q4,       // the 4-bit weight kernels
     Rwkv,     // RWKV-7 (a different layer loop)
     Prefill,  // prefill batching
+    Encdec,   // the v5 encoder-decoder block
     Load,     // container loading, memory, upload
     Tok,      // tokenizer
     Gen,      // sampling, penalties, stop policy

@@ -2399,57 +2399,68 @@ std::string ln_stats_q16(int dim, XFormat rf) {
     // RWKV form stores them bit-cast f32 because its token-norm's values are
     // tiny, but a post-norm residual is a unit-variance vector, so 1/16384 is
     // 0.006% of a component and 0.006% of a mean that is already small.
-    return head(XFormat::I16_2) + x_residual_glsl(rf) +
+    // Bit-cast f32, two texels (the RWKV form).  A q16 store looked natural and
+    // is wrong: q16 rails at +-2, and `invstd` is 1/sigma -- for a Marian
+    // residual, whose sigma is often below 0.5, that is above the rail, so the
+    // normalised row came out a fixed factor too small (maxabs 0.0039 where the
+    // block wanted ~1).  This is the same trap the token-norm hit, from the
+    // other side.
+    return head(XFormat::I16_2) + x_residual_glsl(rf) + kBC +
         "uniform sampler2D X;uniform float eps;"
         "void main(){float s=0.0,s2=0.0;"
         "for(int i=0;i<" + D + ";i++){float v=R1(X,i," + RW + ".0);s+=v;s2+=v*v;}"
         "float m=s/float(" + D + ");"
         "float inv=inversesqrt(max(s2/float(" + D + ")-m*m,0.0)+eps);"
-        "gl_FragColor=x_st2q(m,inv);}";
+        "if(gl_FragCoord.x<1.0)gl_FragColor=bcWr(m);else gl_FragColor=bcWr(inv);}";
 }
 
-std::string ln_apply_q16(int dim, XFormat rf) {
+std::string ln_apply_q16(int dim, XFormat rf, XFormat out) {
     need_dim("ln_apply_q16", dim);
     const string D = to_string(dim), RW = to_string(x_texels(dim, rf));
     const string DW = to_string(x_texels(dim, XFormat::I16_2));
     // W is two rows: the LayerNorm weight at y=0.25 and its bias at y=0.75, so
     // the pair the store wants is one texel from each row.
-    return head(XFormat::I16_2) + x_residual_glsl(rf) +
+    return head(out) + x_residual_glsl(rf) + kBC +
         "uniform sampler2D X,S,W;"
         "void main(){int t=int(gl_FragCoord.x);int i0=2*t;"
-        "float m=R1(S,0,1.0);float inv=R1(S,1,1.0);"
+        "float m=bcRd(S,vec2(0.25,0.5));float inv=bcRd(S,vec2(0.75,0.5));"
         "vec4 wc=texture2D(W,vec2((float(t)+0.5)/float(" + DW + "),0.25));"
         "vec4 bc=texture2D(W,vec2((float(t)+0.5)/float(" + DW + "),0.75));"
         "float v0=(R1(X,i0," + RW + ".0)-m)*inv*x_i16(wc.rg)+x_i16(bc.rg);"
         "float v1=(R1(X,i0+1," + RW + ".0)-m)*inv*x_i16(wc.ba)+x_i16(bc.ba);"
-        "gl_FragColor=x_st2q(v0,v1);}";
+        "gl_FragColor=" + (out == XFormat::F32 ? "x_f32enc2(v0,v1)" : "x_st2q(v0,v1)") + ";}";
 }
 
-std::string bias_add_q16(int dim, XFormat rf) {
+std::string bias_add_q16(int dim, XFormat f) {
     need_dim("bias_add_q16", dim);
-    const string RW = to_string(x_texels(dim, rf));
-    const string DW = to_string(x_texels(dim, XFormat::I16_2));
-    // Both sides are q16 and the bias row is uploaded with the same packer as
-    // the rmsnorm weights, so a bias is a weight vector as far as the store is
-    // concerned.  Views this wide are q/k/v (3*dim) and dim.
-    return head(XFormat::I16_2) + x_residual_glsl(rf) +
+    const string AS = to_string(x_texels(dim, f));
+    // X and the bias row are in the *same* format (a matvec writes act_fmt_ and
+    // the bias rides it), and the sum is written in that format too: the pass
+    // that follows reads what this writes, so nothing here may assume q16.
+    // Reading an I24_1 matvec output with the q16 decoder is what turned the
+    // first encoder run's values into 0.058 -- the fingerprint is "everything
+    // after the first projection is tiny".
+    return head(f) + x_residual_glsl(f) +
         "uniform sampler2D X,B;"
         "void main(){int t=int(gl_FragCoord.x);int i0=2*t;"
-        "vec4 xc=texture2D(X,vec2((float(t)+0.5)/float(" + DW + "),0.5));"
-        "vec4 bc=texture2D(B,vec2((float(t)+0.5)/float(" + DW + "),0.5));"
-        "gl_FragColor=x_st2q(x_i16(xc.rg)+x_i16(bc.rg),x_i16(xc.ba)+x_i16(bc.ba));}";
+        "float v0=R1(X,i0," + AS + ".0)+R1(B,i0," + AS + ".0);"
+        "float v1=R1(X,i0+1," + AS + ".0)+R1(B,i0+1," + AS + ".0);"
+        "gl_FragColor=" + (f == XFormat::F32 ? "x_f32enc2(v0,v1)" : "x_st2q(v0,v1)") + ";}";
 }
 
-std::string act_swish_i24(int dim) {
-    need_dim("act_swish_i24", dim);
-    const string D = to_string(dim);
-    // The non-gated FFN's activation, on a matvec's I24 output: swish(x) =
-    // x*sigmoid(x), the same form swiglu's gate uses, so one exp per value.
-    return head(XFormat::I24_1) + q24_helpers() +
+std::string act_swish(int dim, XFormat f) {
+    need_dim("act_swish", dim);
+    const string D = to_string(dim), AS = to_string(x_texels(dim, f));
+    // The non-gated FFN's activation on a matvec's output: swish(x) =
+    // x*sigmoid(x), the same form swiglu's gate uses.  The format is the
+    // matvec's, not a literal, because ACT is an axis (I24_1 by default, I16_2
+    // under ACT=i16) and the reader below has to decode what was written.
+    return head(f) + x_residual_glsl(f) +
         "uniform sampler2D X;"
-        "void main(){int i=int(gl_FragCoord.x);"
-        "float x=" + rd24("X", "i", D + ".0") + ";"
-        "gl_FragColor=x_q24enc(x/(1.0+" + EXP("-x") + "));}";
+        "void main(){int i=int(gl_FragCoord.x);int i0=2*i;"
+        "float x0=R1(X,i0," + AS + ".0),x1=R1(X,i0+1," + AS + ".0);"
+        "gl_FragColor=" + (f == XFormat::F32 ? "x_f32enc2(x0/(1.0+" + EXP("-x0") + "),x1/(1.0+" + EXP("-x1") + "))"
+                                            : "x_st2q(x0/(1.0+" + EXP("-x0") + "),x1/(1.0+" + EXP("-x1") + "))") + ";}";
 }
 
 std::string rwkv_mul(int dim, int adiv) {

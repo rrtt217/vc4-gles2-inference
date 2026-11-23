@@ -261,6 +261,10 @@ static const SwitchDef kSwitches[] = {
     {"PREFILL_BATCH", "", SwKind::Int, "0..16", SwStatus::Probe, SwAxis::Prefill,
      "fuse N positions' attention score passes into one draw (0 = off); the residual chain stays serial"},
 
+    // ---- Encoder-decoder (MMCF v5) ----------------------------------------
+    {"ENCDEC_DUMP", "", SwKind::Flag, "", SwStatus::Probe, SwAxis::Encdec,
+     "print the encoder/decoder stage magnitudes and the first step's argmax"},
+
     // ---- Load: the container, the memory, the upload ----------------------
     {"MODEL", "", SwKind::Str, "", SwStatus::Permanent, SwAxis::Load,
      "the container to run when --model is absent"},
@@ -418,6 +422,7 @@ const char* sw_axis_name(SwAxis a) {
         case SwAxis::Q4: return "q4";
         case SwAxis::Rwkv: return "rwkv";
         case SwAxis::Prefill: return "prefill";
+        case SwAxis::Encdec: return "encdec";
         case SwAxis::Load: return "load";
         case SwAxis::Tok: return "tok";
         case SwAxis::Gen: return "gen";

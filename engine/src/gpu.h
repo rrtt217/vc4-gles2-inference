@@ -181,6 +181,11 @@ public:
     // batched score texture (phase 3).  Every kernel is the serial text with
     // the row substituted, so the logits are byte-identical.
     void att_qkv_draw(const Mat& qkv, GLuint x);
+    // v5: the q/k/v bias the next qkv draw must add, 0 for none.  Set around a
+    // block rather than passed through attention_block, so the block's draw
+    // sequence is untouched.
+    void set_qkv_bias(GLuint b) { att_qkv_bias_ = b; }
+    void set_causal(bool c) { att_causal_ = c; }
     // Phase 1 of a group, one position: qkv draw, V grid, KV write, rotated Q
     // staged into row b.  The serial attention_block's draws in the same order.
     void att_stage(const Mat& qkv, GLuint x, int layer, int pos, int b, int n);
@@ -452,7 +457,17 @@ private:
     Target ffn_a_, ffn_b_, ffn_h_, ffn_ab_;
     Target ffn_ab_a_, ffn_ab_b_, ffn_h_a_, ffn_h_b_;
     Target ln_stat_;   // v5: one texel, (mean, invstd)
+    Target qkv_biased_;  // v5: the biased qkv, swapped with qkv_target_
     Target qkv_target_, att_scores_, att_stats_, att_probs_, att_out_, qrot_target_, qscale_target_;
+    // v5 scratch (session.cpp): the LN output, r, the FFN hidden, one matvec
+    // output.  Owned here so release_scene()/reset_targets() cover them.
+    Target cd_a_, cd_b_, cd_c_, cd_d_;
+public:
+    Target& cd_a() { return cd_a_; }
+    Target& cd_b() { return cd_b_; }
+    Target& cd_c() { return cd_c_; }
+    Target& cd_d() { return cd_d_; }
+private:
     // Prefill query batching: the staged rotated Q (dim/2 x n) and the batched
     // score texture (seq/2 x heads*n), plus the group's residual store.
     Target qrot_batch_, scores_batch_;
@@ -494,7 +509,11 @@ private:
     Target pp_in2_, pp_g_, pp_w2_, pp_w2b_, xb2_, xbf2_;
     bool layer_fast_finish_ = false;
     bool res_pack_ = false;   // residual stream holds two int16 per texel
-    XFormat act_fmt_ = XFormat::I16_2;  // matvec input (qkv/wo/gate/logits)
+    XFormat act_fmt_ = XFormat::I16_2;
+public:
+    XFormat act_fmt() const { return act_fmt_; }
+    XFormat res_fmt() const { return res_fmt_; }
+private:  // matvec input (qkv/wo/gate/logits)
     XFormat ffn_fmt_ = XFormat::I16_2;  // FFN hidden state (w2 input)
     XFormat res_fmt_ = XFormat::I16_1;  // residual stream layout
     GLuint hidden_in_ = 0;
@@ -520,6 +539,8 @@ private:
     // v5: the block has no rotation; its positions are a table added to the
     // embedding (AttnConfig::rope_none, which emits #define NOROPE).
     bool att_rope_none_ = false;
+    GLuint att_qkv_bias_ = 0;   // v5: q/k/v bias for the next qkv draw
+    bool att_causal_ = true;    // v5: false for the encoder's bidirectional pass
     float att_score_scale_ = 1024.0f;   // ATT_SCALE: score/(max) grid
     float att_sum_scale_ = 32.0f;       // ATT_SUM_SCALE: exp-sum grid (linear)
     bool att_sum_log_ = false;          // ATT_SUM=log2: sum stored as log2
@@ -596,8 +617,17 @@ private:
         bool ready = false;
     } enc_rows_;
     GLuint ln_q16(GLuint x, GLuint wb, Target& out, float eps);
+    // The row passes of a v5 block, each taking the format its *caller* uses:
+    // a matvec output is act_fmt_ and a residual is res_fmt_, and reading one
+    // as the other is how 512 values became 0.058.  The bias row is uploaded
+    // in the format of the tensor it belongs to (upload_bias).
+    GLuint upload_bias(const vector<float>& b, XFormat f);
     GLuint bias_add(GLuint x, GLuint b, Target& out);
-    GLuint act_swish(GLuint x, Target& out);
+    // The same pass over an arbitrary width: a qkv row is 3*dim and the FFN's
+    // 2048-row biases are not the attention's width either.
+    GLuint bias_add_wide(GLuint x, GLuint b, Target& out, int dim);
+    GLuint bias_add_f(GLuint x, GLuint b, Target& out, int dim, XFormat f);
+    GLuint act_swish(GLuint x, Target& out, int n, XFormat f);
     GLuint rwkv_mul(GLuint a, GLuint b, Target& out, int adiv);
     GLuint rwkv_rk(GLuint k, GLuint r, GLuint sc, GLuint v, GLuint y, Target& out);
     GLuint rwkv_wkv(int layer, GLuint r, GLuint k, GLuint v, GLuint a, GLuint kk,
