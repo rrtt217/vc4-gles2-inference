@@ -23,6 +23,13 @@ enum class XFormat : uint8_t {
     // hold exactly (24 mantissa bits).  Same 1/256 step as I16 but 256x the
     // range, which is what a model whose residual exceeds the q16 rail needs.
     I24_1 = 3,
+    // An RMSNorm's **partial sums**: the same three bytes and the same 2^23 bias
+    // as I24_1, a different step (1/4096 of a summed quantity, not 1/256 of a
+    // value).  It is its own format because it is its own *quantity* -- a sum of
+    // `x^2` reaches 2048 here, an I24_1 payload is a value in +-32768 -- and
+    // sharing one meant one byte layout decoded at two scales with nothing in the
+    // name to say which.  Same bytes, so no number moves.
+    S24_1 = 6,
     // 32-bit float, one value per texel: the four bytes of the IEEE-754 number
     // in the texel's .rgba, rebuilt with uintBitsToFloat.  The only format with
     // no fixed-point grid at all.  It costs what I24_1 costs in memory (one
@@ -68,6 +75,12 @@ std::string x_glsl(XFormat f);
 // Residual-stream variants use distinct R1/R2 names so a shader can read an
 // int8 activation and a q16 residual with different layouts in one pass.
 std::string x_residual_glsl(XFormat f);
+// One format's value codecs, without its texture macros.  A pass names its own
+// formats; another format's two functions travel as text (the rms sum's store is
+// S24_1 and the residual of the same shader is not).  Never the macros: a
+// builder already defines its own `#define` set and a second copy stops the
+// program with "Redefinition of macro".
+std::string x_codec_glsl(XFormat f);
 // Only the float32 *store* helper (`x_f32enc`), without the X1/X2/X4 read
 // macros: a kernel that reads a fixed q16 pair layout and writes an f32
 // stream -- the swiglu feeding the FFN hidden -- needs the encoder without

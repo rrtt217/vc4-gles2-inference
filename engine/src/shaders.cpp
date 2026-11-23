@@ -43,8 +43,8 @@ static std::string rms_store_glsl() {
             "\n#define S_ST(V) s_st(V)\n"
             "#define S_LD(C) s_ld(C)\n");
     }
-    return "\n#define S_ST(V) encs(V)\n"
-           "#define S_LD(C) (x_i24raw(C)/4096.0)\n";
+    return "\n#define S_ST(V) x_s24enc(V)\n"
+           "#define S_LD(C) x_s24(C)\n";
 }
 
 string q24_helpers() {
@@ -153,7 +153,7 @@ const string kEncs4096 =
     "return vec4(r0/255.0,g/255.0,b/255.0,a/255.0);}";
 // The 24-bit encoder plus the S_ST/S_LD pair `RMS_STORE` selects: every builder
 // that writes or reads an rms partial sum emits this, once.
-static string encs_glsl() { return kEncs4096 + rms_store_glsl(); }
+static string encs_glsl() { return x_codec_glsl(XFormat::S24_1) + rms_store_glsl(); }
 
 // Shape contract.  The q8 kernels step the column loop by four; the q4 kernels
 // take eight weights per texel in groups of 32.  A width that is not a multiple
@@ -926,7 +926,7 @@ string rms_norm_pair2(int dim, XFormat rf, bool use_eps_uniform) {
     const string D = to_string(dim);
     const string RW = to_string(x_texels(dim, rf));
     const string DW = to_string(x_texels(dim, XFormat::I16_2));
-    return head(XFormat::I16_2) + rms_store_glsl() + x_residual_glsl(rf) + x_pair2_glsl(rf) + q24_helpers() +
+    return head(XFormat::I16_2) + encs_glsl() + x_residual_glsl(rf) + x_pair2_glsl(rf) + q24_helpers() +
         (use_eps_uniform ? "uniform sampler2D XA,XB,W,S;uniform float eps;"
                          : "uniform sampler2D XA,XB,W,S;") +
         "void main(){int k=int(gl_FragCoord.x);"
@@ -2118,7 +2118,7 @@ string rms_norm(int dim, XFormat residual, XFormat out, bool fused_reduce,
     // conditional below is redundant for that one format -- but it is what
     // every other format's text contains, and the emitted text is the
     // numerics (gate/shader_hashes.txt), so it stays exactly as it was.
-    return head(residual) + rms_store_glsl() + x_residual_glsl(residual) +
+    return head(residual) + encs_glsl() + x_residual_glsl(residual) +
            (residual == XFormat::BF16 ? string() : x_bf16_glsl()) + q24_helpers() +
         "uniform sampler2D X,W,S;uniform float dummy;" + (use_eps_uniform ? "uniform float eps;" : string()) + body;
 }

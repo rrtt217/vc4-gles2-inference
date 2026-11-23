@@ -14,6 +14,7 @@ const char* x_format_name(XFormat f) {
         case XFormat::I16_2: return "x16_2";
         case XFormat::I8_4: return "x8_4";
         case XFormat::I24_1: return "x24_1";
+        case XFormat::S24_1: return "s24_1";
         case XFormat::F32: return "f32";
         case XFormat::BF16: return "bf16";
     }
@@ -26,6 +27,7 @@ int x_per_texel(XFormat f) {
         case XFormat::I16_2: return 2;
         case XFormat::I8_4: return 4;
         case XFormat::I24_1: return 1;
+        case XFormat::S24_1: return 1;
         case XFormat::F32: return 1;
         case XFormat::BF16: return 2;
     }
@@ -181,6 +183,22 @@ std::string x_bf16_glsl() {
         "#endif\n";
 }
 
+std::string x_codec_glsl(XFormat f) {
+    if (f != XFormat::S24_1) return std::string();
+    // The sum of squares the rms stats passes store.  Faithful to the encoder it
+    // replaces (`encs` in shaders.cpp): *four* bytes, because a lane sum of
+    // `x^2` reaches 2048 and 2048*4096 already fills the 24 the value stream
+    // uses -- `.r` is the 25th.
+    return
+        "float x_s24(vec4 c){return (float(int(c.r*255.0+0.5))*16777216.0+"
+        "float(int(c.g*255.0+0.5))*65536.0+float(int(c.b*255.0+0.5))*256.0+"
+        "float(int(c.a*255.0+0.5))-8388608.0)/4096.0;}\n"
+        "vec4 x_s24enc(float v){float q=floor(v*4096.0+0.5)+8388608.0;"
+        "float r0=floor(q/16777216.0),g=floor(q/65536.0)-r0*256.0,"
+        "b=floor(q/256.0)-r0*65536.0-g*256.0,a=q-r0*16777216.0-g*65536.0-b*256.0;"
+        "return vec4(r0/255.0,g/255.0,b/255.0,a/255.0);}\n";
+}
+
 std::string x_glsl(XFormat f) {
     // Values crossing this boundary are real activations.  XST* converts to
     // q16/q8 on write.  X1/X2/X4 return real values; the Q-suffixed variants
@@ -233,6 +251,20 @@ std::string x_glsl(XFormat f) {
         "vec4 x_q24encq(float q){return x_q24enc(q/256.0);}\n";
 
     switch (f) {
+        case XFormat::S24_1:
+            s += x_codec_glsl(XFormat::S24_1);
+            s +=
+                "#define X1(T,I,TW) x_s24(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)))\n"
+                "#define X2(T,BASE,TW) vec2(X1(T,(BASE),TW),X1(T,(BASE)+1,TW))\n"
+                "#define X4(T,BASE,TW) vec4(X1(T,(BASE),TW),X1(T,(BASE)+1,TW),"
+                "X1(T,(BASE)+2,TW),X1(T,(BASE)+3,TW))\n"
+                "#define XST1(V) x_s24enc(V)\n"
+                "#define XST2(A,B) vec4(0.0)\n"
+                "#define XST4(A,B,C,D) vec4(0.0)\n"
+                "#define X1Q(T,I,TW) X1(T,I,TW)\n"
+                "#define X2Q(T,B,TW) X2(T,B,TW)\n"
+                "#define X4Q(T,B,TW) X4(T,B,TW)\n";
+            break;
         case XFormat::I24_1:
             s +=
                 "#define X1(T,I,TW) x_q24(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)))\n"
@@ -328,6 +360,12 @@ std::string x_glsl(XFormat f) {
 
 std::string x_residual_glsl(XFormat f) {
     switch (f) {
+        case XFormat::S24_1:
+            return x_codec_glsl(XFormat::S24_1) +
+                "#define R1(T,I,TW) x_s24(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)))\n"
+                "#define R2(T,BASE,TW) vec2(R1(T,(BASE),TW),R1(T,(BASE)+1,TW))\n"
+                "#define R1Q(T,I,TW) R1(T,I,TW)\n"
+                "#define XST1Q(Q) x_s24enc(Q)\n";
         case XFormat::I24_1:
             return
                 "#define R1(T,I,TW) x_q24(texture2D(T,vec2((float(I)+0.5)/(TW),0.5)))\n"
