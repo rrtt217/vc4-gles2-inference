@@ -105,11 +105,12 @@ bool x_is_int8(XFormat f);
 bool x_is_int24(XFormat f);
 bool x_is_f32(XFormat f);
 bool x_is_bf16(XFormat f);
-// Two granularities, and only two: a whole codec (`x_codec_glsl`, both
-// functions) and a store alone (`x_store_glsl`).  `x_bf16_glsl()` used to be a
-// third -- a whole codec under a specific name -- because bf16 was the first
-// format to need one and it was written before this dispatcher existed; its 13
-// call sites all wanted the whole thing.
+// **One** entry for "these two functions": a codec.  `x_bf16_glsl()`,
+// `x_f32_store_glsl()` and `x_f32r`/`x_f32renc` were four spellings of it, one
+// per format and two for one granularity -- "the store alone" -- which is not a
+// layer worth having: a program that already emits its own format's macros has no
+// collision to avoid, and calling the codec there costs four lines the driver
+// compiles away.  A second entry is a second thing to remember.
 
 // CPU side packing.  Values are real activations; q16 is applied here.
 std::vector<uint8_t> x_pack(const float* values, int count, XFormat f);
@@ -132,7 +133,7 @@ std::string x_codec_glsl(XFormat f);
 // macros: a kernel that reads a fixed q16 pair layout and writes an f32
 // stream -- the swiglu feeding the FFN hidden -- needs the encoder without
 // the decoder, or the read macros would change meaning under it.
-std::string x_store_glsl(XFormat f);
+
 
 // Two-position ("batch pair", P2) target layout, used by the 2-position prefill
 // kernels: a vector of n values occupies n texels, texel k holding value k of

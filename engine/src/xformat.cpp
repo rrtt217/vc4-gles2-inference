@@ -215,7 +215,10 @@ std::string x_codec_glsl(XFormat f) {
             "float x_f32(vec4 c){uint u=(uint(int(c.x*255.0+0.5))<<24)|"
             "(uint(int(c.y*255.0+0.5))<<16)|(uint(int(c.z*255.0+0.5))<<8)|"
             "uint(int(c.w*255.0+0.5));return uintBitsToFloat(u);}\n"
-            "#endif\n" + x_store_glsl(XFormat::F32);
+            "vec4 x_f32enc(float v){uint u=floatBitsToUint(v);"
+            "return vec4(float(u>>24),float((u>>16)&255u),float((u>>8)&255u),"
+            "float(u&255u))/255.0;}\n"
+            "#endif\n";
     }
     if (f != XFormat::S24_1) return std::string();
     // The sum of squares the rms stats passes store.  Faithful to the encoder it
@@ -494,11 +497,3 @@ std::string x_pair2_glsl(XFormat f) {
 // The f32 store helper on its own (see xformat.h).  `x_glsl(F32)` emits this
 // plus the read macros; a kernel with a fixed q16 *input* layout and an f32
 // *output* (the swiglu) emits this plus `head(XFormat::I16_2)`.
-std::string x_store_glsl(XFormat f) {
-    if (f != XFormat::F32) return std::string();
-    return "\n#ifndef X_F32_STORE_GLSL\n#define X_F32_STORE_GLSL\n"
-        "vec4 x_f32enc(float v){uint u=floatBitsToUint(v);"
-        "return vec4(float(u>>24),float((u>>16)&255u),float((u>>8)&255u),"
-        "float(u&255u))/255.0;}\n"
-        "#endif\n";
-}

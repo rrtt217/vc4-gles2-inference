@@ -172,6 +172,12 @@ vector<Case> cases() {
     add(v, "swiglu_pair_2432_i16_2", [] { return swiglu_pair(2432, I16_2); });
     add(v, "swiglu_pair_2432_i8_4", [] { return swiglu_pair(2432, I8_4); });
     add(v, "swiglu_2row_2432_i16_2", [] { return swiglu_2row(2432, I16_2); });
+    // The two formats with a codec of their own: bf16 and f32 had **no** entry
+    // here, so `gate/shader_hashes.sh` could not see the day one of them
+    // changed (`x_f32r` was a hand copy and nothing compared it).  One program
+    // each, at the shape the FFN's hidden uses.
+    add(v, "swiglu_2row_2432_bf16", [] { return swiglu_2row(2432, XFormat::BF16); });
+    add(v, "swiglu_2row_2432_f32", [] { return swiglu_2row(2432, XFormat::F32); });
     add(v, "swiglu_2432_fused_i16_2", [] { return swiglu(2432, true, I16_2); });
     add(v, "swiglu_2432_split_i8_4", [] { return swiglu(2432, false, I8_4); });
     add(v, "rms_stats_split_768_i16_1", [] { return rms_stats_split(768, I16_1); });

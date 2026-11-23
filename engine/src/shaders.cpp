@@ -1809,7 +1809,7 @@ string swiglu_pair(int hidden, XFormat out, int hs) {
                "gl_FragColor=x_f32enc(actv(i)" + HM + ");}";
         // head(I16_2), not head(F32): the pair buffer A holds two q16 values a
         // texel and actv() reads it with X2.  Only the *store* is f32.
-        return head(XFormat::I16_2) + poly_src() + x_store_glsl(XFormat::F32) + x_codec_glsl(XFormat::BF16) + HD +
+        return head(XFormat::I16_2) + poly_src() + x_codec_glsl(XFormat::F32) + x_codec_glsl(XFormat::BF16) + HD +
            "uniform sampler2D A;" + act + body;
     }
     if (out == XFormat::BF16) {
@@ -1848,7 +1848,7 @@ string swiglu_2row(int hidden, XFormat out, int hs) {
         // pocket's peaks at 1005 (probe_residuals.py).
         body = "void main(){int i=int(gl_FragCoord.x);"
                "gl_FragColor=x_f32enc(yat(i)" + HM + ");}";
-        return head(XFormat::I16_2) + poly_src() + x_store_glsl(XFormat::F32) + x_codec_glsl(XFormat::BF16) +
+        return head(XFormat::I16_2) + poly_src() + x_codec_glsl(XFormat::F32) + x_codec_glsl(XFormat::BF16) +
                HD +
                "uniform sampler2D A;" + read + body;
     }
@@ -1928,7 +1928,7 @@ string swiglu(int hidden, bool fused, XFormat out, int hs) {
     if (out == XFormat::F32) {
         body = "void main(){int i=int(gl_FragCoord.x);"
                "gl_FragColor=x_f32enc(yat(i)" + HM + ");}";
-        return head(XFormat::I16_2) + x_store_glsl(XFormat::F32) + HD + read + body;
+        return head(XFormat::I16_2) + x_codec_glsl(XFormat::F32) + HD + read + body;
     }
     if (out == XFormat::BF16) {
         body = "void main(){int t=int(gl_FragCoord.x);int i0=2*t;"
