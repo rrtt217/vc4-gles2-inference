@@ -2,10 +2,22 @@
 //
 // A separate translation unit on purpose: this is not RWKV and not the dense
 // decoder-only chain.  What lives here is the row-level plumbing a post-norm
-// block needs and no other block does -- a LayerNorm whose stats travel as
-// bit-cast f32, a bias add that rides whatever format its caller uses, the
-// non-gated FFN's activation, and the one-time upload of the container's bias
-// rows and LayerNorm (w,b) pairs.
+// block needs and no other block does:
+//
+//   ln_q16        (mean, invstd) as ONE q16 pair in one texel, then the apply
+//                 pass; the weight and its bias are two one-row textures
+//                 because no XFORMAT macro addresses a second row
+//   bias_add_*    a bias on whatever wrote x -- `bias_add_matvec` for a
+//                 projection's I24 output, `bias_add_wide` for a residual
+//   act_swish     the non-gated FFN's activation
+//   upload_encdec_rows  the container's bias rows and LayerNorm pairs, uploaded
+//                 from Session's constructor because they are packed *in the
+//                 formats that constructor decides*
+//
+// Three of those comments used to describe the first shape of each pass (f32
+// stats, a two-row weight texture, a single-format bias add) and stayed after the
+// shape changed -- so read the code, not this block, and keep this block's list
+// of *what is here* rather than of how it was.
 //
 // The shader *text* stays in src/shaders.cpp (v5 section): this file only binds
 // programs, sizes targets and draws.  The block's structure -- encode pass,

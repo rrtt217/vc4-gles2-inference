@@ -138,6 +138,17 @@ void GPU::reset_targets(){
         xb2_ = Target();
         xbf2_ = Target();
         probe_ = Target();
+        // Model-scoped *singletons* that are not Targets.  The ledger above
+        // deletes their textures, but a name left behind is a name the next model
+        // will bind: `init_persistent()` is skipped for a v5 container (it has no
+        // model-wide norm), so after a dense -> v5 swap `hidden_in_` still named a
+        // deleted texture and `upload_hidden`'s "allocate on demand" test
+        // (`hidden_in_ == 0`) was false -- it bound the corpse.  Same for
+        // `rms_final_tex_`, and `rope_tex_` is `rope_parts_[0]`, which this list
+        // clears underneath it.
+        hidden_in_ = hidden_in_b_ = hidden_in_w_ = 0;
+        rms_final_tex_ = 0;
+        rope_tex_ = 0;
         conv_state_.clear();
         vs_targets_.clear();
         kv_cache_.clear();
