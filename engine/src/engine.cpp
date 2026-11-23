@@ -203,7 +203,11 @@ int main(int argc, char** argv) {
         vector<int> src = app.tokenizer.encode(opt.prompt, /*bos=*/false,
                                               /*dummy_prefix=*/true);
         src.push_back(app.model.id_eos);
+        const auto t0 = std::chrono::steady_clock::now();
         session.encdec_encode(src);
+        const double enc_s = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - t0).count();
+        const auto t_enc = std::chrono::steady_clock::now();
         fprintf(stderr, "encdec: %zu source tokens, %d decoder layers (act %s res %s)\n",
                 src.size(), app.model.layers,
                 x_format_name(app.gpu.act_fmt()), x_format_name(app.gpu.res_fmt()));
@@ -223,6 +227,20 @@ int main(int argc, char** argv) {
         fprintf(stderr, "encdec: %zu target tokens:", out.size());
         for (int t : out) fprintf(stderr, " %d", t);
         fprintf(stderr, "\n");
+        // The switch the chat path already reads.  Without this, `TIMING=1` on the
+        // one path with *two* stages reports nothing (found asking for the Pi's
+        // translation timings and getting only the wall clock).
+        if (char* on = getenv("TIMING"); on && *on) {
+                // Two stages, so two numbers: the encoder runs once over every
+                // source position (its cost is the *source's*), the decoder once
+                // a token.  The chat path's `TIMING prefill/decode` would report
+                // one of them as if it were the other.
+                const double dec_ms = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - t_enc).count();
+                fprintf(stderr, "TIMING enc=%.3fs dec_avg=%.1fms/token gen=%zu\n",
+                        enc_s, out.empty() ? 0.0 : dec_ms / (double)out.size(),
+                        out.size());
+        }
         return 0;
     }
 
