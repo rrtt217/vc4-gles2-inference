@@ -38,14 +38,15 @@ void GPU::upload_encdec_rows(const Model& m){
         auto one_act = [&](const float* v, int n) {
                 return upload_bias(vector<float>(v, v + n), act_fmt_);
         };
-        auto pair2 = [&](const float* w, const float* b, int n) {
-                vector<float> v(w, w + n);
-                v.insert(v.end(), b, b + n);
-                return make_q16_pair2_texture(v);
-        };
+        // One row a vector, both through upload_bias: see EncdecRows.
+        auto wrow = [&](const float* w, int n) { return upload_bias(
+                vector<float>(w, w + n), XFormat::I16_2); };
         const int L = m.layers, E = m.enc_layers, D = m.dim, F = m.enc_ffn;
-        r.ln1.assign(L, 0); r.ln2.assign(L, 0); r.ln3.assign(L, 0);
-        r.enc_ln1.assign(E, 0); r.enc_ln2.assign(E, 0);
+        r.ln1.assign(L, 0); r.ln1b.assign(L, 0);
+        r.ln2.assign(L, 0); r.ln2b.assign(L, 0);
+        r.ln3.assign(L, 0); r.ln3b.assign(L, 0);
+        r.enc_ln1.assign(E, 0); r.enc_ln1b.assign(E, 0);
+        r.enc_ln2.assign(E, 0); r.enc_ln2b.assign(E, 0);
         r.qkv_b.assign(L, 0); r.o_b.assign(L, 0);
         r.cq_b.assign(L, 0); r.ck_b.assign(L, 0); r.cv_b.assign(L, 0); r.co_b.assign(L, 0);
         r.fc1_b.assign(L, 0); r.fc2_b.assign(L, 0);
@@ -53,12 +54,12 @@ void GPU::upload_encdec_rows(const Model& m){
         r.enc_fc1_b.assign(E, 0); r.enc_fc2_b.assign(E, 0);
         for (int l = 0; l < L; ++l) {
                 const int B = m.dec_bias_row(l, Model::kRowQ);
-                r.ln1[l] = pair2(m.bias_dim_row(B + Model::kRowLn1W),
-                                 m.bias_dim_row(B + Model::kRowLn1B), D);
-                r.ln2[l] = pair2(m.bias_dim_row(B + Model::kRowLn2W),
-                                 m.bias_dim_row(B + Model::kRowLn2B), D);
-                r.ln3[l] = pair2(m.bias_dim_row(B + Model::kRowLn3W),
-                                 m.bias_dim_row(B + Model::kRowLn3B), D);
+                r.ln1[l] = wrow(m.bias_dim_row(B + Model::kRowLn1W), D);
+                r.ln1b[l] = wrow(m.bias_dim_row(B + Model::kRowLn1B), D);
+                r.ln2[l] = wrow(m.bias_dim_row(B + Model::kRowLn2W), D);
+                r.ln2b[l] = wrow(m.bias_dim_row(B + Model::kRowLn2B), D);
+                r.ln3[l] = wrow(m.bias_dim_row(B + Model::kRowLn3W), D);
+                r.ln3b[l] = wrow(m.bias_dim_row(B + Model::kRowLn3B), D);
                 // q/k/v are one 3*dim row in the qkv texture, so their three
                 // biases are concatenated rather than added one at a time.
                 vector<float> qkv(m.bias_dim_row(B + Model::kRowQ),
@@ -78,8 +79,10 @@ void GPU::upload_encdec_rows(const Model& m){
         }
         for (int l = 0; l < E; ++l) {
                 const int B = m.enc_row(l, 0);
-                r.enc_ln1[l] = pair2(m.bias_dim_row(B + 4), m.bias_dim_row(B + 5), D);
-                r.enc_ln2[l] = pair2(m.bias_dim_row(B + 6), m.bias_dim_row(B + 7), D);
+                r.enc_ln1[l] = wrow(m.bias_dim_row(B + 4), D);
+                r.enc_ln1b[l] = wrow(m.bias_dim_row(B + 5), D);
+                r.enc_ln2[l] = wrow(m.bias_dim_row(B + 6), D);
+                r.enc_ln2b[l] = wrow(m.bias_dim_row(B + 7), D);
                 vector<float> qkv(m.bias_dim_row(B + 0), m.bias_dim_row(B + 0) + D);
                 qkv.insert(qkv.end(), m.bias_dim_row(B + 1), m.bias_dim_row(B + 1) + D);
                 qkv.insert(qkv.end(), m.bias_dim_row(B + 2), m.bias_dim_row(B + 2) + D);
@@ -126,7 +129,7 @@ void GPU::attach_dump_fbo(Target& t){
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t.tex, 0);
 }
 
-GLuint GPU::ln_q16(GLuint x, GLuint wb, Target& out, float eps){
+GLuint GPU::ln_q16(GLuint x, GLuint w, GLuint b, Target& out, float eps){
         const int dim = att_dim_;
         const int ow = x_texels(dim, act_fmt_);
         if (out.tex == 0 || out.w != ow) out = make_target(ow, 1);
@@ -134,7 +137,16 @@ GLuint GPU::ln_q16(GLuint x, GLuint wb, Target& out, float eps){
         // and ln_apply reads them at uv 0.25 / 0.75 (texel 0 / texel 1).  A
         // one-wide target draws only the mean and leaves invstd at zero, which
         // makes the LayerNorm return its bias alone.
+        // ONE texel: (mean, invstd) is an x_st2q pair in .rg/.ba.
         if (ln_stat_.tex == 0 || ln_stat_.w != 1) ln_stat_ = make_target(1, 1);
+        if (getenv("ENCDEC_DUMP")) {
+                static bool once = false;
+                if (!once) { once = true;
+                        cerr << "ENCDEC ln formats dim=" << dim
+                             << " res=" << x_format_name(res_fmt_)
+                             << " texels=" << x_texels(dim, res_fmt_)
+                             << " act=" << x_format_name(act_fmt_) << "\n"; }
+        }
         GLuint ps = x_prog("lns_" + to_string(dim) + "_" + to_string((int)res_fmt_),
                            ln_stats_q16(dim, res_fmt_));
         bind_fbo(ln_stat_.fbo);
@@ -152,7 +164,8 @@ GLuint GPU::ln_q16(GLuint x, GLuint wb, Target& out, float eps){
         use_program(pn);
         bind_tex(0, x); set_sampler(pn, "X", 0);
         bind_tex(1, ln_stat_.tex); set_sampler(pn, "S", 1);
-        bind_tex(2, wb); set_sampler(pn, "W", 2);
+        bind_tex(2, w); set_sampler(pn, "W", 2);
+        bind_tex(3, b); set_sampler(pn, "B", 3);
         setup_attrib(pn);
         glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         return out.tex;

@@ -2395,55 +2395,50 @@ std::string act_sqrelu(int dim) {
 std::string ln_stats_q16(int dim, XFormat rf) {
     need_dim("ln_stats_q16", dim);
     const string D = to_string(dim), RW = to_string(x_texels(dim, rf));
-    // One fragment for the whole row, and (mean, invstd) as one q16 pair: the
-    // RWKV form stores them bit-cast f32 because its token-norm's values are
-    // tiny, but a post-norm residual is a unit-variance vector, so 1/16384 is
-    // 0.006% of a component and 0.006% of a mean that is already small.
-    // Bit-cast f32, two texels (the RWKV form).  A q16 store looked natural and
-    // is wrong: q16 rails at +-2, and `invstd` is 1/sigma -- for a Marian
-    // residual, whose sigma is often below 0.5, that is above the rail, so the
-    // normalised row came out a fixed factor too small (maxabs 0.0039 where the
-    // block wanted ~1).  This is the same trap the token-norm hit, from the
-    // other side.
-    // One texel, one q16 pair: (mean, invstd).  Storing them as bit-cast f32
-    // (the RWKV form) needs ESSL 3.00's texture()/uintBitsToFloat, and this
-    // program is ESSL 1.00 like every other row pass -- reading it back with
-    // bcRd in ln_apply gave zero, which is what a 300-es builtin in a 100-es
-    // program looks like.  invstd is 1/sigma and a post-norm residual is O(1),
-    // so the q16 grid had to be *scaled* rather than dropped: the pair is
-    // stored as (mean, invstd/256) and the reader multiplies by 256.
+    // One fragment, one XST2 store: the pair is (mean, invstd) in .rg/.ba of a
+    // single I16_2 texel.  XFORMAT's rule is that producers use XST* and
+    // consumers use X1/X2/X4; the RWKV bit-cast form (kBC) looked available
+    // because it is a helper in this file, but it is a *private* codec of that
+    // block -- using it here forces the whole program to ESSL 3.00 while the
+    // matching reader below is ESSL 1.00, which is exactly the mixed-language
+    // kernel the format module exists to prevent.
+    //
+    // The q16 grid is fine for this pair because both are O(1) after a
+    // normalisation: mean is a *mean* of a normalised row and invstd is
+    // 1/sigma with sigma O(1) for a post-norm residual.  A model whose
+    // residual is far from O(1) would need ACT=f32 here (the ACT axis), not a
+    // second private codec.
     return head(XFormat::I16_2) + x_residual_glsl(rf) +
         "uniform sampler2D X;uniform float eps;"
         "void main(){float s=0.0,s2=0.0;"
         "for(int i=0;i<" + D + ";i++){float v=R1(X,i," + RW + ".0);s+=v;s2+=v*v;}"
         "float m=s/float(" + D + ");"
         "float inv=inversesqrt(max(s2/float(" + D + ")-m*m,0.0)+eps);"
-        "gl_FragColor=x_st2q(m,inv*0.00390625);}";
+        "gl_FragColor=XST2(m,inv);}";
 }
 
 std::string ln_apply_q16(int dim, XFormat rf, XFormat out) {
     need_dim("ln_apply_q16", dim);
-    // R1 takes the *texel* width: for I16_2 it halves the index before dividing,
-    // so passing the value count reads at half the right pitch (every other texel,
-    // i.e. a row of zeros for indices past dim/2).  This is the one bug of the
-    // whole v5 bring-up that produced a plausible-looking, perfectly wrong row.
-    const string D = to_string(dim), RW = to_string(x_texels(dim, rf));
-    // W's row pitch is its *own* width (dim values, I16_2), independent of what
-    // the output format is: indexing it with the output's texel count reads off
-    // the end of the row whenever act_fmt_ is not I16_2.
+    const string RW = to_string(x_texels(dim, rf));
     const string WW = to_string(x_texels(dim, XFormat::I16_2));
-    // W is two rows: the LayerNorm weight at y=0.25 and its bias at y=0.75, so
-    // the pair the store wants is one texel from each row.
+    // XFORMAT-clean: every fetch is a macro, and each tensor is its own texture
+    // in its own format.  W (the LayerNorm weight) and B (its bias) used to
+    // share one two-row texture, which no macro can read -- `R1` addresses
+    // y = 0.5 only -- so that "optimisation" forced two hand-written
+    // `texture2D` fetches with a row pitch guessed from a comment, which is
+    // exactly what the format module exists to stop.  Two one-row textures cost
+    // 2 KiB and read like every other weight.
+    // S is ONE I16_2 texel holding both members, so its `TW` is 1 -- the macro
+    // halves the index and divides by TW, and both 0 and 1 must land on texel 0
+    // (picking .rg and .ba).  Passing the target's width instead puts index 1 at
+    // texel 0.5, i.e. outside the pair.
     return head(out) + x_residual_glsl(rf) +
-        "uniform sampler2D X,S,W;"
+        "uniform sampler2D X,S,W,B;"
         "void main(){int t=int(gl_FragCoord.x);int i0=2*t;"
-        "vec4 sc=texture2D(S,vec2(0.5,0.5));"
-        "float m=x_i16(sc.rg);float inv=x_i16(sc.ba)*256.0;"
-        "vec4 wc=texture2D(W,vec2((float(i0/2)+0.5)/float(" + WW + "),0.25));"
-        "vec4 bc=texture2D(W,vec2((float(i0/2)+0.5)/float(" + WW + "),0.75));"
-        "float v0=(R1(X,i0," + RW + ".0)-m)*inv*x_i16(wc.rg)+x_i16(bc.rg);"
-        "float v1=(R1(X,i0+1," + RW + ".0)-m)*inv*x_i16(wc.ba)+x_i16(bc.ba);"
-        "gl_FragColor=" + (out == XFormat::F32 ? "x_f32enc2(v0,v1)" : "x_st2q(v0,v1)") + ";}";
+        "float m=R1(S,0,1.0);float inv=R1(S,1,1.0);"
+        "float v0=(R1(X,i0," + RW + ".0)-m)*inv*R1(W,i0," + WW + ".0)+R1(B,i0," + WW + ".0);"
+        "float v1=(R1(X,i0+1," + RW + ".0)-m)*inv*R1(W,i0+1," + WW + ".0)+R1(B,i0+1," + WW + ".0);"
+        "gl_FragColor=" + (out == XFormat::F32 ? "x_f32enc2(v0,v1)" : "XST2(v0,v1)") + ";}";
 }
 
 std::string bias_add_q16(int dim, XFormat f) {
@@ -2460,7 +2455,7 @@ std::string bias_add_q16(int dim, XFormat f) {
         "void main(){int t=int(gl_FragCoord.x);int i0=2*t;"
         "float v0=R1(X,i0," + AS + ".0)+R1(B,i0," + AS + ".0);"
         "float v1=R1(X,i0+1," + AS + ".0)+R1(B,i0+1," + AS + ".0);"
-        "gl_FragColor=" + (f == XFormat::F32 ? "x_f32enc2(v0,v1)" : "x_st2q(v0,v1)") + ";}";
+        "gl_FragColor=" + (f == XFormat::F32 ? "x_f32enc2(v0,v1)" : "XST2(v0,v1)") + ";}";
 }
 
 std::string act_swish(int dim, XFormat f) {
@@ -2475,7 +2470,7 @@ std::string act_swish(int dim, XFormat f) {
         "void main(){int i=int(gl_FragCoord.x);int i0=2*i;"
         "float x0=R1(X,i0," + AS + ".0),x1=R1(X,i0+1," + AS + ".0);"
         "gl_FragColor=" + (f == XFormat::F32 ? "x_f32enc2(x0/(1.0+" + EXP("-x0") + "),x1/(1.0+" + EXP("-x1") + "))"
-                                            : "x_st2q(x0/(1.0+" + EXP("-x0") + "),x1/(1.0+" + EXP("-x1") + "))") + ";}";
+                                            : "XST2(x0/(1.0+" + EXP("-x0") + "),x1/(1.0+" + EXP("-x1") + "))") + ";}";
 }
 
 std::string rwkv_mul(int dim, int adiv) {

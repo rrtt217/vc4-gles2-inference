@@ -86,7 +86,7 @@ public:
     // format its *caller* uses, because a matvec output is act_fmt_ and a
     // residual is res_fmt_ and reading one as the other silently shrinks the
     // row to a fixed factor.
-    GLuint ln_q16(GLuint x, GLuint wb, Target& out, float eps);
+    GLuint ln_q16(GLuint x, GLuint w, GLuint b, Target& out, float eps);
     Target& ln_stat_probe() { return ln_stat_; }
     GLuint upload_bias(const vector<float>& b, XFormat f);
     GLuint upload_into(Target& t, const vector<float>& x);
@@ -622,8 +622,13 @@ private:  // matvec input (qkv/wo/gate/logits)
     // after the matrix upload because they come from metadata-sized vectors.
 
     struct EncdecRows {
-        vector<GLuint> ln1, ln2, ln3;   // [layer] (w,b) pairs, decoders
-        vector<GLuint> enc_ln1, enc_ln2; // [enc layer]
+        // Each LayerNorm is two one-row textures: `ln1` the weight, `ln1b` the
+        // bias.  They were one two-row texture until the format audit: no
+        // XFORMAT macro addresses a second row, so that shape forced two
+        // hand-written fetches inside a kernel whose neighbours all read like
+        // `R1(W, i, TW)`.
+        vector<GLuint> ln1, ln1b, ln2, ln2b, ln3, ln3b;
+        vector<GLuint> enc_ln1, enc_ln1b, enc_ln2, enc_ln2b;
         vector<GLuint> qkv_b, o_b, cq_b, ck_b, cv_b, co_b, fc1_b, fc2_b;  // [layer]
         vector<GLuint> enc_qkv_b, enc_o_b, enc_fc1_b, enc_fc2_b;          // [enc layer]
         GLuint logits_b = 0;
