@@ -452,6 +452,8 @@ private:
     void bind_tex(int unit, GLuint tex);
     // Force unit 0 active and bind, for a glTexSubImage2D upload.
     void bind_upload_tex(GLuint tex);
+    // What unit `u` currently holds (debugging a stale binding).
+    static GLuint bound_tex(int u);
     void bind_fbo(GLuint fbo);
     void use_program(GLuint prog);
     void set_sampler(GLuint prog, const char* name, int unit);

@@ -303,6 +303,15 @@ Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
             gpu_.res_pack_ = x_per_texel(gpu_.res_fmt_) == 2;
             if (res && strcmp(res, "i16") && m_.res_q24 && strcmp(res, "i24"))
                 cerr << "RES overrides the container's q24 residual\n";
+            // The v5 bias and LayerNorm rows are packed *in the formats chosen
+            // above*, so they cannot be uploaded before this block runs.  They
+            // were uploaded from App::upload_weights(), i.e. while res_fmt_ was
+            // still its I16_1 default: every row went out one-value-a-texel
+            // (alpha = 255) and the row passes read the odd half of an I16_2
+            // row as that alpha byte -- a constant +255/256 on every odd
+            // component, which is what the "odd components are wrong" hunt was
+            // chasing for six commits.
+            if (m_.is_encdec()) gpu_.upload_encdec_rows(m_);
         }
         // Paired qkv matvec: two output rows per fragment, half the activation
         // decode.  Only the int8 checkpoint uses it; QKV_PAIR=0 restores the

@@ -223,11 +223,10 @@ void App::upload_weights() {
     }
     gpu.upload_batch_end();
     g_progress.end();
-    // The v5 f32 rows.  They are 60 KiB, and they are not Mats: each is a
-    // 1-row or 2-row q16 texture the row passes read as a weight plane, built
-    // after the batch because they come from metadata-sized vectors rather
-    // than from a mapping.
-    if (model.is_encdec()) gpu.upload_encdec_rows(model);
+    // The v5 bias/LayerNorm rows are NOT uploaded here: they are packed in the
+    // container's formats, which the Session decides, so Session's constructor
+    // uploads them after it has.  Doing it here sent them out one-value-a-texel
+    // in front of an I16_2 reader.
     model.release_map();
 }
 

@@ -108,6 +108,8 @@ void GPU::bind_upload_tex(GLuint tex) {
         g_bound_tex[0] = tex;
 }
 
+GLuint GPU::bound_tex(int u) { return (u >= 0 && u < 8) ? g_bound_tex[u] : 0; }
+
 void GPU::bind_fbo(GLuint fbo) {
         if (g_cur_fbo == fbo) return;
         glBindFramebuffer(GL_FRAMEBUFFER, fbo);
