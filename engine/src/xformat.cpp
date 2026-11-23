@@ -40,7 +40,10 @@ int x_texels(int count, XFormat f) {
 }
 
 bool x_is_int8(XFormat f) { return f == XFormat::I8_4; }
-bool x_is_int24(XFormat f) { return f == XFormat::I24_1; }
+// A 24-bit *integer in an RGBA8*: the value form and the sum form share that
+// packing (four bytes, a byte an integer), so the question is about the texture's
+// storage, not about which quantity it holds.
+bool x_is_int24(XFormat f) { return f == XFormat::I24_1 || f == XFormat::S24_1; }
 bool x_is_f32(XFormat f) { return f == XFormat::F32; }
 bool x_is_bf16(XFormat f) { return f == XFormat::BF16; }
 
@@ -86,6 +89,18 @@ std::vector<uint8_t> x_pack(const float* values, int count, XFormat f) {
                 p[2 * k] = (uint8_t)(r >> 8);
                 p[2 * k + 1] = (uint8_t)(r & 0xFF);
             }
+        } else if (f == XFormat::S24_1) {
+            // Played on a value a texel, 1/4096: the sum form's step.  Nothing
+            // host-packs a sum today (the rms partial sums are written by the
+            // shader), and it is here because "a format has every row of the
+            // contract" is the rule -- the alternative is this function silently
+            // returning I8_4 bytes, which is what it did before.
+            long q = lrintf(values[t] * 4096.0f);
+            q = std::max(0L, std::min(16777215L, q + 8388608L));
+            p[0] = (uint8_t)((q >> 24) & 0xFF);
+            p[1] = (uint8_t)((q >> 16) & 0xFF);
+            p[2] = (uint8_t)((q >> 8) & 0xFF);
+            p[3] = (uint8_t)(q & 0xFF);
         } else if (f == XFormat::I16_2) {
             const int16_t q0 = quantize_act(values[2 * t]);
             const int16_t q1 = 2 * t + 1 < count ? quantize_act(values[2 * t + 1]) : 0;
@@ -93,13 +108,20 @@ std::vector<uint8_t> x_pack(const float* values, int count, XFormat f) {
             p[1] = (uint8_t)q0;
             p[2] = (uint8_t)((uint16_t)q1 >> 8);
             p[3] = (uint8_t)q1;
-        } else {
+        } else if (f == XFormat::I8_4) {
             for (int k = 0; k < 4; ++k) {
                 const int i = 4 * t + k;
                 int q = i < count ? (int)lrintf(values[i] * 16.0f) : 0;
                 q = std::max(-127, std::min(127, q));
                 p[k] = (uint8_t)(q + 128);
             }
+        } else {
+            // An explicit stop, not a default: `else` meant `I8_4` and a format
+            // the packer did not know wrote 8-bit bytes that every reader then
+            // decoded as its own -- the one failure mode this API exists to
+            // make impossible.  The contract in xformat.h is the list.
+            fprintf(stderr, "x_pack: %s has no host pack\n", x_format_name(f));
+            abort();
         }
     }
     return out;
@@ -420,6 +442,13 @@ std::string x_residual_glsl(XFormat f) {
                 "#define R1Q(T,I,TW) (R1(T,(I),(TW))*256.0)\n"
                 "#define XST1Q(Q) x_bf16enc((Q)/256.0)\n";
         case XFormat::I8_4:
+            // No residual in this format, by design and not by omission: four
+            // values a texel at 1/16 is a *narrow* stream, and a residual is
+            // the one that has to survive every layer unscaled (the q16 residual
+            // rails at +-128, which is why the wide formats exist at all).  An
+            // empty set here is the answer "this format is not a residual", and
+            // a caller that asks for one gets a program that does not compile --
+            // the loudest available failure.
             return {};
     }
 

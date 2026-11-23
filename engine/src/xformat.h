@@ -47,6 +47,35 @@ enum class XFormat : uint8_t {
     BF16 = 5,
 };
 
+// ===================================================================
+// The XFormat contract.  A format is not "a 4-byte layout": it is a
+// *quantity at a stated step* (see the enum), and it must provide every
+// row of this table or say why in the row it does not.  The six
+// consumers each used to keep its own list, and they had already drifted
+// -- `x_pack` had no I8_4 branch (the last `else` *was* I8_4, so a new
+// format silently wrote 8-bit), `x_residual_glsl` had no I8_4 at all,
+// and `x_is_int24` answered false for a 24-bit format added later.
+//
+//   capability          provided by              type of the store
+//   ---------------------------------------------------------------
+//   value decode        X1 / R1                  a real value
+//   q16 decode          X1Q / R1Q                an integer on the step
+//   value store         XST1 / XST2 / XST4 (X)    a real value
+//   q16 store           XST1Q (R)                 an integer, *no* step
+//   host pack           x_pack                   a real value
+//   GLSL                x_glsl / x_residual_glsl  (the two APIs)
+//
+// The last column is what nothing in the code says, and it is the one
+// that cost three rounds: XST1 multiplies by the format's step and
+// XST1Q does not, under names that differ by one letter.  A pass writes
+// through the one that matches what it already has (a value or an
+// integer) and reads through either.
+//
+// X1 and R1 are the *same* decoder.  The X/R split names which store
+// travels with a texture, not two decodes -- which is why both can be in
+// one program, and why F32/BF16 carry a second helper name there.
+// ===================================================================
+
 struct XLayout {
     XFormat fmt = XFormat::I16_2;
     int count = 0;
