@@ -49,7 +49,19 @@ build/host/%.o: %.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(ALL_CXXFLAGS) $(SECTIONS) $(INCS) -MMD -MP -c $< -o $@
 
-build/pi/%.o: %.cpp | check-cross
+# The cross tree is only valid for the sysroot and compiler it was built with.
+# The stamp is rewritten only when one of them changes, and every pi object
+# depends on it, so a sysroot switch cannot reuse host-ABI objects.
+PI_STAMP := build/pi/.toolchain
+$(PI_STAMP): force-stamp
+	@mkdir -p $(dir $@)
+	@printf '%s\n%s\n' '$(CROSS_CXX)' '$(CROSS_SYSROOT)' | cmp -s - $@ || \
+	  printf '%s\n%s\n' '$(CROSS_CXX)' '$(CROSS_SYSROOT)' > $@
+
+force-stamp:
+	@:
+
+build/pi/%.o: %.cpp $(PI_STAMP) | check-cross
 	@mkdir -p $(dir $@)
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) $(WARN) $(SECTIONS) $(INCS) -MMD -MP -c $< -o $@
 
@@ -119,7 +131,7 @@ CROSS_CXXFLAGS ?= --sysroot=$(CROSS_SYSROOT) \
                  -ffast-math -std=c++17
 CROSS_LDLIBS ?= -L$(CROSS_TARGETLIB) -lEGL -lGLESv2 -lm
 
-.PHONY: pi armv6 armv6-check check-cross clean probes check warncheck test
+.PHONY: pi armv6 armv6-check check-cross clean probes check warncheck test force-stamp
 
 pi: engine_mm3_pi
 
@@ -450,7 +462,7 @@ probes/packunpack_probe_pi: probes/packunpack_probe.cpp | check-cross
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -o $@ $< $(CROSS_LDLIBS)
 
 probes/q4mv_probe_pi: probes/q4mv_probe.cpp $(GPULIB) $(HEADERS) | check-cross
-	$(CROSS_CXX) $(CROSS_CXXFLAGS) -I$(SRC) -o $@ $^ $(CROSS_LDLIBS)
+	$(CROSS_CXX) $(CROSS_CXXFLAGS) -I$(SRC) -o $@ probes/q4mv_probe.cpp $(GPULIB) $(CROSS_LDLIBS)
 
 # Native build of the same probe: the q4 decode A/B (Q4_NOUNPACK, Q4_BFAST,
 # Q4_SHIFT=0) is a per-texel difference of a few ALU ops, and a whole-token
@@ -462,9 +474,9 @@ probes/q4mv_probe: probes/q4mv_probe.cpp $(GPULIB) $(HEADERS)
 # Prices a draw, an rmsnorm and the q8 matvec shapes on the real driver
 # (WORKLOG item 7: the cost model behind prefill batching).
 probes/draw_probe_pi: probes/draw_probe.cpp $(GPULIB) | check-cross $(HEADERS) $(PROBE_HEADERS)
-	$(CROSS_CXX) $(CROSS_CXXFLAGS) -I$(SRC) -o $@ $^ $(CROSS_LDLIBS)
+	$(CROSS_CXX) $(CROSS_CXXFLAGS) -I$(SRC) -o $@ probes/draw_probe.cpp $(GPULIB) $(CROSS_LDLIBS)
 
 # Prices 2-position packing: one weight fetch feeding two positions, and the
 # P2 layout it writes (WORKLOG item 7b).
 probes/ffn2_probe_pi: probes/ffn2_probe.cpp $(GPULIB) | check-cross $(HEADERS)
-	$(CROSS_CXX) $(CROSS_CXXFLAGS) -I$(SRC) -o $@ $^ $(CROSS_LDLIBS)
+	$(CROSS_CXX) $(CROSS_CXXFLAGS) -I$(SRC) -o $@ probes/ffn2_probe.cpp $(GPULIB) $(CROSS_LDLIBS)

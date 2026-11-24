@@ -122,11 +122,13 @@ Build for the target and do not reuse a stale binary:
 - Iteration: `make -C engine -j8 engine_mm3` is incremental — one object per
   translation unit under `engine/build/host/`, dependencies from `-MMD`, so a
   one-line change relinks in about a second and a full build is about 33 s on 8
-  cores.  `-B` stays the baseline and the cross command.  make cannot see a
-  `CXXFLAGS` or `CROSS_SYSROOT` change, so after one use `-B` or remove that
-  object tree (`build/host`, `build/pi`, `build/armv6`; the trees are separate
-  so a host object is never linked into an ARM binary).  `warncheck` still
-  forces the clean build, in parallel with `JOBS` (default min(nproc, 8)).
+  cores.  `-B` stays the baseline and the cross command.  The cross tree
+  carries a stamp of `CROSS_CXX`/`CROSS_SYSROOT`, so changing either invalidates
+  its objects; a `CXXFLAGS` change is still invisible to make, so after one use
+  `-B` or remove that object tree (`build/host`, `build/pi`, `build/armv6`; the
+  trees are separate so a host object is never linked into an ARM binary).
+  `warncheck` still forces the clean build, in parallel with `JOBS` (default
+  min(nproc, 8)).
 - Pi Zero, on the board: `make -C engine -B armv6` — the same flag set the cross
   target uses, with no sysroot.
 - Pi Zero, cross: `make -C engine -B pi CROSS_SYSROOT=<sysroot>` on the cross
