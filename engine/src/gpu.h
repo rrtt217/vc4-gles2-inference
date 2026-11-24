@@ -228,7 +228,7 @@ public:
     void att_qrot_stage(int layer, int pos, int b, int n);
     // One half of a cross-attention KV row: the projection `x` (a one-row I24
     // texture) into `cross_kv_[layer]` at row `b`, K half or V half.
-    void cross_kv_store(int layer, GLuint x, int b, bool v_half);
+    void cross_kv_store(int layer, GLuint x, int b, bool v_half, GLuint bias = 0);
     // The cross-attention's query: projection -> bias -> the hoisted q the score
     // pass reads.  One call, because the three steps share `qkv_target_` and a
     // caller reaching for it by name is how the width of the bias add gets

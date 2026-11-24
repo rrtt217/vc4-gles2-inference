@@ -184,7 +184,7 @@ vector<Case> cases() {
         c.dim = 512; c.kv_dim = 512; c.heads = 8; c.kv_heads = 8; c.head_dim = 64;
         c.seq = 64; c.rope_none = true; c.qk_norm = false; c.kv_bits = 16;
         c.kv_width = 512;
-        add(v, "att_cross_kv_512", [c] { return att_cross_kv(c, false, I16_2); });
+        add(v, "att_cross_kv_512", [c] { return att_cross_kv(c, false, XFormat::I24_1, false); });
     }
     add(v, "act_swish_biased_2048_f24_i16", []
         { return act_swish_biased(2048, XFormat::I24_1, I16_2); });

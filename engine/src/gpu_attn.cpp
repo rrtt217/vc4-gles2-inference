@@ -892,17 +892,18 @@ void GPU::alloc_cross_kv(int n){
 // One half of one row of the cross plane.  The viewport is where the values go --
 // K at x=0, V at x=kv_dim/2 -- so one draw is one half of one position's row, and
 // the kernel is the attention's own KV encoder (same grid, so nothing can drift).
-void GPU::cross_kv_store(int layer, GLuint x, int b, bool v_half){
+void GPU::cross_kv_store(int layer, GLuint x, int b, bool v_half, GLuint bias){
         if (layer < 0 || (size_t)layer >= cross_kv_.size() || cross_kv_[layer].tex == 0) return;
         const int half = att_kv_width_ / 2;
         GLuint p = x_prog(string("xkv_") + (v_half ? "v" : "k") + "_" +
                               to_string(att_kv_width_) + "_" + to_string((int)att_kv_fmt_),
-                          ::att_cross_kv(att_cfg(), v_half, act_fmt_));
+                          ::att_cross_kv(att_cfg(), v_half, XFormat::I24_1, bias != 0));
         bind_fbo(cross_kv_[layer].fbo);
         glViewport(v_half ? half : 0, b, half, 1);
         use_program(p);
         bind_tex(0, x);
         set_sampler(p, "XS", 0);
+        if (bias) { bind_tex(1, bias); set_sampler(p, "BS", 1); }
         glUniform1f(uloc(p, "XOFF"), v_half ? (float)half : 0.0f);
         setup_attrib(p);
         glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;

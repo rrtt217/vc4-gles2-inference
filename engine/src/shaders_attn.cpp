@@ -119,25 +119,24 @@ string seg_rope_y(const AttnConfig& c) {
 // x=kv_dim/2 and y=the position, so one draw is one half of one row.  This
 // replaces the host round trip a v5 decode used to pay twice per layer per token:
 // read the query back, softmax and the value mix in C++, upload the context.
-string att_cross_kv(const AttnConfig& c, bool v_half, XFormat xf) {
+string att_cross_kv(const AttnConfig& c, bool v_half, XFormat xf, bool bias) {
     need_attn(c);
-    // `xf` is what the *projection* wrote -- `act_fmt_`, which is the packed q16
-    // pair on these containers and I24 only when the axis says so.  Reading it
-    // as one fixed format put the rail in the plane: `.gba` of a q16 pair texel
-    // is an integer in the millions, `encKV` clamped it at +-16, and the context
-    // came out constant.
+    // `xf` is what the *projection* wrote, and the bias must be uploaded in the
+    // same one: one slot, one reader, so `X1` serves both textures.  Reading a
+    // fixed format here is what put the rail in the plane once already --
+    // `.gba` of a q16 pair texel is an integer in the millions and `encKV`
+    // clamped it at +-16.
     const string TW = to_string(x_texels(c.kv_dim, xf));
     (void)v_half;
-    return "precision highp float;\n" + att_defs(c) + att_helpers(c) +
-           x_glsl(xf) +
+    return "precision highp float;\n" + att_defs(c) + att_helpers(c) + x_glsl(xf) +
         // `gl_FragCoord.x` is the *window* coordinate, and the V half lives at
-        // x=kv_dim/2: without XOFF the V half read X past its width and the K
-        // half read the first half twice.
-        "uniform sampler2D XS;uniform float XOFF;"
-        "void main(){int x=int(gl_FragCoord.x-XOFF);"
+        // x=kv_dim/2: without XOFF the V half read X past its width.
+        string("uniform sampler2D XS") + (bias ? ",BS" : "") + ";uniform float XOFF;"
+        "void main(){int x=int(gl_FragCoord.x-XOFF);int i0=2*x;"
         // X2 gives two consecutive values whatever the format's texel width.
         "vec2 vv=X2(XS,2*x," + TW + ".0);"
-        "gl_FragColor=encKV(vv.x,vv.y);}";
+        + string(bias ? "vv+=X2(BS,2*x," : "vv+=vec2(") + TW + (bias ? ".0);" : "0.0);")
+        + "gl_FragColor=encKV(vv.x,vv.y);}";
 }
 
 string att_defs(const AttnConfig& c) {

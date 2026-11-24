@@ -2419,14 +2419,16 @@ void Session::encdec_encode(const vector<int>& src) {
         for (int l = 0; l < m.layers; ++l) {
                 lap.mark("encCrossKV", l);
                 for (int b = 0; b < n; ++b) {
+                        // The bias rides the store: `att_cross_kv` reads the
+                        // projection's I24 row and its bias row with the same
+                        // reader, so the separate `bias_add_matvec` pass is gone
+                        // and this is two draws a position instead of four.
                         gpu_.matvec_to(m.u_cross_k[l], gpu_.grp_h(b, n).tex, gpu_.cd_b());
-                        gpu_.bias_add_matvec(gpu_.cd_b().tex, gpu_.enc_rows_.ck_b[l],
-                                             gpu_.cd_c(), D);
-                        gpu_.cross_kv_store(l, gpu_.cd_c().tex, b, /*v_half=*/false);
+                        gpu_.cross_kv_store(l, gpu_.cd_b().tex, b, /*v_half=*/false,
+                                            gpu_.enc_rows_.ck_b[l]);
                         gpu_.matvec_to(m.u_cross_v[l], gpu_.grp_h(b, n).tex, gpu_.cd_b());
-                        gpu_.bias_add_matvec(gpu_.cd_b().tex, gpu_.enc_rows_.cv_b[l],
-                                             gpu_.cd_c(), D);
-                        gpu_.cross_kv_store(l, gpu_.cd_c().tex, b, /*v_half=*/true);
+                        gpu_.cross_kv_store(l, gpu_.cd_b().tex, b, /*v_half=*/true,
+                                            gpu_.enc_rows_.cv_b[l]);
                 }
         }
         lap.mark("encCrossKVEnd", 0);
