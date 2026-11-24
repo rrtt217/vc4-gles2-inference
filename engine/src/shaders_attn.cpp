@@ -328,7 +328,8 @@ string att_kv_rope(const AttnConfig& c) {
         "vec4 rs=texture2D(" + rt + ",vec2((float(2*ti+1)+0.5)/float(2*HALF)," + rty + "));"
         "float co=dec24s(rc,4096.0),sn=dec24s(rs,4096.0);"
         "bool first=(ROPEHALF==1)?(i<HALF):(even==0);"
-        "float o=first?vn*co-bn*sn:bn*sn+vn*co;gl_FragColor=encKV1(o);}";
+        + string(c.rope_none ? "gl_FragColor=encKV1(vn);}"
+                             : "float o=first?vn*co-bn*sn:bn*sn+vn*co;gl_FragColor=encKV1(o);}");
 }
 
 string att_vscale(const AttnConfig& c) {

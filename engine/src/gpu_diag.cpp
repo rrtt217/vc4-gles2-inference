@@ -113,8 +113,9 @@ void GPU::dump_attention(int layer, int pos, GLuint kv){
         // V, int/1024 for scores and the stats max, int/32 for the stats sum.
         static bool meta = true;
         if (meta) {
-                fprintf(stderr, "ATTD meta %d %d %d %d %d %g %d\n", att_heads_, att_kv_heads_,
-                        att_head_dim_, att_dim_, att_kv_dim_, (double)kv_.scale, att_seq_);
+                fprintf(stderr, "ATTD meta %d %d %d %d %d %g %d %d\n", att_heads_, att_kv_heads_,
+                        att_head_dim_, att_dim_, att_kv_dim_, (double)kv_.scale, att_seq_,
+                        kv_.vpt);
                 meta = false;
         }
         {
@@ -125,37 +126,46 @@ void GPU::dump_attention(int layer, int pos, GLuint kv){
         }
         // Every K/V row the score and V passes read: rows 0..pos, across the
         // segments (docs/long-context.md).  A segmented session keeps them in
-        // `kv_parts_`; nseg == 1 is `kv_cache_` itself.
+        // `kv_parts_`; nseg == 1 is `kv_cache_` itself.  The value index is the
+        // [K | V] position, so it is the same number whatever `vpt` is: i24 and
+        // f32 hold one value a texel, q16 and bf16 two, q8 four.
         for (int t = 0; t <= pos && t < att_seq_; ++t) {
                 if (layer >= (int)kv_cache_.size()) break;
-                const bool f32kv = kv_.codec == KvCodec::F32;
-                if (kv_.bits != 16 && !f32kv) break;
-                Target ovr;
-                if (kv && att_nseg_ == 1) {
-                        ovr.tex = kv;
-                        ovr.w = kv_.texels;
-                        ovr.h = att_seq_;
-                }
-                const Target& kt = ovr.tex ? ovr
+                // `kv` is a bare texture name; the cross plane's Target (and its
+                // FBO) is the one in cross_kv_.  A temporary Target with fbo=0
+                // reads the window framebuffer, which is why a cross dump used
+                // to come back all zeros.
+                const Target* ovr = nullptr;
+                if (kv)
+                        for (const Target& ct : cross_kv_)
+                                if (ct.tex == kv) { ovr = &ct; break; }
+                const Target& kt = ovr ? *ovr
                                  : (att_nseg_ > 1 ? kv_part(layer, t / att_seg_)
                                                   : kv_cache_[layer]);
-                const vector<uint8_t> b = gpu_read_target_row(kt, att_nseg_ > 1 ? t % att_seg_ : t);
-                auto at = [&](int texel) {
-                        if (!f32kv) return 0;
-                        const uint8_t* p = b.data() + (size_t)texel * 4;
-                        uint32_t u = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
-                                     ((uint32_t)p[2] << 8) | (uint32_t)p[3];
-                        float v = 0.0f;
-                        memcpy(&v, &u, 4);
-                        return (int)lrintf(v * kv_.scale);
+                const vector<uint8_t> b = gpu_read_target_row(kt, att_nseg_ > 1 && !ovr ? t % att_seg_ : t);
+                const int vpt = kv_.vpt;
+                auto val = [&](int vi) {
+                        const int texel = vi / vpt, comp = vi - texel * vpt;
+                        if (kv_.codec == KvCodec::F32) {
+                                const uint8_t* p = b.data() + (size_t)texel * 4;
+                                const uint32_t u = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+                                                   ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+                                float v = 0.0f;
+                                memcpy(&v, &u, 4);
+                                return (int)lrintf(v * kv_.scale);
+                        }
+                        if (vpt == 1) {
+                                const uint8_t* p = b.data() + (size_t)texel * 4;
+                                return (int)((long)p[1] << 16 | (long)p[2] << 8 | p[3]) - 8388608;
+                        }
+                        if (vpt == 2) return q16_at(b, texel, comp);
+                        return (int)b[(size_t)texel * 4 + comp] - 128;
                 };
                 fprintf(stderr, "ATTD kv %d %d %d %d", layer, pos, t, att_kv_dim_);
-                for (int i = 0; i < att_kv_dim_; ++i)
-                        fprintf(stderr, " %d", f32kv ? at(i) : q16_at(b, i / 2, i & 1));
+                for (int i = 0; i < att_kv_dim_; ++i) fprintf(stderr, " %d", val(i));
                 fprintf(stderr, "\n");
                 fprintf(stderr, "ATTD kvv %d %d %d %d", layer, pos, t, att_kv_dim_);
-                for (int i = 0; i < att_kv_dim_; ++i)
-                        fprintf(stderr, " %d", f32kv ? at(att_kv_dim_ + i) : q16_at(b, att_kv_dim_ / 2 + i / 2, i & 1));
+                for (int i = 0; i < att_kv_dim_; ++i) fprintf(stderr, " %d", val(att_kv_dim_ + i));
                 fprintf(stderr, "\n");
         }
         {
