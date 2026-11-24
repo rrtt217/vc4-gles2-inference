@@ -57,7 +57,7 @@ void GPU::att_geometry_line() const {
         fprintf(stderr, "attn: dim %d seq %d heads %d head_dim %d nseg %d seg %d "
                         "kv_width %d kv_bits %d kv_fmt %d qkv_pair %d qkv_pair_ok %d rope_none %d causal %d\n",
                 att_dim_, att_seq_, att_heads_, att_head_dim_, att_nseg_, att_seg_,
-                att_kv_width_, att_kv_bits_, (int)att_kv_fmt_,
+                kv_.texels, kv_.bits, (int)kv_.codec,
                 (int)att_qkv_pair_, (int)att_qkv_pair_,
                 (int)att_rope_none_, (int)att_causal_);
 }
@@ -75,18 +75,21 @@ void GPU::init_attention(int dim, int kv_dim, int heads, int kv_heads, int head_
         att_rope_half_ = rope_half; att_qk_norm_ = qk_norm;
         att_qkv_pair_ = qkv_pair && ((dim + 2 * kv_dim) % 2 == 0);
         // The KV axis, one value: i24 | q8 | q16 | bf16 | f32.  It replaces
-        // KV_PACK (the width) and KV_FMT (the codec), which were the two halves
-        // of this axis and whose interaction was undefined: bf16 could be
-        // "packed" and "not packed" at once, depending on which one you set
-        // last.  kRenames maps both spellings onto the values below.
-        // A hybrid model defaults to the packed 16-bit KV: the 24-bit path
-        // produces garbage on LFM2.5's shape (kv_dim 512, head_dim 64) while
-        // the packed one is correct, and the packed layout is the canonical
-        // Pi/Xe setting anyway.
+        // KV_PACK (the width) and KV_FMT (the codec), whose interaction was
+        // undefined.  The layout built here is the one place the codec, the
+        // values a texel, the row width and the grid come from; the shaders
+        // read it through AttnConfig and the cache flags through kv_.
+        // A hybrid model defaults to the packed 16-bit KV: the canonical
+        // Pi/Xe setting, and the one LFM2.5's shape was validated on.
         const char* kv = sw_enum("KV");
         if (!kv) kv = hybrid ? "q16" : "i24";
-        att_kv_bits_ = !strcmp(kv, "q8") ? 8 : !strcmp(kv, "q16") ? 16 : 0;
-        att_kv_packed_ = att_kv_bits_ != 0;
+        KvLayout L;
+        if (!strcmp(kv, "bf16")) { L.codec = KvCodec::Bf16; L.bits = 16; }
+        else if (!strcmp(kv, "f32")) { L.codec = KvCodec::F32; L.bits = 0; }
+        else if (!strcmp(kv, "q16")) { L.bits = 16; }
+        else if (!strcmp(kv, "q8")) { L.bits = 8; }
+        L.vpt = L.bits == 16 ? 2 : L.bits == 8 ? 4 : 1;
+        L.texels = L.bits == 16 ? kv_dim : L.bits == 8 ? kv_dim / 2 : 2 * kv_dim;
         att_score_scale_ = (float) env_double("ATT_SCORE_GRID", kAttnScoreScale);
         if (att_score_scale_ < 1.0f) att_score_scale_ = 1.0f;
         att_sum_scale_ = (float) env_double("ATT_SUM_GRID", kAttnSumScale);
@@ -95,45 +98,26 @@ void GPU::init_attention(int dim, int kv_dim, int heads, int kv_heads, int head_
         // linear grid stays the default even though log2 is the more accurate
         // one (the two MiniMind3 containers disagree in sign).
         if (const char* sd = getenv("ATT_SUM")) att_sum_log_ = !strcmp(sd, "log2");
-        // bf16 keeps two values a texel (14 in the codec, the scale only in the
-        // grid ATT_DUMP prints on); f32 uses the one-value-a-texel layout (the
-        // 24-bit path's) with no rounding to flip, which is the only encoding
-        // that removes the last-bit disagreement between the two drivers.
-        att_kv_fmt_ = !strcmp(kv, "bf16") ? 1 : !strcmp(kv, "f32") ? 2 : 0;
-        // bf16 *is* the packed pair codec: two 16-bit halves in one texel, so it
-        // goes with the q16 layout (width kv_dim).  Leaving it on the
-        // one-value-a-texel layout wrote 24-bit fixed-point and read bf16 back
-        // -- MiniMind3 q8 PPL 71840 with KV_FMT=bf16 alone, 0.0000 of that
-        // being bf16's 0.1%: the two halves of the axis had to agree, which is
-        // what folding KV_PACK and KV_FMT into one value is for.
-        if (att_kv_fmt_ == 1) {
-                att_kv_bits_ = 16;
-                att_kv_packed_ = true;
-        } else if (att_kv_fmt_ == 2) {
-                att_kv_bits_ = 0;
-                att_kv_packed_ = false;
-        }
-        att_kv_scale_ = (float) env_double("KV_GRID",
-                        att_kv_bits_ == 16 ? 2048.0 : att_kv_bits_ == 8 ? 16.0 : 16384.0);
-        if (att_kv_scale_ < 1.0f) att_kv_scale_ = 1.0f;
-        att_kv_width_ = att_kv_bits_ == 16 ? kv_dim : att_kv_bits_ == 8 ? kv_dim / 2 : 2 * kv_dim;
-        if (att_kv_fmt_ == 2) {
+        L.scale = (float) env_double("KV_GRID",
+                        L.bits == 16 ? 2048.0 : L.bits == 8 ? 16.0 : 16384.0);
+        if (L.scale < 1.0f) L.scale = 1.0f;
+        if (L.codec == KvCodec::F32) {
                 // KVSCALE is only the grid the dump and the checker print on.
-                att_kv_scale_ = 512.0f;
-                att_kv_width_ = 2 * kv_dim;
+                L.scale = 512.0f;
+                L.texels = 2 * kv_dim;
         }
-        if (att_kv_bits_ != 0 &&
-            ((kv_dim % 2) != 0 || (att_kv_bits_ == 8 && ((kv_dim % 4) != 0 || (head_dim % 4) != 0)))) {
+        if (L.bits != 0 &&
+            ((kv_dim % 2) != 0 || (L.bits == 8 && ((kv_dim % 4) != 0 || (head_dim % 4) != 0)))) {
             cerr << "KV: width not divisible for the packed layout; falling back to i24\n";
-            att_kv_bits_ = 0; att_kv_packed_ = false;
-            att_kv_scale_ = 16384.0f; att_kv_width_ = 2 * kv_dim;
+            L = KvLayout();
         }
         // 8-bit KV: an opt-in per-head, per-position grid for V (max/127),
         // because V head ranges differ by an order of magnitude while K is
         // qk-normed.  Off by default: it buys q4 6% of PPL but costs q8 6%
         // and one extra pass per layer (docs/performance.md).  K always keeps
         // the global KVSCALE grid.
-        att_kv_vstep_ = att_kv_bits_ == 8 && env_flag("KV_VSTEP");
+        L.vstep = L.bits == 8 && env_flag("KV_VSTEP");
+        kv_ = L;
         q_norm_tex_.clear(); k_norm_tex_.clear();
         if (qk_norm) {
             for (int l = 0; l < layers; ++l) {
@@ -209,12 +193,12 @@ void GPU::init_attention(int dim, int kv_dim, int heads, int kv_heads, int head_
                 const bool a = is_attn(l);
                 Target first;
                 for (int k = 0; k < att_nseg_; ++k) {
-                        Target t = a ? make_target(att_kv_width_, att_seg_) : Target();
+                        Target t = a ? make_target(kv_.texels, att_seg_) : Target();
                         if (k == 0) first = t;
                         kv_parts_.push_back(t);
                 }
                 kv_cache_.push_back(first);
-                if (att_kv_vstep_) {
+                if (kv_.vstep) {
                         Target vfirst;
                         for (int k = 0; k < att_nseg_; ++k) {
                                 Target t = a ? make_target(att_kv_heads_, att_seg_) : Target();
@@ -351,7 +335,7 @@ GLuint GPU::attention_block(const Mat& qkv, GLuint x, int layer, int pos,
                 cerr << "QKVD " << layer << " " << pos << " " << qkv_hash(qkv.rows) << "\n";
             }
         }
-        if (stage_kv && att_kv_vstep_) { kv_vscale(layer, pos); lap("vscale"); }
+        if (stage_kv && kv_.vstep) { kv_vscale(layer, pos); lap("vscale"); }
         if (stage_kv) kv_rope_write(layer, pos);
         if (stage_kv && attn_dup("rope"))
             dup_price("rope", [&]{ kv_rope_write(layer, pos); });
@@ -651,7 +635,7 @@ void GPU::att_v(int layer, int pos, GLuint kv){
                 set_sampler(p0, "ST", 2);
                 bind_tex(1, kv ? kv : kv_cache_[layer].tex);
                 set_sampler(p0, "KV", 1);
-                if (att_kv_vstep_) {
+                if (kv_.vstep) {
                         bind_tex(3, vs_targets_[layer].tex);
                         set_sampler(p0, "VS", 3);
                 }
@@ -679,7 +663,7 @@ void GPU::att_v(int layer, int pos, GLuint kv){
             set_sampler(p, "ST", 2);
             bind_tex(1, (kv && k == 0) ? kv : kv_part(layer, k).tex);
             set_sampler(p, "KV", 1);
-            if (att_kv_vstep_) {
+            if (kv_.vstep) {
                 bind_tex(3, vs_part(layer, k).tex);
                 set_sampler(p, "VS", 3);
             }
@@ -772,7 +756,7 @@ void GPU::kv_rope_write(int layer, int pos){
         // text, so this is the identical call; a split session writes into the
         // segment's own texture at the offset, and SEGK in the text makes the
         // rope table agree.
-        glViewport(0, seg_off(pos), att_kv_width_, 1);
+        glViewport(0, seg_off(pos), kv_.texels, 1);
         use_program(p);
         // Bind every sampler to the unit the *program* declares.  The shipped
         // text puts QKV on unit 0 and RT on 1; a segmented text declares its
@@ -802,7 +786,7 @@ void GPU::kv_rope_write(int layer, int pos){
             bind_tex(u_kn < 0 ? 2 : u_kn, k_norm_tex_[layer]);
             set_sampler(p, "KN", u_kn < 0 ? 2 : u_kn);
         }
-        if (att_kv_vstep_) {
+        if (kv_.vstep) {
             const int u_vs = uloc(p, "VS");
             bind_tex(u_vs < 0 ? 3 : u_vs, vs_part(layer, sg).tex);
             set_sampler(p, "VS", u_vs < 0 ? 3 : u_vs);
@@ -831,7 +815,7 @@ void GPU::kv_rope_write(int layer, int pos){
 void GPU::att_stage(const Mat& qkv, GLuint x, int layer, int pos, int b, int n){
         att_qkv_draw(qkv, x);
         att_finish();
-        if (att_kv_vstep_) kv_vscale(layer, pos);
+        if (kv_.vstep) kv_vscale(layer, pos);
         kv_rope_write(layer, pos);
         att_qrot_stage(layer, pos, b, n);
 }
@@ -885,7 +869,7 @@ void GPU::alloc_cross_kv(int n){
         // same reason.
         (void)n;
         for (size_t l = 0; l < cross_kv_.size(); ++l)
-                cross_kv_[l] = make_target(att_kv_width_, att_seq_);
+                cross_kv_[l] = make_target(kv_.texels, att_seq_);
 }
 
 // One half of one row of the cross plane.  The viewport is where the values go --
@@ -893,9 +877,9 @@ void GPU::alloc_cross_kv(int n){
 // the kernel is the attention's own KV encoder (same grid, so nothing can drift).
 void GPU::cross_kv_store(int layer, GLuint x, int b, bool v_half, GLuint bias){
         if (layer < 0 || (size_t)layer >= cross_kv_.size() || cross_kv_[layer].tex == 0) return;
-        const int half = att_kv_width_ / 2;
+        const int half = kv_.texels / 2;
         GLuint p = x_prog(string("xkv_") + (v_half ? "v" : "k") + "_" +
-                              to_string(att_kv_width_) + "_" + to_string((int)att_kv_fmt_),
+                              to_string(kv_.texels) + "_" + to_string((int)kv_.codec),
                           ::att_cross_kv(att_cfg(), v_half, XFormat::I24_1, bias != 0));
         bind_fbo(cross_kv_[layer].fbo);
         glViewport(v_half ? half : 0, b, half, 1);
@@ -960,7 +944,7 @@ void GPU::att_v_row(int layer, int pos, int b, int n){
         set_sampler(p, "ST", 2);
         bind_tex(1, kv_cache_[layer].tex);
         set_sampler(p, "KV", 1);
-        if (att_kv_vstep_) {
+        if (kv_.vstep) {
             bind_tex(3, vs_targets_[layer].tex);
             set_sampler(p, "VS", 3);
         }

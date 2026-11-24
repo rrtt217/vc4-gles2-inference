@@ -114,7 +114,7 @@ void GPU::dump_attention(int layer, int pos, GLuint kv){
         static bool meta = true;
         if (meta) {
                 fprintf(stderr, "ATTD meta %d %d %d %d %d %g %d\n", att_heads_, att_kv_heads_,
-                        att_head_dim_, att_dim_, att_kv_dim_, (double)att_kv_scale_, att_seq_);
+                        att_head_dim_, att_dim_, att_kv_dim_, (double)kv_.scale, att_seq_);
                 meta = false;
         }
         {
@@ -128,12 +128,12 @@ void GPU::dump_attention(int layer, int pos, GLuint kv){
         // `kv_parts_`; nseg == 1 is `kv_cache_` itself.
         for (int t = 0; t <= pos && t < att_seq_; ++t) {
                 if (layer >= (int)kv_cache_.size()) break;
-                const bool f32kv = att_kv_fmt_ == 2;
-                if (att_kv_bits_ != 16 && !f32kv) break;
+                const bool f32kv = kv_.codec == KvCodec::F32;
+                if (kv_.bits != 16 && !f32kv) break;
                 Target ovr;
                 if (kv && att_nseg_ == 1) {
                         ovr.tex = kv;
-                        ovr.w = att_kv_width_;
+                        ovr.w = kv_.texels;
                         ovr.h = att_seq_;
                 }
                 const Target& kt = ovr.tex ? ovr
@@ -147,7 +147,7 @@ void GPU::dump_attention(int layer, int pos, GLuint kv){
                                      ((uint32_t)p[2] << 8) | (uint32_t)p[3];
                         float v = 0.0f;
                         memcpy(&v, &u, 4);
-                        return (int)lrintf(v * att_kv_scale_);
+                        return (int)lrintf(v * kv_.scale);
                 };
                 fprintf(stderr, "ATTD kv %d %d %d %d", layer, pos, t, att_kv_dim_);
                 for (int i = 0; i < att_kv_dim_; ++i)

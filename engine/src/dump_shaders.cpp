@@ -45,10 +45,7 @@ AttnConfig attn_base() {
     c.rope_half = false;
     c.qk_norm = true;
     c.qkv_pair = true;
-    c.kv_bits = 16;
-    c.kv_scale = 16384.0f;
-    c.kv_width = 192;
-    c.kv_vstep = false;
+    c.kv = KvLayout{KvCodec::Fixed, 16, 2, 192, 16384.0f, false};
     return c;
 }
 
@@ -182,8 +179,8 @@ vector<Case> cases() {
         // `attn_base()` so every field `need_attn` checks is filled.
         AttnConfig c = attn_base();
         c.dim = 512; c.kv_dim = 512; c.heads = 8; c.kv_heads = 8; c.head_dim = 64;
-        c.seq = 64; c.rope_none = true; c.qk_norm = false; c.kv_bits = 16;
-        c.kv_width = 512;
+        c.seq = 64; c.rope_none = true; c.qk_norm = false; c.kv.bits = 16; c.kv.vpt = 2;
+        c.kv.texels = 512;
         add(v, "att_cross_kv_512", [c] { return att_cross_kv(c, false, XFormat::I24_1, false); });
     }
     add(v, "act_swish_biased_2048_f24_i16", []
@@ -227,7 +224,7 @@ vector<Case> cases() {
     add(v, "att_helpers", [c] { return att_helpers(c); });
 
     c = attn_base();
-    c.kv_bits = 16;
+    c.kv.bits = 16; c.kv.vpt = 2;
     add_attn(v, "attn_q8_kv16_qkvpair", c);
 
     c = attn_base();
@@ -235,20 +232,20 @@ vector<Case> cases() {
     add_attn(v, "attn_q8_kv16_unpaired", c);
 
     c = attn_base();
-    c.kv_bits = 8;
-    c.kv_width = 96;
-    c.kv_vstep = true;
+    c.kv.bits = 8; c.kv.vpt = 4;
+    c.kv.texels = 96;
+    c.kv.vstep = true;
     add_attn(v, "attn_q4_kv8_vstep", c);
 
     c = attn_base();
-    c.kv_bits = 0;
-    c.kv_width = 384;
+    c.kv.bits = 0; c.kv.vpt = 1;
+    c.kv.texels = 384;
     add_attn(v, "attn_kv24", c);
 
     // Long context: one segmented program per segment kind, so a change to the
     // SEGK/SEG arithmetic is a digest and not a model difference.
     c = attn_base();
-    c.kv_bits = 16;
+    c.kv.bits = 16; c.kv.vpt = 2;
     c.nseg = 2;
     c.seg = 1024;
     c.segk = 1;
@@ -268,9 +265,9 @@ vector<Case> cases() {
 
     c = attn_base();
     c.qkv_pair = false;
-    c.kv_bits = 8;
-    c.kv_width = 96;
-    c.kv_vstep = false;
+    c.kv.bits = 8; c.kv.vpt = 4;
+    c.kv.texels = 96;
+    c.kv.vstep = false;
     add_attn(v, "attn_kv8_nostep_unpaired", c);
 
     // --- RWKV-7 (P6): the elementwise ops and the WKV7 recurrence.  dim 768,

@@ -219,7 +219,7 @@ public:
     // Phase 1 of a group, one position: qkv draw, V grid, KV write, rotated Q
     // staged into row b.  The serial attention_block's draws in the same order.
     void att_stage(const Mat& qkv, GLuint x, int layer, int pos, int b, int n);
-    // The cross-attention's K/V plane, one per decoder layer, `att_kv_width_`
+    // The cross-attention's K/V plane, one per decoder layer, `kv_.texels`
     // wide by the source's length tall: `[K | V]` per row, the layout
     // `kv_rope_write` already produces for the self-attention's cache.
     vector<Target> cross_kv_;
@@ -585,16 +585,16 @@ private:  // matvec input (qkv/wo/gate/logits)
     bool att_rope_half_ = false;
     bool att_qk_norm_ = false;
     bool att_qkv_pair_ = false;  // qkv target holds two q16 per texel
-    bool att_kv_packed_ = false;
-    int att_kv_bits_ = 0;
-    float rms_eps_ = 1e-5f;
+    // The KV cache's layout: codec, values a texel, row width, grid and the
+    // 8-bit per-head V grid.  Built once from `KV` in init_attention; this is
+    // the only place those facts live.
+    KvLayout kv_;
+    int rms_eps_ = 1e-5f;
     // A container that states an epsilon makes the shader read a uniform; one
     // that does not keeps the literal 1e-5, because turning a constant into a
     // uniform is *not* a no-op on this driver (measured: PPL 270.3170 ->
     // 269.9303 with eps numerically identical).
     bool rms_eps_stated_ = false;
-    float att_kv_scale_ = 16384.0f;
-    int att_kv_fmt_ = 0;                 // KV_FMT: 0 fixed grid, 1 bf16
     // v5: the block has no rotation; its positions are a table added to the
     // embedding (AttnConfig::rope_none, which emits #define NOROPE).
     bool att_rope_none_ = false;
@@ -603,8 +603,6 @@ private:  // matvec input (qkv/wo/gate/logits)
     float att_score_scale_ = 1024.0f;   // ATT_SCALE: score/(max) grid
     float att_sum_scale_ = 32.0f;       // ATT_SUM_SCALE: exp-sum grid (linear)
     bool att_sum_log_ = false;          // ATT_SUM=log2: sum stored as log2
-    int att_kv_width_ = 0;
-    bool att_kv_vstep_ = false;   // 8-bit KV: per-head V grid
     int max_target_dim_ = 0;
     int max_tex_units_ = 8;
     vector<GLuint> q_norm_tex_, k_norm_tex_;

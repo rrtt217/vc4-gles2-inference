@@ -369,15 +369,15 @@ Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
         // What this run actually asked the kernels for.  One line, because every
         // investigation here starts with "which stream is this texture in".
         if (gpu_attn_) {
-            const char* kvs = gpu_.att_kv_fmt_ == 1 ? "bf16"
-                            : gpu_.att_kv_fmt_ == 2 ? "f32"
-                            : gpu_.att_kv_bits_ == 16 ? "q16"
-                            : gpu_.att_kv_bits_ == 8 ? "q8" : "i24";
+            const char* kvs = gpu_.kv_.codec == KvCodec::Bf16 ? "bf16"
+                            : gpu_.kv_.codec == KvCodec::F32 ? "f32"
+                            : gpu_.kv_.bits == 16 ? "q16"
+                            : gpu_.kv_.bits == 8 ? "q8" : "i24";
             const char* rms = sw_str("RMS_STORE");
             fprintf(stderr, "formats: act %s res %s ffn %s | kv %s width %d | "
                             "qkv_pair %d | rms %s\n",
                     x_format_name(gpu_.act_fmt_), x_format_name(gpu_.res_fmt_),
-                    x_format_name(gpu_.ffn_fmt_), kvs, gpu_.att_kv_width_,
+                    x_format_name(gpu_.ffn_fmt_), kvs, gpu_.kv_.texels,
                     (int)gpu_.att_qkv_pair_, rms ? rms : "i24");
             // The parse above is inside `if (gpu_layer_)`; saying so is the
             // difference between "the axis was applied" and "the axis was

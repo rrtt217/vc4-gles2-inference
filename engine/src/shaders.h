@@ -25,6 +25,23 @@ constexpr XFormat kLnPairFmt = XFormat::I16_2;
 // F32.  One accessor so the host dump decodes with the shader's format.
 XFormat rms_store_format();
 
+// The KV cache's layout, built once from the `KV` value.  A codec is an
+// encoding *and* the number of values a texel holds: i24 and f32 one, q16 and
+// bf16 two, q8 four.  `vpt` is the constant every writer and reader needs --
+// the cross-KV writer assumed two and lost half of every i24 row because no
+// name carried it.  `texels` is the [K | V] row width, `scale` the grid the
+// fixed codec uses, and `vstep` the 8-bit per-head V grid.
+enum class KvCodec : uint8_t { Fixed = 0, Bf16 = 1, F32 = 2 };
+
+struct KvLayout {
+    KvCodec codec = KvCodec::Fixed;
+    int bits = 0;      // 0 = i24/f32, 16 = q16/bf16, 8 = q8
+    int vpt = 1;       // values a texel
+    int texels = 0;    // [K | V] row width
+    float scale = 16384.0f;
+    bool vstep = false;
+};
+
 struct AttnConfig {
     int dim = 0;
     int kv_dim = 0;
@@ -42,22 +59,16 @@ struct AttnConfig {
     // No rotation at all (v5): the block's positions are a table added to the
     // embedding, so the K write and the Q stage must not rotate either.
     bool rope_none = false;
-    int kv_bits = 0;
-    // KV value encoding: 0 = the fixed q16 grid (KVSCALE), 1 = bf16 (same two
-    // values a texel, uniform 0.1% relative precision, no scale to tune).
-    int kv_fmt = 0;
+    // The KV cache's layout, built once from `KV` in init_attention.  The
+    // per-head V grid is part of it: 8-bit KV only, derived from the head max,
+    // with K on the global KVSCALE grid (qk-normed, so already unit RMS).
+    KvLayout kv;
     // ATT_EXP=poly: use the portable exp (x_exp) instead of the driver's.
     // VC4's exp/exp2 are the same fixed-point sequence at 4.6e-05 worst
     // relative error against Xe's 2.2e-06; the polynomial is 1.5e-06 on
     // both (probes/sumorder_probe).  Off by default: the pins and the
     // shader digests belong to the driver's exp.
     bool exp_poly = false;
-    float kv_scale = 16384.0f;
-    int kv_width = 0;
-    // 8-bit KV only: V is quantised on a per-head, per-position grid derived
-    // from that head max (K keeps the global KVSCALE grid: it is qk-normed
-    // before rope, so its range is already about unit RMS).
-    bool kv_vstep = false;
     // The score and (max,sum) grids.  q16 with these scales: the score texel
     // holds round(score*score_scale), so the representable score range is
     // +-32768/score_scale (1024 -> +-32, 256 -> +-128) and the step is

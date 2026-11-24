@@ -42,12 +42,12 @@ string qkv_read(const AttnConfig& c, const char* tex, const char* macro) {
 static void need_attn(const AttnConfig& c) {
     const bool ok = c.dim > 0 && c.kv_dim > 0 && c.heads > 0 && c.kv_heads > 0 &&
                     c.head_dim > 0 && (c.head_dim % 2) == 0 && c.seq > 0 &&
-                    (c.heads % c.kv_heads) == 0 && c.kv_width > 0 &&
-                    (c.kv_bits == 0 || c.kv_bits == 8 || c.kv_bits == 16);
+                    (c.heads % c.kv_heads) == 0 && c.kv.texels > 0 &&
+                    (c.kv.bits == 0 || c.kv.bits == 8 || c.kv.bits == 16);
     if (!ok) {
         fprintf(stderr, "attn config: dim=%d kv_dim=%d heads=%d kv_heads=%d head_dim=%d "
                         "seq=%d kv_bits=%d width=%d\n", c.dim, c.kv_dim, c.heads, c.kv_heads,
-                c.head_dim, c.seq, c.kv_bits, c.kv_width);
+                c.head_dim, c.seq, c.kv.bits, c.kv.texels);
         exit(2);
     }
 }
@@ -128,15 +128,24 @@ string att_cross_kv(const AttnConfig& c, bool v_half, XFormat xf, bool bias) {
     // clamped it at +-16.
     const string TW = to_string(x_texels(c.kv_dim, xf));
     (void)v_half;
-    return "precision highp float;\n" + att_defs(c) + att_helpers(c) + x_glsl(xf) +
-        // `gl_FragCoord.x` is the *window* coordinate, and the V half lives at
-        // x=kv_dim/2: without XOFF the V half read X past its width.
-        string("uniform sampler2D XS") + (bias ? ",BS" : "") + ";uniform float XOFF;"
-        "void main(){int x=int(gl_FragCoord.x-XOFF);int i0=2*x;"
-        // X2 gives two consecutive values whatever the format's texel width.
-        "vec2 vv=X2(XS,2*x," + TW + ".0);"
-        + string(bias ? "vv+=X2(BS,2*x," : "vv+=vec2(") + TW + (bias ? ".0);" : "0.0);")
-        + "gl_FragColor=encKV(vv.x,vv.y);}";
+    // One fragment writes one *texel* of the half row, and the number of
+    // projection values that texel holds comes from the KV layout: i24/f32
+    // one, q16/bf16 two, q8 four.  This used to assume two and encode with
+    // encKV, so an i24 half (one value a texel) read 2x and kept only the even
+    // value -- half of every K/V row, silently.  (KV=q16 hid it; i24 is the
+    // v5 default.)
+    string fs = "precision highp float;\n" + att_defs(c) + att_helpers(c) + x_glsl(xf) +
+        "uniform sampler2D XS" + (bias ? ",BS" : "") + ";uniform float XOFF;"
+        "float rv(int j){return X1(XS,j," + TW + ".0)" +
+        (bias ? "+X1(BS,j," + TW + ".0)" : "") + ";}"
+        "void main(){int x=int(gl_FragCoord.x-XOFF);";
+    if (c.kv.vpt == 4)
+        fs += "int i=4*x;gl_FragColor=encKV8(rv(i),rv(i+1),rv(i+2),rv(i+3));}";
+    else if (c.kv.vpt == 2)
+        fs += "int i=2*x;gl_FragColor=encKV(rv(i),rv(i+1));}";
+    else
+        fs += "gl_FragColor=encKV1(rv(x));}";
+    return fs;
 }
 
 string att_defs(const AttnConfig& c) {
@@ -154,16 +163,16 @@ string att_defs(const AttnConfig& c) {
            "#define ROPEHALF " + string(c.rope_half ? "1" : "0") + "\n" +
            "#define QKNORM " + string(c.qk_norm ? "1" : "0") + "\n" +
            "#define QKEPS 0.000001\n" +
-           "#define KVSCALE " + to_string(c.kv_scale) + "\n" +
+           "#define KVSCALE " + to_string(c.kv.scale) + "\n" +
            "#define SCS " + to_string(c.score_scale) + "\n" +
            "#define SCSI " + to_string(256.0f / c.score_scale) + "\n" +
            "#define SMS " + to_string(c.sum_scale) + "\n" +
            "#define SMSI " + to_string(256.0f / c.sum_scale) + "\n" +
            (c.sum_log ? "#define SUM_LOG_SCALE " + to_string(c.sum_log_scale) + "\n" +
                        "#define SUM_LOG_INV " + to_string(256.0f / c.sum_log_scale) + "\n" : "") +
-           "#define KVPACK " + to_string(c.kv_bits) + "\n" +
-           "#define KVWIDTH " + to_string(c.kv_width) + "\n" +
-           "#define KVSTEP " + string(c.kv_vstep ? "1" : "0") + "\n" +
+           "#define KVVPT " + to_string(c.kv.vpt) + "\n" +
+           "#define KVWIDTH " + to_string(c.kv.texels) + "\n" +
+           "#define KVSTEP " + string(c.kv.vstep ? "1" : "0") + "\n" +
            (c.nseg > 1 ? "#define NSEG " + to_string(c.nseg) + "\n" +
                          "#define SEG " + to_string(c.seg) + "\n" +
                          "#define SEGK " + to_string(c.segk) + "\n" : "") +
@@ -184,7 +193,7 @@ string att_helpers(const AttnConfig& c) {
     // uniform 0.1% relative error; the fixed grid is 0.006% at the head max and
     // 2% a decade below it, which is what the attention's small values pay.
     const string kv_codec =
-        c.kv_fmt == 2 ?
+        c.kv.codec == KvCodec::F32 ?
         // f32 on the one-value-a-texel layout (the 24-bit path's): K at
         // [0,KVDIM), V at [KVDIM,2*KVDIM).  No rounding at all, which is the
         // point: a 16-bit grid fails by an LSB flip when the two drivers
@@ -197,7 +206,7 @@ string att_helpers(const AttnConfig& c) {
                "float(u&255u))/255.0;}\n"
                "vec4 encKV(float v0,float v1){return encKV1(v1);}\n"
                "float decKV(vec4 c,int odd){return decKV1(c);}\n")
-        : c.kv_fmt == 1 ?
+        : c.kv.codec == KvCodec::Bf16 ?
         // bf16 comes from XFormat now, not from a private codec here: the
         // layout is the two-values-a-texel one and the rounding is
         // round-to-nearest-even, both of which xformat already owns.
@@ -208,13 +217,13 @@ string att_helpers(const AttnConfig& c) {
         "float decKV(vec4 c,int odd){return (odd==1)?x_bf16(c.ba):x_bf16(c.rg);}\n"
         : string("vec4 encKV1(float v){return enc24s(v,KVSCALE);}\n"
                  "float decKV1(vec4 c){return dec24s(c,KVSCALE);}\n"
-                 "vec4 encKV(float v0,float v1){if(KVPACK==16){float q0=clamp(floor(v0*KVSCALE+0.5),-32768.0,32767.0);"
+                 "vec4 encKV(float v0,float v1){if(KVVPT==2){float q0=clamp(floor(v0*KVSCALE+0.5),-32768.0,32767.0);"
                  "if(q0<0.0)q0+=65536.0;float q1=clamp(floor(v1*KVSCALE+0.5),-32768.0,32767.0);if(q1<0.0)q1+=65536.0;"
                  "float h0=floor(q0/256.0),l0=q0-h0*256.0,h1=floor(q1/256.0),l1=q1-h1*256.0;"
                  "return vec4(h0/255.0,l0/255.0,h1/255.0,l1/255.0);}return enc24s(v0,KVSCALE);}\n"
-                 "float decKV(vec4 c,int odd){if(KVPACK==16){float hi=(odd==1)?c.b:c.r;float lo=(odd==1)?c.a:c.g;"
+                 "float decKV(vec4 c,int odd){if(KVVPT==2){float hi=(odd==1)?c.b:c.r;float lo=(odd==1)?c.a:c.g;"
                  "float u=float(int(hi*255.0+0.5)*256+int(lo*255.0+0.5));if(u>=32768.0)u-=65536.0;"
-                 "return u/KVSCALE;}if(KVPACK==8)return decKV8(c,odd);return decKV1(c);}\n");
+                 "return u/KVSCALE;}if(KVVPT==4)return decKV8(c,odd);return decKV1(c);}\n");
     return
         "vec4 q16(float v){float q=clamp(floor(v*256.0+0.5),-32768.0,32767.0);if(q<0.0)q+=65536.0;float hi=floor(q/256.0),lo=q-hi*256.0;return vec4(hi/255.0,lo/255.0,0.0,1.0);}\n"
         "float dec24raw(vec4 c){return float(int(c.r*255.0+0.5))*16777216.0+float(int(c.g*255.0+0.5))*65536.0+float(int(c.b*255.0+0.5))*256.0+float(int(c.a*255.0+0.5))-8388608.0;}\n"
@@ -243,7 +252,7 @@ string att_kv_rope(const AttnConfig& c) {
                     : string("uniform sampler2D QKV,RT,KN,VS;")) +
         "uniform float pos;" + qkv_read(c, "QKV", "QKVQ") +
         "void main(){int x=int(gl_FragCoord.x);"
-        "if(KVPACK==8){"
+        "if(KVVPT==4){"
         "if(x<KVDIM/4){"
         "int base=4*x;int h=base/HEADDIM;int li0=base-h*HEADDIM;"
         "float rk=1.0;"
@@ -275,7 +284,7 @@ string att_kv_rope(const AttnConfig& c) {
         "if(KVSTEP==1){float vd=dec24s(texture2D(" + vs + ",vec2((float(vh)+0.5)/float(KVHEADS)," + rty + ")),16777216.0);"
         "gl_FragColor=encKV8s(v0,v1,v2,v3,vd);return;}"
         "gl_FragColor=encKV8(v0,v1,v2,v3);return;}"
-        "if(KVPACK==16){"
+        "if(KVVPT==2){"
         "if(x<KVDIM/2){"
         "int i0=2*x;int h=i0/HEADDIM;int li0=i0-h*HEADDIM;"
         "float rk=1.0;"
@@ -426,8 +435,7 @@ string att_score(const AttnConfig& c) {
         "for(int i=0;i<HEADDIM;i++){"
         "vec4 qp=texture2D(Q,vec2((float((h*HEADDIM+i)/2)+0.5)/float(DIM/2)," + qrow + "));"
         "float q=(((h*HEADDIM+i)-(h*HEADDIM+i)/2*2)==0)?dec16(qp.rg):dec16(qp.ba);"
-        "int ki=kvh*HEADDIM+i;int tx=ki;int odd=0;"
-        "if(KVPACK==16){tx=ki/2;odd=ki-tx*2;}else if(KVPACK==8){tx=ki/4;odd=ki-tx*4;}"
+        "int ki=kvh*HEADDIM+i;int tx=ki/KVVPT;int odd=ki-tx*KVVPT;"
         "if(e0)s0+=q*decKV(texture2D(" + kv0.sampler + ",vec2((float(tx)+0.5)/float(KVWIDTH)," + kv0.y + ")),odd);"
         "if(e1)s1+=q*decKV(texture2D(" + kv1.sampler + ",vec2((float(tx)+0.5)/float(KVWIDTH)," + kv1.y + ")),odd);}"
         "vec4 p0=qe(e0?s0*invsqrt:0.0),p1=qe(e1?s1*invsqrt:0.0);"
@@ -566,9 +574,8 @@ string att_v(const AttnConfig& c, XFormat out) {
     for (int k = 0; k < N; ++k) {
         string K = to_string(k);
         heads_idx += "int ci" + K + "=i0+" + K + ";int vi" + K + "=kvh*HEADDIM+ci" + K + ";"
-                     "int tx" + K + "=KVDIM+vi" + K + ";int od" + K + "=0;"
-                     "if(KVPACK==16){tx" + K + "=KVDIM/2+vi" + K + "/2;od" + K + "=vi" + K + "-(vi" + K + "/2)*2;}"
-                     "else if(KVPACK==8){tx" + K + "=KVDIM/4+vi" + K + "/4;od" + K + "=vi" + K + "-(vi" + K + "/4)*4;}";
+                     "int tx" + K + "=KVDIM/KVVPT+vi" + K + "/KVVPT;"
+                     "int od" + K + "=vi" + K + "-(vi" + K + "/KVVPT)*KVVPT;";
     }
     string bodies, accs;
     for (int k = 0; k < N; ++k) {
@@ -578,7 +585,7 @@ string att_v(const AttnConfig& c, XFormat out) {
     }
     // 8-bit V carries a per-head, per-position step: one fetch per position,
     // shared by every channel of the fragment (they all sit in one KV head).
-    const bool vstep = (c.kv_bits == 8 && c.kv_vstep);
+    const bool vstep = (c.kv.bits == 8 && c.kv.vstep);
     const string step0 = "float d0=dec24s(texture2D(" + vs0.sampler + ",vec2((float(kvh)+0.5)/float(KVHEADS)," + vs0.y + ")),16777216.0);";
     const string step1 = "float d1=dec24s(texture2D(" + vs1.sampler + ",vec2((float(kvh)+0.5)/float(KVHEADS)," + vs1.y + ")),16777216.0);";
     string loads0, loads1;
