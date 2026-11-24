@@ -2385,9 +2385,17 @@ void Session::encdec_encode(const vector<int>& src) {
         }
         // The encoder output and each decoder layer's cross K/V, read back once.
         cd_enc_.assign((size_t)n * D, 0.0f);
-        for (int b = 0; b < n; ++b) {
-                vector<float> row = read_hidden(gpu_.grp_h(b, n));
-                memcpy(cd_enc_.data() + (size_t)b * D, row.data(), sizeof(float) * D);
+        // The host copy of the encoder's output is a **dump**, not an operand:
+        // the cross-attention's K/V is built on the GPU and nothing else reads
+        // this.  It used to be filled unconditionally, which is `n` finishes and
+        // `n` read-backs a sentence -- the fixed cost that made the encode pass
+        // look superlinear in the source length.
+        if (env_flag("ENCDEC_DUMP")) {
+                for (int b = 0; b < n; ++b) {
+                        vector<float> row = read_hidden(gpu_.grp_h(b, n));
+                        memcpy(cd_enc_.data() + (size_t)b * D, row.data(),
+                               sizeof(float) * D);
+                }
         }
         // ENCDEC_DUMP: the two numbers that decide whether the encode pass is
         // sane -- the output's magnitude (a post-norm stack ends O(1), so a
