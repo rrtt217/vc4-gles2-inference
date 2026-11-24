@@ -2314,10 +2314,12 @@ void Session::encdec_encode(const vector<int>& src) {
                         // not enter the softmax.
                         gpu_.att_stats_row(n - 1, b, n);
                         gpu_.att_v_row(l, n - 1, b, n);
+                        lap.mark("encStatsV", l);
                         // r1 = x + wo*att + o_b, then x1 = LN1(r1)
                         gpu_.matvec_add(m.u_enc_wo[l], gpu_.att_out_.tex,
                                         h[b], gpu_.cd_b(), gpu_.act_fmt_);
                         gpu_.bias_add(gpu_.cd_b().tex, gpu_.enc_rows_.enc_o_b[l], gpu_.cd_c());
+                        lap.mark("encWo", l);
                         if (env_flag("ENCDEC_DUMP") && l == 0 && b == 0) {
                                 // Even components of r1 match the numpy reference
                                 // and odd ones do not, which is the signature of
@@ -2335,6 +2337,7 @@ void Session::encdec_encode(const vector<int>& src) {
                         GLuint x1 = gpu_.ln_q16(gpu_.cd_c().tex, gpu_.enc_rows_.enc_ln1[l],
                                                 gpu_.enc_rows_.enc_ln1b[l],
                                                 gpu_.cd_a(), m.rms_eps);
+                        lap.mark("encLN1b", l);
                         // f = fc2(swish(fc1(x1) + b1)) + b2, then r2 = x1 + f.
                         // cd_b holds the fc1 side, so x1 (cd_a) survives as the
                         // residual this adds into.
