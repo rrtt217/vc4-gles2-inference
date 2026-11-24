@@ -2247,8 +2247,14 @@ void Session::encdec_encode(const vector<int>& src) {
         const Model& m = m_;
         const int n = (int)src.size();
         if (n <= 0 || n > m.enc_seq || n > m.seq) {
+                // A refusal, not a truncation.  `cd_n_ = 0` makes the decode loop
+                // stop instead of running on the previous sentence's state, which
+                // is what "return here" did: a silent redirect of the model's
+                // answer to something unrelated.
                 cerr << "encoder: " << n << " positions do not fit (enc_seq "
-                     << m.enc_seq << ", seq " << m.seq << ")\n";
+                     << m.enc_seq << ", seq " << m.seq << "); the container was "
+                     << "packed for a shorter source\n";
+                cd_n_ = 0;
                 return;
         }
         cd_n_ = n;
@@ -2399,6 +2405,8 @@ void Session::encdec_encode(const vector<int>& src) {
 }
 
 vector<float> Session::encdec_step(int token, int pos) {
+        // `encdec_encode` refuses a source that does not fit and zeroes this.
+        if (cd_n_ <= 0) return vector<float>();
         const Model& m = m_;
         const int D = m.dim, F = m.enc_ffn;
         const float s = m.enc_scale_embed ? sqrtf((float)D) : 1.0f;

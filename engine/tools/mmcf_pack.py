@@ -529,8 +529,10 @@ def main():
     ap.add_argument("--tok-unigram", action="store_true",
                     help="the embedded .tok is a SentencePiece unigram table "
                          "(key 10 byte 4); build it with make_tok_spm.py")
-    ap.add_argument("--enc-seq", type=int, default=64,
-                    help="encoder sequence capacity (v5 only); SEQ is the decoder's")
+    ap.add_argument("--enc-seq", type=int, default=0,
+                    help="encoder sequence capacity (v5 only); 0 takes the model's "
+                         "own capacity from its position table, which is the only "
+                         "value that is not a silent truncation.  SEQ is the decoder's")
     ap.add_argument("--tok")
     ap.add_argument("--out", required=True)
     ap.add_argument("--name", default="model")

@@ -1661,7 +1661,7 @@ def fold_scale_constants(m):
 
 
 
-def load_marian(model_dir, seq=64, enc_seq=64):
+def load_marian(model_dir, seq=0, enc_seq=0):
     """Read a Marian encoder-decoder directory (OPUS-MT, `MarianMTModel`).
 
     The block is not a transformer decoder: `normalize_before: false` puts the
@@ -1688,6 +1688,18 @@ def load_marian(model_dir, seq=64, enc_seq=64):
     from pth_legacy import load as load_legacy
     with open(model_dir + '/config.json') as f:
         cfg = json.load(f)
+    # 0 means "this model's own capacity", resolved here: the encoder block below
+    # is built before the position table is read, so a later default wrote
+    # `seq 0` into the container and the engine refused every source.  A
+    # hand-passed 64 is not a memory saving either -- it is a silent cap on every
+    # source and target sentence, and the 512-row position table made the old
+    # guard pass regardless.
+    cap = int(cfg.get("max_position_embeddings") or 0)
+    if cap:
+        if not seq:
+            seq = cap
+        if not enc_seq:
+            enc_seq = cap
     w = load_legacy(model_dir + '/pytorch_model.bin')
 
     def g(name):
@@ -1790,6 +1802,15 @@ def load_marian(model_dir, seq=64, enc_seq=64):
         m['dec_bias_ffn'].append([g(p + 'fc1.bias')])
 
     m['pos'] = g('model.encoder.embed_positions.weight')
+    # 0 means "this model's own capacity".  A hand-passed 64 used to be the
+    # default and it is not a memory saving, it is a silent cap: every source or
+    # target longer than it is truncated, and the position table's 512 rows made
+    # the guard below pass either way.
+    cap = int(m['pos'].shape[0])
+    if not seq:
+        seq = cap
+    if not enc_seq:
+        enc_seq = cap
     if not np.array_equal(m['pos'], g('model.decoder.embed_positions.weight')):
         raise SystemExit("%s: the two position tables differ; the container "
                          "carries one" % model_dir)
