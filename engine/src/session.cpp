@@ -2303,10 +2303,12 @@ void Session::encdec_encode(const vector<int>& src) {
                 gpu_.set_qkv_bias(gpu_.enc_rows_.enc_qkv_b[l]);
                 for (int b = 0; b < n; ++b) {
                         gpu_.att_stage(m.u_enc_qkv[l], h[b], l, b, b, n);
+                        lap.mark("encAttStage", l);
                 }
                 gpu_.set_qkv_bias(0);
                 lap.mark("encQKV", l);
                 gpu_.att_scores_batch(l, n - 1, n);
+                lap.mark("encScoresBatch", l);
                 lap.mark("encScores", l);
                 for (int b = 0; b < n; ++b) {
                         // `pos` is the last *valid* key under NOCAUSAL (the
@@ -2314,7 +2316,9 @@ void Session::encdec_encode(const vector<int>& src) {
                         // fills n slots of a SEQ-wide cache and the rest must
                         // not enter the softmax.
                         gpu_.att_stats_row(n - 1, b, n);
+                        lap.mark("encStatsRow", l);
                         gpu_.att_v_row(l, n - 1, b, n);
+                        lap.mark("encVRow", l);
                         lap.mark("encStatsV", l);
                         // r1 = x + wo*att + o_b, then x1 = LN1(r1)
                         gpu_.matvec_add(m.u_enc_wo[l], gpu_.att_out_.tex,
