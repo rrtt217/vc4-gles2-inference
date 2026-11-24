@@ -270,6 +270,7 @@ std::string ln_stats_q16(int dim, XFormat rf);
 std::string ln_apply_q16(int dim, XFormat rf, XFormat out);
 std::string bias_add_q16(int dim, XFormat xf, XFormat f);
 std::string act_swish(int dim, XFormat f);
+std::string act_swish_biased(int dim, XFormat xf, XFormat f);
 std::string rwkv_mul(int dim, int adiv);
 std::string rwkv_rk_reduce(int dim, int hs);
 std::string rwkv_rk_add(int dim, int hs);

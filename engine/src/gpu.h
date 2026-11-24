@@ -99,6 +99,9 @@ public:
     // the same format only by accident.
     GLuint bias_add_f(GLuint x, GLuint b, Target& out, int dim, XFormat xf, XFormat f);
     GLuint act_swish(GLuint x, Target& out, int n, XFormat f);
+    // swish(x + b) in one pass: the bias add and the activation are one
+    // elementwise expression and two formats.
+    GLuint act_swish_biased(GLuint x, GLuint b, Target& out, int dim, XFormat xf, XFormat f);
 
     // Everything this context created that is *scene* rather than *program*:
     // weight textures, per-layer tables, scratch/FBO targets, the upload cache.

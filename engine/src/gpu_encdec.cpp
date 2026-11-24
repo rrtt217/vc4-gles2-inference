@@ -220,6 +220,24 @@ GLuint GPU::bias_add_f(GLuint x, GLuint b, Target& out, int dim, XFormat xf, XFo
         return out.tex;
 }
 
+// swish(x + b): one draw where the two passes it replaces took three (the
+// 2048-wide bias add splits into strips), and one texture round trip fewer.
+GLuint GPU::act_swish_biased(GLuint x, GLuint b, Target& out, int dim, XFormat xf, XFormat f){
+        const int tw = x_texels(dim, f);
+        if (out.tex == 0 || out.w != tw) out = make_target(tw, 1);
+        GLuint p = x_prog("swishb_" + to_string(dim) + "_" + to_string((int)xf) + "_" +
+                              to_string((int)f),
+                          ::act_swish_biased(dim, xf, f));
+        bind_fbo(out.fbo);
+        glViewport(0, 0, tw, 1);
+        use_program(p);
+        bind_tex(0, x); set_sampler(p, "X", 0);
+        bind_tex(1, b); set_sampler(p, "B", 1);
+        setup_attrib(p);
+        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+        return out.tex;
+}
+
 GLuint GPU::act_swish(GLuint x, Target& out, int dim, XFormat f){
         const int tw = x_texels(dim, f);
         if (out.tex == 0 || out.w != tw) out = make_target(tw, 1);

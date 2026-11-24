@@ -2344,16 +2344,28 @@ void Session::encdec_encode(const vector<int>& src) {
                         // f = fc2(swish(fc1(x1) + b1)) + b2, then r2 = x1 + f.
                         // cd_b holds the fc1 side, so x1 (cd_a) survives as the
                         // residual this adds into.
+                        lap.mark("encFC1", l);
                         gpu_.matvec_to(m.u_enc_w1[l], x1, gpu_.cd_d());
                         // X is what `matvec_q8` wrote, and that kernel's
                         // output store is I24 unconditionally -- the ACT axis
                         // does not reach it.  Reading it as act_fmt_ is the
                         // "FFN hidden is fine in one half only" bug.
-                        gpu_.bias_add_f(gpu_.cd_d().tex, gpu_.enc_rows_.enc_fc1_b[l],
-                                        gpu_.cd_b(), F, XFormat::I24_1, gpu_.act_fmt_);
-                        GLuint hf = gpu_.act_swish(gpu_.cd_b().tex, gpu_.cd_d(), F, gpu_.act_fmt_);
-                        gpu_.matvec_add(m.u_enc_w2[l], hf, x1, gpu_.cd_b(), gpu_.act_fmt_);
-                        gpu_.bias_add(gpu_.cd_b().tex, gpu_.enc_rows_.enc_fc2_b[l], gpu_.cd_c());
+                        // swish(fc1 + b) in one pass: the bias add was 0.59 ms
+                        // against the 0.50 ms matvec that fed it, and both were
+                        // their own draw.
+                        GLuint hf = gpu_.act_swish_biased(gpu_.cd_d().tex,
+                                                          gpu_.enc_rows_.enc_fc1_b[l],
+                                                          gpu_.cd_b(), F, XFormat::I24_1,
+                                                          gpu_.act_fmt_);
+                        lap.mark("encSwishB", l);
+                        // hf lives in cd_b, so the add must not write there: a
+                        // matvec reads X and draws into its target, and one
+                        // texture for both is a hazard the strip split makes
+                        // real (measured: the reply collapsed to 0 tokens).
+                        gpu_.matvec_add(m.u_enc_w2[l], hf, x1, gpu_.cd_d(), gpu_.act_fmt_);
+                        lap.mark("encW2", l);
+                        gpu_.bias_add(gpu_.cd_d().tex, gpu_.enc_rows_.enc_fc2_b[l], gpu_.cd_c());
+                        lap.mark("encFC2b", l);
                         // x = LN2(r2), straight into the group slot the next layer reads.
                         h[b] = gpu_.ln_q16(gpu_.cd_c().tex, gpu_.enc_rows_.enc_ln2[l],
                                            gpu_.enc_rows_.enc_ln2b[l],
@@ -2449,11 +2461,11 @@ vector<float> Session::encdec_step(int token, int pos) {
                 GLuint y2 = gpu_.ln_q16(gpu_.cd_c().tex, gpu_.enc_rows_.ln2[l],
                                         gpu_.enc_rows_.ln2b[l], gpu_.cd_a(), m.rms_eps);
                 gpu_.matvec_to(m.w1[l], y2, gpu_.cd_d());
-                gpu_.bias_add_f(gpu_.cd_d().tex, gpu_.enc_rows_.fc1_b[l], gpu_.cd_b(),
-                                F, XFormat::I24_1, gpu_.act_fmt_);
-                GLuint hid = gpu_.act_swish(gpu_.cd_b().tex, gpu_.cd_d(), F, gpu_.act_fmt_);
-                gpu_.matvec_add(m.w2[l], hid, y2, gpu_.cd_b(), gpu_.act_fmt_);
-                gpu_.bias_add(gpu_.cd_b().tex, gpu_.enc_rows_.fc2_b[l], gpu_.cd_c());
+                GLuint hid = gpu_.act_swish_biased(gpu_.cd_d().tex, gpu_.enc_rows_.fc1_b[l],
+                                                   gpu_.cd_b(), F, XFormat::I24_1,
+                                                   gpu_.act_fmt_);
+                gpu_.matvec_add(m.w2[l], hid, y2, gpu_.cd_d(), gpu_.act_fmt_);
+                gpu_.bias_add(gpu_.cd_d().tex, gpu_.enc_rows_.fc2_b[l], gpu_.cd_c());
                 h = gpu_.ln_q16(gpu_.cd_c().tex, gpu_.enc_rows_.ln3[l],
                                 gpu_.enc_rows_.ln3b[l], gpu_.cd_d(), m.rms_eps);
         }

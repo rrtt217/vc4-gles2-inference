@@ -2486,6 +2486,42 @@ std::string act_swish(int dim, XFormat f) {
     return head(f) + x_residual_glsl(f) + "uniform sampler2D X;" + body + "}";
 }
 
+// swish(x + b) in one pass.  `bias_add_f` then `act_swish` is two draws and two
+// texture round trips for what is one elementwise expression, and the bias add
+// alone measured 0.59 ms against the 0.50 ms matvec that fed it -- the pass is
+// its own cost on a board where a draw is 1.25 ms.
+//
+// Two slots, because the operands are two formats: X is what the projection
+// wrote (I24 today, `xf`) and B is a host-uploaded row in the output's format.
+// `head(f)` names slot X for f, `x_residual_glsl(xf)` names slot Y for xf, so
+// nothing collides -- the same arrangement every two-format kernel here uses.
+std::string act_swish_biased(int dim, XFormat xf, XFormat f) {
+    need_dim("act_swish_biased", dim);
+    const string AS = to_string(x_texels(dim, xf));
+    const string BS = to_string(x_texels(dim, f));
+    // The sum goes into a local first.  Composing `X+B/(1+exp(-(X+B)))` straight
+    // from the pieces emitted `x + b/(1+exp(-(x+b)))` -- `/` binds tighter than
+    // `+`, so the activation landed on the bias alone and the translation came
+    // back empty.  A local also evaluates the sum once, not twice.
+    const auto sum = [&](const string& k) {
+        return "Y1(X," + k + "," + AS + ".0)+X1(B," + k + "," + BS + ".0)";
+    };
+    const auto sw = [](const char* v) {
+        const string neg = string("-") + v;
+        return string(v) + "/(1.0+" + EXP(neg.c_str()) + ")";
+    };
+    string body = "void main(){";
+    if (x_per_texel(f) == 2)
+        body += "int t=int(gl_FragCoord.x);int i0=2*t;"
+                "float v0=" + sum("i0") + ";float v1=" + sum("i0+1") + ";"
+                "gl_FragColor=XST2(" + sw("v0") + "," + sw("v1") + ");";
+    else
+        body += "int i0=int(gl_FragCoord.x);"
+                "float v0=" + sum("i0") + ";"
+                "gl_FragColor=XST1(" + sw("v0") + ");";
+    return head(f) + x_residual_glsl(xf) + "uniform sampler2D X,B;" + body + "}";
+}
+
 std::string rwkv_mul(int dim, int adiv) {
     need_dim("rwkv_mul", dim);
     const string D = to_string(dim);

@@ -176,6 +176,8 @@ vector<Case> cases() {
     // here, so `gate/shader_hashes.sh` could not see the day one of them
     // changed (`x_f32r` was a hand copy and nothing compared it).  One program
     // each, at the shape the FFN's hidden uses.
+    add(v, "act_swish_biased_2048_f24_i16", []
+        { return act_swish_biased(2048, XFormat::I24_1, I16_2); });
     add(v, "swiglu_2row_2432_bf16", [] { return swiglu_2row(2432, XFormat::BF16); });
     add(v, "swiglu_2row_2432_f32", [] { return swiglu_2row(2432, XFormat::F32); });
     add(v, "swiglu_2432_fused_i16_2", [] { return swiglu(2432, true, I16_2); });
