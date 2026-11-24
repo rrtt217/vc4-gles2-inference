@@ -51,7 +51,7 @@ The rows below are the registry, one per switch, grouped by the axis they move.
 diagnostic or a pricing arm; `retired` is gone (`--dump-switches` prints the
 same table with what *this* environment resolved to).
 
-152 switches: 29 permanent, 109 probe, 14 retired; 16 legacy spellings are translated.
+154 switches: 29 permanent, 111 probe, 14 retired; 16 legacy spellings are translated.
 
 ### The activation streams
 
@@ -157,6 +157,8 @@ same table with what *this* environment resolved to).
 | `CPU_RMS_GPU` | value | the CPU layer loop's RMSNorm runs the GPU shader (A/B for the PPL gap) |
 | `DUMP_F32` | value | dump rows as raw IEEE bits instead of q16 texels |
 | `FFN_DUMP` | value | the first 8 texels of layer 0's gate output |
+| `GLSL_DUMP` | value | write every program this run builds to <dir>/<key>.glsl: the seed for a kernel experiment |
+| `GLSL_OVERRIDE` | value | compile <file> for <key>, one or more <key>=<file>[,<key>=<file>...]; a key that never builds is named at exit |
 | `HIDDEN_DUMP` | value | the same for the layer output on the GPU path (GPU_LAYER 0 vs 1) |
 | `LOGITS_OUT` | value | float32 logits after prefill, for cmp_logits.py |
 | `MATVEC_DUP` | value | replay one weight-matrix pass per layer (wo,ffn,w2 or all); dup_env() |
@@ -792,6 +794,19 @@ conclusion from its output.
 - `SHADER_SRC=<substr>` — prints the generated GLSL for program keys containing
   the substring.  The builder branches on the activation and residual formats,
   and reading the generated text is the only way to be sure which branch ran.
+
+- `GLSL_DUMP=<dir>` and `GLSL_OVERRIDE=<key>=<file>[,<key>=<file>...]` — the
+  runtime half of the shader text: `GLSL_DUMP` writes every program this run
+  builds to `<dir>/<key>.glsl` (the seed, as one directory; a model swap that
+  rebuilds a key with another text writes `<key>.2.glsl` rather than overwriting
+  it), and `GLSL_OVERRIDE` compiles the named file for that program instead of
+  the builder's text (one or more programs, named on the command line).  The
+  workflow is one run with the directory, then one run per edited copy; a key that
+  never builds is named at exit, and a malformed or unreadable entry stops the
+  run.  `SHADER_SRC` prints the effective text.  The default (both unset) is the
+  builder's text byte for byte, so `gate/shader_hashes.sh` keeps hashing the
+  builders; a winning text goes back into `shaders_*.cpp` and rebaselines that
+  gate in the same commit.
 
 - `BLOCK_MARKERS=1` — mask the `<|...|>` marker tokens while generating.  Off
   by default: the engine cannot tell a marker from content (`<think>` is a

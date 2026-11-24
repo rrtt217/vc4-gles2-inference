@@ -7,6 +7,7 @@
 // drivers that call them are split by mechanism.
 #include "gpu.h"
 #include "gpu_internal.h"
+#include "glsl_io.h"
 #include "shaders.h"
 #include "xformat.h"
 
@@ -128,7 +129,10 @@ GLuint GPU::x_i4_pair(int rows, int cols){
         auto it = programs_.find(key);
         if (it != programs_.end()) return it->second;
         g_prog_key = key;
-        GLuint p = link_program(matvec_i4_pair(rows, cols, act_fmt_));
+        // This site builds a program without x_prog's text hash, so the two
+        // runtime GLSL switches have to be asked here too (glsl_io.h).
+        const string text = glsl_text(key, matvec_i4_pair(rows, cols, act_fmt_));
+        GLuint p = link_program(text);
         programs_[key] = p;
         return p;
     }
@@ -192,8 +196,10 @@ GLuint GPU::x_i4_add_pair(int rows, int cols, XFormat xf, bool fmt4){
         auto it = programs_.find(key);
         if (it != programs_.end()) return it->second;
         g_prog_key = key;
-        GLuint p = link_program(fmt4 ? matvec_i4_add_pair_4x4(rows, cols, xf, res_fmt_, inl)
-                                     : matvec_i4_add_pair(rows, cols, xf, res_fmt_, inl));
+        const string text = glsl_text(key,
+                                     fmt4 ? matvec_i4_add_pair_4x4(rows, cols, xf, res_fmt_, inl)
+                                          : matvec_i4_add_pair(rows, cols, xf, res_fmt_, inl));
+        GLuint p = link_program(text);
         programs_[key] = p;
         return p;
     }

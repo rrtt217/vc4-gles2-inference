@@ -9,6 +9,7 @@
 
 #include "gpu.h"
 #include "gpu_internal.h"
+#include "glsl_io.h"
 #include "shaders.h"
 
 #include <cstring>
@@ -59,18 +60,24 @@ double run_time_ms(){
     }
 
 GLuint GPU::x_prog(const string& key, const string& src){
+        // The text that compiles: GLSL_OVERRIDE replaces the builder's text and
+        // GLSL_DUMP writes this run's set out (glsl_io.h).  The hash below is
+        // therefore the *effective* text's: an override is another program, not a
+        // cache hit on the builder's, and two keys that build one text must stay
+        // one program only while neither is overridden.
+        const string text = glsl_text(key, src);
         // SHADER_SRC=<substr> prints the generated GLSL for matching program
         // keys.  The alternative is reading the builder and guessing which
         // branch a format took, which is how a wrong decode survives a review.
         if (const char* f = getenv("SHADER_SRC"))
                 if (key.find(f) != string::npos)
                         fprintf(stderr, "==== %s ====\n%s==== end %s ====\n",
-                                key.c_str(), src.c_str(), key.c_str());
+                                key.c_str(), text.c_str(), key.c_str());
         // Two keys can build byte-identical text (xq8pl and xqkvp both do): a
         // program is a pure function of its shaders, so share the object and
         // skip the second compile.  64-bit hash; a collision would need two
         // different texts and is not a practical risk here.
-        const size_t h = std::hash<string>{}(src);
+        const size_t h = std::hash<string>{}(text);
         auto it = programs_.find(key);
         if (it != programs_.end()) {
             // Only a hit when the key still stands for this text.  A model
@@ -91,7 +98,7 @@ GLuint GPU::x_prog(const string& key, const string& src){
             return t->second;
         }
         g_prog_key = key;
-        GLuint p = link_program(src);
+        GLuint p = link_program(text);
         check_program_runs(p, key);
         programs_[key] = p;
         prog_key_hash_[key] = h;

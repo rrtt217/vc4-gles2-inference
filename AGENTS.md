@@ -409,6 +409,7 @@ Pick the tool that answers the question before writing a new probe:
 | does the conv (hybrid) block's fetching work? | `probes/conv_probe` (and `_pi`): section A drives the kernel fetch patterns byte-for-byte, B/C run the shipped `conv3_act`/`mul_act` against a CPU reference.  It is how "three fetches from one sampler" was cleared on VC4 -- the kernel texture is 512x3, and every case is exact |
 | did my change alter numerics? | `regression.sh`, and PPL rather than one string |
 | did my change move the emitted GLSL? | `gate/shader_hashes.sh` (no GPU needed); `--dump-shaders` / `--dump-shaders=raw` to look |
+| want another GLSL text without a rebuild? | `GLSL_DUMP=<dir>` seeds every program's text; `GLSL_OVERRIDE=<key>=<file>` compiles it (`docs/test-hooks.md`); port the winner back and rebaseline `shader_hashes.sh` |
 
 `docs/test-hooks.md` lists the environment switches and
 [`engine/src/switches.cpp`](engine/src/switches.cpp) is the inventory: one row

@@ -15,6 +15,7 @@ responsibility, not by line count:
 | `src/shaders_rwkv.cpp` | RWKV-7's private f32 bit-cast codec, gates, norms and WKV recurrence |
 | `src/shaders_attn.cpp` | attention (self and cross), KV and logits shader builders |
 | `src/dump_shaders.h/.cpp` | the `--dump-shaders` matrix: every builder's emitted GLSL, digested |
+| `src/glsl_io.h/.cpp` | runtime GLSL text: `GLSL_DUMP` seeds `<dir>/<key>.glsl`, `GLSL_OVERRIDE` compiles a named program's file (the kernel experiment without a rebuild) |
 | `src/gpu.cpp` | the GL object's own state: the constructor (which reads the three target limits), the capability queries (`gpu_attn_enabled`, `gpu_layer_enabled`, `rms_fused`, `needs_finish`, `att_cfg`) and the qkv probes.  142 lines; it was 2674 before the 2026-11-14 split |
 | `src/gpu_gl.cpp` | EGL/GLES2: `init_egl` (surfaceless context, the MESA version overrides for the q4 kernels), `init_gl`, the bind cache accessors and the read-backs |
 | `src/gpu_state.cpp` | textures/targets factories, `attach_dump_fbo`, `release_scene`/`reset_targets`, the scene ledgers (the ones `gate/check_target_reset.sh` keeps complete) |

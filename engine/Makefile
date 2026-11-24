@@ -27,10 +27,10 @@ JINJA := $(TP)/jinja/lexer.cpp $(TP)/jinja/parser.cpp $(TP)/jinja/runtime.cpp \
 # rule now covers the shader builders: one TU per weight format plus the shared
 # prelude, so a new shader file is linked without every probe being edited.
 SHADERLIB := $(wildcard $(SRC)/shaders*.cpp)
-GPULIB := $(wildcard $(SRC)/gpu*.cpp) $(SHADERLIB) \
+GPULIB := $(wildcard $(SRC)/gpu*.cpp) $(SHADERLIB) $(SRC)/glsl_io.cpp \
           $(SRC)/xformat.cpp $(SRC)/common.cpp $(SRC)/switches.cpp
 CORE := $(SRC)/engine.cpp $(SRC)/common.cpp $(SRC)/xformat.cpp $(SRC)/switches.cpp \
-        $(SHADERLIB) $(SRC)/dump_shaders.cpp \
+        $(SHADERLIB) $(SRC)/dump_shaders.cpp $(SRC)/glsl_io.cpp \
         $(wildcard $(SRC)/gpu*.cpp) \
         $(SRC)/tokenizer.cpp $(SRC)/model.cpp $(SRC)/session.cpp $(SRC)/prefix_cache.cpp $(SRC)/lineedit.cpp $(SRC)/lineedit_layout.cpp \
         $(SRC)/sampling.cpp $(SRC)/grammar.cpp $(SRC)/gbnf.cpp $(SRC)/gbnf_full.cpp $(SRC)/schema.cpp $(SRC)/tools.cpp $(SRC)/ppl.cpp $(SRC)/cli.cpp $(SRC)/chat_format.cpp $(SRC)/prefix_build.cpp $(SRC)/app.cpp $(SRC)/worker.cpp $(SRC)/chat.cpp $(SRC)/chattmpl.cpp $(JINJA)

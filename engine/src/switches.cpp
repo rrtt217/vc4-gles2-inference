@@ -66,6 +66,10 @@ static const SwitchDef kSwitches[] = {
      "with the greedy fast path, print the chunk winners"},
     {"SHADER_SRC", "", SwKind::Str, "", SwStatus::Probe, SwAxis::Dump,
      "print the GLSL of every program whose key contains the substring"},
+    {"GLSL_DUMP", "", SwKind::Str, "", SwStatus::Probe, SwAxis::Dump,
+     "write every program this run builds to <dir>/<key>.glsl: the seed for a kernel experiment"},
+    {"GLSL_OVERRIDE", "", SwKind::Str, "", SwStatus::Probe, SwAxis::Dump,
+     "compile <file> for <key>, one or more <key>=<file>[,<key>=<file>...]; a key that never builds is named at exit"},
 
     // ---- Probe: what one pass costs ----------------------------------------
     {"TEX_LIMIT", "", SwKind::Int, "0..16384", SwStatus::Probe, SwAxis::Probe,
