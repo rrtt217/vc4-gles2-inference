@@ -1,7 +1,7 @@
 #pragma once
 
-// Shader-text regression harness.  Every builder in shaders.cpp /
-// shaders_attn.cpp is called with a fixed matrix of arguments and the
+// Shader-text regression harness.  Every builder in the shader TUs
+// (shaders_*.cpp) is called with a fixed matrix of arguments and the
 // resulting GLSL is printed, either as one digest per builder or verbatim.
 //
 // The point is that the emitted *text* is the thing the driver compiles and

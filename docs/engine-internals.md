@@ -428,7 +428,7 @@ of levels or on zero.  The upload is the boundary where this bites, because
 every matvec reads its activation from a texture:
 
 ```cpp
-vector<float> GPU::matvec_s(const Mat& m, const vector<float>& x);  // gpu.cpp
+vector<float> GPU::matvec_s(const Mat& m, const vector<float>& x);  // gpu_matvec.cpp
 ```
 
 `matvec_s` takes the input's own maximum, picks the power of two that puts it
@@ -535,8 +535,9 @@ container can run `SEQ=32768`).
 
 **The loop.** The serial form keeps the state in `vector<float>` on the host and
 runs every matrix as a GPU matvec, which is the reference path.  The fused form
-(`gpu_rwkv.cpp`, 27 `rwkv_*` builders, `RWKV_GPU=1`) keeps the whole layer on
-textures and stores the state as **bit-cast f32 in RGBA8 ping-pong targets**
+(`RWKV_GPU=1`; the `rwkv_*` builders live in `shaders_rwkv.cpp`, the loop in
+`gpu_rwkv.cpp`) keeps the whole layer on textures and stores the state as
+**bit-cast f32 in RGBA8 ping-pong targets**
 (`floatBitsToUint` / `uintBitsToFloat`), which is exact and needs an ES3 context;
 without one the state stays on the CPU (`RWKV_WKV_CPU=1` forces that).  This is
 the one place an integer encoding was measured and rejected: 1/256 fixed-point

@@ -83,9 +83,9 @@ RWKV_GPU=1 GPU_LAYER=1 KV=q16 SEQ=512 ./bin/engine_mm3_pi --chat \
   --system "You are a helpful assistant." --prompt "用一句话介绍你自己。" --gen 32 --greedy
 ```
 
-* `RWKV_GPU=1` selects the fused loop (27 `rwkv_*` builders).  Without it the
-  serial loop runs the same mathematics on the CPU with GPU matvecs, which is the
-  reference path.  **Cross-path acceptance is PPL, never the greedy string**: the
+* `RWKV_GPU=1` selects the fused loop (the `rwkv_*` builders in
+  `shaders_rwkv.cpp`).  Without it the serial loop runs the same mathematics
+  on the CPU with GPU matvecs, which is the reference path.  **Cross-path acceptance is PPL, never the greedy string**: the
   two loops differ by temp-0 chaos on a 0.1B, and `AGENTS.md` says so.
 * The WKV state travels as **bit-cast f32 in RGBA8 ping-pong textures**
   (`floatBitsToUint` / `uintBitsToFloat`), which needs an ES3 context; without one
