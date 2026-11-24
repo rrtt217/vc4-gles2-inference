@@ -7,6 +7,7 @@ responsibility, not by line count:
 |---|---|
 | `src/common.h/.cpp` | shared types (`Mat`, `Target`), q16 helpers, signals, file helpers |
 | `src/xformat.h/.cpp` | **the only activation-layout definition** (I16_1, I16_2, I8_4, and the P2 pair-of-positions target) and its GLSL macros |
+| `src/weight_format.h` | **the only weight-format definition**: one row per `WeightType` with its scale modes, slice alignment, accepted activation formats and the pipeline stages (`WStage`) it has a kernel for, plus the container dtype mapping |
 | `src/logits_grid.h` | **the only vocabulary-grid definition**: tile rows, the packed half-width, the matvec strip threshold |
 | `src/shaders.h` | the builder API: pure `(rows, cols, formats…) -> std::string` functions; no GL, no weight type |
 | `src/shaders_internal.h` + `src/shaders_common.cpp` | the prelude every builder emits, and the decode text more than one format shares |
@@ -129,6 +130,12 @@ claims to be text-neutral must leave the golden file untouched. The hot kernels
 repeat the decode inline on purpose, so the repetition is generated from the
 shared `k*` constants in `shaders_common.cpp` or the format TU that owns them
 rather than copied: one definition, same bytes.
+
+Which weight kernels exist is not part of that text: `src/weight_format.h` answers
+`wf_can(type, stage)`, and the GPU adapter is the only code that includes both it
+and `shaders.h`.  A stage the table grants and the adapter lacks a case for
+stops the run; a case with no stage bit only leaves a path unused.  Neither
+direction can fall through to another format's decoder.
 
 JSON documents — the `--worker` event stream, tool arguments and results, and
 the chat-template context — are built with `common_json` from

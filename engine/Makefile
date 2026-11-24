@@ -346,19 +346,21 @@ check: test warncheck
 	sh gate/check_q16_decode.sh
 	sh gate/check_draw_cap.sh
 	sh gate/check_target_reset.sh
+	python3 gate/check_weight_formats.py
 	python3 gate/test_mmcf_format.py
 	python3 ../server/selftest.py
 
 # The compiled tests, built and run without warncheck's forced engine rebuild:
 # `make test` is the fast loop (a few seconds), and `check` runs it first so a
 # broken unit fails before the minute-long build.
-test: test_lineedit test_tokenizer test_xformat test_grammar test_schema test_gbnf_full
+test: test_lineedit test_tokenizer test_xformat test_grammar test_schema test_gbnf_full test_weight_format
 	./test_lineedit
 	./test_tokenizer
 	./test_xformat
 	./test_grammar
 	./test_schema
 	./test_gbnf_full
+	./test_weight_format
 
 # Warnings from src/ are a defect: -Wall -Wextra is on by default and this makes a
 # clean build an assertion rather than a hope.  Warnings from third_party/ are
@@ -426,9 +428,15 @@ test_gbnf_full: tests/test_gbnf_full.cpp tests/checks.h $(SRC)/gbnf_full.cpp \
 	$(CXX) $(ALL_CXXFLAGS) $(INCS) -o $@ tests/test_gbnf_full.cpp $(SRC)/gbnf_full.cpp \
 	  $(SRC)/tokenizer.cpp $(SRC)/common.cpp $(SRC)/switches.cpp -lm
 
+# The weight-format contract: row order, caps, slice alignment, the wire dtype
+# mapping and mat_bytes' arithmetic.  Header-only, so no GPU and no model.
+test_weight_format: tests/test_weight_format.cpp tests/checks.h $(SRC)/weight_format.h \
+                    $(SRC)/common.h $(SRC)/xformat.h
+	$(CXX) $(ALL_CXXFLAGS) $(INCS) -o $@ tests/test_weight_format.cpp
+
 clean:
 	rm -rf build
-	rm -f engine engine_mm3 engine_mm3_pi test_lineedit test_tokenizer test_xformat test_grammar test_schema test_gbnf_full
+	rm -f engine engine_mm3 engine_mm3_pi test_lineedit test_tokenizer test_xformat test_grammar test_schema test_gbnf_full test_weight_format
 	rm -f probes/vc4_probe probes/vc4_ffn_probe probes/vc4_topk_probe probes/load_probe_pi
 	rm -f probes/matvec_probe probes/texsize_probe probes/q4fmt_probe_pi probes/glsl_probe_pi probes/q4mv_probe_pi probes/draw_probe_pi probes/packunpack_probe probes/packunpack_probe_pi probes/logits_grid_probe probes/wrow_probe probes/wrow_probe_pi probes/conv_probe probes/conv_probe_pi probes/t3mv_probe probes/t3mv_probe_pi probes/t3dec_probe probes/t3dec_probe_pi probes/t3lut_probe probes/t3lut_probe_pi probes/t3act_probe probes/t3act_probe_pi probes/rmsfuse_probe probes/rmsfuse_probe_pi probes/att_batch_probe probes/att_batch_probe_pi probes/att_out_probe probes/att_out_probe_pi \
 	rm -f probes/sumorder_probe probes/sumorder_probe_pi probes/q4mv_probe probes/progbinary_probe_pi probes/ffn2_probe_pi probes/rgba4444_probe probes/rgba4444_probe_pi
