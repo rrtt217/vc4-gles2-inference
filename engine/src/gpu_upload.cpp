@@ -343,7 +343,7 @@ GLuint GPU::upload_activations(const vector<float>& x){
 // the store (one q16 pair row), and a LayerNorm is the same packing two rows
 // tall with the bias underneath -- so `ln_q16` reads y=0.25 for w and y=0.75
 // for b, and `bias_add` reads a one-row texture.
-void GPU::upload_encdec_rows(const Model& m){
+void GPU::upload_v5_rows(const Model& m){
         EncdecRows& r = enc_rows_;
         // A bias rides the format of the tensor it is added to: a matvec writes
         // act_fmt_ (I24_1 by default) and a residual add reads res_fmt_, so the

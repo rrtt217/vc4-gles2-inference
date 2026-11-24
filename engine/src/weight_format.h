@@ -67,7 +67,7 @@ constexpr uint16_t xfmt_bit(XFormat f) { return (uint16_t)(1u << (unsigned)f); }
 constexpr uint16_t kActAll =
     xfmt_bit(XFormat::I16_1) | xfmt_bit(XFormat::I16_2) | xfmt_bit(XFormat::I8_4) |
     xfmt_bit(XFormat::I24_1) | xfmt_bit(XFormat::F32) | xfmt_bit(XFormat::BF16);
-// matvec_i6 refuses anything else by name (bitwise 6-bit decode).
+// matvec_q6 refuses anything else by name (bitwise 6-bit decode).
 constexpr uint16_t kActQ6 =
     xfmt_bit(XFormat::I16_2) | xfmt_bit(XFormat::F32) | xfmt_bit(XFormat::BF16);
 

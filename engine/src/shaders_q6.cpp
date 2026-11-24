@@ -6,12 +6,12 @@
 using std::string;
 using std::to_string;
 
-string matvec_i6(int rows, int cols, XFormat xf, bool wrow) {
-    need_shape("matvec_i6", rows, cols, 8);
+string matvec_q6(int rows, int cols, XFormat xf, bool wrow) {
+    need_shape("matvec_q6", rows, cols, 8);
     // X4Q is format-generic, so a float32 activation row works here too; the
     // q16 pair grid is only what the VC4 fast path was tuned for.
     if (xf != XFormat::I16_2 && xf != XFormat::F32 && xf != XFormat::BF16)
-        { fprintf(stderr, "shader matvec_i6: q6 head needs I16_2, BF16 or F32 activations\n"); exit(2); }
+        { fprintf(stderr, "shader matvec_q6: q6 head needs I16_2, BF16 or F32 activations\n"); exit(2); }
     const int axw = x_texels(cols, xf);
     const int lo_w = cols / 8;    // one texel = 4 bytes = 8 nibbles
     const int hi_w = cols / 16;   // one texel = 4 bytes = 16 two-bit values

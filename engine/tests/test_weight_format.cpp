@@ -79,7 +79,7 @@ void test_scale_and_activations() {
     CHECK_LL(wf(WeightType::INT6).scale_modes, kWScaleUniform | kWScalePerRow);
     CHECK_LL(wf(WeightType::T3).scale_modes, kWScaleUniform | kWScalePerRow);
 
-    // matvec_i6's refusal is the reason q6 is the one exception.
+    // matvec_q6's refusal is the reason q6 is the one exception.
     CHECK_LL(wf(WeightType::INT6).act_mask, kActQ6);
     CHECK(wf_accepts(WeightType::INT6, XFormat::I16_2));
     CHECK(wf_accepts(WeightType::INT6, XFormat::F32));

@@ -145,7 +145,7 @@ vector<vector<vector<float>>> GPU::matvec_batch_group(const vector<MvBatch>& gro
                 const Mat& m = *groups[i].m;
                 const vector<const vector<float>*>& xs = *groups[i].xs;
                 if (xs.empty()) continue;
-                const bool wrow = m.type == WeightType::INT8 && m.has_row_scale();
+                const bool wrow = wf(m.type).wrow && wf_can(m.type, WStage::Batch) && m.has_row_scale();
                 const GLuint p = x_q8_batch(m.rows, m.cols, wrow);
                 bind_fbo(tout.fbo);
                 use_program(p);
@@ -226,7 +226,7 @@ vector<vector<vector<float>>> GPU::matvec_batch_group(const vector<MvBatch>& gro
                                 for (size_t j = 0; j < scaled.size(); ++j) scaled[j] = (*xs[b])[j] * inv;
                                 Mat view = *groups[i].m;   // a view: borrowed bytes are not copied
                                 if (k > 0) {
-                                        if (view.type == WeightType::INT4) view.q4_param_scale = std::ldexp(view.q4_param_scale, k);
+                                        if (wf(view.type).scale_modes & kWScaleGroupMinMax) view.q4_param_scale = std::ldexp(view.q4_param_scale, k);
                                         else view.scale = std::ldexp(view.scale, k);
                                 }
                                 const vector<float> one = matvec(view, scaled);

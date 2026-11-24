@@ -81,7 +81,7 @@ public:
     void upload_batch_begin();
     void upload_batch_end();
     // v5: build the bias and LayerNorm row textures (needs the container's rows).
-    void upload_encdec_rows(const class Model& m);
+    void upload_v5_rows(const class Model& m);
     // The row passes (src/gpu_row.cpp).  `wb` is one texture holding a
     // LayerNorm's weight at row 0 and its bias at row 1; each pass takes the
     // format its *caller* uses, because a matvec output is act_fmt_ and a
@@ -697,7 +697,7 @@ private:  // matvec input (qkv/wo/gate/logits)
     GLuint rwkv_wkv(int layer, GLuint r, GLuint k, GLuint v, GLuint a, GLuint kk,
                     GLuint decay, Target& out);
     void rwkv_copy(GLuint src, Target& dst);
-    void rwkv_draw1(GLuint prog, int w, int h = 1);
+    void draw_row(GLuint prog, int w, int h = 1);
 
 
     void init_egl();

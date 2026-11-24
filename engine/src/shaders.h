@@ -161,7 +161,7 @@ std::string matvec_i4(int rows, int cols, XFormat xf, bool inl = true);
 // Signed 6-bit head: a 4-bit low plane and a 2-bit high plane in two textures
 // (one sampler cannot be fetched twice in a fragment on VC4), one 24-bit value
 // per fragment, per-row scale plane when `wrow`.
-std::string matvec_i6(int rows, int cols, XFormat xf, bool wrow);
+std::string matvec_q6(int rows, int cols, XFormat xf, bool wrow);
 std::string matvec_i4_add(int rows, int cols, XFormat xf, XFormat rf);
 std::string matvec_i4_4x4(int rows, int cols, XFormat xf, bool inl = true);
 std::string matvec_i4_add_4x4(int rows, int cols, XFormat xf, XFormat rf);

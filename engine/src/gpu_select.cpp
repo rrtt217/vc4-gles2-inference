@@ -56,7 +56,7 @@ GLuint GPU::x_t3_add(const Mat& m, XFormat xf, XFormat rf, bool wrow){
 GLuint GPU::x_q6(int rows, int cols, bool wrow){
         return x_prog("xq6_" + to_string(rows) + "_" + to_string(cols) + "_" +
                       x_format_name(act_fmt_) + (wrow ? "_wr" : ""),
-                      matvec_i6(rows, cols, act_fmt_, wrow));
+                      matvec_q6(rows, cols, act_fmt_, wrow));
     }
 
 GLuint GPU::x_q8_pair(int rows, int cols, bool wrow){

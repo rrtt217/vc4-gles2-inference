@@ -334,23 +334,6 @@ std::vector<float> GPU::rwkv_read_residual(GLuint tex){
         return out;
 }
 
-// One full-target draw of an already-bound program (viewport w x h).
-void GPU::rwkv_draw1(GLuint prog, int w, int h){
-        setup_attrib(prog);
-        if (needs_finish()) {
-            // VC4 silently drops a single draw wider than kDrawCap (the sqrelu of
-            // a 1536-wide chunked cm hidden left its target at the clear color).
-            // Split into strips; gl_FragCoord.x is absolute, so the shader is
-            // unchanged.  Xe drives the wide draw in one piece (its own rounding).
-            for (int x0 = 0; x0 < w; x0 += kDrawCap) {
-                glViewport(x0, 0, std::min(kDrawCap, w - x0), h);
-                glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
-            }
-        } else {
-            glViewport(0, 0, w, h);
-            glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
-        }
-}
 
 // A matvec into a pre-sized scratch target (no read-back).  Unlike matvec_to it
 // does not recreate the target when the row count differs from a previous use:
@@ -369,7 +352,7 @@ void GPU::rwkv_copy(GLuint src, Target& dst){
         bind_fbo(dst.fbo);
         use_program(p);
         bind_tex(0, src); set_sampler(p, "A", 0);
-        rwkv_draw1(p, tw);
+        draw_row(p, tw);
 }
 
 GLuint GPU::ln_affine(GLuint x, GLuint wb, Target& out){
@@ -379,13 +362,13 @@ GLuint GPU::ln_affine(GLuint x, GLuint wb, Target& out){
         bind_fbo(stat.fbo); use_program(ps);
         bind_tex(0, x); set_sampler(ps, "X", 0);
         glUniform1f(uloc(ps, "eps"), rwkv_eps_);
-        rwkv_draw1(ps, 2);
+        draw_row(ps, 2);
         GLuint pn = x_prog("lnn_" + to_string(dim), rwkv_ln_norm(dim, res_fmt_));
         bind_fbo(out.fbo); use_program(pn);
         bind_tex(0, x); set_sampler(pn, "X", 0);
         bind_tex(1, stat.tex); set_sampler(pn, "S", 1);
         bind_tex(2, wb); set_sampler(pn, "W", 2);
-        rwkv_draw1(pn, dim);
+        draw_row(pn, dim);
         return out.tex;
 }
 
@@ -408,13 +391,13 @@ GLuint GPU::ln_affine_p(GLuint x, GLuint wb, Target& out){
         bind_fbo(stat.fbo); use_program(ps);
         bind_tex(0, x); set_sampler(ps, "X", 0);
         glUniform1f(uloc(ps, "eps"), rwkv_eps_);
-        rwkv_draw1(ps, 2);
+        draw_row(ps, 2);
         GLuint pn = x_prog("lnp_" + to_string(dim), ::rwkv_ln_norm_p(dim));
         bind_fbo(out.fbo); use_program(pn);
         bind_tex(0, x); set_sampler(pn, "X", 0);
         bind_tex(1, stat.tex); set_sampler(pn, "S", 1);
         bind_tex(2, wb); set_sampler(pn, "W", 2);
-        rwkv_draw1(pn, dim);
+        draw_row(pn, dim);
         return out.tex;
 }
 
@@ -425,7 +408,7 @@ GLuint GPU::rwkv_res_add(GLuint resid, GLuint delta, Target& out){
         bind_fbo(out.fbo); use_program(p);
         bind_tex(0, resid); set_sampler(p, "R", 0);
         bind_tex(1, delta); set_sampler(p, "D", 1);
-        rwkv_draw1(p, dim);
+        draw_row(p, dim);
         return out.tex;
 }
 
@@ -435,7 +418,7 @@ GLuint GPU::rwkv_first_add(GLuint x0, GLuint delta, Target& out){
         bind_fbo(out.fbo); use_program(p);
         bind_tex(0, x0); set_sampler(p, "P", 0);
         bind_tex(1, delta); set_sampler(p, "D", 1);
-        rwkv_draw1(p, dim);
+        draw_row(p, dim);
         return out.tex;
 }
 
@@ -445,13 +428,13 @@ GLuint GPU::rwkv_gn(GLuint y, GLuint wb, Target& out){
         GLuint ps = x_prog("rwkv_gns_" + to_string(dim) + "_" + to_string(hs), rwkv_gn_stats(dim, hs));
         bind_fbo(stat.fbo); use_program(ps);
         bind_tex(0, y); set_sampler(ps, "Y", 0);
-        rwkv_draw1(ps, H, 2);
+        draw_row(ps, H, 2);
         GLuint pn = x_prog("rwkv_gnn_" + to_string(dim) + "_" + to_string(hs), rwkv_gn_norm(dim, hs));
         bind_fbo(out.fbo); use_program(pn);
         bind_tex(0, y); set_sampler(pn, "Y", 0);
         bind_tex(1, stat.tex); set_sampler(pn, "S", 1);
         bind_tex(2, wb); set_sampler(pn, "W", 2);
-        rwkv_draw1(pn, dim);
+        draw_row(pn, dim);
         return out.tex;
 }
 
@@ -463,7 +446,7 @@ GLuint GPU::rwkv_lerp(GLuint xn, GLuint sh, GLuint lp, int which, int nrows, Tar
         bind_tex(0, xn); set_sampler(p, "XN", 0);
         bind_tex(1, sh); set_sampler(p, "SH", 1);
         bind_tex(2, lp); set_sampler(p, "L", 2);
-        rwkv_draw1(p, dim);
+        draw_row(p, dim);
         return out.tex;
 }
 
@@ -474,13 +457,13 @@ GLuint GPU::rwkv_l2(GLuint k, GLuint sc, Target& out){
         bind_fbo(stat.fbo); use_program(ps);
         bind_tex(0, k); set_sampler(ps, "K", 0);
         bind_tex(1, sc); set_sampler(ps, "SC", 1);
-        rwkv_draw1(ps, H);
+        draw_row(ps, H);
         GLuint pn = x_prog("rwkv_l2n_" + to_string(dim) + "_" + to_string(hs), rwkv_l2_norm(dim, hs));
         bind_fbo(out.fbo); use_program(pn);
         bind_tex(0, k); set_sampler(pn, "K", 0);
         bind_tex(1, sc); set_sampler(pn, "SC", 1);
         bind_tex(2, stat.tex); set_sampler(pn, "N", 2);
-        rwkv_draw1(pn, dim);
+        draw_row(pn, dim);
         return out.tex;
 }
 
@@ -491,7 +474,7 @@ GLuint GPU::rwkv_keydelta(GLuint k, GLuint a, GLuint sc, Target& out){
         bind_tex(0, k); set_sampler(p, "K", 0);
         bind_tex(1, a); set_sampler(p, "A", 1);
         bind_tex(2, sc); set_sampler(p, "SC", 2);
-        rwkv_draw1(p, dim);
+        draw_row(p, dim);
         return out.tex;
 }
 
@@ -500,7 +483,7 @@ GLuint GPU::rwkv_tanh(GLuint x, Target& out){
         GLuint p = x_prog("rwkv_tanh_" + to_string(w), ::rwkv_tanh(w));
         bind_fbo(out.fbo); use_program(p);
         bind_tex(0, x); set_sampler(p, "X", 0);
-        rwkv_draw1(p, w);
+        draw_row(p, w);
         return out.tex;
 }
 
@@ -511,7 +494,7 @@ GLuint GPU::rwkv_sigmoid(GLuint x, GLuint bias, Target& out, int oscale){
         bind_fbo(out.fbo); use_program(p);
         bind_tex(0, x); set_sampler(p, "X", 0);
         if (hb) { bind_tex(1, bias); set_sampler(p, "B", 1); }
-        rwkv_draw1(p, w);
+        draw_row(p, w);
         return out.tex;
 }
 
@@ -521,7 +504,7 @@ GLuint GPU::rwkv_decay(GLuint u, GLuint w0, Target& out){
         bind_fbo(out.fbo); use_program(p);
         bind_tex(0, u); set_sampler(p, "X", 0);
         bind_tex(1, w0); set_sampler(p, "B", 1);
-        rwkv_draw1(p, dim);
+        draw_row(p, dim);
         return out.tex;
 }
 
@@ -533,17 +516,10 @@ GLuint GPU::rwkv_vres(GLuint v, GLuint vf, GLuint u, GLuint v0, Target& out){
         bind_tex(1, vf); set_sampler(p, "VF", 1);
         bind_tex(2, u); set_sampler(p, "U", 2);
         bind_tex(3, v0); set_sampler(p, "B", 3);
-        rwkv_draw1(p, dim);
+        draw_row(p, dim);
         return out.tex;
 }
 
-GLuint GPU::act_sqrelu(GLuint x, Target& out){
-        GLuint p = x_prog("act_sqrelu_" + to_string(out.w), ::act_sqrelu(out.w));
-        bind_fbo(out.fbo); use_program(p);
-        bind_tex(0, x); set_sampler(p, "X", 0);
-        rwkv_draw1(p, out.w);
-        return out.tex;
-}
 
 GLuint GPU::rwkv_mul(GLuint a, GLuint b, Target& out, int adiv){
         const int dim = rwkv_dim_;
@@ -551,7 +527,7 @@ GLuint GPU::rwkv_mul(GLuint a, GLuint b, Target& out, int adiv){
         bind_fbo(out.fbo); use_program(p);
         bind_tex(0, a); set_sampler(p, "A", 0);
         bind_tex(1, b); set_sampler(p, "B", 1);
-        rwkv_draw1(p, dim);
+        draw_row(p, dim);
         return out.tex;
 }
 
@@ -563,13 +539,13 @@ GLuint GPU::rwkv_rk(GLuint k, GLuint r, GLuint sc, GLuint v, GLuint y, Target& o
         bind_tex(0, k); set_sampler(pr, "K", 0);
         bind_tex(1, r); set_sampler(pr, "R", 1);
         bind_tex(2, sc); set_sampler(pr, "SC", 2);
-        rwkv_draw1(pr, H);
+        draw_row(pr, H);
         GLuint pa = x_prog("rwkv_rka_" + to_string(dim) + "_" + to_string(hs), rwkv_rk_add(dim, hs));
         bind_fbo(out.fbo); use_program(pa);
         bind_tex(0, y); set_sampler(pa, "Y", 0);
         bind_tex(1, v); set_sampler(pa, "V", 1);
         bind_tex(2, rk.tex); set_sampler(pa, "RK", 2);
-        rwkv_draw1(pa, dim);
+        draw_row(pa, dim);
         return out.tex;
 }
 
@@ -586,7 +562,7 @@ GLuint GPU::rwkv_wkv(int layer, GLuint r, GLuint k, GLuint v, GLuint a, GLuint k
         bind_fbo(sa.fbo); use_program(ps);
         bind_tex(0, st_old.tex); set_sampler(ps, "ST", 0);
         bind_tex(1, kk); set_sampler(ps, "KK", 1);
-        rwkv_draw1(ps, ROWS);
+        draw_row(ps, ROWS);
         // update: one fragment per state element, kDrawCap-bounded strips.
         GLuint pu = x_prog("rwkv_wkv_up_" + shape, ::rwkv_wkv_update(H, hs));
         bind_fbo(st_new.fbo); use_program(pu);
@@ -626,7 +602,7 @@ GLuint GPU::rwkv_wkv(int layer, GLuint r, GLuint k, GLuint v, GLuint a, GLuint k
         bind_fbo(out.fbo); use_program(po);
         bind_tex(0, st_new.tex); set_sampler(po, "ST", 0);
         bind_tex(1, r); set_sampler(po, "R", 1);
-        rwkv_draw1(po, ROWS);
+        draw_row(po, ROWS);
         return out.tex;
 }
 

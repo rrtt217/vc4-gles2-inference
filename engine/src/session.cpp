@@ -311,7 +311,7 @@ Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
             // row as that alpha byte -- a constant +255/256 on every odd
             // component, which is what the "odd components are wrong" hunt was
             // chasing for six commits.
-            if (m_.is_encdec()) gpu_.upload_encdec_rows(m_);
+            if (m_.is_encdec()) gpu_.upload_v5_rows(m_);
         }
         // Paired qkv matvec: two output rows per fragment, half the activation
         // decode.  Only the int8 checkpoint uses it; QKV_PAIR=0 restores the

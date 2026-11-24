@@ -11,6 +11,7 @@
 #include "gpu_internal.h"
 #include "xformat.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -276,3 +277,21 @@ vector<int32_t> GPU::read_i32(Target& t, int w, int h){
         }
         return out;
     }
+
+// One row-sized full-target draw of an already-bound program (viewport w x h).
+void GPU::draw_row(GLuint prog, int w, int h){
+        setup_attrib(prog);
+        if (needs_finish()) {
+            // VC4 silently drops a single draw wider than kDrawCap (the sqrelu of
+            // a 1536-wide chunked cm hidden left its target at the clear color).
+            // Split into strips; gl_FragCoord.x is absolute, so the shader is
+            // unchanged.  Xe drives the wide draw in one piece (its own rounding).
+            for (int x0 = 0; x0 < w; x0 += kDrawCap) {
+                glViewport(x0, 0, std::min(kDrawCap, w - x0), h);
+                glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+            }
+        } else {
+            glViewport(0, 0, w, h);
+            glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+        }
+}

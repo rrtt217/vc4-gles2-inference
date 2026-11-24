@@ -332,7 +332,7 @@ void Model::split_rwkv(int max_dim){
                 // The cut is even by default.  RWKV_CM_SPLIT=<rows> moves it
                 // (docs/test-hooks.md): the chunk widths decide how many
                 // kDrawCap-sized strips the key matvec and its relu^2 take
-                // (draw() and rwkv_draw1 both split at 1024 fragments), so a
+                // (draw() and draw_row both split at 1024 fragments), so a
                 // 2048+1024 cut is 3+3 strips against 1536+1536's 4+4 on VC4.
                 // It is a measurement arm: the split point moves the q16
                 // residual grid (two adds, whose first input is the chunk sum),

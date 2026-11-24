@@ -238,3 +238,11 @@ GLuint GPU::rmsnorm_pair2(GLuint xa, GLuint xb, GLuint w, Target& out){
         layer_finish("NF_RMS");
         return out.tex;
     }
+
+GLuint GPU::act_sqrelu(GLuint x, Target& out){
+        GLuint p = x_prog("act_sqrelu_" + to_string(out.w), ::act_sqrelu(out.w));
+        bind_fbo(out.fbo); use_program(p);
+        bind_tex(0, x); set_sampler(p, "X", 0);
+        draw_row(p, out.w);
+        return out.tex;
+}
