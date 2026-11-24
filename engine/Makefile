@@ -248,6 +248,12 @@ probes/conv_probe: probes/conv_probe.cpp $(SHADERLIB) $(SRC)/xformat.cpp $(SRC)/
 probes/conv_probe_pi: probes/conv_probe.cpp $(SHADERLIB) $(SRC)/xformat.cpp $(SRC)/common.cpp $(SRC)/switches.cpp | check-cross $(HEADERS)
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -I$(SRC) -o $@ probes/conv_probe.cpp $(SHADERLIB) $(SRC)/xformat.cpp $(SRC)/common.cpp $(SRC)/switches.cpp $(CROSS_LDLIBS)
 
+# What does the v5 LayerNorm's (mean, invstd) q16 pair cost as the residual
+# spread moves, and does (mean, sd) + a per-row 2^-k hold.  Links the shipped
+# ln_stats_q16/ln_apply_q16 so section A is the engine's own text.
+probes/lnstats_probe: probes/lnstats_probe.cpp $(SHADERLIB) $(SRC)/xformat.cpp $(SRC)/common.cpp $(SRC)/switches.cpp $(HEADERS)
+	$(CXX) $(ALL_CXXFLAGS) -I$(SRC) -o $@ probes/lnstats_probe.cpp $(SHADERLIB) $(SRC)/xformat.cpp $(SRC)/common.cpp $(SRC)/switches.cpp $(LDLIBS)
+
 probes/rwkv_probe: probes/rwkv_probe.cpp $(SHADERLIB) $(SRC)/xformat.cpp $(SRC)/common.cpp $(SRC)/switches.cpp $(HEADERS)
 	$(CXX) $(ALL_CXXFLAGS) -I$(SRC) -o $@ probes/rwkv_probe.cpp $(SHADERLIB) $(SRC)/xformat.cpp $(SRC)/common.cpp $(SRC)/switches.cpp $(LDLIBS)
 

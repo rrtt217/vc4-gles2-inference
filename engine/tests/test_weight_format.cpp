@@ -86,9 +86,16 @@ void test_scale_and_activations() {
     CHECK(wf_accepts(WeightType::INT6, XFormat::BF16));
     CHECK(!wf_accepts(WeightType::INT6, XFormat::I16_1));
     CHECK(!wf_accepts(WeightType::INT6, XFormat::I8_4));
-    for (WeightType t : {WeightType::INT8, WeightType::INT16, WeightType::INT4,
-                         WeightType::T3}) {
-        CHECK_LL(wf(t).act_mask, kActAll);
+    // I8_4 has an acceptance record for q8 (the ACT8 pin) and for t3 (correct
+    // since 5b66ebc, docs/bitcpm.md); q4 and i16 never had one, so the table
+    // says no for them (the contract's "unused, slow, correct" direction).
+    CHECK_LL(wf(WeightType::INT8).act_mask, kActAll);
+    CHECK(wf_accepts(WeightType::INT8, XFormat::I8_4));
+    CHECK_LL(wf(WeightType::T3).act_mask, kActAll);
+    CHECK(wf_accepts(WeightType::T3, XFormat::I8_4));
+    for (WeightType t : {WeightType::INT16, WeightType::INT4}) {
+        CHECK_LL(wf(t).act_mask, kActAll8);
+        CHECK(!wf_accepts(t, XFormat::I8_4));
         CHECK(!wf_accepts(t, XFormat::S24_1));
     }
 }

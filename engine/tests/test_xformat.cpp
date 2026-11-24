@@ -5,7 +5,9 @@
 // one without the other is a numerics bug that the shader digest cannot see
 // (it hashes the text, not the layout), so this pins the bytes for each format
 // and the texel arithmetic around them.  No GPU, no model.
+#include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <vector>
 
 #include "checks.h"
@@ -23,6 +25,7 @@ void test_shapes_and_names() {
     CHECK_STR(x_format_name(XFormat::I16_2), "x16_2");
     CHECK_STR(x_format_name(XFormat::I8_4), "x8_4");
     CHECK_STR(x_format_name(XFormat::I24_1), "x24_1");
+    CHECK_STR(x_format_name(XFormat::S24_1), "s24_1");
     CHECK_STR(x_format_name(XFormat::F32), "f32");
     CHECK_STR(x_format_name(XFormat::BF16), "bf16");
 
@@ -30,6 +33,7 @@ void test_shapes_and_names() {
     CHECK_LL(x_per_texel(XFormat::I16_2), 2);
     CHECK_LL(x_per_texel(XFormat::I8_4), 4);
     CHECK_LL(x_per_texel(XFormat::I24_1), 1);
+    CHECK_LL(x_per_texel(XFormat::S24_1), 1);
     CHECK_LL(x_per_texel(XFormat::F32), 1);
     CHECK_LL(x_per_texel(XFormat::BF16), 2);
 
@@ -106,6 +110,26 @@ void test_bf16() {
                 0x3F, 0x82, 0x00, 0x00);
 }
 
+void test_unpack() {
+    // x_unpack is the host half of every codec: the same bytes x_pack wrote,
+    // decoded by the format's own rule.  These values are exact in all seven
+    // formats (multiples of 1/16, |v| <= 7, at most 8 significant bits), so the
+    // round trip is exact and a drift on either side shows as a mismatch.
+    const std::vector<float> v{0.0f, 0.5f, -1.25f, 2.0f, -3.5f, 7.0f, -0.75f, 1.0f};
+    for (XFormat f : {XFormat::I16_1, XFormat::I16_2, XFormat::I8_4,
+                      XFormat::I24_1, XFormat::S24_1, XFormat::F32, XFormat::BF16}) {
+        const std::vector<uint8_t> b = x_pack(v, f);
+        for (size_t i = 0; i < v.size(); ++i) {
+            const float got = x_unpack(b.data(), (int)i, f);
+            if (!(std::fabs(got - v[i]) <= 1e-6f)) {
+                std::fprintf(stderr, "x_unpack %s element %zu: %.9g != %.9g\n",
+                             x_format_name(f), i, (double)got, (double)v[i]);
+                ++checks::g_fail;
+            }
+        }
+    }
+}
+
 void test_empty() {
     CHECK(x_pack(std::vector<float>{}, XFormat::I16_2).empty());
     CHECK(x_pack(std::vector<float>{}, XFormat::I8_4).empty());
@@ -121,6 +145,7 @@ int main() {
     test_i24_1();
     test_f32();
     test_bf16();
+    test_unpack();
     test_empty();
     if (checks::g_fail) {
         std::fprintf(stderr, "test_xformat: %d check(s) failed\n", checks::g_fail);

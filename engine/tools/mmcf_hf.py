@@ -2017,6 +2017,15 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
     if rail_check:
         res_peaks, hid_peaks = rail_peaks(m)
         meta['res_peaks'] = res_peaks
+        # The per-layer RMSNorm weight vectors are read in kLnPairFmt (I16_2:
+        # 1/256, rail +-127.996) by the norm passes.  They are O(1) in every
+        # container packed so far, but that is an observation; this records the
+        # number so mmcf_pack.py can say it rather than assume it.
+        if m.get('rms_att'):
+            meta['norm_peaks'] = [
+                float(max(np.abs(np.asarray(m['rms_att'][l], dtype=np.float32)).max(),
+                          np.abs(np.asarray(m['rms_ffn'][l], dtype=np.float32)).max()))
+                for l in range(m['layers'])]
         if hid_peaks is not None:
             meta['hid_peaks'] = hid_peaks
             # A hidden over the q16 activation rail is stored *2^-k (key 15)

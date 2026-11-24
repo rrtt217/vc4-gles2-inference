@@ -157,6 +157,10 @@ Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
                 // RWKV_WKV_CPU=1) the recurrence falls back to the host f32 state.
                 rwkv_wkv_cpu_ = env_flag("RWKV_WKV_CPU") || !gpu_es3_ok();
                 if (rwkv_gpu_) gpu_.init_rwkv(m_);
+                if (rwkv_gpu_)
+                    fprintf(stderr, "formats: rwkv act %s res %s ffn %s | kv none (recurrent)\n",
+                            x_format_name(gpu_.act_fmt_), x_format_name(gpu_.res_fmt_),
+                            x_format_name(gpu_.ffn_fmt_));
                 return;
         }
         // Both loops are correct for a hybrid model since 2026-11-12: the q8
@@ -202,63 +206,97 @@ Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
             }
         }
         if (gpu_layer_) {
-            const auto all_int8 = [](const vector<Mat>& v) {
-                if (v.empty()) return false;
-                for (const Mat& m : v) if (m.type != WeightType::INT8) return false;
-                return true;
+            // A stream's format is checked against the weight-format table, not
+            // a hand-written "model family" list: `act_mask` owns which kernels
+            // can read which XFormat, and a value it refuses stops the run with
+            // the matrix's name.  The old rule ("qkv/wo/w2 all q8") also gated
+            // FFN_HID on matrices that read a different stream, and it had no
+            // record for the families it happened to allow or refuse.
+            const auto refuse = [&](XFormat f, const char* stream, const char* label,
+                                    const Mat& m) {
+                if (m.rows <= 0 || wf_accepts(m.type, f)) return;
+                cerr << stream << ": " << label << " is " << wf(m.type).name
+                     << ", which cannot read " << x_format_name(f) << "\n";
+                exit(2);
             };
-            const auto all_t3 = [](const vector<Mat>& v) {
-                if (v.empty()) return false;
-                for (const Mat& m : v) if (m.type != WeightType::T3) return false;
-                return true;
+            const auto refusev = [&](XFormat f, const char* stream, const char* label,
+                                     const vector<Mat>& v) {
+                for (const Mat& m : v) refuse(f, stream, label, m);
             };
-            const vector<Mat>& w2 = !m_.w2a.empty() ? m_.w2a : m_.w2;
-            const vector<Mat>& w1 = !m_.w1a.empty() ? m_.w1a : m_.w1;
-            const vector<Mat>& w3 = !m_.w3a.empty() ? m_.w3a : m_.w3;
-            const bool q8_model = all_int8(m_.qkv) && all_int8(m_.wo) && all_int8(w2);
-            // A 2-bit body takes the same activation stream: the t3 kernels are
-            // built with the activation format as a parameter (they read X4Q,
-            // which every format defines), so what the gate tests is "which
-            // matvec family will read this stream", and `all-q8` was only ever
-            // a shorthand for "a family that has an I8_4 path".
-            // WORK IN PROGRESS: the t3 path answers garbage under ACT=i8 (the
-            // finding is in this branch's first commit).  Only ACT=i8 reaches
-            // it; a run that does not set the axis is unaffected.
-            const bool t3_model = all_t3(m_.qkv) && all_t3(m_.wo) && all_t3(w1) &&
-                                  all_t3(w3) && all_t3(w2);
-            // The activation axis, one value for the GPU streams (the uploaded
-            // h, the attention output, xb/xbf): `i16` is the q16 pair grid,
-            // `f32` the bit-cast one (same memory as the 24-bit residual, one
-            // bit-cast a value, needs ESSL 3.00 -- init_egl asks for it), `i8`
-            // is the 8-bit stream and needs q8 weights.
-            // This replaces ACT_FMT (the format), ACT8=1 (the width) and
-            // ACT8=2 (the FFN hidden alone, now FFN_HID); kRenames rewrites
-            // those spellings into ACT/FFN_HID before we get here, so the
-            // decision is made in exactly one place.
+            XFormat act_want = XFormat::I16_2;
             if (const char* a = sw_enum("ACT")) {
-                if (!strcmp(a, "f32")) gpu_.act_fmt_ = XFormat::F32;
-                else if (!strcmp(a, "bf16")) gpu_.act_fmt_ = XFormat::BF16;
-                else if (!strcmp(a, "i8")) {
-                    if (q8_model || t3_model) gpu_.act_fmt_ = XFormat::I8_4;
-                    else cerr << "ACT=i8 needs all-q8 or all-t3 weights; "
-                                 "keeping the q16 streams\n";
-                }
+                if (!strcmp(a, "f32")) act_want = XFormat::F32;
+                else if (!strcmp(a, "bf16")) act_want = XFormat::BF16;
+                else if (!strcmp(a, "i8")) act_want = XFormat::I8_4;
             }
-            // FFN_HID: the FFN hidden stream's format.  `f32` exists because the
-            // q16 grid rails at +-128 and a model whose hidden state exceeds it
-            // loses the tail of every FFN output -- MNN-Pocket peaks at 1005
-            // (probe_residuals.py), i.e. 8x the rail, and that is why it is the
-            // first container to ask for this.  `i8` needs all-q8 weights.
+            // Every matrix the ACT stream feeds.  w2 is here only for v5: its
+            // post-norm FFN writes swish(fc1) in ACT and reads it back in ACT;
+            // a dense w2 reads FFN_HID, the other axis.
+            refusev(act_want, "ACT", "qkv", m_.qkv);
+            refusev(act_want, "ACT", "wo", m_.wo);
+            refusev(act_want, "ACT", "w13", m_.w13);
+            refusev(act_want, "ACT", "w1", m_.w1);
+            refusev(act_want, "ACT", "w3", m_.w3);
+            refusev(act_want, "ACT", "w1a", m_.w1a);
+            refusev(act_want, "ACT", "w1b", m_.w1b);
+            refusev(act_want, "ACT", "w3a", m_.w3a);
+            refusev(act_want, "ACT", "w3b", m_.w3b);
+            refusev(act_want, "ACT", "router", m_.router);
+            refusev(act_want, "ACT", "logits_tiles", m_.logits_tiles);
+            refusev(act_want, "ACT", "conv_in", m_.conv_in);
+            refusev(act_want, "ACT", "conv_in_b", m_.conv_in_b);
+            refusev(act_want, "ACT", "conv_in_c", m_.conv_in_c);
+            refusev(act_want, "ACT", "conv_in_x", m_.conv_in_x);
+            refusev(act_want, "ACT", "conv_out", m_.conv_out);
+            refusev(act_want, "ACT", "u_enc_qkv", m_.u_enc_qkv);
+            refusev(act_want, "ACT", "u_enc_wo", m_.u_enc_wo);
+            refusev(act_want, "ACT", "u_enc_w1", m_.u_enc_w1);
+            refusev(act_want, "ACT", "u_enc_w2", m_.u_enc_w2);
+            refusev(act_want, "ACT", "u_cross_q", m_.u_cross_q);
+            refusev(act_want, "ACT", "u_cross_k", m_.u_cross_k);
+            refusev(act_want, "ACT", "u_cross_v", m_.u_cross_v);
+            refusev(act_want, "ACT", "u_cross_o", m_.u_cross_o);
+            if (m_.is_encdec()) {
+                refusev(act_want, "ACT", "w2", m_.w2);
+                refusev(act_want, "ACT", "w2a", m_.w2a);
+                refusev(act_want, "ACT", "w2b", m_.w2b);
+            }
+            for (const auto& layer : m_.moe)
+                for (const auto& e : layer) {
+                    refuse(act_want, "ACT", "moe.w1", e.w1);
+                    refuse(act_want, "ACT", "moe.w3", e.w3);
+                    refuse(act_want, "ACT", "moe.w1a", e.w1a);
+                    refuse(act_want, "ACT", "moe.w1b", e.w1b);
+                    refuse(act_want, "ACT", "moe.w3a", e.w3a);
+                    refuse(act_want, "ACT", "moe.w3b", e.w3b);
+                }
+            gpu_.act_fmt_ = act_want;
+            // FFN_HID: the w2 input.  `f32` exists because the q16 grid rails at
+            // +-128 and a model whose hidden state exceeds it loses the tail of
+            // every FFN output -- MNN-Pocket peaks at 1005 (probe_residuals.py),
+            // 8x the rail, which is why it is the first container to ask for it.
+            // A v5 block's FFN hidden is the ACT stream (swish(fc1) -> fc2), so
+            // the axis does not reach it; say that once rather than accept a
+            // value that changes nothing.
             if (const char* fh = sw_enum("FFN_HID")) {
-                if (!strcmp(fh, "i8")) {
-                    if (q8_model) gpu_.ffn_fmt_ = XFormat::I8_4;
-                    else cerr << "FFN_HID=i8 needs an all-q8 model; keeping the q16 hidden\n";
-                } else if (!strcmp(fh, "f32")) {
-                    gpu_.ffn_fmt_ = XFormat::F32;
-                } else if (!strcmp(fh, "bf16")) {
-                    // The middle rung again: pocket's hidden reaches 1005, which
-                    // q16 rails at +-128, and f32 doubles the store.
-                    gpu_.ffn_fmt_ = XFormat::BF16;
+                XFormat want = XFormat::I16_2;
+                if (!strcmp(fh, "i8")) want = XFormat::I8_4;
+                else if (!strcmp(fh, "f32")) want = XFormat::F32;
+                else if (!strcmp(fh, "bf16")) want = XFormat::BF16;
+                if (m_.is_encdec()) {
+                    cerr << "FFN_HID=" << fh << " has no effect on a v5 container: "
+                            "its FFN hidden is the ACT stream\n";
+                } else {
+                    refusev(want, "FFN_HID", "w2", m_.w2);
+                    refusev(want, "FFN_HID", "w2a", m_.w2a);
+                    refusev(want, "FFN_HID", "w2b", m_.w2b);
+                    for (const auto& layer : m_.moe)
+                        for (const auto& e : layer) {
+                            refuse(want, "FFN_HID", "moe.w2", e.w2);
+                            refuse(want, "FFN_HID", "moe.w2a", e.w2a);
+                            refuse(want, "FFN_HID", "moe.w2b", e.w2b);
+                        }
+                    gpu_.ffn_fmt_ = want;
                 }
             }
             // Residual stream packed two int16 per texel: halves the fetch count in
@@ -328,6 +366,26 @@ Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
                                 m_.q_norm, m_.k_norm, rope_cos_, rope_sin_, qkv_pair,
                                 m_.hybrid, m_.hybrid ? &m_.layer_type : nullptr,
                                 /*rope_none=*/m_.is_encdec());
+        // What this run actually asked the kernels for.  One line, because every
+        // investigation here starts with "which stream is this texture in".
+        if (gpu_attn_) {
+            const char* kvs = gpu_.att_kv_fmt_ == 1 ? "bf16"
+                            : gpu_.att_kv_fmt_ == 2 ? "f32"
+                            : gpu_.att_kv_bits_ == 16 ? "q16"
+                            : gpu_.att_kv_bits_ == 8 ? "q8" : "i24";
+            const char* rms = sw_str("RMS_STORE");
+            fprintf(stderr, "formats: act %s res %s ffn %s | kv %s width %d | "
+                            "qkv_pair %d | rms %s\n",
+                    x_format_name(gpu_.act_fmt_), x_format_name(gpu_.res_fmt_),
+                    x_format_name(gpu_.ffn_fmt_), kvs, gpu_.att_kv_width_,
+                    (int)gpu_.att_qkv_pair_, rms ? rms : "i24");
+            // The parse above is inside `if (gpu_layer_)`; saying so is the
+            // difference between "the axis was applied" and "the axis was
+            // ignored and the defaults ran".
+            if (!gpu_layer_)
+                fprintf(stderr, "formats: ACT/RES/FFN_HID apply only with "
+                                "GPU_LAYER=1; this run uses the defaults above\n");
+        }
         // A v5 container has no model-wide norm: every layer carries its own
         // LayerNorm inside the bias rows, so init_persistent would memcpy from
         // three empty vectors (and did: SIGSEGV in memmove).

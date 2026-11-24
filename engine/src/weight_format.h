@@ -67,6 +67,14 @@ constexpr uint16_t xfmt_bit(XFormat f) { return (uint16_t)(1u << (unsigned)f); }
 constexpr uint16_t kActAll =
     xfmt_bit(XFormat::I16_1) | xfmt_bit(XFormat::I16_2) | xfmt_bit(XFormat::I8_4) |
     xfmt_bit(XFormat::I24_1) | xfmt_bit(XFormat::F32) | xfmt_bit(XFormat::BF16);
+// The same set without the 8-bit stream.  I8_4 is validated for q8 (the ACT8
+// pin) and for t3 (correct since 5b66ebc, measured in docs/bitcpm.md); the
+// other two families' generic X4Q form compiles but was never accepted, and a
+// stream format that has no acceptance record must not become one by default.
+// The contract's failure direction is "table says no, adapter has a case ->
+// unused (slow, correct), never wrong", so the declaration says no until a
+// measurement says otherwise.
+constexpr uint16_t kActAll8 = kActAll & ~xfmt_bit(XFormat::I8_4);
 // matvec_q6 refuses anything else by name (bitwise 6-bit decode).
 constexpr uint16_t kActQ6 =
     xfmt_bit(XFormat::I16_2) | xfmt_bit(XFormat::F32) | xfmt_bit(XFormat::BF16);
@@ -96,11 +104,11 @@ constexpr WeightFormat kWeightFormats[] = {
          wstage_bit(WStage::P2Add) | wstage_bit(WStage::Batch)},
     // i16: two weights a texel, one scale.  Serial and add only; the paired
     // paths fall back to the serial kernel rather than pretending.
-    {WeightType::INT16, "i16", kWScaleUniform, 1, 1, false, kActAll,
+    {WeightType::INT16, "i16", kWScaleUniform, 1, 1, false, kActAll8,
      wstage_bit(WStage::Serial) | wstage_bit(WStage::Add)},
     // q4: eight packed nibbles a texel plus the group scale/min plane.  A
     // column slice must stay on a group boundary; rows are independent.
-    {WeightType::INT4, "q4", kWScaleGroupMinMax, 1, 32, false, kActAll,
+    {WeightType::INT4, "q4", kWScaleGroupMinMax, 1, 32, false, kActAll8,
      wstage_bit(WStage::Serial) | wstage_bit(WStage::Add) |
          wstage_bit(WStage::FfnPair) | wstage_bit(WStage::FfnFusedGate)},
     // q6: two planes (4-bit low, 2-bit high), tied head only.  It is the one

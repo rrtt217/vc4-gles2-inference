@@ -81,7 +81,7 @@ e40dc67d9e0a92ac    3292 attn_q8_kv16_unpaired/att_qnorm_scale
 3d152d6000b54b81    2893 bias_add_q16_512
 d9504f8855126699    3192 conv3_1024
 a0368fa798334641    2864 conv_copy_1024
-24b34c12e54bd51e    3019 ln_apply_q16_512
+e9245098e7df9ff9    3280 ln_apply_q16_512
 0d02ce37a7d608f1    3336 ln_norm_768_i16_1
 3923194aff2fd786    3344 ln_norm_p_768
 8fba8225afcc8061    3244 ln_stats_768_i16_1

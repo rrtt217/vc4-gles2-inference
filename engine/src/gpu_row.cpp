@@ -161,34 +161,20 @@ GLuint GPU::rmsnorm(GLuint x, GLuint w, Target& out){
         // row (measured 1.00212 on layer 0, 2026-11-18) can only come from here
         // or from the weight vector, and the weight is the same bytes.
         if (const char* rd = getenv("RMS_DUMP")) {
-                // The 32 lane sums as the shader wrote them (24-bit fixed point,
-                // step 1/4096, biased by 2^23) -- the finest thing the rmsnorm
-                // produces.  `RMS_DUMP=<layer>` keeps the log to one layer.
+                // The 32 lane sums, decoded by the format RMS_STORE selected --
+                // through the same accessor the shader's codec comes from, so a
+                // dump cannot read the bytes as the other format.  (It did: a
+                // hardcoded 24-bit decode read the f32 store as fixed point and
+                // the PPL came back 6399 instead of 270.32, 2026-11-18.)
                 static int layer_no = 0;
                 const bool want = !*rd || atoi(rd) == layer_no;
                 if (want) {
                         sync();
                         const vector<uint8_t> b = read_bytes(rms_partial_, RMS_PARTIALS, 1);
+                        const XFormat rf = rms_store_format();
                         fprintf(stderr, "RMSD %d %d", layer_no, RMS_PARTIALS);
-                        static const bool f32_store = [] {
-                                const char* v = sw_str("RMS_STORE");
-                                return v && !strcmp(v, "f32");
-                        }();
-                        for (int i = 0; i < RMS_PARTIALS && (size_t)(i * 4 + 3) < b.size(); ++i) {
-                                if (f32_store) {
-                                        const uint32_t u = ((uint32_t)b[i * 4] << 24) |
-                                                           ((uint32_t)b[i * 4 + 1] << 16) |
-                                                           ((uint32_t)b[i * 4 + 2] << 8) |
-                                                           (uint32_t)b[i * 4 + 3];
-                                        float f = 0;
-                                        memcpy(&f, &u, 4);
-                                        fprintf(stderr, " %.6g", (double)f);
-                                } else {
-                                        const long q = (long)b[i * 4] * 16777216L + (long)b[i * 4 + 1] * 65536L +
-                                                       (long)b[i * 4 + 2] * 256L + (long)b[i * 4 + 3] - 8388608L;
-                                        fprintf(stderr, " %ld", q);
-                                }
-                        }
+                        for (int i = 0; i < RMS_PARTIALS && (size_t)(i * 4 + 3) < b.size(); ++i)
+                                fprintf(stderr, " %.6g", (double)x_unpack(b.data(), i, rf));
                         fprintf(stderr, "\n");
                 }
                 ++layer_no;

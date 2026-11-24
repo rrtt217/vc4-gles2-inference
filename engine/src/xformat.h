@@ -115,6 +115,9 @@ bool x_is_bf16(XFormat f);
 // CPU side packing.  Values are real activations; q16 is applied here.
 std::vector<uint8_t> x_pack(const float* values, int count, XFormat f);
 std::vector<uint8_t> x_pack(const std::vector<float>& values, XFormat f);
+// Host-side decode of one element, the inverse of x_pack: for dump readers and
+// oracles, never the hot path.  `index` is the logical element in the row.
+float x_unpack(const uint8_t* row, int index, XFormat f);
 
 // GLSL helpers and the only format-specific macros.  Shader builders prepend
 // "precision highp float;\n" and then this block.

@@ -132,8 +132,11 @@ acceptable as a default**:
 q16 first-step logits: cosine ~0.9998, MAE ~0.05, max ~0.30.  Use q16 if
 reducing KV memory; q8 needs per-head/block scales or better calibration.
 
-The `MMKV1` header (version 2) binds the model metadata, the `KV` value,
-`KV_GRID`, `qk_norm`, `rope_half`, and the activation format (`ACT`).  A
+The `MMKV1` header (version 2) binds the model metadata, the `KV` value and its
+codec (`i24`/`q16`/`q8`/`bf16`/`f32`), `KV_GRID`, `qk_norm`, `rope_half`, and
+the activation format (`ACT`).  The codec has its own flag bits because bf16
+and q16 share the width, the bits and the default scale; without them a cache
+built under one was accepted under the other and decoded on the wrong grid.  A
 cache built with `ACT=i8` is rejected by a q16-stream process and vice versa,
 and a cache written at a different `KV_GRID` is rejected with a
 `PREFIX_CACHE KV_GRID mismatch` line; rebuild on the target machine after

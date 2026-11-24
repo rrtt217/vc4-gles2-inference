@@ -738,6 +738,20 @@ def main():
                   "would need k=%d; a prompt that reached it would clip at %.1f"
                   % (bound, max(0, math.ceil(math.log2(bound / ACTIVATION_RAIL))),
                      (1 << k) * ACTIVATION_RAIL))
+    # The per-layer RMSNorm weight vectors travel in kLnPairFmt (I16_2, 1/256,
+    # rail +-127.996) and the norm pass clamps them silently.  They are O(1) in
+    # every model packed so far, but "observed" is not "checked"; this line is
+    # what turns the assumption into a number.
+    npeaks = meta.get("norm_peaks")
+    if npeaks:
+        worst = max(npeaks)
+        print("norm weights: max|w| %.2f at layer %d (q16 rail %.1f), per layer %s"
+              % (worst, npeaks.index(worst), ACTIVATION_RAIL,
+                 " ".join("%.2f" % v for v in npeaks)))
+        if worst > ACTIVATION_RAIL:
+            print("warning: an RMSNorm weight exceeds the q16 rail at %.1f; the norm "
+                  "pass clamps it silently -- this container needs a wider norm row "
+                  "format, not a tolerance" % ACTIVATION_RAIL)
     # The WKV state is not a rail: it is a per-head 64x64 recurrence that is
     # never renormalised, so its magnitude is what decides whether the Pi can
     # hold it in fixed point at all (docs/engine-internals.md).  Nothing in

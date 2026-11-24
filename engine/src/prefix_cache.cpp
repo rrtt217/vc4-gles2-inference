@@ -44,10 +44,16 @@ bool Session::save_prefix_cache(const string& path, const vector<int>& toks,
         u32(m_.dim); u32(m_.hidden); u32(m_.layers); u32(m_.heads);
         u32(m_.kv_heads); u32(m_.vocab); u32(m_.seq); u32(m_.head_dim);
         f.write((char*)&m_.rope_theta, 4);
+        // Bits 64/128 name the KV *codec* (bf16, f32).  Without them bf16 and
+        // q16 write the same flags, scale and width (both 16/2048/kv_dim), so a
+        // cache built under one was accepted under the other and decoded on the
+        // wrong grid.  Bit 128 also separates f32 (scale is only a dump label)
+        // from i24 when KV_GRID happens to meet at 512.
         u32((m_.qk_norm ? 1u : 0u) | (m_.rope_half ? 2u : 0u) |
             (gpu_.att_kv_bits_ == 16 ? 4u : gpu_.att_kv_bits_ == 8 ? 8u : 0u) |
             (gpu_.act_fmt_ == XFormat::I8_4 ? 16u : 0u) |
-            (m_.hybrid ? 32u : 0u));
+            (m_.hybrid ? 32u : 0u) |
+            (gpu_.att_kv_fmt_ == 1 ? 64u : gpu_.att_kv_fmt_ == 2 ? 128u : 0u));
         u32((uint32_t)toks.size());
         u32((uint32_t)gpu_.att_kv_width_);
         // The field exists in every version >= 3 file, so a version 4 file
@@ -113,6 +119,7 @@ bool Session::save_prefix_cache(const string& path, const vector<int>& toks,
             meta["seq"] = m_.seq;       meta["head_dim"] = m_.head_dim;
             meta["rope_theta"] = (double) m_.rope_theta;
             meta["kv_bits"] = gpu_.att_kv_bits_;
+            meta["kv_fmt"] = (long long) gpu_.att_kv_fmt_;
             meta["act_fmt"] = string(x_format_name(gpu_.act_fmt_));
             meta["hybrid"] = m_.hybrid;
             meta["kv_scale"] = (double) gpu_.att_kv_scale_;
@@ -164,7 +171,8 @@ bool Session::load_prefix_cache(const string& path, vector<int>& toks){
             flags != ((m_.qk_norm ? 1u : 0u) | (m_.rope_half ? 2u : 0u) |
                       (gpu_.att_kv_bits_ == 16 ? 4u : gpu_.att_kv_bits_ == 8 ? 8u : 0u) |
                       (gpu_.act_fmt_ == XFormat::I8_4 ? 16u : 0u) |
-                      (m_.hybrid ? 32u : 0u))) return false;
+                      (m_.hybrid ? 32u : 0u) |
+                      (gpu_.att_kv_fmt_ == 1 ? 64u : gpu_.att_kv_fmt_ == 2 ? 128u : 0u))) return false;
         if (memcmp(&kscale, &gpu_.att_kv_scale_, sizeof(float)) != 0) {
             cerr << "PREFIX_CACHE KV_GRID mismatch: cache " << kscale
                  << ", process " << gpu_.att_kv_scale_ << endl;

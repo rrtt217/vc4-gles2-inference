@@ -10,43 +10,38 @@ using std::to_string;
 
 namespace {
 // ---- how the rmsnorm's partial sums travel (RMS_STORE=i24|f32) --------------
-// Each of the 32 lanes holds a sum of squares whose magnitude follows the row's
-// rms: ~0.013 for pocket's layer 0 (|x| ~ 0.02, measured 2026-11-18) and ~1e8
-// for a 2300-magnitude residual.  The 24-bit encoding below has a *fixed*
-// 1/4096 step, so at layer 0 the lane sums land at 55-91 LSB -- about seven
-// bits -- and one LSB is 0.9% of a lane.  That is exactly the 0.212% scale
-// difference the board shows against Xe on layer 0's normalised row, which then
-// compounds over 28 layers.  `f32` stores the same four bytes as a bit-cast
-// float: exact at every magnitude.  `i24` stays the default so no pin moves.
-static std::string rms_store_glsl() {
-    static const bool f32 = [] {
+// The stream is one XFormat at a time.  `S24_1` is a lane sum at a *fixed*
+// 1/4096 step: at layer 0 the lane sums land at 55-91 LSB -- about seven bits,
+// one LSB being 0.9% of a lane -- which is the 0.212% scale difference the
+// board shows against Xe on layer 0's normalised row, compounding over 28
+// layers.  `F32` stores the same four bytes as a bit-cast float, exact at every
+// magnitude.  `i24` stays the default so no pin moves.
+//
+// Both codecs come from xformat.  The f32 branch used to hand-copy
+// `x_f32`/`x_f32enc` under the names `s_ld`/`s_st` -- a second copy of a codec,
+// which is the drift this module exists to remove.  Sharing `F32` here cannot
+// confuse a scale: the format states no step, so the sum and a value stream
+// decode by the same, step-free rule.
+static XFormat rms_store_fmt() {
+    static const XFormat f = [] {
         const char* v = sw_str("RMS_STORE");
-        return v && !strcmp(v, "f32");
+        return (v && !strcmp(v, "f32")) ? XFormat::F32 : XFormat::S24_1;
     }();
-    if (f32) {
-        return std::string(
-            "float s_ld(vec4 c){uint u=(uint(int(c.x*255.0+0.5))<<24)|"
-            "(uint(int(c.y*255.0+0.5))<<16)|(uint(int(c.z*255.0+0.5))<<8)|"
-            "uint(int(c.w*255.0+0.5));return uintBitsToFloat(u);}\n"
-            "vec4 s_st(float v){uint u=floatBitsToUint(v);"
-            "return vec4(float(u>>24),float((u>>16)&255u),float((u>>8)&255u),"
-            "float(u&255u))/255.0;}\n"
-            "\n#define S_ST(V) s_st(V)\n"
-            "#define S_LD(C) s_ld(C)\n");
-    }
-    return "\n#define S_ST(V) x_s24enc(V)\n"
-           "#define S_LD(C) x_s24(C)\n";
+    return f;
 }
-// Sum of squares in 24-bit fixed point, scale 4096 (the rms stats passes).
-const string kEncs4096 =
-    "vec4 encs(float s){float q=floor(s*4096.0+0.5)+8388608.0;"
-    "float r0=floor(q/16777216.0),g=floor(q/65536.0)-r0*256.0,"
-    "b=floor(q/256.0)-r0*65536.0-g*256.0,a=q-r0*16777216.0-g*65536.0-b*256.0;"
-    "return vec4(r0/255.0,g/255.0,b/255.0,a/255.0);}";
-// The 24-bit encoder plus the S_ST/S_LD pair `RMS_STORE` selects: every builder
-// that writes or reads an rms partial sum emits this, once.
-static string encs_glsl() { return x_codec_glsl(XFormat::S24_1) + rms_store_glsl(); }
+// The aliases the rms builders use, pointed at the selected format's own
+// functions (`x_codec_glsl` below is what defines them).
+static std::string rms_store_glsl() {
+    return rms_store_fmt() == XFormat::F32
+               ? "\n#define S_ST(V) x_f32enc(V)\n#define S_LD(C) x_f32(C)\n"
+               : "\n#define S_ST(V) x_s24enc(V)\n#define S_LD(C) x_s24(C)\n";
+}
+// The selected format's codec plus the S_ST/S_LD aliases: every builder that
+// writes or reads an rms partial sum emits this, once.
+static string encs_glsl() { return x_codec_glsl(rms_store_fmt()) + rms_store_glsl(); }
 }  // namespace
+
+XFormat rms_store_format() { return rms_store_fmt(); }
 
 string swiglu_pair(int hidden, XFormat out, int hs) {
     need_dim("swiglu_pair", hidden);
@@ -448,7 +443,7 @@ std::string ln_stats_q16(int dim, XFormat rf) {
     need_dim("ln_stats_q16", dim);
     const string D = to_string(dim), RW = to_string(x_texels(dim, rf));
     // One fragment, one XST2 store: the pair is (mean, invstd) in .rg/.ba of a
-    // single I16_2 texel.  XFORMAT's rule is that producers use XST* and
+    // single kLnPairFmt texel.  XFORMAT's rule is that producers use XST* and
     // consumers use X1/X2/X4; the RWKV bit-cast form (kBC) looked available
     // because it is a helper in this file, but it is a *private* codec of that
     // block -- using it here forces the whole program to ESSL 3.00 while the
@@ -460,7 +455,7 @@ std::string ln_stats_q16(int dim, XFormat rf) {
     // 1/sigma with sigma O(1) for a post-norm residual.  A model whose
     // residual is far from O(1) would need ACT=f32 here (the ACT axis), not a
     // second private codec.
-    return head(XFormat::I16_2) + x_residual_glsl(rf) +
+    return head(kLnPairFmt) + x_residual_glsl(rf) +
         "uniform sampler2D X;uniform float eps;"
         "void main(){float s=0.0,s2=0.0;"
         "for(int i=0;i<" + D + ";i++){float v=Y1(X,i," + RW + ".0);s+=v;s2+=v*v;}"
@@ -472,38 +467,40 @@ std::string ln_stats_q16(int dim, XFormat rf) {
 std::string ln_apply_q16(int dim, XFormat rf, XFormat out) {
     need_dim("ln_apply_q16", dim);
     const string RW = to_string(x_texels(dim, rf));
-    const string WW = to_string(x_texels(dim, XFormat::I16_2));
-    // XFORMAT-clean: every fetch is a macro, and each tensor is its own texture
-    // in its own format.  W (the LayerNorm weight) and B (its bias) used to
-    // share one two-row texture, which no macro can read -- `R1` addresses
-    // y = 0.5 only -- so that "optimisation" forced two hand-written
-    // `texture2D` fetches with a row pitch guessed from a comment, which is
-    // exactly what the format module exists to stop.  Two one-row textures cost
-    // 2 KiB and read like every other weight.
-    // S is ONE I16_2 texel holding both members, so its `TW` is 1 -- the macro
-    // halves the index and divides by TW, and both 0 and 1 must land on texel 0
-    // (picking .rg and .ba).  Passing the target's width instead puts index 1 at
-    // texel 0.5, i.e. outside the pair.
+    const string WW = to_string(x_texels(dim, kLnPairFmt));
+    // X is the residual and decodes with `rf`.  W, B and S are not residual
+    // streams: their producers (upload_v5_rows, ln_stats_q16) pack kLnPairFmt,
+    // one q16 pair a texel, and this reads that layout directly.  Using Y1 for
+    // them decoded an I16_2 pair with whatever layout the residual happened to
+    // use -- the same bytes only while RES=i16_2, and wrong for every other
+    // axis value.  (The dump's I16_1 case used to pin that mistake as text.)
     // The *output* shape follows `x_per_texel(out)`, not a per-format literal:
     // `x_f32enc2` never existed in the format module, and writing it here made
-    // every ACT=f32 run of the encoder fail to compile -- a branch that is dead
-    // until the axis actually moves, which is why v5 shipped with it.
-    const bool pr = x_per_texel(out) == 2;
+    // every ACT=f32 run of the encoder fail to compile.
     const auto term = [&](const string& k) {
-        return "(Y1(X," + k + "," + RW + ".0)-m)*inv*Y1(W," + k + "," + WW
-               + ".0)+Y1(B," + k + "," + WW + ".0)";
+        return "(Y1(X," + k + "," + RW + ".0)-m)*inv*wv(" + k + ")+bv(" + k + ")";
     };
-    string body = "void main(){";
-    body += "float m=Y1(S,0,1.0);float inv=Y1(S,1,1.0);";
-    if (pr)
+    string body =
+        "float wv(int i){vec4 c=texture2D(W,vec2((float(i/2)+0.5)/float(" + WW + "),0.5));"
+        "return ((i/2)*2==i)?x_i16(c.rg):x_i16(c.ba);}\n"
+        "float bv(int i){vec4 c=texture2D(B,vec2((float(i/2)+0.5)/float(" + WW + "),0.5));"
+        "return ((i/2)*2==i)?x_i16(c.rg):x_i16(c.ba);}\n"
+        "void main(){vec4 sc=texture2D(S,vec2(0.5,0.5));"
+        "float m=x_i16(sc.rg);float inv=x_i16(sc.ba);";
+    const int n = x_per_texel(out);
+    if (n == 4)
+        body += "int t=int(gl_FragCoord.x);int i0=4*t;"
+                "gl_FragColor=XST4(" + term("i0") + "," + term("i0+1") + ","
+                + term("i0+2") + "," + term("i0+3") + ");}";
+    else if (n == 2)
         body += "int t=int(gl_FragCoord.x);int i0=2*t;"
                 "float v0=" + term("i0") + ";float v1=" + term("i0+1") + ";"
-                "gl_FragColor=XST2(v0,v1);";
+                "gl_FragColor=XST2(v0,v1);}";
     else
         body += "int i0=int(gl_FragCoord.x);"
-                "gl_FragColor=XST1(" + term("i0") + ");";
+                "gl_FragColor=XST1(" + term("i0") + ");}";
     return head(out) + x_residual_glsl(rf) +
-        "uniform sampler2D X,S,W,B;" + body + "}";
+        "uniform sampler2D X,S,W,B;" + body;
 }
 
 std::string bias_add_q16(int dim, XFormat xf, XFormat f) {
@@ -544,7 +541,13 @@ std::string act_swish(int dim, XFormat f) {
     // shows when the axis actually moves.
     const bool pr = x_per_texel(f) == 2;
     string body = "void main(){";
-    if (pr)
+    if (x_per_texel(f) == 4)
+        body += "int t=int(gl_FragCoord.x);int i0=4*t;"
+                "float x0=Y1(X,i0," + AS + ".0);float x1=Y1(X,i0+1," + AS + ".0);"
+                "float x2=Y1(X,i0+2," + AS + ".0);float x3=Y1(X,i0+3," + AS + ".0);"
+                "gl_FragColor=XST4(x0/(1.0+" + EXP("-x0") + "),x1/(1.0+" + EXP("-x1") + "),"
+                "x2/(1.0+" + EXP("-x2") + "),x3/(1.0+" + EXP("-x3") + "));";
+    else if (pr)
         body += "int t=int(gl_FragCoord.x);int i0=2*t;"
                 "float x0=Y1(X,i0," + AS + ".0);float x1=Y1(X,i0+1," + AS + ".0);"
                 "gl_FragColor=XST2(x0/(1.0+" + EXP("-x0") + "),x1/(1.0+" + EXP("-x1") + "));";
@@ -580,7 +583,14 @@ std::string act_swish_biased(int dim, XFormat xf, XFormat f) {
         return string(v) + "/(1.0+" + EXP(neg.c_str()) + ")";
     };
     string body = "void main(){";
-    if (x_per_texel(f) == 2)
+    const int n = x_per_texel(f);
+    if (n == 4)
+        body += "int t=int(gl_FragCoord.x);int i0=4*t;"
+                "float v0=" + sum("i0") + ";float v1=" + sum("i0+1") + ";"
+                "float v2=" + sum("i0+2") + ";float v3=" + sum("i0+3") + ";"
+                "gl_FragColor=XST4(" + sw("v0") + "," + sw("v1") + ","
+                + sw("v2") + "," + sw("v3") + ");";
+    else if (n == 2)
         body += "int t=int(gl_FragCoord.x);int i0=2*t;"
                 "float v0=" + sum("i0") + ";float v1=" + sum("i0+1") + ";"
                 "gl_FragColor=XST2(" + sw("v0") + "," + sw("v1") + ");";

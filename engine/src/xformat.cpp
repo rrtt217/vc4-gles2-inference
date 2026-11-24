@@ -131,6 +131,50 @@ std::vector<uint8_t> x_pack(const std::vector<float>& values, XFormat f) {
     return x_pack(values.data(), (int)values.size(), f);
 }
 
+float x_unpack(const uint8_t* row, int index, XFormat f) {
+    switch (f) {
+        case XFormat::I16_1: {
+            const uint8_t* p = row + (size_t)index * 4;
+            return (float)(int16_t)((uint16_t)p[0] << 8 | p[1]) / 256.0f;
+        }
+        case XFormat::I16_2: {
+            const uint8_t* p = row + (size_t)(index / 2) * 4 + (index & 1) * 2;
+            return (float)(int16_t)((uint16_t)p[0] << 8 | p[1]) / 256.0f;
+        }
+        case XFormat::I8_4: {
+            const uint8_t* p = row + (size_t)(index / 4) * 4 + (index & 3);
+            return ((int)*p - 128) / 16.0f;
+        }
+        case XFormat::I24_1: {
+            const uint8_t* p = row + (size_t)index * 4;
+            const long u = (long)p[1] << 16 | (long)p[2] << 8 | p[3];
+            return (float)(u - 8388608L) / 256.0f;
+        }
+        case XFormat::S24_1: {
+            const uint8_t* p = row + (size_t)index * 4;
+            const long u = (long)p[0] << 24 | (long)p[1] << 16 |
+                           (long)p[2] << 8 | p[3];
+            return (float)(u - 8388608L) / 4096.0f;
+        }
+        case XFormat::F32: {
+            const uint8_t* p = row + (size_t)index * 4;
+            const uint32_t u = (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 |
+                               (uint32_t)p[2] << 8 | p[3];
+            float v = 0.0f;
+            memcpy(&v, &u, 4);
+            return v;
+        }
+        case XFormat::BF16: {
+            const uint8_t* p = row + (size_t)(index / 2) * 4 + (index & 1) * 2;
+            const uint32_t u = ((uint32_t)p[0] << 8 | p[1]) << 16;
+            float v = 0.0f;
+            memcpy(&v, &u, 4);
+            return v;
+        }
+    }
+    return 0.0f;
+}
+
 // The q16 decode comes in two spellings.  The default is the fast float
 // reconstruction with the sign classified at 32767.5: two multiplies and an
 // add, no conversions, which is the cost the pre-6234328 kernels had.  It

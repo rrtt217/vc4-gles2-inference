@@ -355,9 +355,11 @@ void GPU::upload_v5_rows(const Model& m){
         auto one_act = [&](const float* v, int n) {
                 return upload_bias(vector<float>(v, v + n), act_fmt_);
         };
-        // One row a vector, both through upload_bias: see EncdecRows.
+        // One row a vector, both through upload_bias: see EncdecRows.  A
+        // LayerNorm's weight and bias are kLnPairFmt, the same layout
+        // ln_apply_q16 reads (shaders.h owns the name).
         auto wrow = [&](const float* w, int n) { return upload_bias(
-                vector<float>(w, w + n), XFormat::I16_2); };
+                vector<float>(w, w + n), kLnPairFmt); };
         const int L = m.layers, E = m.enc_layers, D = m.dim, F = m.enc_ffn;
         r.ln1.assign(L, 0); r.ln1b.assign(L, 0);
         r.ln2.assign(L, 0); r.ln2b.assign(L, 0);
