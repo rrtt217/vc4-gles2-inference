@@ -961,9 +961,16 @@ bool Model::read_tables() {
         };
         auto as_q8 = [&](const MmcfRec& r, Mat& m) {
                 m.rows = (int)r.rows; m.cols = (int)r.cols;
-                m.type = WeightType::INT8;
+                WeightType wt = WeightType::INT8;
+                bool prebiased = false;
+                if (!wf_from_dtype(r.dtype, &wt, &prebiased) || wt != WeightType::INT8) {
+                        cerr << "mmcf: q8 tensor 0x" << std::hex << r.id << std::dec
+                             << " has dtype " << (int)r.dtype << "\n";
+                        exit(2);
+                }
+                m.type = wt;
                 m.scale = r.scale;
-                m.prebiased = (r.dtype == 2);
+                m.prebiased = prebiased;
                 const int8_t* p = (const int8_t*)(fbase_ + data_off_ + r.off);
                 if (borrow_) m.ext8 = p;
                 else { m.q8.assign(p, p + (size_t)r.rows * r.cols); }
@@ -1127,8 +1134,10 @@ bool Model::read_tables() {
                         if (part == 1) q.scl = &r; else q.mn = &r;
                         continue;
                 }
-                if (r.dtype != 0 && r.dtype != 1 && r.dtype != 2 && r.dtype != 3 &&
-                    r.dtype != 4 && r.dtype != 5 && r.dtype != 6 && r.dtype != 7) {
+                WeightType wt = WeightType::INT8;
+                bool prebiased = false;
+                const bool matrix_dtype = wf_from_dtype(r.dtype, &wt, &prebiased);
+                if (!matrix_dtype && r.dtype != 0 && r.dtype != 5) {
                         cerr << "mmcf: tensor 0x" << std::hex << r.id << std::dec
                              << " has unknown dtype " << (int)r.dtype << "\n";
                         return false;

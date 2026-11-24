@@ -658,6 +658,11 @@ The engine is split into `engine/src/` modules; see `docs/engine-layout.md`.
 Shader text belongs in `shaders_*.cpp` (one TU per weight format, plus the
 shared prelude, the block-level row passes, the model-specific languages and
 attention), and activation layout knowledge belongs in `xformat.h/.cpp`.
+A weight format is a row in `engine/src/weight_format.h`: a new one adds a row
+and a `shaders_<name>.cpp`, and the GPU's exhaustive switches (which `-Wswitch`
+and `wf_no_kernel` enforce) must name it.  Dispatch asks `wf_can(type, stage)`
+and `wf_accepts(type, format)`, never a hand-written `WeightType` list, and a
+model name is never a weight-format boundary.
 Environment switches are read through `env_set` / `env_flag` / `env_int` /
 `env_double` (`common.h`), not by
 calling `getenv` twice in one expression (`getenv(X) ? atoi(getenv(X)) : d` is

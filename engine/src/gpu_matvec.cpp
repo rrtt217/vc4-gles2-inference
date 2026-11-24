@@ -49,6 +49,7 @@ void GPU::matvec_add(const Mat& m, GLuint x, GLuint residual, Target& out, XForm
 // carry the arm (the q8 row-pair one).  Zero is the shipped form, unchanged.
 void GPU::matvec_add_bias(const Mat& m, GLuint x, GLuint residual, GLuint bias,
                           Target& out, XFormat xf){
+        if (!wf_accepts(m.type, xf)) wf_no_activation("matvec_add", m.type, xf);
         const bool pair = res_pack_ && (m.type == WeightType::INT8 ||
                                         m.type == WeightType::T3);
         const bool pair4 = res_pack_ && m.type == WeightType::INT4;
@@ -198,6 +199,7 @@ vector<float> GPU::matvec_s(const Mat& m, const vector<float>& x){
 
 
 void GPU::draw(const Mat& m, GLuint x, Target& t, int row ){
+        if (!wf_accepts(m.type, act_fmt_)) wf_no_activation("draw", m.type, act_fmt_);
         const bool wr = wf(m.type).wrow && m.has_row_scale();
         // Exhaustive on purpose, with no default: -Wswitch names a WeightType
         // added without a kernel here, and the guard below stops the run if one

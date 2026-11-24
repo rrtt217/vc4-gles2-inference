@@ -97,6 +97,13 @@ def main():
         bad("kWeightFormats has two rows with the same name")
     type_to_name = dict(zip(row_type, row_name))
 
+    # The split gave every format one TU: the row and the file must agree, or
+    # the table claims a format whose kernels live somewhere else (or nowhere).
+    for name in row_name:
+        path = os.path.join(ENGINE, "src", "shaders_%s.cpp" % name)
+        if not os.path.isfile(path):
+            bad("WeightFormat %r has no src/shaders_%s.cpp" % (name, name))
+
     # The wire mapping: one case per matrix dtype, no case for f32/blob, and the
     # type each case names is the row the packer's name belongs to.
     cases = {}

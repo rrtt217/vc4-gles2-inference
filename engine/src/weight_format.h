@@ -170,3 +170,11 @@ constexpr uint8_t wf_dtype(WeightType t, bool prebiased) {
                  who, (int)t, name);
     std::exit(2);
 }
+
+// The activation half of the same refusal: a format's kernels declare which
+// XFormats they can decode (q6 is the one that refuses the 8-bit streams).
+[[noreturn]] inline void wf_no_activation(const char* who, WeightType t, XFormat f) {
+    std::fprintf(stderr, "%s: weight type %s cannot read %s activations\n",
+                 who, wf(t).name, x_format_name(f));
+    std::exit(2);
+}
