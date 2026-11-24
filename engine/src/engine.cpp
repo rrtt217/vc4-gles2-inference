@@ -213,7 +213,7 @@ int main(int argc, char** argv) {
                 x_format_name(app.gpu.act_fmt()), x_format_name(app.gpu.res_fmt()));
         // The attention's geometry, because a scan bound is the first thing to
         // check when a pass costs 20x what the same pass costs on another model.
-        app.gpu.att_geometry_line();
+        if (env_flag("LAYER_PROFILE")) app.gpu.att_geometry_line();
         vector<int> out;
         int tok = app.model.decoder_start_id;
         const int max_gen = opt.gen_set ? opt.gen : 32;

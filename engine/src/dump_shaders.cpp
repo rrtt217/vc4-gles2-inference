@@ -176,6 +176,16 @@ vector<Case> cases() {
     // here, so `gate/shader_hashes.sh` could not see the day one of them
     // changed (`x_f32r` was a hand copy and nothing compared it).  One program
     // each, at the shape the FFN's hidden uses.
+    {
+        // Marian (v5): 512 wide, 8 heads of 64, no rotation, no qk-norm, and the
+        // KV axis at q16 -- the shape `encdec_encode` builds it in.  Built from
+        // `attn_base()` so every field `need_attn` checks is filled.
+        AttnConfig c = attn_base();
+        c.dim = 512; c.kv_dim = 512; c.heads = 8; c.kv_heads = 8; c.head_dim = 64;
+        c.seq = 64; c.rope_none = true; c.qk_norm = false; c.kv_bits = 16;
+        c.kv_width = 512;
+        add(v, "att_cross_kv_512", [c] { return att_cross_kv(c, false, I16_2); });
+    }
     add(v, "act_swish_biased_2048_f24_i16", []
         { return act_swish_biased(2048, XFormat::I24_1, I16_2); });
     add(v, "swiglu_2row_2432_bf16", [] { return swiglu_2row(2432, XFormat::BF16); });

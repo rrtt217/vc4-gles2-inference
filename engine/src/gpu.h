@@ -192,7 +192,13 @@ public:
                         bool hybrid = false, const std::vector<uint8_t>* layer_type = nullptr,
                         bool rope_none = false);
 
-    GLuint attention_block(const Mat& qkv, GLuint x, int layer, int pos);
+    // One block, two callers.  `kv` overrides the K/V plane the three passes
+    // read (0 = this layer's cache); `stage_kv` false skips `kv_rope_write`,
+    // because a cross-attention's K/V was built once by the encoder and this
+    // layer's cache belongs to the self-attention.  A second hand-rolled
+    // sequence for the cross is what drifted, and it cost a day.
+    GLuint attention_block(const Mat& qkv, GLuint x, int layer, int pos,
+                           GLuint kv = 0, bool stage_kv = true);
 
     // Prefill query batching (PREFILL_BATCH, docs/prefill-batching.md): the
     // attention-internal passes of N positions fuse into one score draw while
@@ -212,7 +218,21 @@ public:
     // Phase 1 of a group, one position: qkv draw, V grid, KV write, rotated Q
     // staged into row b.  The serial attention_block's draws in the same order.
     void att_stage(const Mat& qkv, GLuint x, int layer, int pos, int b, int n);
+    // The cross-attention's K/V plane, one per decoder layer, `att_kv_width_`
+    // wide by the source's length tall: `[K | V]` per row, the layout
+    // `kv_rope_write` already produces for the self-attention's cache.
+    vector<Target> cross_kv_;
+    void alloc_cross_kv(int n);
+    const Target& att_scores_ref() const { return att_scores_; }
+    GLuint cross_kv_tex(int l) const { return (size_t)l < cross_kv_.size() ? cross_kv_[(size_t)l].tex : 0; }
     void att_qrot_stage(int layer, int pos, int b, int n);
+    // One half of a cross-attention KV row: the projection `x` (a one-row I24
+    // texture) into `cross_kv_[layer]` at row `b`, K half or V half.
+    void cross_kv_store(int layer, GLuint x, int b, bool v_half);
+    // The cross-attention's query: projection -> bias -> the hoisted q the score
+    // pass reads.  One call, because the three steps share `qkv_target_` and a
+    // caller reaching for it by name is how the width of the bias add gets
+    // confused with the self-attention's 3*dim.
     void att_scores_batch(int layer, int pos0, int n);
     void att_stats_row(int pos, int b, int n);
     void att_v_row(int layer, int pos, int b, int n);
@@ -343,7 +363,9 @@ public:
     // their q16 grids (value = int/256 and int/KVSCALE), scores in the 1/1024
     // units att_score writes, stats raw as att_stats wrote them.  Offline that
     // is checkable with a dot product and a softmax, no second engine path.
-    void dump_attention(int layer, int pos);
+    // `kv` is the plane the passes actually read (0 = this layer's cache),
+    // so a cross-attention dump shows the cross K/V and not the self cache.
+    void dump_attention(int layer, int pos, GLuint kv = 0);
     // Decoded per-row q16 integers of the qkv target, hashed.  Layout-agnostic
     // (24-bit row texels and packed q16 pairs hash alike), so QKV_PAIR=0 and
     // QKV_PAIR=1 runs can be compared exactly for every layer and position.
@@ -768,7 +790,11 @@ private:  // matvec input (qkv/wo/gate/logits)
 
     void kv_vscale(int layer, int pos);
 
-    void att_scores(int layer, int pos);
+    // `kv` overrides the KV plane the pass reads; 0 means `kv_cache_[layer]`.
+    // v5's cross-attention keeps its K/V in a plane of its own, built once by
+    // `encdec_encode`, and the decoder runs these passes against it with no host
+    // round trip.
+    void att_scores(int layer, int pos, GLuint kv = 0);
 
     void att_stats(int pos);
     // The multi-segment (max, sum) fold (docs/long-context.md).
@@ -779,7 +805,7 @@ private:  // matvec input (qkv/wo/gate/logits)
 
     void att_probs(int pos);
 
-    void att_v(int layer, int pos);
+    void att_v(int layer, int pos, GLuint kv = 0);
 
     // Parallel sum of squares: the serial version is one fragment looping DIM
     // times, so every iteration pays full texture latency (~3.5 ms per call).

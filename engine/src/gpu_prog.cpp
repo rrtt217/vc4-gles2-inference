@@ -147,7 +147,21 @@ GLuint GPU::compile_shader(GLenum type, const string& src){
         GLint ok = 0; glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
         if (!ok) {
             char log[8192]; glGetShaderInfoLog(s, sizeof(log), nullptr, log);
-            cerr << "shader compile failed:\n" << log << "\n"; exit(1);
+            // The source, not just the log: the log names a line number and
+            // without the text that number is unreadable, which is how one of
+            // these cost an hour.  SHADER_SRC=0 turns it off.
+            cerr << "shader compile failed:\n" << log << "\n";
+            if (!getenv("SHADER_SRC") || atoi(getenv("SHADER_SRC")) != 0) {
+                    int n = 1;
+                    cerr << "--- source ---\n";
+                    for (size_t i = 0; i < src.size(); ++i) {
+                            if (i == 0 || src[i - 1] == '\n') cerr << n++ << "| ";
+                            cerr << src[i];
+                    }
+                    if (!src.empty() && src.back() != '\n') cerr << "\n";
+                    cerr << "--- end ---\n";
+            }
+            exit(1);
         }
         return s;
     }

@@ -2195,18 +2195,6 @@ vector<float> Session::swiglu(const vector<float>& h){
 //
 // The cross-attention reads its K/V on the host for now.  That is a deliberate
 // bring-up step, not the shape of the finished path: the encoder output and the
-// per-layer cross K/V are produced by GPU matvecs and read back once (n * dim
-// floats a layer, 1.5 MB for opus), and the per-token attention then runs in C++
-// against them.  The remaining work is one kernel family -- the score/stats/v
-// passes bound to a second KV plane -- and until it exists this keeps the rest
-// of the block on the GPU where it can be compared against the reference.
-static void softmax_inplace(float* s, int n) {
-        float mx = s[0];
-        for (int i = 1; i < n; ++i) if (s[i] > mx) mx = s[i];
-        float sum = 0.0f;
-        for (int i = 0; i < n; ++i) { s[i] = expf(s[i] - mx); sum += s[i]; }
-        if (sum > 0.0f) for (int i = 0; i < n; ++i) s[i] /= sum;
-}
 
 // The v5 profile lap.  Same line and the same reason as the dense loop's `mark`:
 // a lap synchronises, so its wall time is QPU work plus submit plus finish, and
@@ -2390,23 +2378,21 @@ void Session::encdec_encode(const vector<int>& src) {
                 cerr << "ENCDEC enc_out maxabs " << mx << " rms "
                      << sqrtf(ss / (float)cd_enc_.size()) << "\n";
         }
-        cd_k_.assign(m.layers, {});
-        cd_v_.assign(m.layers, {});
+        // The cross-attention's K/V live on the GPU now: one plane per decoder
+        // layer, `[K | V]` a row, written from each projection's output.  No
+        // read-back -- the host kept two vectors a layer and paid `n * layers`
+        // round trips to fill them, and the decoder then paid two more per token.
+        gpu_.alloc_cross_kv(n);
         for (int l = 0; l < m.layers; ++l) {
-                cd_k_[l].assign((size_t)n * D, 0.0f);
-                cd_v_[l].assign((size_t)n * D, 0.0f);
                 for (int b = 0; b < n; ++b) {
-                        // matvec_to writes I24 (see bias_add_matvec)
                         gpu_.matvec_to(m.u_cross_k[l], gpu_.grp_h(b, n).tex, gpu_.cd_b());
                         gpu_.bias_add_matvec(gpu_.cd_b().tex, gpu_.enc_rows_.ck_b[l],
                                              gpu_.cd_c(), D);
-                        vector<float> k = read_hidden(gpu_.cd_c());
-                        memcpy(cd_k_[l].data() + (size_t)b * D, k.data(), sizeof(float) * D);
+                        gpu_.cross_kv_store(l, gpu_.cd_c().tex, b, /*v_half=*/false);
                         gpu_.matvec_to(m.u_cross_v[l], gpu_.grp_h(b, n).tex, gpu_.cd_b());
                         gpu_.bias_add_matvec(gpu_.cd_b().tex, gpu_.enc_rows_.cv_b[l],
                                              gpu_.cd_c(), D);
-                        vector<float> v = read_hidden(gpu_.cd_c());
-                        memcpy(cd_v_[l].data() + (size_t)b * D, v.data(), sizeof(float) * D);
+                        gpu_.cross_kv_store(l, gpu_.cd_c().tex, b, /*v_half=*/true);
                 }
         }
         gpu_.set_causal(true);
@@ -2414,7 +2400,7 @@ void Session::encdec_encode(const vector<int>& src) {
 
 vector<float> Session::encdec_step(int token, int pos) {
         const Model& m = m_;
-        const int D = m.dim, F = m.enc_ffn, H = m.heads, hd = m.head_dim;
+        const int D = m.dim, F = m.enc_ffn;
         const float s = m.enc_scale_embed ? sqrtf((float)D) : 1.0f;
         vector<float> y = embedding(token, /*exact_f32=*/true);
         const float* p = m.pos_table.data() + (size_t)pos * D;
@@ -2434,29 +2420,27 @@ vector<float> Session::encdec_step(int token, int pos) {
                                         gpu_.enc_rows_.ln1b[l], gpu_.cd_a(), m.rms_eps);
                 // cross-attention: q from y1, k/v from the encoder (read-back
                 // planes; the cross kernel is the remaining host step)
-                gpu_.matvec_to(m.u_cross_q[l], y1, gpu_.cd_b());
-                gpu_.bias_add_matvec(gpu_.cd_b().tex, gpu_.enc_rows_.cq_b[l],
-                                     gpu_.cd_d(), D);
-                vector<float> q = read_hidden(gpu_.cd_d());
-                vector<float> ctx((size_t)D, 0.0f);
-                for (int hh = 0; hh < H; ++hh) {
-                        vector<float> sc((size_t)n);
-                        const float* qh = q.data() + hh * hd;
-                        for (int b = 0; b < n; ++b) {
-                                const float* kh = cd_k_[l].data() + (size_t)b * D + hh * hd;
-                                float dot = 0.0f;
-                                for (int i = 0; i < hd; ++i) dot += qh[i] * kh[i];
-                                sc[b] = dot / sqrtf((float)hd);
-                        }
-                        softmax_inplace(sc.data(), n);
-                        for (int b = 0; b < n; ++b) {
-                                const float* vh = cd_v_[l].data() + (size_t)b * D + hh * hd;
-                                for (int i = 0; i < hd; ++i)
-                                        ctx[(size_t)hh * hd + i] += sc[b] * vh[i];
-                        }
-                }
-                GLuint cq = gpu_.upload_hidden(ctx);
-                gpu_.matvec_add(m.u_cross_o[l], cq, y1, gpu_.cd_b(), gpu_.act_fmt_);
+                // The cross-attention runs where the self-attention runs: the
+                // query is projected on the GPU, the three passes read the plane
+                // `encdec_encode` built, and the context stays in a texture.  What
+                // used to be here was a read-back, a host softmax with a nested
+                // loop over heads and keys, and an upload -- per layer, per token.
+                // The cross-attention runs where the self-attention runs: the
+                // same block, pointed at the plane `encdec_encode` built and told
+                // not to touch this layer's cache.  It used to be a read-back, a
+                // host softmax over heads and keys, and an upload -- per layer,
+                // per token.
+                //
+                // The bias add leaves `qkv_target_` at `3*dim`, which is the width
+                // `RQKVQ` divides by (`QKVTW`); a `dim`-wide add shrank it to a
+                // third and every three q samples landed on the same texel.  The
+                // uploaded bias is zero-padded to that width for the same reason.
+                gpu_.set_qkv_bias(gpu_.enc_rows_.cq_b[l]);
+                GLuint ctx_tex = gpu_.attention_block(m.u_cross_q[l], y1, l, n - 1,
+                                                      gpu_.cross_kv_tex(l),
+                                                      /*stage_kv=*/false);
+                gpu_.set_qkv_bias(0);
+                gpu_.matvec_add(m.u_cross_o[l], ctx_tex, y1, gpu_.cd_b(), gpu_.act_fmt_);
                 gpu_.bias_add(gpu_.cd_b().tex, gpu_.enc_rows_.co_b[l], gpu_.cd_c());
                 GLuint y2 = gpu_.ln_q16(gpu_.cd_c().tex, gpu_.enc_rows_.ln2[l],
                                         gpu_.enc_rows_.ln2b[l], gpu_.cd_a(), m.rms_eps);

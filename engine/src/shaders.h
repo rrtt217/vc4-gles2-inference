@@ -122,6 +122,8 @@ std::string seg_seq_tex(const AttnConfig& c, const std::string& base);
 std::string seg_uniforms(const AttnConfig& c, const std::string& base);
 
 std::string att_defs(const AttnConfig& c);
+// A projection's row into one half of a KV row (cross-attention, v5).
+std::string att_cross_kv(const AttnConfig& c, bool v_half, XFormat xf);
 std::string att_helpers(const AttnConfig& c);
 
 std::string matvec_q8(int rows, int cols, XFormat xf, bool wrow = false);

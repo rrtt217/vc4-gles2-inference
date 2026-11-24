@@ -106,7 +106,7 @@ int q16_at(const vector<uint8_t>& b, int texel, int comp){
         return v;
 }
 
-void GPU::dump_attention(int layer, int pos){
+void GPU::dump_attention(int layer, int pos, GLuint kv){
         if (qrot_target_.tex == 0 || att_scores_.tex == 0 || att_stats_.tex == 0) return;
         // One meta line pins the shape and the grids, so the checker needs no
         // assumptions: value = int/256 for q and att_out, int/KVSCALE for K and
@@ -130,8 +130,15 @@ void GPU::dump_attention(int layer, int pos){
                 if (layer >= (int)kv_cache_.size()) break;
                 const bool f32kv = att_kv_fmt_ == 2;
                 if (att_kv_bits_ != 16 && !f32kv) break;
-                const Target& kt = att_nseg_ > 1 ? kv_part(layer, t / att_seg_)
-                                                 : kv_cache_[layer];
+                Target ovr;
+                if (kv && att_nseg_ == 1) {
+                        ovr.tex = kv;
+                        ovr.w = att_kv_width_;
+                        ovr.h = att_seq_;
+                }
+                const Target& kt = ovr.tex ? ovr
+                                 : (att_nseg_ > 1 ? kv_part(layer, t / att_seg_)
+                                                  : kv_cache_[layer]);
                 const vector<uint8_t> b = gpu_read_target_row(kt, att_nseg_ > 1 ? t % att_seg_ : t);
                 auto at = [&](int texel) {
                         if (!f32kv) return 0;

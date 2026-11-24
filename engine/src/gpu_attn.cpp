@@ -54,8 +54,11 @@ void GPU::bind_seg(int base_unit, const char* base, const vector<GLuint>& tex, G
 }
 
 void GPU::att_geometry_line() const {
-        fprintf(stderr, "attn: dim %d seq %d heads %d head_dim %d nseg %d seg %d rope_none %d causal %d\n",
+        fprintf(stderr, "attn: dim %d seq %d heads %d head_dim %d nseg %d seg %d "
+                        "kv_width %d kv_bits %d kv_fmt %d qkv_pair %d qkv_pair_ok %d rope_none %d causal %d\n",
                 att_dim_, att_seq_, att_heads_, att_head_dim_, att_nseg_, att_seg_,
+                att_kv_width_, att_kv_bits_, (int)att_kv_fmt_,
+                (int)att_qkv_pair_, (int)att_qkv_pair_,
                 (int)att_rope_none_, (int)att_causal_);
 }
 
@@ -287,7 +290,8 @@ void GPU::att_qkv_draw(const Mat& qkv, GLuint x){
         }
 }
 
-GLuint GPU::attention_block(const Mat& qkv, GLuint x, int layer, int pos){
+GLuint GPU::attention_block(const Mat& qkv, GLuint x, int layer, int pos,
+                            GLuint kv, bool stage_kv){
         if (qkv_target_.tex == 0 || kv_cache_.empty()) return 0;
         // Per-pass attribution: the block is five dependent draws and the whole
         // thing used to be one number in the profile.
@@ -348,11 +352,12 @@ GLuint GPU::attention_block(const Mat& qkv, GLuint x, int layer, int pos){
                 cerr << "QKVD " << layer << " " << pos << " " << qkv_hash(qkv.rows) << "\n";
             }
         }
-        if (att_kv_vstep_) { kv_vscale(layer, pos); lap("vscale"); }
-        kv_rope_write(layer, pos);
-        if (attn_dup("rope")) dup_price("rope", [&]{ kv_rope_write(layer, pos); });
+        if (stage_kv && att_kv_vstep_) { kv_vscale(layer, pos); lap("vscale"); }
+        if (stage_kv) kv_rope_write(layer, pos);
+        if (stage_kv && attn_dup("rope"))
+            dup_price("rope", [&]{ kv_rope_write(layer, pos); });
         lap("rope");
-        att_scores(layer, pos);
+        att_scores(layer, pos, kv);
         lap("scores");
         att_stats(pos);
         if (attn_dup("stats")) dup_price("stats", [&]{ att_stats(pos); });
@@ -360,9 +365,9 @@ GLuint GPU::attention_block(const Mat& qkv, GLuint x, int layer, int pos){
         // q16-packed scores/stats are decoded directly in att_v; the old
         // standalone probability pass is no longer compatible and is retired.
         lap("probs");
-        att_v(layer, pos);
-        if (attn_dup("v")) dup_price("v", [&]{ att_v(layer, pos); });
-        if (getenv("ATT_DUMP") && pos == atoi(getenv("ATT_DUMP"))) dump_attention(layer, pos);
+        att_v(layer, pos, kv);
+        if (attn_dup("v")) dup_price("v", [&]{ att_v(layer, pos, kv); });
+        if (getenv("ATT_DUMP") && pos == atoi(getenv("ATT_DUMP"))) dump_attention(layer, pos, kv);
         lap("v");
         return att_out_.tex;
     }
@@ -395,7 +400,7 @@ void GPU::kv_vscale(int layer, int pos){
         att_finish();
 }
 
-void GPU::att_scores(int layer, int pos){
+void GPU::att_scores(int layer, int pos, GLuint kv){
         // The q16 score-pair layout requires the hoisted q path; ATTN_HOIST=0
         // was removed with the kernel it selected (see att_score).
         const bool sprof = env_set("LAYER_PROFILE");
@@ -482,7 +487,7 @@ void GPU::att_scores(int layer, int pos){
                 use_program(p);
                 bind_tex(0, qrot_target_.tex);
                 set_sampler(p, "Q", 0);
-                bind_tex(1, kv_part(layer, k).tex);
+                bind_tex(1, (kv && k == 0) ? kv : kv_part(layer, k).tex);
                 set_sampler(p, "KV", 1);
                 glUniform1f(uloc(p, "pos"), (float)pos);
                 glUniform1f(uloc(p, "invsqrt"), 1.0f / sqrtf((float)att_head_dim_));
@@ -634,7 +639,7 @@ void GPU::att_probs(int pos){
         att_finish();
     }
 
-void GPU::att_v(int layer, int pos){
+void GPU::att_v(int layer, int pos, GLuint kv){
         // q16 score/stats layout has one packed texel per head; fused decode is mandatory.
         if (att_nseg_ == 1) {
                 GLuint p0 = x_v();
@@ -645,7 +650,7 @@ void GPU::att_v(int layer, int pos){
                 set_sampler(p0, "S", 0);
                 bind_tex(2, att_stats_.tex);
                 set_sampler(p0, "ST", 2);
-                bind_tex(1, kv_cache_[layer].tex);
+                bind_tex(1, kv ? kv : kv_cache_[layer].tex);
                 set_sampler(p0, "KV", 1);
                 if (att_kv_vstep_) {
                         bind_tex(3, vs_targets_[layer].tex);
@@ -673,7 +678,7 @@ void GPU::att_v(int layer, int pos){
             set_sampler(p, "S", 0);
             bind_tex(2, att_stats_.tex);
             set_sampler(p, "ST", 2);
-            bind_tex(1, kv_part(layer, k).tex);
+            bind_tex(1, (kv && k == 0) ? kv : kv_part(layer, k).tex);
             set_sampler(p, "KV", 1);
             if (att_kv_vstep_) {
                 bind_tex(3, vs_part(layer, k).tex);
@@ -870,6 +875,37 @@ void GPU::att_qrot_stage(int layer, int pos, int b, int n){
         setup_attrib(pr);
         glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         att_finish();
+}
+
+void GPU::alloc_cross_kv(int n){
+        cross_kv_.assign((size_t)kv_cache_.size(), Target());
+        // Height `att_seq_`, not `n`: every attention kernel addresses the KV plane
+        // with the compile-time `SEQ` (`(pos+0.5)/SEQ`), so a plane six rows tall
+        // put the source positions in the top tenth of a 64-row grid and every
+        // query read row 0.  The self-attention's cache has this height for the
+        // same reason.
+        (void)n;
+        for (size_t l = 0; l < cross_kv_.size(); ++l)
+                cross_kv_[l] = make_target(att_kv_width_, att_seq_);
+}
+
+// One half of one row of the cross plane.  The viewport is where the values go --
+// K at x=0, V at x=kv_dim/2 -- so one draw is one half of one position's row, and
+// the kernel is the attention's own KV encoder (same grid, so nothing can drift).
+void GPU::cross_kv_store(int layer, GLuint x, int b, bool v_half){
+        if (layer < 0 || (size_t)layer >= cross_kv_.size() || cross_kv_[layer].tex == 0) return;
+        const int half = att_kv_width_ / 2;
+        GLuint p = x_prog(string("xkv_") + (v_half ? "v" : "k") + "_" +
+                              to_string(att_kv_width_) + "_" + to_string((int)att_kv_fmt_),
+                          ::att_cross_kv(att_cfg(), v_half, act_fmt_));
+        bind_fbo(cross_kv_[layer].fbo);
+        glViewport(v_half ? half : 0, b, half, 1);
+        use_program(p);
+        bind_tex(0, x);
+        set_sampler(p, "XS", 0);
+        glUniform1f(uloc(p, "XOFF"), v_half ? (float)half : 0.0f);
+        setup_attrib(p);
+        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
 }
 
 void GPU::att_scores_batch(int layer, int pos0, int n){

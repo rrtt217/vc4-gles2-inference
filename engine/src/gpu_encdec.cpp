@@ -82,7 +82,18 @@ void GPU::upload_encdec_rows(const Model& m){
                            m.bias_dim_row(B + Model::kRowV) + D);
                 r.qkv_b[l] = upload_bias(qkv, act_fmt_);
                 r.o_b[l] = one(m.bias_dim_row(B + Model::kRowO), D);
-                r.cq_b[l] = one(m.bias_dim_row(B + Model::kRowCQ), D);
+                // The cross query's bias rides `qkv_target_`'s width, not `dim`:
+                // `att_scores` reads the q out of that target through `RQKVQ`,
+                // whose texel divisor is the compile-time `QKVTW` (3*dim).  A
+                // `dim`-wide bias add shrank the target to a third and every
+                // three samples landed on the same texel -- the q came out
+                // replicated three times and the translation repeated one token.
+                {
+                        vector<float> pad(m.bias_dim_row(B + Model::kRowCQ),
+                                          m.bias_dim_row(B + Model::kRowCQ) + D);
+                        pad.resize((size_t)3 * D, 0.0f);
+                        r.cq_b[l] = upload_bias(pad, res_fmt_);
+                }
                 r.ck_b[l] = one(m.bias_dim_row(B + Model::kRowCK), D);
                 r.cv_b[l] = one(m.bias_dim_row(B + Model::kRowCV), D);
                 r.co_b[l] = one(m.bias_dim_row(B + Model::kRowCO), D);
