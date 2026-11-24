@@ -2302,6 +2302,7 @@ void Session::encdec_encode(const vector<int>& src) {
                 lap.mark("encLN1", l);
                 gpu_.set_qkv_bias(gpu_.enc_rows_.enc_qkv_b[l]);
                 for (int b = 0; b < n; ++b) {
+                        lap.mark("encPhase1", l);
                         gpu_.att_stage(m.u_enc_qkv[l], h[b], l, b, b, n);
                         lap.mark("encAttStage", l);
                 }
@@ -2311,6 +2312,7 @@ void Session::encdec_encode(const vector<int>& src) {
                 lap.mark("encScoresBatch", l);
                 lap.mark("encScores", l);
                 for (int b = 0; b < n; ++b) {
+                        lap.mark("encPhase3", l);
                         // `pos` is the last *valid* key under NOCAUSAL (the
                         // scan bound), not this query's position: the encoder
                         // fills n slots of a SEQ-wide cache and the rest must
@@ -2413,7 +2415,9 @@ void Session::encdec_encode(const vector<int>& src) {
         // read-back -- the host kept two vectors a layer and paid `n * layers`
         // round trips to fill them, and the decoder then paid two more per token.
         gpu_.alloc_cross_kv(n);
+        lap.mark("encAllocKV", 0);
         for (int l = 0; l < m.layers; ++l) {
+                lap.mark("encCrossKV", l);
                 for (int b = 0; b < n; ++b) {
                         gpu_.matvec_to(m.u_cross_k[l], gpu_.grp_h(b, n).tex, gpu_.cd_b());
                         gpu_.bias_add_matvec(gpu_.cd_b().tex, gpu_.enc_rows_.ck_b[l],
@@ -2425,6 +2429,7 @@ void Session::encdec_encode(const vector<int>& src) {
                         gpu_.cross_kv_store(l, gpu_.cd_c().tex, b, /*v_half=*/true);
                 }
         }
+        lap.mark("encCrossKVEnd", 0);
         gpu_.set_causal(true);
 }
 
