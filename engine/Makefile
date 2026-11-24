@@ -6,6 +6,9 @@ CXX ?= g++
 CXXSTD := -std=c++17
 OPT ?= -O2
 WARN ?= -Wall -Wextra
+# Compile parallelism for the forced clean build in warncheck: capped so a
+# many-core host does not start more compilers than its memory can hold.
+JOBS ?= $(shell n=$$(nproc 2>/dev/null || echo 2); [ $$n -gt 8 ] && n=8; echo $$n)
 CXXFLAGS ?=
 ALL_CXXFLAGS := $(CXXSTD) $(OPT) $(CXXFLAGS) $(WARN)
 LDLIBS ?= -lEGL -lGLESv2 -lm
@@ -32,6 +35,29 @@ CORE := $(SRC)/engine.cpp $(SRC)/common.cpp $(SRC)/xformat.cpp $(SRC)/switches.c
         $(SRC)/tokenizer.cpp $(SRC)/model.cpp $(SRC)/session.cpp $(SRC)/prefix_cache.cpp $(SRC)/lineedit.cpp $(SRC)/lineedit_layout.cpp \
         $(SRC)/sampling.cpp $(SRC)/grammar.cpp $(SRC)/gbnf.cpp $(SRC)/gbnf_full.cpp $(SRC)/schema.cpp $(SRC)/tools.cpp $(SRC)/ppl.cpp $(SRC)/cli.cpp $(SRC)/chat_format.cpp $(SRC)/prefix_build.cpp $(SRC)/app.cpp $(SRC)/worker.cpp $(SRC)/chat.cpp $(SRC)/chattmpl.cpp $(JINJA)
 HEADERS := $(wildcard $(SRC)/*.h)
+# Incremental build: one object per translation unit, dependencies from -MMD.
+# Each toolchain gets its own tree -- a native, a cross and an armv6 object
+# differ in ABI and flags, and reusing one is a wrong binary that links.  -B
+# still means "rebuild everything": it is the baseline command in AGENTS.md and
+# what warncheck runs.  make cannot see a CXXFLAGS or sysroot change, so after
+# one, use -B or remove that object tree.
+HOST_OBJ  := $(patsubst %.cpp,build/host/%.o,$(CORE))
+PI_OBJ    := $(patsubst %.cpp,build/pi/%.o,$(CORE))
+ARMV6_OBJ := $(patsubst %.cpp,build/armv6/%.o,$(CORE))
+
+build/host/%.o: %.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(ALL_CXXFLAGS) $(SECTIONS) $(INCS) -MMD -MP -c $< -o $@
+
+build/pi/%.o: %.cpp | check-cross
+	@mkdir -p $(dir $@)
+	$(CROSS_CXX) $(CROSS_CXXFLAGS) $(WARN) $(SECTIONS) $(INCS) -MMD -MP -c $< -o $@
+
+build/armv6/%.o: %.cpp | armv6-check
+	@mkdir -p $(dir $@)
+	$(CXX) $(ARMV6_CXXFLAGS) $(WARN) $(SECTIONS) $(INCS) -MMD -MP -c $< -o $@
+
+-include $(HOST_OBJ:.o=.d) $(PI_OBJ:.o=.d) $(ARMV6_OBJ:.o=.d)
 # Probe-only headers (not part of the engine build).  Only the probes that
 # include one depend on it; the others are untouched.
 PROBE_HEADERS := $(wildcard probes/*.h)
@@ -44,8 +70,8 @@ INCS := -I$(SRC) -isystem $(TP)
 SECTIONS := -ffunction-sections -fdata-sections
 LDFLAGS ?= -Wl,--gc-sections
 
-engine_mm3: $(CORE) $(HEADERS)
-	$(CXX) $(ALL_CXXFLAGS) $(SECTIONS) $(INCS) -o $@ $(CORE) $(LDLIBS) $(LDFLAGS)
+engine_mm3: $(HOST_OBJ)
+	$(CXX) $(ALL_CXXFLAGS) $(SECTIONS) $(INCS) -o $@ $(HOST_OBJ) $(LDLIBS) $(LDFLAGS)
 
 
 # ARMv6 cross build for the Pi Zero.  Two independent installs meet here: the
@@ -93,7 +119,7 @@ CROSS_CXXFLAGS ?= --sysroot=$(CROSS_SYSROOT) \
                  -ffast-math -std=c++17
 CROSS_LDLIBS ?= -L$(CROSS_TARGETLIB) -lEGL -lGLESv2 -lm
 
-.PHONY: pi armv6 check-cross clean probes check warncheck test
+.PHONY: pi armv6 armv6-check check-cross clean probes check warncheck test
 
 pi: engine_mm3_pi
 
@@ -130,8 +156,8 @@ check-cross:
 # The arch attributes are the only proof that the -B discovery matched reality:
 # -march=armv6 on our own objects does not stop ARMv7 startfiles from raising
 # Tag_CPU_arch.  The .comment line names the runtime that was actually linked.
-engine_mm3_pi: $(CORE) $(HEADERS) | check-cross
-	$(CROSS_CXX) $(CROSS_CXXFLAGS) $(WARN) $(SECTIONS) $(INCS) -o $@ $(CORE) $(CROSS_LDLIBS) $(LDFLAGS)
+engine_mm3_pi: $(PI_OBJ) | check-cross
+	$(CROSS_CXX) $(CROSS_CXXFLAGS) $(WARN) $(SECTIONS) $(INCS) -o $@ $(PI_OBJ) $(CROSS_LDLIBS) $(LDFLAGS)
 	@if [ -n "$(CROSS_READELF)" ]; then \
 	  attrs=$$($(CROSS_READELF) -A $@); \
 	  echo "$$attrs" | grep -q 'Tag_CPU_arch: v6' || { \
@@ -147,13 +173,17 @@ engine_mm3_pi: $(CORE) $(HEADERS) | check-cross
 # no sysroot and no -B.  This target exists so the READMEs stop hand-copying the
 # flag list (they had lost -marm, which the cross target carries).
 ARMV6_CXXFLAGS ?= -O2 -marm -march=armv6 -mfpu=vfp -mfloat-abi=hard -ffast-math -std=c++17
-armv6: $(CORE) $(HEADERS)
+armv6: $(ARMV6_OBJ) | armv6-check
+	$(CXX) $(ARMV6_CXXFLAGS) $(WARN) $(SECTIONS) $(INCS) -o engine_mm3 $(ARMV6_OBJ) $(LDLIBS) $(LDFLAGS)
+	@echo "  built engine_mm3 for this host (a Pi Zero reports ARMv6/VFPv2)"
+
+# The host has to be ARM before an ARMv6 object is built; a host object under
+# build/armv6 would be a v7 binary with a v6 name.
+armv6-check:
 	@$(CXX) -dumpmachine 2>/dev/null | grep -q '^arm' || { \
 	  echo "armv6 builds on the Pi itself; this host targets $$($(CXX) -dumpmachine)." >&2; \
 	  echo "  To build the Pi binary from here: make -C engine -B pi CROSS_SYSROOT=<sysroot>" >&2; \
 	  exit 2; }
-	$(CXX) $(ARMV6_CXXFLAGS) $(WARN) $(SECTIONS) $(INCS) -o engine_mm3 $(CORE) $(LDLIBS) $(LDFLAGS)
-	@echo "  built engine_mm3 for this host (a Pi Zero reports ARMv6/VFPv2)"
 
 # Does the summation order matter on this driver, at the magnitudes a small
 # model's residual reaches?  See the header of the source for the case.
@@ -337,7 +367,7 @@ test: test_lineedit test_tokenizer test_xformat test_grammar test_schema test_gb
 # flag keeps working for our code.
 warncheck:
 	@log=$$(mktemp); \
-	if $(MAKE) -B engine_mm3 > $$log 2>&1; then :; else cat $$log; rm -f $$log; exit 1; fi; \
+	if $(MAKE) -B -j$(JOBS) engine_mm3 > $$log 2>&1; then :; else cat $$log; rm -f $$log; exit 1; fi; \
 	if grep -qE '^src/[^:]+:[0-9]+:[0-9]+: warning' $$log; then \
 	    echo "warnings from src/ (a clean build is required):"; \
 	    grep -E '^src/[^:]+:[0-9]+:[0-9]+: warning' $$log; rm -f $$log; exit 1; \
@@ -397,6 +427,7 @@ test_gbnf_full: tests/test_gbnf_full.cpp tests/checks.h $(SRC)/gbnf_full.cpp \
 	  $(SRC)/tokenizer.cpp $(SRC)/common.cpp $(SRC)/switches.cpp -lm
 
 clean:
+	rm -rf build
 	rm -f engine engine_mm3 engine_mm3_pi test_lineedit test_tokenizer test_xformat test_grammar test_schema test_gbnf_full
 	rm -f probes/vc4_probe probes/vc4_ffn_probe probes/vc4_topk_probe probes/load_probe_pi
 	rm -f probes/matvec_probe probes/texsize_probe probes/q4fmt_probe_pi probes/glsl_probe_pi probes/q4mv_probe_pi probes/draw_probe_pi probes/packunpack_probe probes/packunpack_probe_pi probes/logits_grid_probe probes/wrow_probe probes/wrow_probe_pi probes/conv_probe probes/conv_probe_pi probes/t3mv_probe probes/t3mv_probe_pi probes/t3dec_probe probes/t3dec_probe_pi probes/t3lut_probe probes/t3lut_probe_pi probes/t3act_probe probes/t3act_probe_pi probes/rmsfuse_probe probes/rmsfuse_probe_pi probes/att_batch_probe probes/att_batch_probe_pi probes/att_out_probe probes/att_out_probe_pi \

@@ -34,6 +34,8 @@ __pycache__/
 /engine/engine
 /engine/engine_mm3
 /engine/engine_mm3_pi
+# Incremental objects and their .d files (one tree per toolchain)
+/engine/build/
 # local A/B builds of the board binary (engine_mm3_pi.<arm>): the arms are
 # documented in docs/performance.md, the binaries are not deliverables
 /engine/engine_mm3_pi.*
