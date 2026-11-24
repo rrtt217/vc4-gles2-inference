@@ -6,6 +6,7 @@
 // keeps the scene ledger complete for `release_scene()`.
 
 #include "gpu.h"
+#include "model.h"
 #include "switches.h"
 #include "gpu_internal.h"
 #include "shaders.h"
@@ -287,92 +288,6 @@ Target& GPU::grp_w2a(){
         return grp_w2a_;
 }
 
-GLuint GPU::rmsnorm(GLuint x, GLuint w, Target& out){
-        const int aw = x_texels(att_dim_, act_fmt_);
-        if (out.tex == 0 || out.w != aw) out = make_target(aw, 1);
-        if (rms_stats_.tex == 0) rms_stats_ = make_target(1, 1);
-        if (rms_partial_.tex == 0 || rms_partial_.w != RMS_PARTIALS)
-            rms_partial_ = make_target(RMS_PARTIALS, 1);
-        GLuint ps = x_rms_split();
-        bind_fbo(rms_partial_.fbo);
-        glViewport(0, 0, RMS_PARTIALS, 1);
-        use_program(ps);
-        bind_tex(0, x);
-        set_sampler(ps, "X", 0);
-        setup_attrib(ps);
-        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
-        // RMS_FUSED folds the 32-way reduce into every normalising fragment:
-        // same summation order, so bit-identical, one draw less per rmsnorm.
-        // VC4 defaults to the fused reduce (one draw less per rmsnorm, same
-        // summation order so bit-identical); other backends keep the split pass,
-        // where a 32-fetch fragment per output texel may cost more than a draw.
-        // ACT8=1 (int8 activations) does not accept the fused form.
-        const bool fused_reduce = rms_fused() && act_fmt_ != XFormat::I8_4;
-        if (!fused_reduce) {
-            GLuint pr = x_rms_reduce();
-            bind_fbo(rms_stats_.fbo);
-            glViewport(0, 0, 1, 1);
-            use_program(pr);
-            bind_tex(0, rms_partial_.tex);
-            set_sampler(pr, "S", 0);
-            setup_attrib(pr);
-            glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
-        }
-        layer_finish("NF_RMS");
-        // RMS_DUMP=1: the two scalars every layer's normalisation divides by.
-        // A cross-machine difference that is a *pure scale* on the normalised
-        // row (measured 1.00212 on layer 0, 2026-11-18) can only come from here
-        // or from the weight vector, and the weight is the same bytes.
-        if (const char* rd = getenv("RMS_DUMP")) {
-                // The 32 lane sums as the shader wrote them (24-bit fixed point,
-                // step 1/4096, biased by 2^23) -- the finest thing the rmsnorm
-                // produces.  `RMS_DUMP=<layer>` keeps the log to one layer.
-                static int layer_no = 0;
-                const bool want = !*rd || atoi(rd) == layer_no;
-                if (want) {
-                        sync();
-                        const vector<uint8_t> b = read_bytes(rms_partial_, RMS_PARTIALS, 1);
-                        fprintf(stderr, "RMSD %d %d", layer_no, RMS_PARTIALS);
-                        static const bool f32_store = [] {
-                                const char* v = sw_str("RMS_STORE");
-                                return v && !strcmp(v, "f32");
-                        }();
-                        for (int i = 0; i < RMS_PARTIALS && (size_t)(i * 4 + 3) < b.size(); ++i) {
-                                if (f32_store) {
-                                        const uint32_t u = ((uint32_t)b[i * 4] << 24) |
-                                                           ((uint32_t)b[i * 4 + 1] << 16) |
-                                                           ((uint32_t)b[i * 4 + 2] << 8) |
-                                                           (uint32_t)b[i * 4 + 3];
-                                        float f = 0;
-                                        memcpy(&f, &u, 4);
-                                        fprintf(stderr, " %.6g", (double)f);
-                                } else {
-                                        const long q = (long)b[i * 4] * 16777216L + (long)b[i * 4 + 1] * 65536L +
-                                                       (long)b[i * 4 + 2] * 256L + (long)b[i * 4 + 3] - 8388608L;
-                                        fprintf(stderr, " %ld", q);
-                                }
-                        }
-                        fprintf(stderr, "\n");
-                }
-                ++layer_no;
-        }
-
-        GLuint pn = x_rms_norm(rms_eps_stated_);
-        bind_fbo(out.fbo);
-        glViewport(0, 0, aw, 1);
-        use_program(pn);
-        if (rms_eps_stated_) glUniform1f(uloc(pn, "eps"), rms_eps_);
-        bind_tex(0, x);
-        set_sampler(pn, "X", 0);
-        bind_tex(1, w);
-        set_sampler(pn, "W", 1);
-        bind_tex(2, fused_reduce ? rms_partial_.tex : rms_stats_.tex);
-        set_sampler(pn, "S", 2);
-        setup_attrib(pn);
-        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
-        layer_finish("NF_RMS");
-        return out.tex;
-    }
 
 GLuint GPU::upload_input2(const vector<float>& a, const vector<float>& b){
         const int n = (int)a.size();
@@ -395,72 +310,6 @@ GLuint GPU::upload_input2(const vector<float>& a, const vector<float>& b){
         return it->second;
     }
 
-GLuint GPU::rmsnorm_pair2(GLuint xa, GLuint xb, GLuint w, Target& out){
-        const int aw = att_dim_;   // P2: one texel per value per position
-        if (out.tex == 0 || out.w != aw) out = make_target(aw, 1);
-        if (rms_partial2_.tex == 0 || rms_partial2_.w != 64) rms_partial2_ = make_target(64, 1);
-        GLuint ps = x_rms_stats2();
-        bind_fbo(rms_partial2_.fbo);
-        glViewport(0, 0, 64, 1);
-        use_program(ps);
-        bind_tex(0, xa); set_sampler(ps, "XA", 0);
-        bind_tex(1, xb); set_sampler(ps, "XB", 1);
-        setup_attrib(ps);
-        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
-        layer_finish("NF_RMS");
-        GLuint pn = x_rms_norm_pair2(rms_eps_stated_);
-        bind_fbo(out.fbo);
-        glViewport(0, 0, aw, 1);
-        use_program(pn);
-        if (rms_eps_stated_) glUniform1f(uloc(pn, "eps"), rms_eps_);
-        bind_tex(0, xa); set_sampler(pn, "XA", 0);
-        bind_tex(1, xb); set_sampler(pn, "XB", 1);
-        bind_tex(2, w); set_sampler(pn, "W", 2);
-        bind_tex(3, rms_partial2_.tex); set_sampler(pn, "S", 3);
-        setup_attrib(pn);
-        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
-        layer_finish("NF_RMS");
-        return out.tex;
-    }
-
-void GPU::p2_split(GLuint xp2, Target& out, int which){
-        const int ow = x_texels(att_dim_, res_fmt_);
-        if (out.tex == 0 || out.w != ow) out = make_target(ow, 1);
-        GLuint p = x_p2_split(att_dim_);
-        bind_fbo(out.fbo);
-        glViewport(0, 0, ow, 1);
-        use_program(p);
-        bind_tex(0, xp2); set_sampler(p, "X", 0);
-        glUniform1f(uloc(p, "which"), (float)which);
-        setup_attrib(p);
-        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
-        if (ffn_flush_wanted(layer_fast_finish_)) glFlush();
-        else layer_finish("NF_FFN");
-        ffn_sync();
-    }
-
-GLuint GPU::ffn_pair_i4_swiglu_chunk(const Mat& w1, const Mat& w3, GLuint x, int rows, Target& out, int hs){
-        const int aw = x_texels(rows, ffn_fmt_);
-        if (out.tex == 0 || out.w != aw) out = make_target(aw, 1);
-        GLuint p = x_i4_pair_swiglu(rows, w1.cols, hs, w1.fmt4);
-        bind_fbo(out.fbo);
-        glViewport(0, 0, aw, 1);
-        use_program(p);
-        bind_tex(0, w1.tex); set_sampler(p, "W1", 0);
-        bind_tex(1, w3.tex); set_sampler(p, "W2", 1);
-        bind_tex(2, x); set_sampler(p, "X", 2);
-        bind_tex(3, w1.q4_param_tex); set_sampler(p, "P1", 3);
-        bind_tex(4, w3.q4_param_tex); set_sampler(p, "P2", 4);
-        glUniform1f(uloc(p, "ps1"), w1.q4_param_scale);
-        glUniform1f(uloc(p, "ps2"), w3.q4_param_scale);
-        setup_attrib(p);
-        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
-        if (ffn_flush_wanted(layer_fast_finish_)) glFlush();
-        else layer_finish("NF_FFN");
-        ffn_sync();
-        return out.tex;
-}
-
 GLuint GPU::upload_activations(const vector<float>& x){
         const int n = (int)x.size();
         const int texels = x_texels(n, act_fmt_);
@@ -476,3 +325,123 @@ GLuint GPU::upload_activations(const vector<float>& x){
         if (needs_finish()) { glFlush(); glFinish(); }
         return it->second;
     }
+
+// ---- the container's bias and LayerNorm rows (v5) -------------------------
+// The v5 f32 rows, uploaded once per container.  A bias is a weight vector to
+// the store (one q16 pair row), and a LayerNorm is the same packing two rows
+// tall with the bias underneath -- so `ln_q16` reads y=0.25 for w and y=0.75
+// for b, and `bias_add` reads a one-row texture.
+void GPU::upload_encdec_rows(const Model& m){
+        EncdecRows& r = enc_rows_;
+        // A bias rides the format of the tensor it is added to: a matvec writes
+        // act_fmt_ (I24_1 by default) and a residual add reads res_fmt_, so the
+        // same bias vector may need both encodings.  `one` is the residual one,
+        // `one_act` the matvec's.
+        auto one = [&](const float* v, int n) {
+                return upload_bias(vector<float>(v, v + n), res_fmt_);
+        };
+        auto one_act = [&](const float* v, int n) {
+                return upload_bias(vector<float>(v, v + n), act_fmt_);
+        };
+        // One row a vector, both through upload_bias: see EncdecRows.
+        auto wrow = [&](const float* w, int n) { return upload_bias(
+                vector<float>(w, w + n), XFormat::I16_2); };
+        const int L = m.layers, E = m.enc_layers, D = m.dim, F = m.enc_ffn;
+        r.ln1.assign(L, 0); r.ln1b.assign(L, 0);
+        r.ln2.assign(L, 0); r.ln2b.assign(L, 0);
+        r.ln3.assign(L, 0); r.ln3b.assign(L, 0);
+        r.enc_ln1.assign(E, 0); r.enc_ln1b.assign(E, 0);
+        r.enc_ln2.assign(E, 0); r.enc_ln2b.assign(E, 0);
+        r.qkv_b.assign(L, 0); r.o_b.assign(L, 0);
+        r.cq_b.assign(L, 0); r.ck_b.assign(L, 0); r.cv_b.assign(L, 0); r.co_b.assign(L, 0);
+        r.fc1_b.assign(L, 0); r.fc2_b.assign(L, 0);
+        r.enc_qkv_b.assign(E, 0); r.enc_o_b.assign(E, 0);
+        r.enc_fc1_b.assign(E, 0); r.enc_fc2_b.assign(E, 0);
+        for (int l = 0; l < L; ++l) {
+                const int B = m.dec_bias_row(l, Model::kRowQ);
+                r.ln1[l] = wrow(m.bias_dim_row(B + Model::kRowLn1W), D);
+                r.ln1b[l] = wrow(m.bias_dim_row(B + Model::kRowLn1B), D);
+                r.ln2[l] = wrow(m.bias_dim_row(B + Model::kRowLn2W), D);
+                r.ln2b[l] = wrow(m.bias_dim_row(B + Model::kRowLn2B), D);
+                r.ln3[l] = wrow(m.bias_dim_row(B + Model::kRowLn3W), D);
+                r.ln3b[l] = wrow(m.bias_dim_row(B + Model::kRowLn3B), D);
+                // q/k/v are one 3*dim row in the qkv texture, so their three
+                // biases are concatenated rather than added one at a time.
+                vector<float> qkv(m.bias_dim_row(B + Model::kRowQ),
+                                  m.bias_dim_row(B + Model::kRowQ) + D);
+                qkv.insert(qkv.end(), m.bias_dim_row(B + Model::kRowK),
+                           m.bias_dim_row(B + Model::kRowK) + D);
+                qkv.insert(qkv.end(), m.bias_dim_row(B + Model::kRowV),
+                           m.bias_dim_row(B + Model::kRowV) + D);
+                r.qkv_b[l] = upload_bias(qkv, act_fmt_);
+                r.o_b[l] = one(m.bias_dim_row(B + Model::kRowO), D);
+                // The cross query's bias rides `qkv_target_`'s width, not `dim`:
+                // `att_scores` reads the q out of that target through `RQKVQ`,
+                // whose texel divisor is the compile-time `QKVTW` (3*dim).  A
+                // `dim`-wide bias add shrank the target to a third and every
+                // three samples landed on the same texel -- the q came out
+                // replicated three times and the translation repeated one token.
+                {
+                        vector<float> pad(m.bias_dim_row(B + Model::kRowCQ),
+                                          m.bias_dim_row(B + Model::kRowCQ) + D);
+                        pad.resize((size_t)3 * D, 0.0f);
+                        r.cq_b[l] = upload_bias(pad, res_fmt_);
+                }
+                // I24 to match the projection it rides: `att_cross_kv` reads
+                // both with one `X1`.
+                r.ck_b[l] = upload_bias(vector<float>(m.bias_dim_row(B + Model::kRowCK),
+                                               m.bias_dim_row(B + Model::kRowCK) + D),
+                                 XFormat::I24_1);
+                // I24 to match the projection it rides: `att_cross_kv` reads
+                // both with one `X1`.
+                r.cv_b[l] = upload_bias(vector<float>(m.bias_dim_row(B + Model::kRowCV),
+                                               m.bias_dim_row(B + Model::kRowCV) + D),
+                                 XFormat::I24_1);
+                r.co_b[l] = one(m.bias_dim_row(B + Model::kRowCO), D);
+                r.fc1_b[l] = one_act(m.bias_ffn_row(l), F);
+                r.fc2_b[l] = one(m.bias_dim_row(B + Model::kRowFc2B), D);
+        }
+        for (int l = 0; l < E; ++l) {
+                const int B = m.enc_row(l, 0);
+                r.enc_ln1[l] = wrow(m.bias_dim_row(B + 4), D);
+                r.enc_ln1b[l] = wrow(m.bias_dim_row(B + 5), D);
+                r.enc_ln2[l] = wrow(m.bias_dim_row(B + 6), D);
+                r.enc_ln2b[l] = wrow(m.bias_dim_row(B + 7), D);
+                vector<float> qkv(m.bias_dim_row(B + 0), m.bias_dim_row(B + 0) + D);
+                qkv.insert(qkv.end(), m.bias_dim_row(B + 1), m.bias_dim_row(B + 1) + D);
+                qkv.insert(qkv.end(), m.bias_dim_row(B + 2), m.bias_dim_row(B + 2) + D);
+                r.enc_qkv_b[l] = upload_bias(qkv, act_fmt_);
+                r.enc_o_b[l] = one(m.bias_dim_row(B + 3), D);
+                r.enc_fc1_b[l] = one_act(m.bias_ffn_row(L + l), F);
+                r.enc_fc2_b[l] = one(m.bias_dim_row(B + 8), D);
+        }
+        // No logits-bias texture: a 65k-row bias is 32,501 texels wide, over
+        // every GL target limit, and the head's bias is added on the host where
+        // the logits already are (`Session::encdec_step`).
+        r.logits_b = 0;
+        // No position-table texture either: the table is added to the embedding
+        // on the host (`Session::encdec_encode`), because a block with no
+        // rotation has no kernel that would need it on the GPU.
+        r.pos = 0;
+}
+
+// Upload a row into a *Target* rather than into a bare texture: a v5 position
+// needs its residual to be readable and to have an FBO, and `upload_hidden_grp`
+// hands back a make_texture() with no framebuffer at all -- which is fine for a
+// draw source and wrong for anything a caller later reads or draws into.  The
+// group slots (`grp_h(b, n)`) are Targets, so the encoder writes there and the
+// ping-pong is the same one the prefill group loop keeps.
+GLuint GPU::upload_into(Target& t, const vector<float>& x){
+        const int tw = x_texels((int)x.size(), res_fmt_);
+        if (t.tex == 0 || t.w < tw) t = make_target(tw, 1);
+        vector<uint8_t> data = x_pack(x, res_fmt_);
+        bind_upload_tex(t.tex);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, tw, 1, GL_RGBA, GL_UNSIGNED_BYTE, data.data());
+        layer_finish("NF_UPLOAD");
+        return t.tex;
+}
+
+GLuint GPU::upload_bias(const vector<float>& b, XFormat f){
+        vector<uint8_t> data = x_pack(b, f);
+        return make_texture(x_texels((int)b.size(), f), 1, data.data());
+}

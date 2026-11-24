@@ -500,3 +500,10 @@ Target& GPU::target_for(int rows){
         return targets_[rows];
     }
 
+
+void GPU::attach_dump_fbo(Target& t){
+        if (t.fbo) return;
+        glGenFramebuffers(1, &t.fbo);
+        bind_fbo(t.fbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t.tex, 0);
+}

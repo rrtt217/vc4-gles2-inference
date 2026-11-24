@@ -16,15 +16,22 @@ responsibility, not by line count:
 | `src/shaders_attn.cpp` | attention (self and cross), KV and logits shader builders |
 | `src/dump_shaders.h/.cpp` | the `--dump-shaders` matrix: every builder's emitted GLSL, digested |
 | `src/gpu.cpp` | the GL object's own state: the constructor (which reads the three target limits), the capability queries (`gpu_attn_enabled`, `gpu_layer_enabled`, `rms_fused`, `needs_finish`, `att_cfg`) and the qkv probes.  118 lines; it was 2674 before the 2026-11-14 split |
-| `src/gpu_gl.cpp` | EGL/GLES2: `init_egl` (surfaceless context, the MESA version overrides for the q4 kernels), `init_gl`, `draw`, the bind cache accessors and the read-backs |
-| `src/gpu_state.cpp` | textures/targets factories, `release_scene`/`reset_targets`, the scene ledgers (the ones `gate/check_target_reset.sh` keeps complete) |
+| `src/gpu_gl.cpp` | EGL/GLES2: `init_egl` (surfaceless context, the MESA version overrides for the q4 kernels), `init_gl`, the bind cache accessors and the read-backs |
+| `src/gpu_state.cpp` | textures/targets factories, `attach_dump_fbo`, `release_scene`/`reset_targets`, the scene ledgers (the ones `gate/check_target_reset.sh` keeps complete) |
 | `src/gpu_prog.cpp` | the program cache: `x_prog` (key **and** text hash), `link_program`, `es3ify`, the `Q4_SHIFT`/`Q4_INLINE` probes |
+| `src/gpu_select.cpp` | **the `x_*` selectors**: builder text to a cached program, and the key policy (causal, rope_none, qbatch, the formats and the row-scale flag all change the text) |
+| `src/gpu_matvec.cpp` | the projection drivers: `matvec_to`/`from`/`add`/`bias`, the read-back `matvec`/`matvec_s`, and `draw` |
+| `src/gpu_logits.cpp` | the vocabulary projection: tiles to logits, candidates, the greedy argmax and their read-back |
+| `src/gpu_p2.cpp` | the two-position prefill (P2): the gate/w2 matvecs and the pair split |
 | `src/gpu_attn.cpp` | the attention block: qkv draws, RoPE, scores, softmax, KV writes and their probes |
-| `src/gpu_conv.cpp` | the hybrid (LFM2.5) conv block |
 | `src/gpu_ffn.cpp` | FFN: split/fused SwiGLU, the 2-row packing, the pair variants |
-| `src/gpu_matvec.cpp` | the `x_*` selectors and the matvec/logits passes |
-| `src/gpu_upload.cpp` | staging (host vectors and Mats into textures), `rmsnorm`, the pair splitters |
+| `src/gpu_row.cpp` | the row-pass drivers: LayerNorm, bias add, swish and RMSNorm (one fullscreen draw a row) |
+| `src/gpu_conv.cpp` | the hybrid (LFM2.5) conv block |
+| `src/gpu_rwkv.cpp` | RWKV-7's private GPU loop: the bit-cast state, gates and WKV recurrence |
+| `src/gpu_rwkv_prefill.cpp` | RWKV-7's chunked prefill: one draw for a batch of projections plus the read-back |
+| `src/gpu_upload.cpp` | staging: host vectors and Mats into textures, and the container's bias/LayerNorm rows |
 | `src/gpu_diag.cpp` | the dump path (`STAGE_DUMP`, `ATT_DUMP`, the row hashes) |
+| `src/gpu_dmabuf.cpp` | the dma-buf import that makes the q4 4-bit view cost +1.2% instead of +61% |
 | `src/gpu_internal.h` | the seam between them: bind cache, draw cap, scene ledger, measurement hooks, shared program-layer symbols |
 | `src/gpu.h` | EGL context, textures, targets, program cache (keyed by name **and** shader text -- the name alone collides across models), GPU passes |
 | `src/model.h/.cpp` | model metadata, the MMCF reader, q4/q8/i16 conversion, FFN split |

@@ -380,3 +380,25 @@ void GPU::layer_finish(const char* skip_env){
         if (skip) return;
         if (needs_finish()) { glFlush(); glFinish(); }
     }
+
+GLuint GPU::ffn_pair_i4_swiglu_chunk(const Mat& w1, const Mat& w3, GLuint x, int rows, Target& out, int hs){
+        const int aw = x_texels(rows, ffn_fmt_);
+        if (out.tex == 0 || out.w != aw) out = make_target(aw, 1);
+        GLuint p = x_i4_pair_swiglu(rows, w1.cols, hs, w1.fmt4);
+        bind_fbo(out.fbo);
+        glViewport(0, 0, aw, 1);
+        use_program(p);
+        bind_tex(0, w1.tex); set_sampler(p, "W1", 0);
+        bind_tex(1, w3.tex); set_sampler(p, "W2", 1);
+        bind_tex(2, x); set_sampler(p, "X", 2);
+        bind_tex(3, w1.q4_param_tex); set_sampler(p, "P1", 3);
+        bind_tex(4, w3.q4_param_tex); set_sampler(p, "P2", 4);
+        glUniform1f(uloc(p, "ps1"), w1.q4_param_scale);
+        glUniform1f(uloc(p, "ps2"), w3.q4_param_scale);
+        setup_attrib(p);
+        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+        if (ffn_flush_wanted(layer_fast_finish_)) glFlush();
+        else layer_finish("NF_FFN");
+        ffn_sync();
+        return out.tex;
+}

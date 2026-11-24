@@ -1,5 +1,6 @@
-// The GL context and the draw/read-back primitives: everything that talks to
+// The GL context and the read-back primitives: everything that talks to
 // EGL/GLES2 directly, plus the bind cache the rest of the GPU code goes through.
+// The projection draw is in gpu_matvec.cpp; logits read-back in gpu_logits.cpp.
 //
 // Split out of gpu.cpp (2026-11-14, P2-1 of the 2026-11-13 audit).  `init_egl`
 // carries the two rules that were paid for on VC4: the surfaceless context and the
@@ -8,7 +9,6 @@
 #include "gpu.h"
 #include "switches.h"
 #include "gpu_internal.h"
-#include "logits_grid.h"
 #include "xformat.h"
 
 #include <cstdio>
@@ -23,39 +23,6 @@
 #define EGL_OPENGL_ES3_BIT_KHR 0x00000040
 #endif
 #include <GLES2/gl2.h>
-
-vector<float> GPU::read_logits_full(const vector<Mat>& tiles){
-        const int rows = (int)tiles.size();
-        vector<float> out;
-        out.reserve((size_t)rows * kLogitsGrid);
-        if (logits_packed_) {
-            const int w = logits_target_.w;
-            bind_fbo(logits_target_.fbo);
-            vector<uint8_t> b((size_t)w * rows * 4);
-            note_sync();
-            glReadPixels(0, 0, w, rows, GL_RGBA, GL_UNSIGNED_BYTE, b.data());
-            for (int i = 0; i < rows; ++i) {
-                const int n = tiles[i].rows;
-                for (int j = 0; j < n; ++j) {
-                    const int t = j / 2, half = j - t * 2;
-                    const size_t o = ((size_t)i * w + t) * 4 + (half ? 2 : 0);
-                    int v = (int)b[o] * 256 + b[o + 1];
-                    if (v >= 32768) v -= 65536;
-                    out.push_back((float)v / ACT_SCALE);
-                }
-            }
-            return out;
-        }
-        vector<int32_t> raw = read_i32(logits_target_, kLogitsGrid, rows);
-        for (int i = 0; i < rows; ++i) {
-            for (int j = 0; j < tiles[i].rows; ++j) {
-                int v = raw[(size_t)i * kLogitsGrid + j];
-                if (v >= 32768) v -= 65536;
-                out.push_back((float)v / ACT_SCALE);
-            }
-        }
-        return out;
-    }
 
 vector<uint8_t> GPU::read_bytes(Target& t, int w, int h){
         bind_fbo(t.fbo);
@@ -278,62 +245,6 @@ void GPU::init_gl(){
         glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
     }
 
-void GPU::draw(const Mat& m, GLuint x, Target& t, int row ){
-        const bool wr = (m.type == WeightType::INT8 || m.type == WeightType::INT6 ||
-                         m.type == WeightType::T3) && m.has_row_scale();
-        GLuint p = (m.type == WeightType::T3) ? x_t3(m, wr)
-                  : (m.type == WeightType::INT8) ? x_q8(m.rows, m.cols, wr)
-                  : (m.type == WeightType::INT4) ? x_i4(m.rows, m.cols, m.fmt4)
-                  : (m.type == WeightType::INT6) ? x_q6(m.rows, m.cols, wr)
-                                                 : x_i16(m.rows, m.cols);
-        bind_fbo(t.fbo);
-        // DRAW_CLEAR=1 fills the target with a known pattern before the draw, so
-        // "the draw did not execute" and "the draw read stale input" are
-        // distinguishable in a readback.  0x33/0x66/0x99/0xff is not a valid q16
-        // pair for any small value.  Cached: this sits on the per-draw path.
-        static const bool draw_clear = env_set("DRAW_CLEAR");
-        if (draw_clear) { glClearColor(0.2f, 0.4f, 0.6f, 1.0f); glClear(GL_COLOR_BUFFER_BIT); }
-        use_program(p);
-        bind_tex(0, m.tex);
-        set_sampler(p, "W", 0);
-        bind_tex(1, x);
-        set_sampler(p, "X", 1);
-        if (m.type == WeightType::INT6) {
-            bind_tex(2, m.tex_hi);
-            set_sampler(p, "W2", 2);
-        }
-        if (m.type == WeightType::INT4) {
-            bind_tex(2, m.q4_param_tex);
-            set_sampler(p, "P", 2);
-            glUniform1f(uloc(p, "ps"), m.q4_param_scale);
-        } else {
-            glUniform1f(uloc(p, "ws"), m.scale);
-            if (wr) { bind_tex(3, m.row_scale_tex); set_sampler(p, "WS", 3); }
-        }
-        setup_attrib(p);
-        // A single draw must stay below GL_MAX_TEXTURE_SIZE: at exactly 2048
-        // fragments wide vc4 silently produces wrong bytes (2040 is fine,
-        // 2048 differs in 5029/8192 bytes and finishes 3x too fast), while the
-        // same matrix drawn as two viewport-offset halves is exact.  Splitting
-        // costs one draw (~10 us), so cap every strip at 1024 and keep the
-        // gl_FragCoord-absolute convention the shader relies on.
-        //
-        // That cap is what protects the 1536-wide qkv today: a single
-        // 1536-wide draw is byte-exact in a readback probe but leaves the qkv
-        // target unwritten when the next pass samples it as a texture -
-        // different garbage every run, PPL 271.2855 -> 71669 on the Pi
-        // (docs/engine-internals.md section 2).  matvec_add() uses the same cap.
-        // MATVEC_STRIP overrides the cap for experiments.
-        const char* sv = getenv("MATVEC_STRIP");
-        const int env_strip = sv ? atoi(sv) : 0;
-        const int cap = (env_strip > 0) ? env_strip : kDrawCap;
-        const int strip = std::min(cap, m.rows);
-        for (int x0 = 0; x0 < m.rows; x0 += strip) {
-            int w = min(strip, m.rows - x0);
-            glViewport(x0, row, w, 1);
-            glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
-        }
-    }
 
 vector<int32_t> GPU::read_i32_rows(Target& t, int w, int y, int h){
         bind_fbo(t.fbo);

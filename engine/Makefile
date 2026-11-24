@@ -418,7 +418,7 @@ probes/q4mv_probe_pi: probes/q4mv_probe.cpp $(GPULIB) $(HEADERS) | check-cross
 # decode average on Xe is too noisy to resolve it (15/23/44 ms/token for the
 # same arm in one session), so the kernel needs its own instrument.
 probes/q4mv_probe: probes/q4mv_probe.cpp $(GPULIB) $(HEADERS)
-	$(CXX) $(ALL_CXXFLAGS) -I$(SRC) -o $@ $^ $(LDLIBS)
+	$(CXX) $(ALL_CXXFLAGS) $(INCS) -o $@ probes/q4mv_probe.cpp $(GPULIB) $(LDLIBS)
 
 # Prices a draw, an rmsnorm and the q8 matvec shapes on the real driver
 # (WORKLOG item 7: the cost model behind prefill batching).

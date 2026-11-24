@@ -81,7 +81,7 @@ public:
     void upload_batch_end();
     // v5: build the bias and LayerNorm row textures (needs the container's rows).
     void upload_encdec_rows(const class Model& m);
-    // The v5 row passes (src/gpu_encdec.cpp).  `wb` is one texture holding a
+    // The row passes (src/gpu_row.cpp).  `wb` is one texture holding a
     // LayerNorm's weight at row 0 and its bias at row 1; each pass takes the
     // format its *caller* uses, because a matvec output is act_fmt_ and a
     // residual is res_fmt_ and reading one as the other silently shrinks the
