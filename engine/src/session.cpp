@@ -2297,6 +2297,7 @@ void Session::encdec_encode(const vector<int>& src) {
         // which is the 110.8 against the reference's 1.68.
         EncLap lap(gpu_, env_set("LAYER_PROFILE"),
                    env_set("LAYER_PROFILE") && gpu_.pc_available());
+        const bool enc_ffn_fused = env_flag("ENC_FFN_FUSED");
         for (int l = 0; l < E; ++l) {
                 lap.mark("encLN1", l);
                 gpu_.set_qkv_bias(gpu_.enc_rows_.enc_qkv_b[l]);
@@ -2359,9 +2360,17 @@ void Session::encdec_encode(const vector<int>& src) {
                         // matvec reads X and draws into its target, and one
                         // texture for both is a hazard the strip split makes
                         // real (measured: the reply collapsed to 0 tokens).
-                        gpu_.matvec_add(m.u_enc_w2[l], hf, x1, gpu_.cd_d(), gpu_.act_fmt_);
+                        // ENC_FFN_FUSED folds the fc2 bias into the w2 add's
+                        // write-back: one draw instead of two, and a *different
+                        // rounding* -- once instead of twice, by up to 1/256 of
+                        // a value.  It is a dev arm because of that, not a
+                        // refactor.
+                        const GLuint fb = gpu_.enc_rows_.enc_fc2_b[l];
+                        gpu_.matvec_add_bias(m.u_enc_w2[l], hf, x1, fb, gpu_.cd_d(),
+                                             gpu_.act_fmt_);
                         lap.mark("encW2", l);
-                        gpu_.bias_add(gpu_.cd_d().tex, gpu_.enc_rows_.enc_fc2_b[l], gpu_.cd_c());
+                        if (enc_ffn_fused) gpu_.cd_c() = gpu_.cd_d();
+                        else gpu_.bias_add(gpu_.cd_d().tex, fb, gpu_.cd_c());
                         lap.mark("encFC2b", l);
                         // x = LN2(r2), straight into the group slot the next layer reads.
                         h[b] = gpu_.ln_q16(gpu_.cd_c().tex, gpu_.enc_rows_.enc_ln2[l],

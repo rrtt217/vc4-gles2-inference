@@ -223,6 +223,13 @@ CandidateResult GPU::logits_candidates_from(const vector<Mat>& tiles, GLuint xt,
     }
 
 void GPU::matvec_add(const Mat& m, GLuint x, GLuint residual, Target& out, XFormat xf){
+        matvec_add_bias(m, x, residual, 0, out, xf);
+}
+
+// `bias` folds the following `bias_add` into this draw, for the kernels that
+// carry the arm (the q8 row-pair one).  Zero is the shipped form, unchanged.
+void GPU::matvec_add_bias(const Mat& m, GLuint x, GLuint residual, GLuint bias,
+                          Target& out, XFormat xf){
         const bool pair = res_pack_ && (m.type == WeightType::INT8 ||
                                         m.type == WeightType::T3);
         const bool pair4 = res_pack_ && m.type == WeightType::INT4;
@@ -246,7 +253,7 @@ void GPU::matvec_add(const Mat& m, GLuint x, GLuint residual, Target& out, XForm
                        ? (res_pack_ ? x_t3_add_pair(m, xf, res_fmt_, wr)
                                     : x_t3_add(m, xf, res_fmt_, wr))
                   : pair4 ? x_i4_add_pair(m.rows, m.cols, xf, m.fmt4)
-                  : pair ? x_q8_add_pair(m.rows, m.cols, xf, wr)
+                  : pair ? x_q8_add_pair(m.rows, m.cols, xf, wr, bias != 0)
                   : (m.type == WeightType::INT8) ? x_q8_add(m.rows, m.cols, xf, wr)
                   : (m.type == WeightType::INT4) ? x_i4_add(m.rows, m.cols, xf, m.fmt4)
                                                  : x_i16_add(m.rows, m.cols, xf);
@@ -270,6 +277,10 @@ void GPU::matvec_add(const Mat& m, GLuint x, GLuint residual, Target& out, XForm
         // The q4 kernels take their scale as "ps"; "ws" does not exist there.
         if (m.type != WeightType::INT4) glUniform1f(uloc(p, "ws"), m.scale);
         if (wr) { bind_tex(3, m.row_scale_tex); set_sampler(p, "WS", 3); }
+        // The bias arm's sampler: unit 4 is free here (W 0, X 1, R 2, WS 3), and
+        // a kernel without the arm has no `B` uniform, so the bind only happens
+        // for a program that declares one.
+        if (bias) { bind_tex(4, bias); set_sampler(p, "B", 4); }
         setup_attrib(p);
         // Same rule as draw(): a single draw never exceeds 1024 fragments.  A
         // full-target-width draw is what gets dropped (docs/engine-internals.md
@@ -720,7 +731,7 @@ GLuint GPU::x_q8_add(int rows, int cols, XFormat xf, bool wrow){
                       matvec_q8_add(rows, cols, xf, res_fmt_, wrow));
     }
 
-GLuint GPU::x_q8_add_pair(int rows, int cols, XFormat xf, bool wrow){
+GLuint GPU::x_q8_add_pair(int rows, int cols, XFormat xf, bool wrow, bool bias){
         // The inline I16_2 decode is the default; Q8AP_INLINE=0 restores the
         // generic X4Q form in the same binary, so the two can be A/B-ed
         // interleaved without a second build.
@@ -731,8 +742,9 @@ GLuint GPU::x_q8_add_pair(int rows, int cols, XFormat xf, bool wrow){
         // available, and the two are different programs.
         return x_prog("xq8ap_" + to_string(rows) + "_" + to_string(cols) + "_" +
                       x_format_name(xf) + (inl ? "" : "_gen") + (wrow ? "_wr" : "") +
+                      (bias ? "_b" : "") +
                       (res_fmt_ == XFormat::I16_2 ? std::string() : std::string("_") + x_format_name(res_fmt_)),
-                      matvec_q8_add_pair(rows, cols, xf, res_fmt_, inl, wrow));
+                      matvec_q8_add_pair(rows, cols, xf, res_fmt_, inl, wrow, bias));
     }
 
 GLuint GPU::x_i4_add_pair(int rows, int cols, XFormat xf, bool fmt4){

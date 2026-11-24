@@ -1141,7 +1141,12 @@ string matvec_q8_add(int rows, int cols, XFormat xf, XFormat rf, bool wrow) {
         "gl_FragColor=YST1Q(s*" + SC + "+res);}";
 }
 
-string matvec_q8_add_pair(int rows, int cols, XFormat xf, XFormat rf, bool inl, bool wrow) {
+// `bias` folds a separate `bias_add` pass into this one.  The bias rides the
+// output row, so the two rows a fragment writes are two reads of the bias plane
+// and no extra draw is issued.  It is **not** byte-identical to a `bias_add`
+// after the matvec: the sum rounds once here and twice there, by up to 1/256.
+string matvec_q8_add_pair(int rows, int cols, XFormat xf, XFormat rf, bool inl,
+                          bool wrow, bool bias) {
     need_shape("matvec_q8_add_pair", rows, cols, 4);
     const int axw = x_texels(cols, xf);
     const int rw = (rows + 1) / 2;
@@ -1151,18 +1156,28 @@ string matvec_q8_add_pair(int rows, int cols, XFormat xf, XFormat rf, bool inl, 
     const string WD = wrow ? wrow_scale(rows) : "";
     const string SP = wrow ? "vec2 sc=wsr2(r0);" : "";
     const string SC0 = wrow ? "sc.x" : "ws", SC1 = wrow ? "sc.y" : "ws";
+    const string BW = to_string(rw) + ".0";
+    const string BIAS_INL =
+        bias ? "vec4 bt=texture2D(B,vec2((float(t)+0.5)/float(" + to_string(rw) + "),0.5));"
+               "float b0=dA(bt),b1=dB(bt);"
+             : std::string();
+    const string BIAS_GEN =
+        bias ? "float b0=Y1(B,r0," + BW + ");float b1=Y1(B,r1," + BW + ");"
+             : std::string();
+    const string B0 = bias ? "+b0" : "", B1 = bias ? "+b1" : "";
+    const string BS = bias ? ",B" : "";
     // Inline I16_2 decode, the form matvec_q8_pair already uses: the generic
     // X4Q helper takes its two texel fetches as macro arguments and VC4 compiles
     // that loop measurably slower.  r0 is always even and r1 always odd, so the
     // two residuals are the halves of one I16_2 texel.  Accumulation order and
     // the q16 rounding are unchanged, so the packed output is bit-identical.
     if (inl && xf == XFormat::I16_2 && rf == XFormat::I16_2) {
-        return "precision highp float;uniform sampler2D W,X,R;uniform float ws;" + WD +
+        return "precision highp float;uniform sampler2D W,X,R" + BS + ";uniform float ws;" + WD +
                kDec16A + kDec16B
                + kEnc16Raw +
                "void main(){int t=int(gl_FragCoord.x);int r0=2*t;int r1=r0+1;" + SP +
                "vec4 rc=texture2D(R,vec2((float(t)+0.5)/float(" + to_string(rw) + "),0.5));"
-               "float res0=dA(rc),res1=dB(rc);"
+               "float res0=dA(rc),res1=dB(rc);" + BIAS_INL +
                "float s0=0.0,s1=0.0;"
                "for(int q=0;q<" + COLS4 + ";q++){"
                "vec4 c0=texture2D(W,vec2((float(q)+0.5)/float(" + COLS4 + "),"
@@ -1175,14 +1190,15 @@ string matvec_q8_add_pair(int rows, int cols, XFormat xf, XFormat rf, bool inl, 
                "float a0=dA(xa),a1=dB(xa),a2=dA(xb),a3=dB(xb);"
                "s0+=w0.x*a0+w0.y*a1+w0.z*a2+w0.w*a3;"
                "s1+=w1.x*a0+w1.y*a1+w1.z*a2+w1.w*a3;}"
-               "vec2 p1=enc16(s0*" + SC0 + "+res0),p2=enc16(s1*" + SC1 + "+res1);"
+               "vec2 p1=enc16(s0*" + SC0 + "+res0" + B0 + "),"
+               "p2=enc16(s1*" + SC1 + "+res1" + B1 + ");"
                "gl_FragColor=vec4(p1.x,p1.y,p2.x,p2.y);}";
     }
     return head(xf) + x_pair2_glsl(rf) + x_residual_glsl(rf) +
-        "uniform sampler2D W,X,R;uniform float ws;" + WD +
+        "uniform sampler2D W,X,R" + BS + ";uniform float ws;" + WD +
         "void main(){int t=int(gl_FragCoord.x);int r0=2*t;int r1=r0+1;" + SP +
         "float res0=Y1Q(R,r0," + to_string(rw) + ".0);"
-        "float res1=Y1Q(R,r1," + to_string(rw) + ".0);"
+        "float res1=Y1Q(R,r1," + to_string(rw) + ".0);" + BIAS_GEN +
         "float s0=0.0,s1=0.0;"
         "for(int q=0;q<" + to_string(cols / 4) + ";q++){"
         "vec4 c0=texture2D(W,vec2((float(q)+0.5)/float(" + to_string(cols / 4) + "),"
@@ -1193,7 +1209,7 @@ string matvec_q8_add_pair(int rows, int cols, XFormat xf, XFormat rf, bool inl, 
         "vec4 x=X4Q(X,q*4," + to_string(axw) + ".0);"
         "s0+=w0.x*x.x+w0.y*x.y+w0.z*x.z+w0.w*x.w;"
         "s1+=w1.x*x.x+w1.y*x.y+w1.z*x.z+w1.w*x.w;}"
-        "gl_FragColor=x_p2_stq(s0*" + SC0 + "+res0,s1*" + SC1 + "+res1);}";
+        "gl_FragColor=x_p2_stq(s0*" + SC0 + "+res0" + B0 + ",s1*" + SC1 + "+res1" + B1 + ");}";
 }
 
 string matvec_i16(int rows, int cols, XFormat xf) {

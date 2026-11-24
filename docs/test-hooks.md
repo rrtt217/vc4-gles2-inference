@@ -51,7 +51,7 @@ The rows below are the registry, one per switch, grouped by the axis they move.
 diagnostic or a pricing arm; `retired` is gone (`--dump-switches` prints the
 same table with what *this* environment resolved to).
 
-151 switches: 29 permanent, 108 probe, 14 retired; 16 legacy spellings are translated.
+152 switches: 29 permanent, 109 probe, 14 retired; 16 legacy spellings are translated.
 
 ### The activation streams
 
@@ -125,6 +125,7 @@ same table with what *this* environment resolved to).
 | `ATTN_DUP` | value | replay one attention pass; the end-to-end delta is its marginal cost |
 | `DRAWCOUNT` | value | draws per decoded token |
 | `DUP_PROFILE` | `=1` | with a *_DUP replay, price the replay itself: wall against gpu cycles |
+| `ENC_FFN_FUSED` | `=1` | v5: fold the encoder FFN's fc2 bias into the w2 add (one draw, one rounding) |
 | `LAYER_PROFILE` | `=1` | per-pass marks inside a layer |
 | `LOGITS_PERFCNT` | `=1` | with PERFCNT, the logits pass's own counters (its wall time cannot separate work from waiting) |
 | `PAIR_PROFILE` | value | the same for the two-position prefill pair |

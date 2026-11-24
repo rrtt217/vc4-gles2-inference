@@ -253,6 +253,11 @@ public:
     GLuint rmsnorm(GLuint x, GLuint w, Target& out);
 
     void matvec_add(const Mat& m, GLuint x, GLuint residual, Target& out, XFormat xf);
+    // The same, with a bias folded into the write-back: one draw where the
+    // caller would otherwise add another.  `bias` on a kernel without the arm
+    // is ignored, so a caller must still pay its own `bias_add` there.
+    void matvec_add_bias(const Mat& m, GLuint x, GLuint residual, GLuint bias,
+                         Target& out, XFormat xf);
 
     // LFM2 conv block.  The three in_proj row slices are drawn into their own
     // 1024-wide targets (a 3072-wide draw would exceed VC4's 2048), the gates
@@ -408,7 +413,7 @@ private:
     GLuint x_t3_add(const Mat& m, XFormat xf, XFormat rf, bool wrow = false);
     GLuint x_t3_pair(const Mat& m, bool wrow = false);
     GLuint x_t3_add_pair(const Mat& m, XFormat xf, XFormat rf, bool wrow = false);
-    GLuint x_q8_add_pair(int rows, int cols, XFormat xf, bool wrow = false);
+    GLuint x_q8_add_pair(int rows, int cols, XFormat xf, bool wrow, bool bias);
     GLuint x_i4_add_pair(int rows, int cols, XFormat xf, bool fmt4 = false);
     GLuint x_i16(int rows, int cols);
     GLuint x_i16_add(int rows, int cols, XFormat xf);
