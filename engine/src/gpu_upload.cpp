@@ -59,7 +59,10 @@ void GPU::upload(Mat& m){
                 }
                 m.row_scale_tex = make_texture(W, np, rs.data());
         }
-        if (m.type == WeightType::T3) {
+        // Exhaustive on purpose (weight_format.h): a type without a case would
+        // otherwise fall into the q4 `else` and read an empty body.
+        switch (m.type) {
+        case WeightType::T3: {
             // The container's bytes *are* the texture: 16 weights an RGBA8
             // texel, four a byte.  No repack, no bias, no copy -- the upload is
             // the one place the 2-bit kind pays off twice (167 MB of file
@@ -118,7 +121,7 @@ void GPU::upload(Mat& m){
             }
             return;
         }
-        if (m.type == WeightType::INT6) {
+        case WeightType::INT6: {
             // Two planes: nibbles (cols/2 bytes a row) and two-bit values
             // (cols/4 bytes a row).  `tex` carries the low plane so the generic
             // draw() binding works; the high plane gets unit 2 there.
@@ -127,7 +130,7 @@ void GPU::upload(Mat& m){
             m.tex = m.tex_lo;
             return;
         }
-        if (m.type == WeightType::INT8) {
+        case WeightType::INT8: {
             const int8_t* src = m.w8();
             const size_t n = (size_t)m.rows * m.cols;
             vector<uint8_t> data(n);
@@ -150,7 +153,9 @@ void GPU::upload(Mat& m){
             }
             for (; i < n; ++i) data[i] = (uint8_t)((int)src[i] + 128);
             m.tex = make_texture(m.cols / 4, m.rows, data.data());
-        } else if (m.type == WeightType::INT16) {
+            break;
+        }
+        case WeightType::INT16: {
             const int16_t* src = m.w16();
             const int tex_w = (m.cols + 1) / 2;
             vector<uint8_t> data((size_t)m.rows * tex_w * 4);
@@ -163,7 +168,9 @@ void GPU::upload(Mat& m){
                 }
             }
             m.tex = make_texture(tex_w, m.rows, data.data());
-        } else {
+            break;
+        }
+        case WeightType::INT4: {
             const uint8_t* src4 = m.w4();
             const int16_t* s4 = m.s4();
             const int16_t* mn4 = m.m4();
@@ -180,7 +187,12 @@ void GPU::upload(Mat& m){
                 }
             }
             m.q4_param_tex = make_texture(m.groups, m.rows, pd.data());
+            break;
         }
+        }
+        // A type that reached this point without a case has no texture; stop
+        // rather than hand the session an empty one.
+        if (m.tex == 0) wf_no_kernel("upload", m.type);
         if (!getenv("KEEP_CPU_WEIGHTS")) {
             vector<int8_t>().swap(m.q8);
             vector<int16_t>().swap(m.q16);

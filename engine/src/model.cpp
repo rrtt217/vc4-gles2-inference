@@ -1,5 +1,6 @@
 #include "model.h"
 #include "logits_grid.h"
+#include "weight_format.h"
 #include <algorithm>
 #include <fstream>
 #include <functional>
@@ -1866,36 +1867,41 @@ Mat Model::slice_rows(const Mat& src, int r0, int r1){
         // silently fall back to one scale for the whole chunk.
         if (!src.row_scale.empty())
                 m.row_scale.assign(src.row_scale.begin() + r0, src.row_scale.begin() + r1);
-        if (src.type == WeightType::T3) {
+        switch (src.type) {
+        case WeightType::T3: {
                 // A row slice is a pointer offset, but only on a *row pair*: one
                 // texel carries rows 2t and 2t+1 (docs/checkpoint-container.md,
                 // dtype 7), so the body's row t is the texel row and the stride
                 // is the texels a row-pair.  Every shape in this model is a
                 // multiple of 2, and the FFN chunk is 2048.
-                if (r0 % 2) {
-                        cerr << "mmcf: a 2-bit body slices on a 2-row boundary (asked "
-                                << r0 << ")\n";
+                if (r0 % wf_row_align(src.type)) {
+                        cerr << "mmcf: a 2-bit body slices on a " << wf_row_align(src.type)
+                                << "-row boundary (asked " << r0 << ")\n";
                         exit(2);
                 }
                 m.ext3 = src.w3() + (size_t)(r0 / 2) * (((src.cols + 7) / 8) * 4);
                 m.t3_tile_w = m.t3_tile_h = m.t3_tiles_n = 0;
                 return m;
         }
-        if (src.type == WeightType::INT8) {
+        case WeightType::INT8: {
             if (src.ext8) {
                 m.ext8 = src.ext8 + (size_t)r0 * m.cols;
             } else {
                 m.q8.resize((size_t)m.rows * m.cols);
                 memcpy(m.q8.data(), src.q8.data() + (size_t)r0 * m.cols, m.q8.size());
             }
-        } else if (src.type == WeightType::INT16) {
+            break;
+        }
+        case WeightType::INT16: {
             if (src.ext16) {
                 m.ext16 = src.ext16 + (size_t)r0 * m.cols;
             } else {
                 m.q16.resize((size_t)m.rows * m.cols);
                 memcpy(m.q16.data(), src.q16.data() + (size_t)r0 * m.cols, m.q16.size() * 2);
             }
-        } else {
+            break;
+        }
+        case WeightType::INT4: {
             m.group = src.group; m.groups = src.groups; m.q4_param_scale = src.q4_param_scale;
             if (src.ext4) {
                 m.ext4 = src.ext4 + (size_t)r0 * (m.cols / 2);
@@ -1909,6 +1915,12 @@ Mat Model::slice_rows(const Mat& src, int r0, int r1){
                 m.q4_min.resize((size_t)m.rows * m.groups);
                 memcpy(m.q4_min.data(), src.q4_min.data() + (size_t)r0 * m.groups, m.q4_min.size() * 2);
             }
+            break;
+        }
+        case WeightType::INT6:
+            // The tied head is never chunked; a q6 body has two planes and no
+            // slice rule yet.  Refuse instead of treating it as q4.
+            wf_no_kernel("slice_rows", src.type);
         }
         return m;
     }
@@ -1917,13 +1929,15 @@ Mat Model::slice_cols(const Mat& src, int c0, int c1){
         Mat m; m.rows = src.rows; m.cols = c1 - c0; m.type = src.type; m.scale = src.scale;
         m.prebiased = src.prebiased;
         m.row_scale = src.row_scale;   // a column slice keeps every row
-        if (src.type == WeightType::T3) {
+        switch (src.type) {
+        case WeightType::T3: {
                 // A column group is one texel, so a slice on an 8-column
                 // boundary is a contiguous run of texels *within* a row pair --
                 // one memcpy a row pair, the same shape the q8 column slice has.
-                if ((c0 % 8) || ((c1 - c0) % 8)) {
-                        cerr << "mmcf: a 2-bit body can only be column-sliced on an 8-column "
-                                "boundary (" << c0 << ".." << c1 << ")\n";
+                if ((c0 % wf_col_align(src.type)) || ((c1 - c0) % wf_col_align(src.type))) {
+                        cerr << "mmcf: a 2-bit body can only be column-sliced on an "
+                                << wf_col_align(src.type) << "-column boundary ("
+                                << c0 << ".." << c1 << ")\n";
                         exit(2);
                 }
                 const size_t src_stride = ((src.cols + 7) / 8) * 4;
@@ -1936,15 +1950,19 @@ Mat Model::slice_cols(const Mat& src, int c0, int c1){
                                src.w3() + (size_t)t * src_stride + (c0 / 8) * 4, dst_stride);
                 return m;
         }
-        if (src.type == WeightType::INT8) {
+        case WeightType::INT8: {
             m.q8.resize((size_t)m.rows * m.cols);
             for (int r = 0; r < m.rows; ++r)
                 memcpy(m.q8.data() + (size_t)r * m.cols, src.w8() + (size_t)r * src.cols + c0, m.cols);
-        } else if (src.type == WeightType::INT16) {
+            break;
+        }
+        case WeightType::INT16: {
             m.q16.resize((size_t)m.rows * m.cols);
             for (int r = 0; r < m.rows; ++r)
                 memcpy(m.q16.data() + (size_t)r * m.cols, src.w16() + (size_t)r * src.cols + c0, m.cols * 2);
-        } else {
+            break;
+        }
+        case WeightType::INT4: {
             if ((c0 % src.group) != 0 || (m.cols % src.group) != 0)
                 throw runtime_error("q4 column slice must be group aligned");
             m.group = src.group; m.groups = m.cols / src.group; m.q4_param_scale = src.q4_param_scale;
@@ -1968,6 +1986,10 @@ Mat Model::slice_cols(const Mat& src, int c0, int c1){
                 memcpy(m.q4_min.data() + (size_t)r * m.groups,
                        src.m4() + (size_t)r * src.groups + g0, m.groups * 2);
             }
+            break;
+        }
+        case WeightType::INT6:
+            wf_no_kernel("slice_cols", src.type);
         }
         return m;
     }

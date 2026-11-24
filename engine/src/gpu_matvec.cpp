@@ -58,8 +58,7 @@ void GPU::matvec_add_bias(const Mat& m, GLuint x, GLuint residual, GLuint bias,
         // weight format: a row-scale q8 matrix must still write the packed
         // texel the rmsnorm reads, so the paired kernel grows a wrow variant
         // rather than the writer switching layouts.
-        const bool wr = (m.type == WeightType::INT8 || m.type == WeightType::T3) &&
-                        m.has_row_scale();
+        const bool wr = wf(m.type).wrow && m.has_row_scale();
         // A t3 matrix must write the layout `res_pack_` says the reader expects:
         // the packed pair when the residual is two values a texel (VC4's I16_2),
         // the single value otherwise.
@@ -68,14 +67,30 @@ void GPU::matvec_add_bias(const Mat& m, GLuint x, GLuint residual, GLuint bias,
         // the q8 selectors read res_fmt_ themselves, which is why they never had
         // this bug.  Measured: every odd row gained exactly 255/256 and the reply
         // collapsed to one token.
-        GLuint p = m.type == WeightType::T3
-                       ? (res_pack_ ? x_t3_add_pair(m, xf, res_fmt_, wr)
-                                    : x_t3_add(m, xf, res_fmt_, wr))
-                  : pair4 ? x_i4_add_pair(m.rows, m.cols, xf, m.fmt4)
-                  : pair ? x_q8_add_pair(m.rows, m.cols, xf, wr, bias != 0)
-                  : (m.type == WeightType::INT8) ? x_q8_add(m.rows, m.cols, xf, wr)
-                  : (m.type == WeightType::INT4) ? x_i4_add(m.rows, m.cols, xf, m.fmt4)
-                                                 : x_i16_add(m.rows, m.cols, xf);
+        // Exhaustive, no default: see weight_format.h.  The old chain ended in
+        // x_i16_add, so an unhandled format added to WeightType would have run
+        // the i16 decoder on its bytes.
+        GLuint p = 0;
+        switch (m.type) {
+            case WeightType::INT8:
+                p = res_pack_ ? x_q8_add_pair(m.rows, m.cols, xf, wr, bias != 0)
+                              : x_q8_add(m.rows, m.cols, xf, wr);
+                break;
+            case WeightType::INT16:
+                p = x_i16_add(m.rows, m.cols, xf);
+                break;
+            case WeightType::INT4:
+                p = res_pack_ ? x_i4_add_pair(m.rows, m.cols, xf, m.fmt4)
+                              : x_i4_add(m.rows, m.cols, xf, m.fmt4);
+                break;
+            case WeightType::INT6:
+                wf_no_kernel("matvec_add", m.type);
+            case WeightType::T3:
+                p = res_pack_ ? x_t3_add_pair(m, xf, res_fmt_, wr)
+                              : x_t3_add(m, xf, res_fmt_, wr);
+                break;
+        }
+        if (!p) wf_no_kernel("matvec_add", m.type);
         bind_fbo(out.fbo);
         use_program(p);
         bind_tex(0, m.tex);
@@ -183,13 +198,20 @@ vector<float> GPU::matvec_s(const Mat& m, const vector<float>& x){
 
 
 void GPU::draw(const Mat& m, GLuint x, Target& t, int row ){
-        const bool wr = (m.type == WeightType::INT8 || m.type == WeightType::INT6 ||
-                         m.type == WeightType::T3) && m.has_row_scale();
-        GLuint p = (m.type == WeightType::T3) ? x_t3(m, wr)
-                  : (m.type == WeightType::INT8) ? x_q8(m.rows, m.cols, wr)
-                  : (m.type == WeightType::INT4) ? x_i4(m.rows, m.cols, m.fmt4)
-                  : (m.type == WeightType::INT6) ? x_q6(m.rows, m.cols, wr)
-                                                 : x_i16(m.rows, m.cols);
+        const bool wr = wf(m.type).wrow && m.has_row_scale();
+        // Exhaustive on purpose, with no default: -Wswitch names a WeightType
+        // added without a kernel here, and the guard below stops the run if one
+        // is ever compiled past the warning.  A trailing `: x_i16` used to do
+        // this silently (weight_format.h).
+        GLuint p = 0;
+        switch (m.type) {
+            case WeightType::INT8:  p = x_q8(m.rows, m.cols, wr); break;
+            case WeightType::INT16: p = x_i16(m.rows, m.cols); break;
+            case WeightType::INT4:  p = x_i4(m.rows, m.cols, m.fmt4); break;
+            case WeightType::INT6:  p = x_q6(m.rows, m.cols, wr); break;
+            case WeightType::T3:    p = x_t3(m, wr); break;
+        }
+        if (!p) wf_no_kernel("draw", m.type);
         bind_fbo(t.fbo);
         // DRAW_CLEAR=1 fills the target with a known pattern before the draw, so
         // "the draw did not execute" and "the draw read stale input" are

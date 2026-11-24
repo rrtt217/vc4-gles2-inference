@@ -2,6 +2,7 @@
 
 #include "common.h"
 #include "xformat.h"
+#include "weight_format.h"
 #include "shaders.h"
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
