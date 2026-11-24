@@ -2208,6 +2208,53 @@ static void softmax_inplace(float* s, int n) {
         if (sum > 0.0f) for (int i = 0; i < n; ++i) s[i] /= sum;
 }
 
+// The v5 profile lap.  Same line and the same reason as the dense loop's `mark`:
+// a lap synchronises, so its wall time is QPU work plus submit plus finish, and
+// only the performance counters separate them.  A stage whose GPU share is near
+// zero is not slow, it is expensive to launch -- which on this board is most of
+// them, and is the thing a "move it to the GPU" plan has to know.
+namespace {
+struct EncLap {
+        GPU& g;
+        bool prof;
+        bool counters;
+        Clock::time_point pt = Clock::now();
+        long draws = 0;
+        EncLap(GPU& gg, bool p, bool c) : g(gg), prof(p), counters(c) {
+                if (!prof) return;
+                draws = (long)g.draws();
+                if (counters) g.pc_stage_begin();
+        }
+        void mark(const char* name, int l) {
+                if (!prof) return;
+                g.sync();
+                auto now = Clock::now();
+                const long d = (long)g.draws();
+                const double ms = elapsed_ms(pt, now);
+                unsigned long long idle = 0, frag = 0, exec = 0, quads = 0;
+                bool have = false;
+                if (counters) have = g.pc_stage_end(idle, frag, exec, quads);
+                cerr << "PROF l=" << l << " " << name << " " << ms
+                     << " draws=" << (d - draws);
+                if (have) {
+                        // cycles / (qpus * MHz) = ms, with the divisor measured
+                        // on the board rather than assumed.
+                        const double to_ms = 1.0 / (GPU::pc_qpus() * (double)GPU::pc_mhz() * 1000.0);
+                        const double gpu_ms = (double)frag * to_ms;
+                        cerr << " gpu=" << gpu_ms
+                             << " (" << (ms > 0 ? (int)(100.0 * gpu_ms / ms) : 0) << "%)"
+                             << " exec=" << ((double)exec * to_ms)
+                             << " idle=" << ((double)idle * to_ms)
+                             << " quads=" << quads;
+                }
+                cerr << "\n";
+                if (counters) g.pc_stage_begin();
+                draws = d;
+                pt = now;
+        }
+};
+}
+
 void Session::encdec_encode(const vector<int>& src) {
         const Model& m = m_;
         const int n = (int)src.size();
@@ -2254,13 +2301,18 @@ void Session::encdec_encode(const vector<int>& src) {
         // output).  It looks like a small ordering choice and it is not: with
         // nothing normalising the stream, the residual compounds every layer,
         // which is the 110.8 against the reference's 1.68.
+        EncLap lap(gpu_, env_set("LAYER_PROFILE"),
+                   env_set("LAYER_PROFILE") && gpu_.pc_available());
         for (int l = 0; l < E; ++l) {
+                lap.mark("encLN1", l);
                 gpu_.set_qkv_bias(gpu_.enc_rows_.enc_qkv_b[l]);
                 for (int b = 0; b < n; ++b) {
                         gpu_.att_stage(m.u_enc_qkv[l], h[b], l, b, b, n);
                 }
                 gpu_.set_qkv_bias(0);
+                lap.mark("encQKV", l);
                 gpu_.att_scores_batch(l, n - 1, n);
+                lap.mark("encScores", l);
                 for (int b = 0; b < n; ++b) {
                         // `pos` is the last *valid* key under NOCAUSAL (the
                         // scan bound), not this query's position: the encoder
@@ -2307,6 +2359,7 @@ void Session::encdec_encode(const vector<int>& src) {
                                            gpu_.enc_rows_.enc_ln2b[l],
                                            gpu_.grp_h(b, n), m.rms_eps);
                 }
+                lap.mark("encFFN", l);
         }
         // The encoder output and each decoder layer's cross K/V, read back once.
         cd_enc_.assign((size_t)n * D, 0.0f);
