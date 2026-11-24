@@ -2348,8 +2348,8 @@ void Session::encdec_encode(const vector<int>& src) {
                         // f = fc2(swish(fc1(x1) + b1)) + b2, then r2 = x1 + f.
                         // cd_b holds the fc1 side, so x1 (cd_a) survives as the
                         // residual this adds into.
-                        lap.mark("encFC1", l);
                         gpu_.matvec_to(m.u_enc_w1[l], x1, gpu_.cd_d());
+                        lap.mark("encFC1", l);
                         // X is what `matvec_q8` wrote, and that kernel's
                         // output store is I24 unconditionally -- the ACT axis
                         // does not reach it.  Reading it as act_fmt_ is the
