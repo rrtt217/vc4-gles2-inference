@@ -3,7 +3,7 @@
 // 15% slower.**
 //
 // The question came from a real anomaly.  Two q8 kernels in
-// engine/src/shaders.cpp share one activation decode across several rows --
+// engine/src/shaders_q8.cpp share one activation decode across several rows --
 // matvec_q8_pair_logits (qkv, 2 rows) and matvec_q8_pair_swiglu (FFN gate, 4
 // rows) -- and measured through DUP_PROFILE the FFN runs at 1.79 ns/MAC against
 // qkv's 2.87, a ratio of 0.62 against the 0.5 the row count predicts.  The

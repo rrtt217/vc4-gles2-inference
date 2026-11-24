@@ -6,13 +6,13 @@
 // render->fetch round trip.  Xe's lenient NPOT / no-dither hides it.  This probe
 // drives each pattern with data the CPU knows, at the engine's real widths, and
 // names the first diverging case.  Sections A/B/C run the *shipped* shader text
-// (shaders.cpp linked in); D is a minimal bit-cast round trip.
+// (shaders_rwkv.cpp linked in); D is a minimal bit-cast round trip.
 //
 //   A  2D NPOT q24 constant fetch (768 x 6/3/2): byte-exact via a raw fetch and
 //      via the shipped rwkv_lerp
 //   B  I24_1 render -> readback and render -> texture fetch, byte-exact,
 //      GL_DITHER on and off
-//   C  shipped rwkv_sqrelu / rwkv_lerp vs a CPU f32 reference
+//   C  shipped act_sqrelu / rwkv_lerp vs a CPU f32 reference
 //   D  bit-cast f32 render -> fetch round trip (ES3), GL_DITHER on and off
 //
 // build: make -C engine probes/rwkv_probe  /  probes/rwkv_probe_pi
@@ -250,12 +250,12 @@ static void test_i24(int dim, bool dither) {
     glDeleteProgram(p2); glDeleteTextures(1,&it);
 }
 
-// C. The shipped rwkv_sqrelu vs a CPU f32 reference (I24_1 in and out).
+// C. The shipped act_sqrelu vs a CPU f32 reference (I24_1 in and out).
 static void test_sqrelu(int dim) {
     vector<int> raw(dim);
     for (int i = 0; i < dim; ++i) raw[i] = (int)lrintf(sinf(i*0.017f)*30.0f*256.0f);
     GLuint it = tex(dim, 1, q24_bytes(raw, dim, 1));
-    GLuint p = prog(rwkv_sqrelu(dim)); if (!p) { printf("  sqrelu link fail\n"); ++failures; return; }
+    GLuint p = prog(act_sqrelu(dim)); if (!p) { printf("  sqrelu link fail\n"); ++failures; return; }
     out_begin(dim); glUseProgram(p); bind(p,"X",0,it); tri(p);
     vector<int> g = read_q24(dim);
     vector<int> want(dim);
@@ -263,7 +263,7 @@ static void test_sqrelu(int dim) {
         float v = raw[i]/256.0f; float r = v > 0 ? v*v : 0.0f;
         long q = lrintf(r*256.0f); want[i] = (int)std::max(-8388608L, std::min(8388607L, q));
     }
-    report("C rwkv_sqrelu shipped", g, want, 1);
+    report("C act_sqrelu shipped", g, want, 1);
     glDeleteProgram(p); glDeleteTextures(1,&it);
 }
 

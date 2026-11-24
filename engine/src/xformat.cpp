@@ -222,7 +222,7 @@ std::string x_codec_glsl(XFormat f) {
     }
     if (f != XFormat::S24_1) return std::string();
     // The sum of squares the rms stats passes store.  Faithful to the encoder it
-    // replaces (`encs` in shaders.cpp): *four* bytes, because a lane sum of
+    // replaces (`encs` in shaders_block.cpp): *four* bytes, because a lane sum of
     // `x^2` reaches 2048 and 2048*4096 already fills the 24 the value stream
     // uses -- `.r` is the 25th.
     // Guarded, because this is the *only* place the format's two functions come

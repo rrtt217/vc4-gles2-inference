@@ -234,13 +234,13 @@ if (u >= T) u -= 65536.0;           // fold the negative rail
 The rule lives in `engine/src/xformat.cpp`, but the *text* is repeated by every
 kernel that reads q16 by hand -- the `x_i16` family, the q4 kernels' `dA`/`dB`,
 the KV decoders in `shaders_attn.cpp`, the pair readers -- ten spellings across
-three files, with two thresholds:
+four shader TUs, with two thresholds:
 
 | spelling | where | threshold |
 |---|---|---|
 | fast float, `if` form | `xformat.cpp` (raw, pair, quad) | `32767.5` |
 | fast float, `if` form | `xformat.cpp` pair-of-positions, `shaders_attn.cpp` `dec16` | `32768.0` |
-| ternary form | `shaders.cpp` `dA`/`dB`, `dr` | `32768.0` |
+| ternary form | `shaders_common.cpp` `dA`/`dB`, `shaders_q8.cpp` `dr` | `32768.0` |
 
 **Both thresholds are correct**, and that is why the text is not unified: a
 decoded `u` is always a multiple of 255 (the bytes hold 1/255 steps), so no value
@@ -498,7 +498,7 @@ the same rail as the residual, not the 256x range a 24-bit store would allow.
 `probes/conv_probe` covers this block: section A drives the kernel fetch
 patterns (1/2/3/5 fetches per fragment, `.rg`/`.ba`, height 3 and 4) and
 compares **bytes**, sections B/C run the shipped `conv3_act`/`mul_act` from
-`shaders.cpp` against a CPU reference that mirrors the shader's float32
+`shaders_block.cpp` against a CPU reference that mirrors the shader's float32
 expression order.  On both Xe and VC4 every case is exact, including three
 fetches from one sampler at 512x3 -- the wrow plane's failure (§ below,
 `probes/wrow_probe`) is shape-specific, not a general rule.

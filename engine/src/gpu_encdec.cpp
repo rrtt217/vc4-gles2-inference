@@ -19,7 +19,8 @@
 // shape changed -- so read the code, not this block, and keep this block's list
 // of *what is here* rather than of how it was.
 //
-// The shader *text* stays in src/shaders.cpp (v5 section): this file only binds
+// The shader *text* stays in src/shaders_block.cpp (post-norm row passes): this
+// file only binds
 // programs, sizes targets and draws.  The block's structure -- encode pass,
 // cross-attention, decode loop -- is Session's (session.cpp), because that is
 // where the model's layer order lives.

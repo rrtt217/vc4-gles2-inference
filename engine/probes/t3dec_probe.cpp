@@ -58,7 +58,7 @@ static GLuint compile(GLenum t, const string& src, string& log) {
     return ok ? h : 0;
 }
 
-// The shipped t3_byte, verbatim (shaders.cpp): eight byte->uint conversions.
+// The shipped t3_byte, verbatim (shaders_t3.cpp): eight byte->uint conversions.
 static string dec_ship() {
     return "vec4 dec(float bb){return vec4("
            "float(uint(floor(bb*255.0+0.5))&1u),"

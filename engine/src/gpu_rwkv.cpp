@@ -4,7 +4,7 @@
 // the matvec family is reused unchanged (matvec_to / matvec_add).  Activations
 // are I24_1, the residual stays q16 (I16_1) so it matches the CPU add_q16 grid
 // bit-for-bit under the rail.  The only host read-back is the final residual,
-// once per token (Session::forward_gpu_rwkv).  The GLSL is in shaders.cpp
+// once per token (Session::forward_gpu_rwkv).  The GLSL is in shaders_rwkv.cpp
 // (rwkv_* builders); this file is the driver, like gpu_conv.cpp.
 //
 // WKV state is a per-head hs x hs block of bit-cast f32 in RGBA8 ping-pong

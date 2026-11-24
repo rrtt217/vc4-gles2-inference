@@ -1,7 +1,7 @@
 // Does a per-row q8 scale plane actually reach the fragment shader?
 //
 // The engine's q8 kernels grew an extra `texture2D` for a per-row scale
-// (wrow_scale() in shaders.cpp).  On Xe every container with one is correct;
+// (wrow_scale() in shaders_common.cpp).  On Xe every container with one is correct;
 // on VC4 void.1 answered `<pad>` plus invalid bytes, and two runs of the same
 // binary produced different tokens, i.e. something was reading undefined data.
 // Two controls had already narrowed it down without saying what was wrong:
@@ -45,7 +45,7 @@
 using std::string;
 using std::vector;
 
-// shaders.cpp asks the GPU whether the vertex shader can do integer ops; this
+// shaders_q4.cpp asks the GPU whether the vertex shader can do integer ops; this
 // probe never builds a q4 kernel, so the answer is simply "no".
 bool gpu_q4_shift() { return false; }
 

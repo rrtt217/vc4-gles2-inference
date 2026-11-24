@@ -5,7 +5,7 @@
 // reconstruction error 0 (docs/bitcpm.md) -- so the open question is whether
 // reading 16 weights out of one RGBA8 texel and unpacking them is cheaper than
 // reading 4 int8 and using them directly.  The body is the engine's q8 matvec
-// (`engine/src/shaders.cpp`, matvec_q8): one fragment per output row, a loop over
+// (`engine/src/shaders_q8.cpp`, matvec_q8): one fragment per output row, a loop over
 // weight texels, four weights against four activations per iteration.  Only the
 // packing and the decode differ between variants, so the difference is the
 // decode's price and nothing else.

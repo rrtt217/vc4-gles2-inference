@@ -72,7 +72,7 @@ enum class XFormat : uint8_t {
 // integer) and reads through either.
 //
 // X and R are **two format slots**, not two APIs for one.  Every builder
-// in shaders.cpp calls `head(...)` for the stream it decodes and
+// in the shader TUs calls `head(...)` for the stream it decodes and
 // `x_residual_glsl(rf)` for the second one it touches, and the two
 // names carry the fact that they must not collide: `head(I16_2)` is the
 // q16 activation, `x_residual_glsl(I24_1)` the 24-bit residual, and one

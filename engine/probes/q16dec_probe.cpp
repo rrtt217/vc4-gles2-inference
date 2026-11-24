@@ -1,7 +1,7 @@
 // What does the q16 activation decode cost, and can the sign fix be made
 // cheaper without changing a single output byte?
 //
-// The engine's decode (shaders.cpp, kDec16A/kDec16B) is, per component:
+// The engine's decode (shaders_common.cpp, kDec16A/kDec16B) is, per component:
 //
 //     u = c.r*65280.0 + c.g*255.0;
 //     return u >= 32768.0 ? u - 65536.0 : u;

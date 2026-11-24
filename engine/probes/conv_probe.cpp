@@ -17,7 +17,7 @@
 //
 // So this probe drives each pattern with data the CPU knows, at the engine's
 // real widths, and names the values that differ.  Section B and C run the
-// *shipped* shader text (shaders.cpp is linked in, not copied), so a pass is
+// *shipped* shader text (shaders_block.cpp is linked in, not copied), so a pass is
 // evidence about the engine and a failure is evidence about the engine too.
 //
 //   A  the kernel fetch alone: 1, 2, 3 and 5 fetches per fragment, .rg and
@@ -43,7 +43,7 @@
 using std::string;
 using std::vector;
 
-// shaders.cpp asks the GPU whether the vertex shader can do integer ops; this
+// shaders_q4.cpp asks the GPU whether the vertex shader can do integer ops; this
 // probe builds no q4 kernel, so the answer is "no".
 bool gpu_q4_shift() { return false; }
 

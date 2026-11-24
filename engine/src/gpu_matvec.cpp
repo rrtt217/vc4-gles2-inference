@@ -3,7 +3,7 @@
 // Split out of gpu.cpp (2026-11-14, P2-1 of the 2026-11-13 audit).  Every `x_*`
 // function here picks a shader builder for a (format, shape) pair and asks
 // `x_prog` for the program; the passes that follow draw the weight texture in
-// `kDrawCap` strips and read the result back.  The GLSL is in shaders.cpp, the
+// `kDrawCap` strips and read the result back.  The GLSL is in the shader TUs, the
 // program cache in gpu_prog.cpp, the draw limit in gpu_internal.h.
 
 #include "gpu.h"

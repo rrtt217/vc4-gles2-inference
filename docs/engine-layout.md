@@ -8,8 +8,12 @@ responsibility, not by line count:
 | `src/common.h/.cpp` | shared types (`Mat`, `Target`), q16 helpers, signals, file helpers |
 | `src/xformat.h/.cpp` | **the only activation-layout definition** (I16_1, I16_2, I8_4, and the P2 pair-of-positions target) and its GLSL macros |
 | `src/logits_grid.h` | **the only vocabulary-grid definition**: tile rows, the packed half-width, the matvec strip threshold |
-| `src/shaders.h/.cpp` | matvec / FFN / RMS shader builders |
-| `src/shaders_attn.cpp` | attention, KV and logits shader builders |
+| `src/shaders.h` | the builder API: pure `(rows, cols, formats…) -> std::string` functions; no GL, no weight type |
+| `src/shaders_internal.h` + `src/shaders_common.cpp` | the prelude every builder emits, and the decode text more than one format shares |
+| `src/shaders_q8.cpp`, `_i16`, `_q4`, `_q6`, `_t3` | one weight format's builders and its private decode (the weight-format boundary) |
+| `src/shaders_block.cpp` | row-elementwise block passes: RMSNorm/LayerNorm, SwiGLU/swish, bias add, the hybrid conv, the P2 layout split |
+| `src/shaders_rwkv.cpp` | RWKV-7's private f32 bit-cast codec, gates, norms and WKV recurrence |
+| `src/shaders_attn.cpp` | attention (self and cross), KV and logits shader builders |
 | `src/dump_shaders.h/.cpp` | the `--dump-shaders` matrix: every builder's emitted GLSL, digested |
 | `src/gpu.cpp` | the GL object's own state: the constructor (which reads the three target limits), the capability queries (`gpu_attn_enabled`, `gpu_layer_enabled`, `rms_fused`, `needs_finish`, `att_cfg`) and the qkv probes.  118 lines; it was 2674 before the 2026-11-14 split |
 | `src/gpu_gl.cpp` | EGL/GLES2: `init_egl` (surfaceless context, the MESA version overrides for the q4 kernels), `init_gl`, `draw`, the bind cache accessors and the read-backs |
@@ -115,8 +119,8 @@ dump is machine independent.
 (`--rebaseline` rewrites it, `--show NAME` prints one program). A refactor that
 claims to be text-neutral must leave the golden file untouched. The hot kernels
 repeat the decode inline on purpose, so the repetition is generated from the
-shared `k*` constants in `shaders.cpp` / `shaders_attn.cpp` rather than copied:
-one definition, same bytes.
+shared `k*` constants in `shaders_common.cpp` or the format TU that owns them
+rather than copied: one definition, same bytes.
 
 JSON documents — the `--worker` event stream, tool arguments and results, and
 the chat-template context — are built with `common_json` from

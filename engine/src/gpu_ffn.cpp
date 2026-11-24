@@ -3,7 +3,8 @@
 // Split out of gpu.cpp (2026-11-14, P2-1 of the 2026-11-13 audit).  The FFN is where
 // the draw cap and the flush hooks earn their keep: `ffn_flush_wanted`/`ffn_sync`
 // are the measurement hooks (14 sites, now two functions in gpu_state.cpp) and
-// `kDrawCap` splits a 1216-wide chunk into strips.  The GLSL is in shaders.cpp.
+// `kDrawCap` splits a 1216-wide chunk into strips.  The GLSL is in the
+// shader TUs (shaders_q8.cpp / shaders_q4.cpp / shaders_block.cpp).
 
 #include "gpu.h"
 #include "gpu_internal.h"

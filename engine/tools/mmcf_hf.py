@@ -1251,7 +1251,7 @@ ACTIVATION_RAIL = 32767.0 / 256.0
 # dim/32 values each) into 24-bit fixed point: 1/4096 step biased by 2^23, so a
 # lane pins at 2048.  It is a *squared* quantity, which is why it rails long
 # before any residual format does: MiniMind3's residual of ~50 pins it (22x),
-# SmolLM2's 26884 pins it by 6e6.  Stored: shaders.cpp's S_ST / RMS_DUMP.
+# SmolLM2's 26884 pins it by 6e6.  Stored: shaders_block.cpp's S_ST / RMS_DUMP.
 RMS_LANE_RAIL = 2048.0
 
 

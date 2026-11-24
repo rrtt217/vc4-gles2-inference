@@ -129,7 +129,7 @@ AttnConfig GPU::att_cfg(int segk, bool accumulate) const{
         c.kv_fmt = att_kv_fmt_;
         c.score_scale = att_score_scale_; c.sum_scale = att_sum_scale_;
         c.sum_log = att_sum_log_;
-        c.exp_poly = exp_poly_enabled();   // EXP=drv|poly, one axis (shaders.cpp)
+        c.exp_poly = exp_poly_enabled();   // EXP=drv|poly, one axis (shaders_common.cpp)
         c.qkv_pair = att_qkv_pair_;
         c.rope_none = att_rope_none_;
         c.causal = att_causal_;

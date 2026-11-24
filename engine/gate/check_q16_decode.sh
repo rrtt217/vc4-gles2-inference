@@ -4,8 +4,8 @@
 # The q16 decode is `u = hi*65280 + lo*255`, then the negative rail is folded back
 # (`u >= T` subtracts 65536).  The rule lives in xformat.cpp, but its *text* is
 # copied into every kernel that reads q16 by hand: the x_i16 family, the q4
-# kernels' dA/dB, the KV decoders, the pair readers.  Ten spellings across three
-# files, and two thresholds.
+# kernels' dA/dB, the KV decoders, the pair readers.  Ten spellings across four
+# shader TUs, and two thresholds.
 #
 # The two thresholds are both correct and that is why this is a check and not a
 # refactor: a decoded u is always a multiple of 255 (the bytes are 1/255 steps),

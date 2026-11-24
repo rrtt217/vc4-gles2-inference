@@ -646,9 +646,11 @@ dated sections verbatim).  Do not grow it back.
 ## Source split policy
 
 The engine is split into `engine/src/` modules; see `docs/engine-layout.md`.
-Shader text belongs in `shaders.cpp` / `shaders_attn.cpp`, and activation
-layout knowledge belongs in `xformat.h/.cpp`.  Environment switches are read
-through `env_set` / `env_flag` / `env_int` / `env_double` (`common.h`), not by
+Shader text belongs in `shaders_*.cpp` (one TU per weight format, plus the
+shared prelude, the block-level row passes, the model-specific languages and
+attention), and activation layout knowledge belongs in `xformat.h/.cpp`.
+Environment switches are read through `env_set` / `env_flag` / `env_int` /
+`env_double` (`common.h`), not by
 calling `getenv` twice in one expression (`getenv(X) ? atoi(getenv(X)) : d` is
 both slow in a per-layer loop and the shape where the two reads can disagree);
 `env_flag` means "set and not 0", which is the convention `docs/test-hooks.md`

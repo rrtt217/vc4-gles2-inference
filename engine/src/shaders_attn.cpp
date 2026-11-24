@@ -76,7 +76,7 @@ static std::string exp_call(const AttnConfig& c){
 
 
 // The shader-side definition of the portable exp, or nothing: one copy lives in
-// shaders.cpp (EXP=drv|poly, the same switch the FFN kernels read).
+// shaders_common.cpp (EXP=drv|poly, the same switch the FFN kernels read).
 static std::string exp_poly_text(const AttnConfig& c){
     return c.exp_poly ? exp_poly_source() : string();
 }

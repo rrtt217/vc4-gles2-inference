@@ -265,7 +265,7 @@ output row, the row's scale *divided by the matrix unit* the record's own
 `scale` field carries (`f32` there is the largest row scale).  The engine
 uploads it as one 24-bit value per row and every q8 kernel multiplies the row's
 dot product by it instead of by a single `ws`
-(`wrow_scale()` in `engine/src/shaders.cpp`).  A container either has a plane
+(`wrow_scale()` in `engine/src/shaders_common.cpp`).  A container either has a plane
 for every q8 matrix or for none: a matrix that keeps its per-matrix scale while
 the file says otherwise is silently wrong, which is why the reader refuses a
 plane whose `rows` or byte count does not match its matrix.

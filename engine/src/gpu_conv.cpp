@@ -3,7 +3,7 @@
 // own three-draw sequence.
 //
 // Split out of gpu.cpp (2026-11-14).  The GLSL is not here -- `conv3_act`,
-// `mul_act` and `copy_act` live in shaders.cpp with every other kernel, and
+// `mul_act` and `copy_act` live in shaders_block.cpp with every other kernel, and
 // `dump_shaders.cpp` lists them; this file is the driver, exactly like
 // gpu_state.cpp is the object layer.  `conv_state_`/`conv_k_tex_` stay in gpu.h
 // and `prefix_cache.cpp` reads and writes the state through the public
