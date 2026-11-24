@@ -11,7 +11,7 @@ responsibility, not by line count:
 | `src/shaders.h` | the builder API: pure `(rows, cols, formats…) -> std::string` functions; no GL, no weight type |
 | `src/shaders_internal.h` + `src/shaders_common.cpp` | the prelude every builder emits, and the decode text more than one format shares |
 | `src/shaders_q8.cpp`, `_i16`, `_q4`, `_q6`, `_t3` | one weight format's builders and its private decode (the weight-format boundary) |
-| `src/shaders_block.cpp` | row-elementwise block passes: RMSNorm/LayerNorm, SwiGLU/swish, bias add, the hybrid conv, the P2 layout split |
+| `src/shaders_block.cpp` | row-elementwise block passes: RMSNorm/LayerNorm, SwiGLU/swish/squared ReLU, bias add, the hybrid conv, the P2 layout split |
 | `src/shaders_rwkv.cpp` | RWKV-7's private f32 bit-cast codec, gates, norms and WKV recurrence |
 | `src/shaders_attn.cpp` | attention (self and cross), KV and logits shader builders |
 | `src/dump_shaders.h/.cpp` | the `--dump-shaders` matrix: every builder's emitted GLSL, digested |

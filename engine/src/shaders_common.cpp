@@ -151,6 +151,11 @@ string wrow_scale(int rows, const char* smp, const char* fn, const char* unit,
            "*(1.0/65536.0);}";
 }
 
+// One I24_1 value at an integer index, from a row of W texels.
+string rd24(const char* tex, const string& idx, const string& W) {
+    return string("x_q24(texture2D(") + tex + ",vec2((float(" + idx + ")+0.5)/" + W + ",0.5)))";
+}
+
 // The switch reader and the poly's definition, at file scope: the builders in
 // every shader TU call them, and so does shaders_attn.cpp.
 bool exp_poly_enabled() {

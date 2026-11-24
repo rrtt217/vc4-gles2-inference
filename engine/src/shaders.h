@@ -244,14 +244,14 @@ std::string top1_final(int groups);
 //   state  stores S*2^e_head  -> per-head exponent e_head, >=18 effective bits
 //                               (S-1: the q16/I24 1/256 grid costs +0.154 nats).
 
-std::string ln_stats(int dim, XFormat rf);
-std::string ln_norm(int dim, XFormat rf);
+std::string rwkv_ln_stats(int dim, XFormat rf);
+std::string rwkv_ln_norm(int dim, XFormat rf);
 
 // Layer 0's input is the token-normed embedding (~0.013 on g1d), far below the
 // q16 residual step (1/256 = 30% of it).  The CPU keeps it f32 until the first
 // residual add; the GPU stores it *256 in I24_1 and these read it back /256.
-std::string ln_stats_p(int dim);
-std::string ln_norm_p(int dim);
+std::string rwkv_ln_stats_p(int dim);
+std::string rwkv_ln_norm_p(int dim);
 std::string rwkv_first_add(int dim);
 std::string rwkv_res_add(int dim);
 
@@ -265,14 +265,6 @@ std::string rwkv_tanh(int dim);
 std::string rwkv_sigmoid(int dim, bool has_bias, int oscale);
 std::string rwkv_decay(int dim);
 std::string rwkv_vres(int dim);
-std::string act_sqrelu(int dim);
-// v5 (encoder-decoder) dense-chain passes: LayerNorm (mean removed) in two
-// draws, x += b, and the non-gated FFN's swish.
-std::string ln_stats_q16(int dim, XFormat rf);
-std::string ln_apply_q16(int dim, XFormat rf, XFormat out);
-std::string bias_add_q16(int dim, XFormat xf, XFormat f);
-std::string act_swish(int dim, XFormat f);
-std::string act_swish_biased(int dim, XFormat xf, XFormat f);
 std::string rwkv_mul(int dim, int adiv);
 std::string rwkv_rk_reduce(int dim, int hs);
 std::string rwkv_rk_add(int dim, int hs);
@@ -283,3 +275,15 @@ std::string rwkv_rk_add(int dim, int hs);
 std::string rwkv_wkv_sa(int heads, int hs);
 std::string rwkv_wkv_update(int heads, int hs);
 std::string rwkv_wkv_out(int heads, int hs);
+
+// ---- post-norm block row passes --------------------------------------------
+// Generic and XFORMAT-clean: LayerNorm (mean removed) in two draws, x += b, and
+// the non-gated FFN's swish.  RWKV's rwkv_ln_* above are a different
+// implementation with its own bit-cast stats codec; these are the ones a
+// post-norm transformer block calls.
+std::string ln_stats_q16(int dim, XFormat rf);
+std::string ln_apply_q16(int dim, XFormat rf, XFormat out);
+std::string bias_add_q16(int dim, XFormat xf, XFormat f);
+std::string act_swish(int dim, XFormat f);
+std::string act_swish_biased(int dim, XFormat xf, XFormat f);
+std::string act_sqrelu(int dim);

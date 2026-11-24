@@ -36,3 +36,8 @@ extern const std::string kDec16B;
 // rows in one texel is not an optimisation (probes/wrow_probe).
 std::string wrow_scale(int rows, const char* smp = "WS", const char* fn = "wsr",
                        const char* unit = "ws", bool hi = false);
+
+// One I24_1 value at an integer index, through the ESSL 1.00 texture2D form.
+// Shared by the block's squared ReLU and RWKV's I24 passes; the ES3 spelling
+// (texture()) stays RWKV-private.
+std::string rd24(const char* tex, const std::string& idx, const std::string& W);

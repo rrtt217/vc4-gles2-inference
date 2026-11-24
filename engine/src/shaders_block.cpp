@@ -590,3 +590,15 @@ std::string act_swish_biased(int dim, XFormat xf, XFormat f) {
                 "gl_FragColor=XST1(" + sw("v0") + ");";
     return head(f) + x_residual_glsl(xf) + "uniform sampler2D X,B;" + body + "}";
 }
+
+// Squared ReLU on the I24 stream.  The formula is generic; the stream is fixed
+// because the RWKV block writes every activation in I24_1.  A caller with
+// another stream would take the format as a parameter, as act_swish does.
+std::string act_sqrelu(int dim) {
+    need_dim("act_sqrelu", dim);
+    const string D = to_string(dim);
+    return head(XFormat::I24_1) + poly_src() +
+        "uniform sampler2D X;"
+        "void main(){int i=int(gl_FragCoord.x);float r=max(" + rd24("X", "i", D + ".0") + ",0.0);"
+        "gl_FragColor=x_q24enc(r*r);}";
+}

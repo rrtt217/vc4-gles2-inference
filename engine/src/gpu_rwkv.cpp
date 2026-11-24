@@ -375,12 +375,12 @@ void GPU::rwkv_copy(GLuint src, Target& dst){
 GLuint GPU::ln_affine(GLuint x, GLuint wb, Target& out){
         const int dim = rwkv_dim_;
         Target& stat = rwkv_tmp(RT_LNSTAT);
-        GLuint ps = x_prog("lns_" + to_string(dim), ln_stats(dim, res_fmt_));
+        GLuint ps = x_prog("lns_" + to_string(dim), rwkv_ln_stats(dim, res_fmt_));
         bind_fbo(stat.fbo); use_program(ps);
         bind_tex(0, x); set_sampler(ps, "X", 0);
         glUniform1f(uloc(ps, "eps"), rwkv_eps_);
         rwkv_draw1(ps, 2);
-        GLuint pn = x_prog("lnn_" + to_string(dim), ln_norm(dim, res_fmt_));
+        GLuint pn = x_prog("lnn_" + to_string(dim), rwkv_ln_norm(dim, res_fmt_));
         bind_fbo(out.fbo); use_program(pn);
         bind_tex(0, x); set_sampler(pn, "X", 0);
         bind_tex(1, stat.tex); set_sampler(pn, "S", 1);
@@ -404,12 +404,12 @@ GLuint GPU::rwkv_upload_x0(const vector<float>& x0){
 GLuint GPU::ln_affine_p(GLuint x, GLuint wb, Target& out){
         const int dim = rwkv_dim_;
         Target& stat = rwkv_tmp(RT_LNSTAT);
-        GLuint ps = x_prog("lnsp_" + to_string(dim), ::ln_stats_p(dim));
+        GLuint ps = x_prog("lnsp_" + to_string(dim), ::rwkv_ln_stats_p(dim));
         bind_fbo(stat.fbo); use_program(ps);
         bind_tex(0, x); set_sampler(ps, "X", 0);
         glUniform1f(uloc(ps, "eps"), rwkv_eps_);
         rwkv_draw1(ps, 2);
-        GLuint pn = x_prog("lnp_" + to_string(dim), ::ln_norm_p(dim));
+        GLuint pn = x_prog("lnp_" + to_string(dim), ::rwkv_ln_norm_p(dim));
         bind_fbo(out.fbo); use_program(pn);
         bind_tex(0, x); set_sampler(pn, "X", 0);
         bind_tex(1, stat.tex); set_sampler(pn, "S", 1);
