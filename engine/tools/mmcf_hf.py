@@ -1700,7 +1700,37 @@ def load_marian(model_dir, seq=0, enc_seq=0):
             seq = cap
         if not enc_seq:
             enc_seq = cap
-    w = load_legacy(model_dir + '/pytorch_model.bin')
+    # `model.safetensors` first, `pytorch_model.bin` second.  Marian releases
+    # ship both, and preferring the bare pickle meant downloading 296 MB we
+    # already had -- or failing outright when the safetensors is the only one
+    # fetched.  `pth_legacy` is still the path for a release that ships only the
+    # pickle (the OPUS-MT family).
+    if os.path.exists(model_dir + '/model.safetensors'):
+        with open(model_dir + '/model.safetensors', 'rb') as f:
+            n = struct.unpack('<Q', f.read(8))[0]
+            shdr = json.loads(f.read(n))
+            sdata = f.read()
+
+        def st_get(name):
+            if name not in shdr:
+                raise SystemExit("%s: the checkpoint has no %s; this is not the "
+                                 "Marian layout this loader maps"
+                                 % (model_dir, name))
+            e = shdr[name]
+            a, b = e['data_offsets']
+            dt = st_dtype(e)
+            if dt is None:
+                raise SystemExit("%s: unsupported safetensors dtype %s"
+                                 % (name, e.get('dtype')))
+            if e.get("dtype") == "BF16":
+                bits = np.frombuffer(sdata[a:b], dtype="<u2").astype(np.uint32) << 16
+                return bits.view(np.float32).reshape(e['shape'])
+            return np.frombuffer(sdata[a:b], dtype=dt).astype(np.float32).reshape(
+                e['shape'])
+
+        w = {k: st_get(k) for k in shdr if k != '__metadata__'}
+    else:
+        w = load_legacy(model_dir + '/pytorch_model.bin')
 
     def g(name):
         if name not in w:
@@ -1729,7 +1759,12 @@ def load_marian(model_dir, seq=0, enc_seq=0):
                          % (model_dir, cfg.get('activation_function')))
 
     shared = g('model.shared.weight')
-    if not np.array_equal(shared, g('model.encoder.embed_tokens.weight')):
+    # `share_encoder_decoder_embeddings: true` is the only form this loader
+    # accepts, but a current export drops the redundant `embed_tokens` alias
+    # entirely -- the tied matrix *is* `model.shared.weight`, so its absence is
+    # the same statement, not a different layout.
+    if ('model.encoder.embed_tokens.weight' in w and
+            not np.array_equal(shared, g('model.encoder.embed_tokens.weight'))):
         raise SystemExit("%s: the encoder embedding is not `shared`; a tied "
                          "head is what this container assumes" % model_dir)
 
@@ -1801,7 +1836,20 @@ def load_marian(model_dir, seq=0, enc_seq=0):
                               g(p + 'fc2.bias')])
         m['dec_bias_ffn'].append([g(p + 'fc1.bias')])
 
-    m['pos'] = g('model.encoder.embed_positions.weight')
+    # Marian's position embedding is *sinusoidal*, so a checkpoint exported by
+    # current transformers carries no `embed_positions` tensor at all
+    # (`static_position_embeddings: true` means sinusoidal, not learned; the
+    # table is a buffer, regenerated at load).  Synthesising it is exact: this
+    # formula reproduces the OPUS-MT table -- which does ship one -- to
+    # max|diff| 0.0.
+    if 'model.encoder.embed_positions.weight' in w:
+        m['pos'] = g('model.encoder.embed_positions.weight')
+    else:
+        rows = int(cfg.get('max_position_embeddings') or 512)
+        half = dim // 2
+        inv = 10000.0 ** (-np.arange(0, half, dtype=np.float64) / half)
+        x = np.arange(rows, dtype=np.float64)[:, None] * inv[None, :]
+        m['pos'] = np.concatenate([np.sin(x), np.cos(x)], axis=1).astype(np.float32)
     # 0 means "this model's own capacity".  A hand-passed 64 used to be the
     # default and it is not a memory saving, it is a silent cap: every source or
     # target longer than it is truncated, and the position table's 512 rows made
@@ -1811,7 +1859,8 @@ def load_marian(model_dir, seq=0, enc_seq=0):
         seq = cap
     if not enc_seq:
         enc_seq = cap
-    if not np.array_equal(m['pos'], g('model.decoder.embed_positions.weight')):
+    if ('model.decoder.embed_positions.weight' in w and
+            not np.array_equal(m['pos'], g('model.decoder.embed_positions.weight'))):
         raise SystemExit("%s: the two position tables differ; the container "
                          "carries one" % model_dir)
     if m['pos'].shape[0] < max(seq, enc_seq):
