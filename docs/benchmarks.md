@@ -397,6 +397,11 @@ owns the batteries and how to run them.
 - **Across containers of the same model**: fine when the weights are the same
   and the body is lossless (BitCPM q8 against t3 above), otherwise state which
   body produced the number.
+- **Across model sizes**: decode follows the draw count, and the layer count
+  predicts that; parameter count does not.  A vocabulary embedding and head are
+  read once per token, not once per layer, so a model with more parameters can
+  decode faster.  On the 2026-11-13 Pi matrix, layer count fitted at R² 0.90
+  against 0.56 for parameters.
 
 ## Where the history is
 
