@@ -56,13 +56,13 @@ vector<vector<vector<float>>> GPU::matvec_batch_group(const vector<MvBatch>& gro
         if (G == 0) return out;
         size_t N = 0;
         int rows_max = 0, in_w = 0;
-        bool all_int8 = true;
+        bool all_batch = true;
         for (const MvBatch& g : groups) {
-                // No batched kernel for q4/i16.  prefill_batch_ok() refuses those
-                // containers, so this is the belt-and-braces arm: answer from the
+                // The batched kernel is q8 today.  prefill_batch_ok() asks the
+                // same table; this is the belt-and-braces arm: answer from the
                 // serial path per input rather than from a kernel that cannot
                 // decode the weights.
-                if (g.m->type != WeightType::INT8) all_int8 = false;
+                if (!wf_can(g.m->type, WStage::Batch)) all_batch = false;
                 N = std::max(N, g.xs->size());
                 rows_max = std::max(rows_max, g.m->rows);
                 for (const vector<float>* x : *g.xs)
@@ -70,7 +70,7 @@ vector<vector<vector<float>>> GPU::matvec_batch_group(const vector<MvBatch>& gro
         }
         if (N == 0) return out;
         out.assign(G, vector<vector<float>>(N));
-        if (!all_int8) {
+        if (!all_batch) {
                 for (size_t i = 0; i < G; ++i)
                         for (size_t b = 0; b < groups[i].xs->size(); ++b)
                                 out[i][b] = matvec(*groups[i].m, *(*groups[i].xs)[b]);

@@ -20,7 +20,7 @@ bool GPU::logits_pair() const{
 bool GPU::logits_pair_ok(const vector<Mat>& tiles) const{
         if (!logits_pair()) return false;
         for (size_t i = 0; i < tiles.size(); ++i)
-            if (tiles[i].type != WeightType::INT8) return false;
+            if (!wf_can(tiles[i].type, WStage::LogitsPair)) return false;
         return true;
     }
 

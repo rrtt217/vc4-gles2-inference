@@ -31,7 +31,7 @@ GLuint GPU::ffn_split(const Mat& w1, const Mat& w3, GLuint x, int hidden, int hs
 GLuint GPU::ffn_fused(const Mat& w13, GLuint x, int hidden, int hs){
         // q8 W13 uses the paired q16 path: the old q24 path miscomputes
         // fused-W13 FFN.  q4/i16 keep the q24 path.
-        if (w13.type == WeightType::INT8) {
+        if (wf_can(w13.type, WStage::FfnFusedW13)) {
             const int aw = x_texels(hidden, ffn_fmt_);
             if (ffn_pair_a_.tex == 0 || ffn_pair_a_.w != hidden) ffn_pair_a_ = make_target(hidden, 1);
             if (ffn_h_a_.tex == 0 || ffn_h_a_.w != aw) ffn_h_a_ = make_target(aw, 1);
@@ -89,32 +89,37 @@ void GPU::ffn_split_chunked(const Mat& w1a, const Mat& w3a, const Mat& w1b, cons
                 return;
         }
         const bool pair = pair_env && ffn_fmt_ == XFormat::I16_2 &&
-                          ((w1a.type == WeightType::INT8 && w3a.type == WeightType::INT8) ||
-                           (w1a.type == WeightType::INT4 && w3a.type == WeightType::INT4));
+                          w1a.type == w3a.type &&
+                          wf_can(w1a.type, WStage::FfnPair);
         if (pair) {
-            // Fused gate+swiglu: one draw per chunk instead of two.  Only the
-            // q8 path has the fused kernel, and only I16_2 output is wired to w2.
+            // Fused gate+swiglu: one draw per chunk instead of two.  q8 and q4
+            // carry it; only an I16_2 hidden is wired to w2.
             // Default ON (measured -20 ms/token).  The fused kernel differs from the two
             // pass sequence in the last bits of the swiglu output (PPL 312.1366 vs
             // 311.1636, 0.3% - far inside the 254-token corpus noise, see WORKLOG), but
             // the greedy gates are byte-identical.  FFN_FUSE=0 restores the two-pass
             // path for A/B and for any future bit-exactness work.
             static const bool fuse_env = !(env_zero("FFN_FUSE"));
-            if (fuse_env && w1a.type == WeightType::INT8 && ffn_fmt_ == XFormat::I16_2 &&
+            if (fuse_env && ffn_fmt_ == XFormat::I16_2 && w1a.type == w3a.type &&
+                wf_can(w1a.type, WStage::FfnFusedGate) &&
                 (n1 & 1) == 0 && (n2 & 1) == 0) {
-                ha = ffn_pair_swiglu_chunk(w1a, w3a, x, n1, ffn_h_a_, hs);
-                hb = ffn_pair_swiglu_chunk(w1b, w3b, x, n2, ffn_h_b_, hs);
-                return;
-            }
-            // q4 has no fused gate: matvec_i4_pair writes one row per fragment
-            // and a separate swiglu draw packs it.  The fused form computes the
-            // row pair in one fragment, swiglus both rows in-kernel and writes
-            // the packed q16 pair, so it is one draw per chunk and bit-identical
-            // (same group order, same qz/sl rounding).
-            if (fuse_env && w1a.type == WeightType::INT4 && ffn_fmt_ == XFormat::I16_2 &&
-                (n1 & 1) == 0 && (n2 & 1) == 0) {
-                ha = ffn_pair_i4_swiglu_chunk(w1a, w3a, x, n1, ffn_h_a_, hs);
-                hb = ffn_pair_i4_swiglu_chunk(w1b, w3b, x, n2, ffn_h_b_, hs);
+                // One fused kernel per format family: q8 and q4 write the pair
+                // differently (packed bytes vs nibbles + the group plane), so
+                // the adapter picks the text and the table only says it exists.
+                switch (w1a.type) {
+                    case WeightType::INT8:
+                        ha = ffn_pair_swiglu_chunk(w1a, w3a, x, n1, ffn_h_a_, hs);
+                        hb = ffn_pair_swiglu_chunk(w1b, w3b, x, n2, ffn_h_b_, hs);
+                        break;
+                    case WeightType::INT4:
+                        ha = ffn_pair_i4_swiglu_chunk(w1a, w3a, x, n1, ffn_h_a_, hs);
+                        hb = ffn_pair_i4_swiglu_chunk(w1b, w3b, x, n2, ffn_h_b_, hs);
+                        break;
+                    case WeightType::INT16:
+                    case WeightType::INT6:
+                    case WeightType::T3:
+                        wf_no_kernel("ffn_fused_gate", w1a.type);
+                }
                 return;
             }
 

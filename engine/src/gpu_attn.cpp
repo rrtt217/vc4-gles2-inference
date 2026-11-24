@@ -254,8 +254,7 @@ void GPU::init_attention(int dim, int kv_dim, int heads, int kv_heads, int head_
     }
 
 void GPU::att_qkv_draw(const Mat& qkv, GLuint x){
-        if (att_qkv_pair_ && (qkv.type == WeightType::INT8 ||
-                              qkv.type == WeightType::T3)) {
+        if (att_qkv_pair_ && wf_can(qkv.type, WStage::QkvPair)) {
             const bool wr = qkv.has_row_scale();
             const int pairs = (qkv.rows + 1) / 2;
             // A t3 qkv holds both rows of the pair in one texel, so its

@@ -1332,18 +1332,18 @@ vector<vector<float>> Session::forward_rwkv_batch(const vector<int>& toks){
 bool Session::prefill_batch_ok() const {
         static const bool on = env_flag("RWKV_PREFILL");
         if (!on || !m_.is_rwkv()) return false;
-        // The batched kernel is the q8 one (matvec_q8_batch): a q4/i16
-        // container keeps the serial prefill rather than answering from a
-        // kernel that cannot decode its weights.
+        // The batched kernel is the q8 one (matvec_q8_batch): a container whose
+        // matrices do not advertise WStage::Batch keeps the serial prefill
+        // rather than answering from a kernel that cannot decode its weights.
         if (rwkv_gpu_) return false;   // the fused loop is one draw per op; no batch kernel
-        const auto q8 = [](const vector<Mat>& v) {
-            for (const Mat& m : v) if (m.rows > 0 && m.type != WeightType::INT8) return false;
+        const auto batch_ok = [](const vector<Mat>& v) {
+            for (const Mat& m : v) if (m.rows > 0 && !wf_can(m.type, WStage::Batch)) return false;
             return true;
         };
-        if (!q8(m_.rwkv_r) || !q8(m_.rwkv_k) || !q8(m_.rwkv_v) || !q8(m_.wo)) return false;
-        if (!q8(m_.rwkv_w1) || !q8(m_.rwkv_w2) || !q8(m_.rwkv_a1) || !q8(m_.rwkv_a2)) return false;
-        if (!q8(m_.rwkv_v1) || !q8(m_.rwkv_v2) || !q8(m_.rwkv_g1) || !q8(m_.rwkv_g2)) return false;
-        if (m_.ffn_chunked && (!q8(m_.w1a) || !q8(m_.w1b) || !q8(m_.w2a) || !q8(m_.w2b))) return false;
+        if (!batch_ok(m_.rwkv_r) || !batch_ok(m_.rwkv_k) || !batch_ok(m_.rwkv_v) || !batch_ok(m_.wo)) return false;
+        if (!batch_ok(m_.rwkv_w1) || !batch_ok(m_.rwkv_w2) || !batch_ok(m_.rwkv_a1) || !batch_ok(m_.rwkv_a2)) return false;
+        if (!batch_ok(m_.rwkv_v1) || !batch_ok(m_.rwkv_v2) || !batch_ok(m_.rwkv_g1) || !batch_ok(m_.rwkv_g2)) return false;
+        if (m_.ffn_chunked && (!batch_ok(m_.w1a) || !batch_ok(m_.w1b) || !batch_ok(m_.w2a) || !batch_ok(m_.w2b))) return false;
         return true;
     }
 
@@ -1697,11 +1697,9 @@ bool Session::pair_ok() const {
         // second position has to see the first one's state (plan O31).  A pair
         // variant is P6's problem; the serial loop is correct today.
         if (m_.is_rwkv()) return false;
-        // A 2-bit ternary body has one kernel so far (the single-row matvec and
-        // its residual add); the two-position pair family does not, and a
-        // missing pair kernel is a wrong shader, not a slow one.  The serial
-        // prefill is correct and this is the switch that keeps it.
-        if (m_.has_t3()) return false;
+        // A format with no pair-family kernel is refused by the table at the
+        // end of this function (WStage::P2); a missing pair kernel is a wrong
+        // shader, not a slow one.
         // The two-position prefill implements a dense transformer block: it
         // calls attention_block() for every layer, and a hybrid model's conv
         // layers carry no qkv (the LFM2-350M q8 container aborted in
@@ -1742,8 +1740,11 @@ bool Session::pair_ok() const {
         const vector<Mat>& w3 = !m_.w3a.empty() ? m_.w3a : m_.w3;
         const vector<Mat>& w2 = !m_.w2a.empty() ? m_.w2a : m_.w2;
         if (w1.empty() || w3.empty() || w2.empty()) return false;
-        return w1[0].type == WeightType::INT8 && w3[0].type == WeightType::INT8 &&
-               w2[0].type == WeightType::INT8;
+        // The weight half is the table's answer; the stream half (I16_2 pairs,
+        // a residual that is not I24/F32) is checked above.  Today only q8 has
+        // the two-position family, so a q4/i16/t3 container takes serial.
+        return wf_can(w1[0].type, WStage::P2) && wf_can(w3[0].type, WStage::P2) &&
+               wf_can(w2[0].type, WStage::P2);
     }
 
 vector<float> Session::step_pair(int tok_a, int pos_a, int tok_b, int pos_b, bool want_logits){

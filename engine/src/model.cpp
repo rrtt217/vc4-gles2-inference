@@ -437,7 +437,9 @@ void Model::apply_hidden_scale(){
         if (hid_scale.empty()) return;
         auto scale_mat = [](Mat& m, float s) {
                 if (m.rows <= 0) return;
-                if (m.type == WeightType::INT4) m.q4_param_scale *= s;
+                // q4 carries its scale in the group plane's unit, every other
+                // format in the single matrix scale (weight_format.h).
+                if (wf(m.type).scale_modes & kWScaleGroupMinMax) m.q4_param_scale *= s;
                 else m.scale *= s;
         };
         for (int l = 0; l < layers; ++l) {
