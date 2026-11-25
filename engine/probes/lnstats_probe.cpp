@@ -1,27 +1,32 @@
-// What do the LayerNorm statistics cost, and at which residual scale?
+// How should the v5 LayerNorm's two statistics be encoded?
 //
-// The v5 block stores (mean, invstd) as two q16 halves of one texel.  Those two
-// numbers have opposite dimensions: mean scales with the residual's spread, and
-// invstd is its reciprocal, so one fixed 1/256 step cannot serve both as the
-// spread moves.  This probe drives the shipped `ln_stats_q16`/`ln_apply_q16`
-// and two candidate encodings on the same rows, at spreads from 1e-2 to 1e3,
-// and compares each to a double-precision reference:
+// The apply pass needs, per row: the mean (same units as x) and the
+// inverse standard deviation (a dimensionless scale, unbounded as the row
+// flattens).  Those have different dimensions, and that is the whole
+// question: one fixed-point pair cannot serve both as the spread moves.
 //
-//   A   the shipped (mean, invstd) q16 pair
-//   B1  (mean, sd) scaled by 2^-k, k passed as a uniform (the encoding with a
-//       free per-row exponent)
-//   B2  the same, with k packed in the texel's third byte and int8 mantissas
-//       (a self-contained one-texel form)
-//   C   (mean, sd) as bfloat16 -- a per-value exponent, no k (host-computed;
-//       this context is ES2)
+//   K   the shipped pair: (mean, sd) * 2^-k as two q16 halves of one texel,
+//       k in the second row (`ln_stats_split` + `ln_stats_reduce` +
+//       `ln_apply_q16`, exactly the engine's text).  The k exists because the
+//       pair is absolute (+-128); x is scaled by 2^-k to match.
+//   B   mean in the residual format (it is a value of the row), invstd as f32
+//       (a per-value exponent, so no k and no rail).
+//   C   the same with invstd as bf16 (7-bit mantissa, 0.4% relative).
+//   D   (mean, sd) both bf16 in one texel -- a per-value exponent, no k.
+//   E   (mean, invstd) both f32: no encoding at all, the floor.
 //
-// The input row is I24 (the q16 stream would clamp before the statistics do at
-// large spreads), and the reference is computed on the *quantized* input the
-// kernels actually read, so the only difference between the three rows is the
-// statistics encoding.
+// All arms read the same I24 input row (the q16 stream would clamp before the
+// statistics do at large spreads), sum in f32, and write an f32 output, so
+// the only difference measured is the statistics encoding.  The reference is
+// double precision on the *quantized* input the kernels read.
+//
+// The rows: a sweep of spreads with a fixed mean, then the shapes a v5 block
+// actually produces -- a modest row (sd 2, mean 0.05) and OPUS-MT's dec1 FFN
+// row (one 5959 dim in a 512-wide row, sd ~263).
 //
 // build: make -C engine probes/lnstats_probe
 #include "shaders.h"
+#include "shaders_internal.h"
 #include "xformat.h"
 
 #include <EGL/egl.h>
@@ -30,12 +35,12 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdint>
 #include <cstdio>
 #include <string>
 #include <vector>
 
 using std::string;
+using std::to_string;
 using std::vector;
 
 bool gpu_q4_shift() { return false; }
@@ -45,7 +50,23 @@ bool gpu_q4_shift() { return false; }
 #endif
 typedef EGLDisplay (*PFNGPD)(EGLenum, void*, const EGLint*);
 
-static GLuint comp(GLenum t, const string& s) {
+// The f32 and bf16 codecs are ESSL 3.00 text (uintBitsToFloat and friends),
+// so the probe runs in an ES3 context and wraps every shader the way
+// GPU::link_program does: no #version -> 300 es, gl_FragColor renamed,
+// texture2D aliased, and the fragment stage's default precision injected.
+static GLuint comp(GLenum t, const string& src) {
+    string s = src;
+    if (s.find("#version") == string::npos) {
+        if (t == GL_VERTEX_SHADER) {
+            s = "#version 300 es\n#define attribute in\n" + s;
+        } else {
+            for (size_t at = s.find("gl_FragColor"); at != string::npos;
+                 at = s.find("gl_FragColor", at + 12))
+                s.replace(at, 12, "frag_color");
+            s = "#version 300 es\nprecision highp float;\nout vec4 frag_color;\n"
+                "#define texture2D texture\n#define textureCube texture\n" + s;
+        }
+    }
     GLuint h = glCreateShader(t);
     const char* p = s.c_str();
     glShaderSource(h, 1, &p, nullptr);
@@ -89,23 +110,29 @@ static GLuint tex(int w, int h, const vector<uint8_t>& px) {
     return t;
 }
 
-static GLuint target_tex(int w) {
+static GLuint target_tex(int w, int h = 1) {
     GLuint t = 0;
     glGenTextures(1, &t);
     glBindTexture(GL_TEXTURE_2D, t);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
     GLuint f = 0;
     glGenFramebuffers(1, &f);
     glBindFramebuffer(GL_FRAMEBUFFER, f);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t, 0);
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-        printf("    FBO incomplete at w=%d\n", w);
+        printf("    FBO incomplete at %dx%d\n", w, h);
     return t;
 }
 
-static void tri(GLuint p, int w, int h) {
+static GLuint g_fbo = 0;
+
+static void draw_to(GLuint p, GLuint out_tex, int w, int h) {
+    if (!g_fbo) glGenFramebuffers(1, &g_fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, g_fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, out_tex, 0);
+    glUseProgram(p);
     static GLuint vbo = 0;
     if (!vbo) {
         glGenBuffers(1, &vbo);
@@ -122,19 +149,13 @@ static void tri(GLuint p, int w, int h) {
     glDrawArrays(GL_TRIANGLES, 0, 3);
 }
 
-static const char* kQ16 =
-    "vec2 q16(float v){float q=clamp(floor(v*256.0+0.5),-32768.0,32767.0);"
-    "if(q<0.0)q+=65536.0;float hi=floor(q/256.0);"
-    "return vec2(hi/255.0,(q-hi*256.0)/255.0);}";
-static const char* kD16 =
-    "float d16(vec2 c){float u=c.x*65280.0+c.y*255.0;"
-    "if(u>=32768.0)u-=65536.0;return u/256.0;}";
-static const char* kD24 =
-    "float d24(vec4 c){return (float(int(c.g*255.0+0.5))*65536.0+"
-    "float(int(c.b*255.0+0.5))*256.0+float(int(c.a*255.0+0.5))-8388608.0)/256.0;}";
+static void bind1(GLuint p, const char* name, int unit, GLuint tex_name) {
+    glActiveTexture((GLenum)(GL_TEXTURE0 + unit));
+    glBindTexture(GL_TEXTURE_2D, tex_name);
+    glUniform1i(glGetUniformLocation(p, name), unit);
+}
 
 static const int D = 512;
-static const int OW = D / 2;
 
 static void make_row(double mu, double sig, vector<float>& x) {
     vector<double> z(D);
@@ -169,43 +190,33 @@ static Err compare(const vector<float>& yg, const vector<double>& yr) {
     return e;
 }
 
-// stat_tex: 1x1; out reads OW texels of I16_2.
-static vector<float> apply(GLuint p, GLuint x_tex, GLuint s_tex, GLuint w_tex,
-                           GLuint b_tex, GLuint out_tex, float iscale) {
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    GLuint fbo = 0;
-    glGenFramebuffers(1, &fbo);
-    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, out_tex, 0);
-    glUseProgram(p);
-    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, x_tex); glUniform1i(glGetUniformLocation(p, "X"), 0);
-    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, s_tex); glUniform1i(glGetUniformLocation(p, "S"), 1);
-    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, w_tex); glUniform1i(glGetUniformLocation(p, "W"), 2);
-    glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, b_tex); glUniform1i(glGetUniformLocation(p, "B"), 3);
-    glUniform1f(glGetUniformLocation(p, "iscale"), iscale);
-    tri(p, OW, 1);
-    glFinish();
-    vector<uint8_t> px((size_t)OW * 4);
-    glReadPixels(0, 0, OW, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
-    glDeleteFramebuffers(1, &fbo);
-    vector<float> y(D);
-    for (int i = 0; i < D; ++i) y[(size_t)i] = x_unpack(px.data(), i, XFormat::I16_2);
-    return y;
+// One fragment a texel of the output; reads the statistics the arm wrote.
+static string apply_shader(XFormat rf, const string& stats) {
+    const string RW = to_string(x_texels(D, rf));
+    const string WW = to_string(x_texels(D, kLnPairFmt));
+    return "precision highp float;\n" + head(rf) + x_residual_glsl(rf) +
+           x_codec_glsl(XFormat::F32) + x_codec_glsl(XFormat::BF16) +
+           "uniform sampler2D X,S,W,B;\n"
+           "float wv(int i){vec4 c=texture2D(W,vec2((float(i/2)+0.5)/float(" + WW + "),0.5));"
+           "return ((i/2)*2==i)?x_i16(c.rg):x_i16(c.ba);}\n"
+           "float bv(int i){vec4 c=texture2D(B,vec2((float(i/2)+0.5)/float(" + WW + "),0.5));"
+           "return ((i/2)*2==i)?x_i16(c.rg):x_i16(c.ba);}\n"
+           "void main(){int i=int(gl_FragCoord.x);"
+           "float x=Y1(X,i," + RW + ".0);\n" + stats + "\n}";
 }
 
-static void run_stats(GLuint p, GLuint x_tex, GLuint s_tex, float sc) {
-    GLuint fbo = 0;
-    glGenFramebuffers(1, &fbo);
-    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s_tex, 0);
-    glUseProgram(p);
-    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, x_tex); glUniform1i(glGetUniformLocation(p, "X"), 0);
-    glUniform1f(glGetUniformLocation(p, "eps"), 1e-5f);
-    glUniform1f(glGetUniformLocation(p, "sc"), sc);
-    tri(p, 1, 1);
-    glFinish();
-    glDeleteFramebuffers(1, &fbo);
+// The candidate statistics pass: one fragment per row of the 1x2 target, each
+// recomputing the sums (the probe measures the encoding, not the scan).
+static string cand_stats(XFormat rf, const string& row0, const string& row1) {
+    const string RW = to_string(x_texels(D, rf));
+    return "precision highp float;\n" + head(rf) + x_residual_glsl(rf) +
+           x_codec_glsl(XFormat::F32) + x_codec_glsl(XFormat::BF16) +
+           "uniform sampler2D X;uniform float eps;"
+           "void main(){float s=0.0,s2=0.0;"
+           "for(int i=0;i<" + to_string(D) + ";i++){float v=Y1(X,i," + RW + ".0);s+=v;s2+=v*v;}"
+           "float mean=s/float(" + to_string(D) + ");"
+           "float sd=sqrt(max(s2/float(" + to_string(D) + ")-mean*mean,0.0)+eps);"
+           "if(gl_FragCoord.y<1.0){" + row0 + "}else{" + row1 + "}}";
 }
 
 int main() {
@@ -221,125 +232,156 @@ int main() {
     EGLConfig cfg;
     EGLint n = 0;
     if (!eglChooseConfig(d, ca, &cfg, 1, &n) || n < 1) { printf("eglChooseConfig n=%d\n", n); return 1; }
-    const EGLint xa[] = {EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE};
+    const EGLint xa[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
     EGLContext ctx = eglCreateContext(d, cfg, EGL_NO_CONTEXT, xa);
     if (!ctx || !eglMakeCurrent(d, EGL_NO_SURFACE, EGL_NO_SURFACE, ctx)) {
         printf("context failed\n");
-        return 1;
+        return 0;
     }
-    printf("renderer %s\n\n", (const char*)glGetString(GL_RENDERER));
+    printf("renderer %s\n", (const char*)glGetString(GL_RENDERER));
 
-    // A: the shipped builders, exactly as the v5 block builds them.
-    GLuint a_stats = prog(ln_stats_q16(D, XFormat::I24_1));
-    GLuint a_apply = prog(ln_apply_q16(D, XFormat::I24_1, XFormat::I16_2));
+    const XFormat RF = XFormat::I24_1;
+    const int OW = D;  // f32 output: one value a texel
 
-    // B1: (mean, sd) q16, scaled by a host-supplied 2^-k.
-    GLuint b1_stats = prog(
-        string("precision highp float;uniform sampler2D X;uniform float sc;\n") + kD24 + kQ16 +
-        "void main(){float s=0.0,s2=0.0;"
-        "for(int i=0;i<512;i++){float v=d24(texture2D(X,vec2((float(i)+0.5)/512.0,0.5)));s+=v;s2+=v*v;}"
-        "float m=s/512.0;float sd=sqrt(max(s2/512.0-m*m,0.0)+1e-5);"
-        "vec2 a=q16(m*sc),b=q16(sd*sc);gl_FragColor=vec4(a,b);}");
-    GLuint b1_apply = prog(
-        string("precision highp float;uniform sampler2D X,S,W,B;uniform float iscale;\n") + kD24 + kD16 + kQ16 +
-        "void main(){int t=int(gl_FragCoord.x);int i0=2*t;"
-        "vec4 st=texture2D(S,vec2(0.5,0.5));"
-        "float m=d16(st.rg)*iscale,sd=d16(st.ba)*iscale;float inv=1.0/sd;"
-        "float y0=0.0,y1=0.0;"
-        "for(int q=0;q<2;q++){int i=i0+q;"
-        "float x=d24(texture2D(X,vec2((float(i)+0.5)/512.0,0.5)));"
-        "vec4 wc=texture2D(W,vec2((float(i/2)+0.5)/256.0,0.5));"
-        "vec4 bc=texture2D(B,vec2((float(i/2)+0.5)/256.0,0.5));"
-        "float wv=((i/2)*2==i)?d16(wc.rg):d16(wc.ba);"
-        "float bv=((i/2)*2==i)?d16(bc.rg):d16(bc.ba);"
-        "float y=(x-m)*inv*wv+bv;if(q==0)y0=y;else y1=y;}"
-        "vec2 p=q16(y0),r=q16(y1);gl_FragColor=vec4(p,r);}");
-
-    // B2: (mean, sd) int8 pair plus the per-row exponent in the third byte.
-    GLuint b2_stats = prog(
-        string("precision highp float;uniform sampler2D X;\n") + kD24 +
-        "void main(){float s=0.0,s2=0.0;"
-        "for(int i=0;i<512;i++){float v=d24(texture2D(X,vec2((float(i)+0.5)/512.0,0.5)));s+=v;s2+=v*v;}"
-        "float m=s/512.0;float sd=sqrt(max(s2/512.0-m*m,0.0)+1e-5);"
-        "float smax=max(abs(m),sd);float kf=clamp(ceil(log2(max(smax,1e-20)/64.0)),-16.0,16.0);"
-        "float sc=exp2(-kf);"
-        "float ms=clamp(floor(m*sc+0.5),-127.0,127.0);"
-        "float ss=clamp(floor(sd*sc+0.5),-127.0,127.0);"
-        "gl_FragColor=vec4((ms+128.0)/255.0,(ss+128.0)/255.0,(kf+32.0)/255.0,0.0);}");
-    GLuint b2_apply = prog(
-        string("precision highp float;uniform sampler2D X,S,W,B;\n") + kD24 + kD16 + kQ16 +
-        "void main(){int t=int(gl_FragCoord.x);int i0=2*t;"
-        "vec4 st=texture2D(S,vec2(0.5,0.5));"
-        "float ms=floor(st.r*255.0+0.5)-128.0,ss=floor(st.g*255.0+0.5)-128.0;"
-        "float kf=floor(st.b*255.0+0.5)-32.0;float sc=exp2(kf);"
-        "float m=ms*sc,sd=ss*sc;float inv=1.0/sd;"
-        "float y0=0.0,y1=0.0;"
-        "for(int q=0;q<2;q++){int i=i0+q;"
-        "float x=d24(texture2D(X,vec2((float(i)+0.5)/512.0,0.5)));"
-        "vec4 wc=texture2D(W,vec2((float(i/2)+0.5)/256.0,0.5));"
-        "vec4 bc=texture2D(B,vec2((float(i/2)+0.5)/256.0,0.5));"
-        "float wv=((i/2)*2==i)?d16(wc.rg):d16(wc.ba);"
-        "float bv=((i/2)*2==i)?d16(bc.rg):d16(bc.ba);"
-        "float y=(x-m)*inv*wv+bv;if(q==0)y0=y;else y1=y;}"
-        "vec2 p=q16(y0),r=q16(y1);gl_FragColor=vec4(p,r);}");
-    if (!a_stats || !a_apply || !b1_stats || !b1_apply || !b2_stats || !b2_apply) return 1;
+    // K: the shipped text, exactly as the engine builds it.
+    GLuint k_split = prog(ln_stats_split(D, RF));
+    GLuint k_reduce = prog(ln_stats_reduce(D));
+    GLuint k_apply = prog(ln_apply_q16(D, RF, XFormat::F32));
+    // B: mean in the residual format, invstd f32.
+    GLuint b_stats = prog(cand_stats(RF, "gl_FragColor=YST1(mean);",
+                                     "gl_FragColor=x_f32enc(1.0/sd);"));
+    GLuint b_apply = prog(apply_shader(RF,
+        "float mu=x_q24(texture2D(S,vec2(0.5,0.25)));float inv=x_f32(texture2D(S,vec2(0.5,0.75)));"
+        "gl_FragColor=x_f32enc((x-mu)*inv*wv(i)+bv(i));"));
+    // C: the same with invstd as bf16.
+    GLuint c_stats = prog(cand_stats(RF, "gl_FragColor=YST1(mean);",
+                                     "gl_FragColor=x_bf16enc(1.0/sd);"));
+    GLuint c_apply = prog(apply_shader(RF,
+        "float mu=x_q24(texture2D(S,vec2(0.5,0.25)));float inv=x_bf16(texture2D(S,vec2(0.5,0.75)).rg);"
+        "gl_FragColor=x_f32enc((x-mu)*inv*wv(i)+bv(i));"));
+    // D: (mean, sd) both bf16 in one texel.
+    GLuint d_stats = prog(cand_stats(RF,
+        "gl_FragColor=vec4(x_bf16enc(mean).rg,x_bf16enc(sd).rg);", "gl_FragColor=vec4(0.0);"));
+    GLuint d_apply = prog(apply_shader(RF,
+        "vec4 st=texture2D(S,vec2(0.5,0.25));float mu=x_bf16(st.rg),sd=x_bf16(st.ba);"
+        "gl_FragColor=x_f32enc((x-mu)/sd*wv(i)+bv(i));"));
+    // E: (mean, invstd) f32.
+    GLuint e_stats = prog(cand_stats(RF, "gl_FragColor=x_f32enc(mean);",
+                                     "gl_FragColor=x_f32enc(1.0/sd);"));
+    GLuint e_apply = prog(apply_shader(RF,
+        "float mu=x_f32(texture2D(S,vec2(0.5,0.25)));"
+        "float inv=x_f32(texture2D(S,vec2(0.5,0.75)));"
+        "gl_FragColor=x_f32enc((x-mu)*inv*wv(i)+bv(i));"));
+    if (!k_split || !k_reduce || !k_apply || !b_stats || !b_apply || !c_stats || !c_apply ||
+        !d_stats || !d_apply || !e_stats || !e_apply)
+        return 1;
 
     vector<float> w(D), b(D);
     for (int i = 0; i < D; ++i) {
         w[(size_t)i] = (float)(0.5 + 0.5 * std::sin(i * 0.13));
         b[(size_t)i] = (float)(0.1 * std::cos(i * 0.07));
     }
-    const GLuint w_tex = tex(OW, 1, x_pack(w, XFormat::I16_2));
-    const GLuint b_tex = tex(OW, 1, x_pack(b, XFormat::I16_2));
-    const GLuint s_tex = target_tex(1);
-    const GLuint o_tex = target_tex(OW);
+    const GLuint w_tex = tex(x_texels(D, kLnPairFmt), 1, x_pack(w, kLnPairFmt));
+    const GLuint b_tex = tex(x_texels(D, kLnPairFmt), 1, x_pack(b, kLnPairFmt));
+    const GLuint partial = target_tex(64, 1);   // the shipped split's 64 lanes
+    const GLuint stat = target_tex(1, 2);
+    const GLuint out = target_tex(OW, 1);
 
-    printf("A = shipped (mean, invstd) q16; B1 = (mean, sd) q16 + free 2^-k; "
-           "B2 = int8 pair + k in the texel\n");
-    for (double sg : {1e-2, 1e-1, 1.0, 1e1, 1e2, 1e3}) {
-        vector<float> x;
-        make_row(0.7, sg, x);
-        const vector<uint8_t> xb = x_pack(x, XFormat::I24_1);
+    printf("K = shipped (mean, sd)*2^-k q16 pair; B = mean in res + invstd f32; "
+           "C = same, invstd bf16; D = (mean, sd) bf16; E = (mean, invstd) f32\n");
+
+    auto run = [&](const char* tag, const vector<float>& x) {
+        const vector<uint8_t> xb = x_pack(x, RF);
         vector<float> xq(D);
-        for (int i = 0; i < D; ++i) xq[(size_t)i] = x_unpack(xb.data(), i, XFormat::I24_1);
+        for (int i = 0; i < D; ++i) xq[(size_t)i] = x_unpack(xb.data(), i, RF);
         double mu, sd;
         stats_ref(xq, mu, sd);
         vector<double> yr(D);
-        for (int i = 0; i < D; ++i)
-            yr[(size_t)i] = (xq[(size_t)i] - mu) / sd * w[(size_t)i] + b[(size_t)i];
+        for (int i = 0; i < D; ++i) yr[(size_t)i] = (xq[(size_t)i] - mu) / sd * w[(size_t)i] + b[(size_t)i];
+        const GLuint xt = tex(x_texels(D, RF), 1, xb);
 
-        const GLuint x_tex = tex(D, 1, xb);
-        const double smax = std::max(std::fabs(mu), sd);
-        int k = (int)std::ceil(std::log2(std::max(smax, 1e-20) / 64.0));
-        k = std::max(-16, std::min(16, k));
+        vector<float> y(D);
 
-        run_stats(a_stats, x_tex, s_tex, 0.0f);
-        const Err ea = compare(apply(a_apply, x_tex, s_tex, w_tex, b_tex, o_tex, 0.0f), yr);
-        run_stats(b1_stats, x_tex, s_tex, (float)std::ldexp(1.0, -k));
-        const Err eb1 = compare(apply(b1_apply, x_tex, s_tex, w_tex, b_tex, o_tex,
-                                      (float)std::ldexp(1.0, k)), yr);
-        run_stats(b2_stats, x_tex, s_tex, 0.0f);
-        const Err eb2 = compare(apply(b2_apply, x_tex, s_tex, w_tex, b_tex, o_tex, 0.0f), yr);
-
-        // C: the same (mean, sd) pair as bfloat16 -- a per-value exponent and no
-        // k at all.  Computed on the host (this context is ES2) with the same
-        // rounding x_pack uses, and the result rounded to the output's q16 so
-        // the comparison is like for like.
-        const vector<uint8_t> bp = x_pack(vector<float>{(float)mu, (float)sd}, XFormat::BF16);
-        const double mb = x_unpack(bp.data(), 0, XFormat::BF16);
-        const double sb = x_unpack(bp.data(), 1, XFormat::BF16);
-        vector<float> yc(D);
-        for (int i = 0; i < D; ++i) {
-            const float v = (float)((xq[(size_t)i] - mb) / sb * w[(size_t)i] + b[(size_t)i]);
-            yc[(size_t)i] = x_unpack(x_pack(vector<float>{v}, XFormat::I16_2).data(), 0, XFormat::I16_2);
+        // K: split -> reduce -> apply.  Program, samplers and uniforms are set
+        // *before* the draw: a glUniform after glDrawArrays lands on the next
+        // draw of that program.
+        glUseProgram(k_split);
+        bind1(k_split, "X", 0, xt);
+        draw_to(k_split, partial, 64, 1);
+        glFinish();
+        glUseProgram(k_reduce);
+        bind1(k_reduce, "S", 0, partial);
+        glUniform1f(glGetUniformLocation(k_reduce, "eps"), 1e-5f);
+        draw_to(k_reduce, stat, 1, 2);
+        glFinish();
+        glUseProgram(k_apply);
+        bind1(k_apply, "X", 0, xt);
+        bind1(k_apply, "S", 1, stat);
+        bind1(k_apply, "W", 2, w_tex);
+        bind1(k_apply, "B", 3, b_tex);
+        draw_to(k_apply, out, OW, 1);
+        glFinish();
+        {
+            vector<uint8_t> px((size_t)OW * 4);
+            glBindFramebuffer(GL_FRAMEBUFFER, g_fbo);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, out, 0);
+            glReadPixels(0, 0, OW, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+            for (int i = 0; i < D; ++i) y[(size_t)i] = x_unpack(px.data(), i, XFormat::F32);
         }
-        const Err ec = compare(yc, yr);
+        const Err ek = compare(y, yr);
 
-        printf("  sigma %7.3g  mu %7.3g  k %+3d | A max %.3g rms %.2g | "
-               "B1 max %.3g rms %.2g | B2 max %.3g rms %.2g | C(bf16) max %.3g rms %.2g\n",
-               sg, mu, k, ea.maxabs, ea.rms, eb1.maxabs, eb1.rms, eb2.maxabs, eb2.rms,
-               ec.maxabs, ec.rms);
-        glDeleteTextures(1, &x_tex);
+        auto cand = [&](GLuint sp, GLuint ap, int rows) {
+            glUseProgram(sp);
+            bind1(sp, "X", 0, xt);
+            glUniform1f(glGetUniformLocation(sp, "eps"), 1e-5f);
+            draw_to(sp, stat, 1, rows);
+            glFinish();
+            glUseProgram(ap);
+            bind1(ap, "X", 0, xt);
+            bind1(ap, "S", 1, stat);
+            bind1(ap, "W", 2, w_tex);
+            bind1(ap, "B", 3, b_tex);
+            draw_to(ap, out, OW, 1);
+            glFinish();
+            vector<uint8_t> px((size_t)OW * 4);
+            glBindFramebuffer(GL_FRAMEBUFFER, g_fbo);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, out, 0);
+            glReadPixels(0, 0, OW, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+            vector<float> yy(D);
+            for (int i = 0; i < D; ++i) yy[(size_t)i] = x_unpack(px.data(), i, XFormat::F32);
+            return compare(yy, yr);
+        };
+        const Err eb = cand(b_stats, b_apply, 2);
+        const Err ec = cand(c_stats, c_apply, 2);
+        const Err ed = cand(d_stats, d_apply, 1);
+        const Err ee = cand(e_stats, e_apply, 2);
+
+        printf("  %-22s mu %8.3f sd %8.3f | K %.2g/%.2g | B %.2g/%.2g | C %.2g/%.2g | "
+               "D %.2g/%.2g | E %.2g/%.2g\n",
+               tag, mu, sd, ek.maxabs, ek.rms, eb.maxabs, eb.rms, ec.maxabs, ec.rms,
+               ed.maxabs, ed.rms, ee.maxabs, ee.rms);
+        glDeleteTextures(1, &xt);
+    };
+
+    printf("max / rms relative error of the LayerNorm output (f32 out, so this is the "
+           "statistics' own error)\n");
+    for (double sg : {1e-2, 1e-1, 1.0, 1e1, 1e2, 1e3}) {
+        vector<float> x;
+        make_row(0.7, sg, x);
+        char tag[64];
+        snprintf(tag, sizeof tag, "sweep sd %.0e", sg);
+        run(tag, x);
+    }
+    {
+        vector<float> x;
+        make_row(0.05, 2.0, x);
+        run("v5 enc/dec ln1/ln2 (sd 2)", x);
+    }
+    {
+        vector<float> x;
+        make_row(0.7, 1.0, x);
+        x[295] = 5959.0f;  // OPUS-MT dec1's massive-activation dim
+        run("v5 dec1 ln3 (spike 5959)", x);
     }
     return 0;
 }
