@@ -304,6 +304,13 @@ probes/draw_cost_probe: probes/draw_cost_probe.cpp probes/egl_surfaceless.h $(PR
 probes/draw_cost_probe_pi: probes/draw_cost_probe.cpp probes/egl_surfaceless.h | check-cross $(PROBE_HEADERS)
 	$(CROSS_CXX) $(CROSS_CXXFLAGS) -o $@ $< $(CROSS_LDLIBS)
 
+# What each XFormat's encode and decode cost per value, from the engine's own
+# emitted codecs, with an exact round-trip check.  ES3 for the bit-cast arms.
+probes/codec_probe: probes/codec_probe.cpp probes/egl_surfaceless.h $(SHADERLIB) $(SRC)/xformat.cpp $(SRC)/common.cpp $(SRC)/switches.cpp $(HEADERS) $(PROBE_HEADERS)
+	$(CXX) $(ALL_CXXFLAGS) -I$(SRC) -o $@ probes/codec_probe.cpp $(SHADERLIB) $(SRC)/xformat.cpp $(SRC)/common.cpp $(SRC)/switches.cpp $(LDLIBS)
+probes/codec_probe_pi: probes/codec_probe.cpp probes/egl_surfaceless.h $(SHADERLIB) $(SRC)/xformat.cpp $(SRC)/common.cpp $(SRC)/switches.cpp | check-cross $(HEADERS) $(PROBE_HEADERS)
+	$(CROSS_CXX) $(CROSS_CXXFLAGS) -I$(SRC) -o $@ probes/codec_probe.cpp $(SHADERLIB) $(SRC)/xformat.cpp $(SRC)/common.cpp $(SRC)/switches.cpp $(CROSS_LDLIBS)
+
 # What the q16 activation decode costs, and whether the sign fix can be made
 # cheaper without changing a byte.  Runs inside the real matvec loop.
 probes/q16dec_probe: probes/q16dec_probe.cpp probes/egl_surfaceless.h $(PROBE_HEADERS)
