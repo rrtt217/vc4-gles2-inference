@@ -134,8 +134,7 @@ string swiglu_pair2row(int hidden, XFormat out, int hs) {
     (void)out;
     const string NP = to_string((hidden + 1) / 2);
     const string HD = hid_scale_def(hs), HM = hid_scale_mul(hs);
-    const string rd = "float i16(vec2 c){float u=c.x*65280.0+c.y*255.0;"
-                      "if(u>=32767.5)u-=65536.0;return u/256.0;}";
+    const string rd = "float i16(vec2 c){return x_i16raw(c)/256.0;}";
     // One texel is two rows, so a fragment reads each texture once and gets both
     // halves: no parity test (which would need ESSL 3.00 bitwise ops), no mix(),
     // and two fetches where reading the rows one at a time took four.
@@ -405,8 +404,7 @@ string rms_norm(int dim, XFormat residual, XFormat out, bool fused_reduce,
         // one texel and the f32 consumer would read them as raw bits.  The norm
         // weight plane stays two q16 a texel, so the index is halved here.
         body =
-            "vec4 rms_f32enc(float v){uint u=floatBitsToUint(v);return vec4(float(u>>24),"
-            "float((u>>16)&255u),float((u>>8)&255u),float(u&255u))/255.0;}\n"
+            "vec4 rms_f32enc(float v){return x_f32enc(v);}\n"
             "void main(){int t=int(gl_FragCoord.x);"
             + ss_read +
             "float inv=inversesqrt(ss/float(" + D + ")+" + eps_src + ");"

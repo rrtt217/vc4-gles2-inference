@@ -47,6 +47,8 @@ if ! python3 gate/gen_test_hooks.py --check; then fail=1; fi
 # has to be documented.  This replaced a grep loop in 2026-11-17: the grep could
 # only ask "does the doc mention this name", never "is this name a whole switch".
 if ! python3 gate/check_switches.py $VERBOSE; then fail=1; fi
+# The codec layouts live in xformat; a shader that types one is drift.
+if ! python3 gate/check_codecs.py $VERBOSE; then fail=1; fi
 n=$(grep -cE '^ *\{"[A-Z][A-Z_0-9]+",.*SwKind::' src/switches.cpp)
 
 # 2. files a document tells you to run must exist

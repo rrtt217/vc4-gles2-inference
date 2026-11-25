@@ -151,6 +151,23 @@ int x_pair2_texels(int count);
 // values already in q16 units.  Call after x_glsl(): both use its encoders.
 std::string x_pair2_glsl(XFormat f = XFormat::I16_2);
 
+// The fixed-point *layouts* at a caller's step.  A format owns its layout
+// and its step; the engine's private grids (the score at 1/1024, the sum at
+// 1/32, the KV at KVSCALE, the rope table at 4096) reuse the layout at their
+// own step, and the attention's kernels are their only other reader.  There
+// is one body per layout, here: a fix in the rail rule or the byte order
+// cannot miss a copy, and gate/check_codecs.py refuses a shader that types
+// one anyway.
+//
+//   q16: two bytes, big-endian, signed; x_q16raw_at is the int16, the
+//        decoders divide by the caller's step.  The rail test is 32767.5
+//        (6234328): the (128,0) pair reconstructs as 32767.99x on VC4.
+//   i24: offset-binary 24-bit, big-endian in .gba (.r stays 0 over the
+//        +-32768 range), at the caller's step.
+//   i8:  one signed byte a component at the caller's step; raw is in q16
+//        units like every decoder's raw form.
+std::string x_scaled_glsl();
+
 // Whether this format can be a residual stream.  I8_4 answers no, by design
 // (x_residual_glsl's empty set is the same statement): a residual has to
 // survive every layer unscaled and 1/16 at +-7.94 cannot.  A block whose

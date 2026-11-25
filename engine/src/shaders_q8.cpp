@@ -529,8 +529,8 @@ string matvec_q8_add(int rows, int cols, XFormat xf, XFormat rf, XFormat of, boo
         // helper-based version (the helper takes two texel fetches as arguments).
         return "precision highp float;uniform sampler2D W,X,R;uniform float ws;" + WD +
                kDec16A + kDec16B +
-               "float dr(vec4 c){float u=c.r*65280.0+c.g*255.0;"
-               "if(u>=32768.0)u-=65536.0;return u/256.0;}"
+               // `dr` was this kernel's own q16 decode with the pre-6234328
+               // rail; the raw form is xformat's now.
                "void main(){int r=int(gl_FragCoord.x);float s=0.0;"
                "for(int q=0;q<" + COLS4 + ";q++){"
                "vec4 c=texture2D(W,vec2((float(q)+0.5)/float(" + COLS4 + "),"
@@ -541,10 +541,8 @@ string matvec_q8_add(int rows, int cols, XFormat xf, XFormat rf, XFormat of, boo
                "s+=w.x*dA(xa)+w.y*dB(xa)+w.z*dA(xb)+w.w*dB(xb);}"
                "float v=clamp(floor(s*" + SC + "+0.5),-32768.0,32767.0);"
                "vec4 rc=texture2D(R,vec2((float(r)+0.5)/float(" + ROWS + "),0.5));"
-               "float oq=v+dr(rc)*256.0;"
-               "float q=clamp(floor(oq+0.5),-32768.0,32767.0);if(q<0.0)q+=65536.0;"
-               "float hi=floor(q/256.0),lo=q-hi*256.0;"
-               "gl_FragColor=vec4(hi/255.0,lo/255.0,0.0,1.0);}";
+               "float oq=v+x_q16raw_at(rc.rg);"
+               "gl_FragColor=vec4(x_q16enc_at(oq/256.0,256.0),0.0,1.0);}";
     }
     const string ST = (of == rf) ? std::string("YST1Q") : std::string("xs1");
     return head(xf) + x_residual_glsl(rf) + (of == rf ? std::string() : x_store_glsl(of)) +

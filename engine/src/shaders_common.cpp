@@ -36,12 +36,15 @@ string head(XFormat xf) {
 // The q4 kernels route through q4_head(), which has always put each decoder on
 // its own line; the newline-separated join is kept there so the text is
 // unchanged.
-const string kDec16A =
-    "float dA(vec4 c){float u=c.r*65280.0+c.g*255.0;"
-    "return u>=32768.0?u-65536.0:u;}";
+// The pair halves through xformat's one raw decoder.  These were functions of
+// their own with a `>= 32768` rail test, which is the *pre*-6234328 rule:
+// VC4 reconstructs the (128,0) pair as 32767.99x, so the old test read the
+// negative rail as +127.99.  A macro keeps the call site inline and the body
+// in xformat (gate/check_codecs.py refuses a re-typed one).
+const string kDec16A = x_scaled_glsl() +
+    "float dA(vec4 c){return x_q16raw_at(c.rg);}\n";
 const string kDec16B =
-    "float dB(vec4 c){float u=c.b*65280.0+c.a*255.0;"
-    "return u>=32768.0?u-65536.0:u;}";
+    "float dB(vec4 c){return x_q16raw_at(c.ba);}\n";
 
 // ---- the exponential: EXP=drv|poly -----------------------------------------
 // VC4's exp2/log2 are the shared SFU's table lookups and Mesa does not refine

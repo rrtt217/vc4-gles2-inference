@@ -188,15 +188,43 @@ static bool q16_decode_exact() {
         return v && (!strcmp(v, "exact") || !strcmp(v, "1"));
 }
 
-static const char* q16_raw_glsl() {
+std::string x_scaled_glsl() {
+    return "\n#ifndef X_SCALED_GLSL\n#define X_SCALED_GLSL\n"
+        "float x_q16raw_at(vec2 c){float u=c.x*65280.0+c.y*255.0;"
+        "if(u>=32767.5)u-=65536.0;return u;}\n"
+        "float x_q16dec_at(vec2 c,float s){return x_q16raw_at(c)/s;}\n"
+        "vec2 x_q16enc_at(float v,float s){"
+        "float q=clamp(floor(v*s+0.5),-32768.0,32767.0);if(q<0.0)q+=65536.0;"
+        "float hi=floor(q/256.0),lo=q-hi*256.0;"
+        "return vec2(hi/255.0,lo/255.0);}\n"
+        "float x_i24raw_at(vec4 c){return float(int(c.g*255.0+0.5))*65536.0+"
+        "float(int(c.b*255.0+0.5))*256.0+float(int(c.a*255.0+0.5))-8388608.0;}\n"
+        "float x_i24dec_at(vec4 c,float s){return x_i24raw_at(c)/s;}\n"
+        "vec4 x_i24enc_at(float v,float s){float q=floor(v*s+0.5)+8388608.0;"
+        "float g=floor(q/65536.0),b=floor(q/256.0)-g*256.0,a=q-g*65536.0-b*256.0;"
+        "return vec4(0.0,g/255.0,b/255.0,a/255.0);}\n"
+        // The signed byte itself, then the q16-unit form (byte*16): the KV
+        // grid is 1/KVSCALE of the *byte*, not of the I8_4 value.  The byte
+        // is offset-binary like the rest of I8_4 (q+128), not two's
+        // complement -- the attention's hand copy wrote the two's-complement
+        // form, so its bytes and this decoder's disagreed by 128.
+        "float x_i8byte_at(float c){return floor(c*255.0+0.5)-128.0;}\n"
+        "float x_i8raw1_at(float c){return x_i8byte_at(c)*16.0;}\n"
+        "float x_i8raw_at(vec4 c,int i){return x_i8byte_at(c[i])*16.0;}\n"
+        "vec4 x_i8enc4_at(float a,float b,float c3,float d,float s){"
+        "vec4 q=clamp(floor(vec4(a,b,c3,d)*s+0.5),-127.0,127.0);"
+        "return (q+128.0)/255.0;}\n"
+        "#endif\n";
+}
+
+static std::string q16_raw_glsl() {
         if (q16_decode_exact())
-                return
+                return x_scaled_glsl() +
                     "float x_i16raw(vec2 c){float hi=float(int(c.x*255.0+0.5));"
                     "float lo=float(int(c.y*255.0+0.5));float u=hi*256.0+lo;"
                     "if(u>=32768.0)u-=65536.0;return u;}\n";
-        return
-            "float x_i16raw(vec2 c){float u=c.x*65280.0+c.y*255.0;"
-            "if(u>=32767.5)u-=65536.0;return u;}\n";
+        return x_scaled_glsl() +
+            "float x_i16raw(vec2 c){return x_q16raw_at(c);}\n";
 }
 
 static const char* q16_pair_glsl() {
@@ -308,26 +336,23 @@ std::string x_glsl(XFormat f) {
         "float x_i16(vec2 c){return x_i16raw(c)/256.0;}\n"
         "vec2 x_i16pair(vec4 c){return vec2(x_i16(c.rg),x_i16(c.ba));}\n" +
         q16_pair_glsl() +
-        "vec2 x_q16enc(float q){q=clamp(floor(q+0.5),-32768.0,32767.0);"
-        "if(q<0.0)q+=65536.0;float hi=floor(q/256.0);"
-        "return vec2(hi/255.0,(q-hi*256.0)/255.0);}\n"
-        "vec2 x_i16enc(float v){return x_q16enc(v*256.0);}\n"
+        "vec2 x_q16enc(float q){return x_q16enc_at(q/256.0,256.0);}\n"
+        "vec2 x_i16enc(float v){return x_q16enc_at(v,256.0);}\n"
         // x_i8q is in q16 units like every other decoder's raw form: the grid
         // is 1/16, so value*256 = (byte-128)*16.  The real-value forms divide
         // by 256, not by 16 -- the 16 is the grid factor and is already in
         // x_i8q; dividing by it again returned the value *16, which no hot
         // kernel reads (they all use X1Q) and probes/codec_probe caught on the
         // first real-value read of an I8_4 stream.
-        "float x_i8q(float c){return (floor(c*255.0+0.5)-128.0)*16.0;}\n"
+        "float x_i8q(float c){return x_i8raw1_at(c);}\n"
         // One component conversion and a dynamic index, not a four-way if:
         // every branch of the if was evaluated (18.3 ns a value against 8.2
         // for this form, same value; probes/codec_probe, VC4 2026-11-25).
-        "float x_i8cq(vec4 c,int i){return x_i8q(c[i]);}\n"
+        "float x_i8cq(vec4 c,int i){return x_i8raw_at(c,i);}\n"
         "float x_i8(float c){return x_i8q(c)/256.0;}\n"
         "float x_i8c(vec4 c,int i){return x_i8cq(c,i)/256.0;}\n"
         "vec4 x_i8enc4(float a,float b,float c,float d){"
-        "vec4 q=clamp(floor(vec4(a,b,c,d)*16.0+0.5),-127.0,127.0);"
-        "return (q+128.0)/255.0;}\n"
+        "return x_i8enc4_at(a,b,c,d,16.0);}\n"
         "vec4 x_st1(float v){vec2 p=x_i16enc(v);return vec4(p.x,p.y,0.0,1.0);}\n"
         "vec4 x_st2(float a,float b){vec2 p=x_i16enc(a),q=x_i16enc(b);"
         "return vec4(p.x,p.y,q.x,q.y);}\n"
@@ -338,12 +363,9 @@ std::string x_glsl(XFormat f) {
     // A 24-bit residual needs its own decode/encode, and `q24_helpers()` may
     // already be in the same shader, so these carry distinct names.
     s +=
-        "float x_q24raw(vec4 c){return float(int(c.g*255.0+0.5))*65536.0+"
-        "float(int(c.b*255.0+0.5))*256.0+float(int(c.a*255.0+0.5))-8388608.0;}\n"
-        "float x_q24(vec4 c){return x_q24raw(c)/256.0;}\n"
-        "vec4 x_q24enc(float v){float q=floor(clamp(v*256.0,-8388608.0,8388607.0)+0.5)+8388608.0;"
-        "float g=floor(q/65536.0),b=floor(q/256.0)-g*256.0,a=q-g*65536.0-b*256.0;"
-        "return vec4(0.0,g/255.0,b/255.0,a/255.0);}\n"
+        "float x_q24raw(vec4 c){return x_i24raw_at(c);}\n"
+        "float x_q24(vec4 c){return x_i24dec_at(c,256.0);}\n"
+        "vec4 x_q24enc(float v){return x_i24enc_at(v,256.0);}\n"
         "vec4 x_q24encq(float q){return x_q24enc(q/256.0);}\n";
 
     switch (f) {

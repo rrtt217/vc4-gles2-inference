@@ -12,10 +12,11 @@ using std::to_string;
 
 namespace {
 
-// 24-bit logits decode, shared by the sum and the two Top-K passes.
+// 24-bit logits decode, shared by the sum and the two Top-K passes.  The
+// layout is xformat's (x_i24dec_at at the 1/256 grid), not a copy of it.
 const string kDec24Q =
-    "float dec(vec4 c){return (floor(c.r*255.0+0.5)*16777216.0+floor(c.g*255.0+0.5)*65536.0+"
-    "floor(c.b*255.0+0.5)*256.0+floor(c.a*255.0+0.5)-8388608.0)/256.0;}";
+    x_scaled_glsl() +
+    "float dec(vec4 c){return x_i24dec_at(c,256.0);}";
 
 // QKV holds the q/k/v matvec output.  When the qkv matvec pairs two output
 // rows into one texel the reads become a half-width fetch plus a component
@@ -29,8 +30,7 @@ string qkv_read(const AttnConfig& c, const char* tex, const char* macro) {
     return "\nfloat " + fn + "(int i){int t=i/2;vec4 c=texture2D(" + t +
            ",vec2((float(t)+0.5)/float(QKVTW),0.5));"
            "vec2 p=(((i-t*2)==0)?c.rg:c.ba);"
-           "float u=floor(p.x*255.0+0.5)*256.0+floor(p.y*255.0+0.5);"
-           "if(u>=32768.0)u-=65536.0;return u/256.0;}\n"
+           "return x_q16dec_at(p,256.0);}\n"
            "#define " + m + "(I) " + fn + "(I)\n";
 }
 
@@ -189,53 +189,59 @@ string att_defs(const AttnConfig& c) {
 }
 
 string att_helpers(const AttnConfig& c) {
-    // The KV value encoding.  bf16 keeps the same two values a texel and gives a
-    // uniform 0.1% relative error; the fixed grid is 0.006% at the head max and
-    // 2% a decade below it, which is what the attention's small values pay.
-    const string kv_codec =
-        c.kv.codec == KvCodec::F32 ?
-        // f32 on the one-value-a-texel layout (the 24-bit path's): K at
-        // [0,KVDIM), V at [KVDIM,2*KVDIM).  No rounding at all, which is the
-        // point: a 16-bit grid fails by an LSB flip when the two drivers
-        // disagree in the last float bit, and no grid width fixes that.
-        string("float decKV1(vec4 c){uint u=(uint(int(c.r*255.0+0.5))<<24)|"
-               "(uint(int(c.g*255.0+0.5))<<16)|(uint(int(c.b*255.0+0.5))<<8)|"
-               "uint(int(c.a*255.0+0.5));return uintBitsToFloat(u);}\n"
-               "vec4 encKV1(float v){uint u=floatBitsToUint(v);"
-               "return vec4(float(u>>24),float((u>>16)&255u),float((u>>8)&255u),"
-               "float(u&255u))/255.0;}\n"
-               "vec4 encKV(float v0,float v1){return encKV1(v1);}\n"
-               "float decKV(vec4 c,int odd){return decKV1(c);}\n")
-        : c.kv.codec == KvCodec::Bf16 ?
-        // bf16 comes from XFormat now, not from a private codec here: the
-        // layout is the two-values-a-texel one and the rounding is
-        // round-to-nearest-even, both of which xformat already owns.
-        string("vec4 encKV1(float v){return enc24s(v,KVSCALE);}\n"
-               "float decKV1(vec4 c){return dec24s(c,KVSCALE);}\n") +
-        x_codec_glsl(XFormat::BF16) +
-        "vec4 encKV(float v0,float v1){return x_bf16enc2(v0,v1);}\n"
-        "float decKV(vec4 c,int odd){return (odd==1)?x_bf16(c.ba):x_bf16(c.rg);}\n"
-        : string("vec4 encKV1(float v){return enc24s(v,KVSCALE);}\n"
-                 "float decKV1(vec4 c){return dec24s(c,KVSCALE);}\n"
-                 "vec4 encKV(float v0,float v1){if(KVVPT==2){float q0=clamp(floor(v0*KVSCALE+0.5),-32768.0,32767.0);"
-                 "if(q0<0.0)q0+=65536.0;float q1=clamp(floor(v1*KVSCALE+0.5),-32768.0,32767.0);if(q1<0.0)q1+=65536.0;"
-                 "float h0=floor(q0/256.0),l0=q0-h0*256.0,h1=floor(q1/256.0),l1=q1-h1*256.0;"
-                 "return vec4(h0/255.0,l0/255.0,h1/255.0,l1/255.0);}return enc24s(v0,KVSCALE);}\n"
-                 "float decKV(vec4 c,int odd){if(KVVPT==2){float hi=(odd==1)?c.b:c.r;float lo=(odd==1)?c.a:c.g;"
-                 "float u=float(int(hi*255.0+0.5)*256+int(lo*255.0+0.5));if(u>=32768.0)u-=65536.0;"
-                 "return u/KVSCALE;}if(KVVPT==4)return decKV8(c,odd);return decKV1(c);}\n");
-    return
-        "vec4 q16(float v){float q=clamp(floor(v*256.0+0.5),-32768.0,32767.0);if(q<0.0)q+=65536.0;float hi=floor(q/256.0),lo=q-hi*256.0;return vec4(hi/255.0,lo/255.0,0.0,1.0);}\n"
-        "float dec24raw(vec4 c){return float(int(c.r*255.0+0.5))*16777216.0+float(int(c.g*255.0+0.5))*65536.0+float(int(c.b*255.0+0.5))*256.0+float(int(c.a*255.0+0.5))-8388608.0;}\n"
-        "float dec24q(vec4 c){float u=dec24raw(c);if(u>=32768.0)u-=65536.0;return u/256.0;}\n"
-        "vec4 enc24s(float v,float s){float q=floor(v*s+0.5)+8388608.0;float r0=floor(q/16777216.0),g=floor(q/65536.0)-r0*256.0,b=floor(q/256.0)-r0*65536.0-g*256.0,a=q-r0*16777216.0-g*65536.0-b*256.0;return vec4(r0/255.0,g/255.0,b/255.0,a/255.0);}\n"
-        "float dec24s(vec4 c,float s){return dec24raw(c)/s;}\n"
-        "float dec16(vec2 c){float u=c.x*65280.0+c.y*255.0;if(u>=32768.0)u-=65536.0;return u/256.0;}\n"
-        "vec4 encKV8(float v0,float v1,float v2,float v3){float q0=clamp(floor(v0*KVSCALE+0.5),-128.0,127.0);if(q0<0.0)q0+=256.0;float q1=clamp(floor(v1*KVSCALE+0.5),-128.0,127.0);if(q1<0.0)q1+=256.0;float q2=clamp(floor(v2*KVSCALE+0.5),-128.0,127.0);if(q2<0.0)q2+=256.0;float q3=clamp(floor(v3*KVSCALE+0.5),-128.0,127.0);if(q3<0.0)q3+=256.0;return vec4(q0/255.0,q1/255.0,q2/255.0,q3/255.0);}\n"
-        "float decKV8(vec4 c,int idx){float q=(idx==0)?c.r:(idx==1)?c.g:(idx==2)?c.b:c.a;float u=float(int(q*255.0+0.5));if(u>=128.0)u-=256.0;return u/KVSCALE;}\n"
-        + kv_codec +
-        "float decKV8d(vec4 c,int idx,float d){float q=(idx==0)?c.r:(idx==1)?c.g:(idx==2)?c.b:c.a;float u=float(int(q*255.0+0.5));if(u>=128.0)u-=256.0;return u*d;}\n"
-        "vec4 encKV8s(float v0,float v1,float v2,float v3,float d){float q0=clamp(floor(v0/d+0.5),-128.0,127.0);if(q0<0.0)q0+=256.0;float q1=clamp(floor(v1/d+0.5),-128.0,127.0);if(q1<0.0)q1+=256.0;float q2=clamp(floor(v2/d+0.5),-128.0,127.0);if(q2<0.0)q2+=256.0;float q3=clamp(floor(v3/d+0.5),-128.0,127.0);if(q3<0.0)q3+=256.0;return vec4(q0/255.0,q1/255.0,q2/255.0,q3/255.0);}\n";
+    // Every fixed-point layout comes from xformat: this file's grids are its
+    // own (the score at 1/256, the statistics' sum, the KV at KVSCALE, the
+    // rope table at 4096, the V step at 2^24) but the *bytes* are the
+    // format's, instantiated at those steps by x_scaled_glsl.  It used to
+    // re-type them, and that copy missed the q16 rail fix (32767.5, 6234328)
+    // for two years' worth of kernels; gate/check_codecs.py now refuses a
+    // second body in a shader TU.
+    //
+    // The KV value encoding.  bf16 keeps the same two values a texel and
+    // gives a uniform 0.1% relative error; the fixed grid is 0.006% at the
+    // head max and 2% a decade below it, which is what the attention's small
+    // values pay.
+    string kv_codec;
+    if (c.kv.codec == KvCodec::F32) {
+        // No rounding at all, which is the point: a 16-bit grid fails by an
+        // LSB flip when the two drivers disagree in the last float bit, and no
+        // grid width fixes that.
+        kv_codec =
+            "vec4 encKV1(float v){return x_f32enc(v);}\n"
+            "float decKV1(vec4 c){return x_f32(c);}\n"
+            "vec4 encKV(float v0,float v1){return encKV1(v1);}\n"
+            "float decKV(vec4 c,int odd){return decKV1(c);}\n";
+    } else if (c.kv.codec == KvCodec::Bf16) {
+        kv_codec =
+            "vec4 encKV1(float v){return x_i24enc_at(v,KVSCALE);}\n"
+            "float decKV1(vec4 c){return x_i24dec_at(c,KVSCALE);}\n"
+            "vec4 encKV(float v0,float v1){return x_bf16enc2(v0,v1);}\n"
+            "float decKV(vec4 c,int odd){return (odd==1)?x_bf16(c.ba):x_bf16(c.rg);}\n";
+    } else {
+        kv_codec =
+            "vec4 encKV1(float v){return x_i24enc_at(v,KVSCALE);}\n"
+            "float decKV1(vec4 c){return x_i24dec_at(c,KVSCALE);}\n"
+            "vec4 encKV(float v0,float v1){if(KVVPT==2)"
+            "return vec4(x_q16enc_at(v0,KVSCALE),x_q16enc_at(v1,KVSCALE));"
+            "return x_i24enc_at(v0,KVSCALE);}\n"
+            "float decKV(vec4 c,int odd){"
+            "if(KVVPT==2)return x_q16dec_at((odd==1)?c.ba:c.rg,KVSCALE);"
+            "if(KVVPT==4)return x_i8byte_at(c[odd])/KVSCALE;return decKV1(c);}\n";
+    }
+    return x_scaled_glsl() +
+        x_codec_glsl(XFormat::F32) + x_codec_glsl(XFormat::BF16) +
+        "vec4 q16(float v){return vec4(x_q16enc_at(v,256.0),0.0,1.0);}\n"
+        "float dec24raw(vec4 c){return x_i24raw_at(c);}\n"
+        "float dec24q(vec4 c){return x_i24dec_at(c,256.0);}\n"
+        "vec4 enc24s(float v,float s){return x_i24enc_at(v,s);}\n"
+        "float dec24s(vec4 c,float s){return x_i24dec_at(c,s);}\n"
+        "float dec16(vec2 c){return x_q16dec_at(c,256.0);}\n"
+        "vec4 encKV8(float v0,float v1,float v2,float v3){"
+        "return x_i8enc4_at(v0,v1,v2,v3,KVSCALE);}\n"
+        "float decKV8(vec4 c,int idx){return x_i8byte_at(c[idx])/KVSCALE;}\n"
+        "float decKV8d(vec4 c,int idx,float d){return x_i8byte_at(c[idx])*d;}\n"
+        "vec4 encKV8s(float v0,float v1,float v2,float v3,float d){"
+        "float si=1.0/d;return x_i8enc4_at(v0,v1,v2,v3,si);}\n" + kv_codec;
 }
 
 string att_kv_rope(const AttnConfig& c) {
@@ -421,9 +427,7 @@ string att_score(const AttnConfig& c) {
         (c.nseg > 1 ? seg_uniforms(c, "KV") + "uniform sampler2D Q;"
                     : string("uniform sampler2D Q,KV;")) +
         "uniform float pos,invsqrt;"
-        "vec4 qe(float v){float q=clamp(floor(v*SCS+0.5),-32768.0,32767.0);"
-        "if(q<0.0)q+=65536.0;float hi=floor(q/256.0);"
-        "return vec4(hi/255.0,(q-hi*256.0)/255.0,0.0,1.0);}"
+        "vec4 qe(float v){return vec4(x_q16enc_at(v,SCS),0.0,1.0);}"
         "void main(){int T=int(gl_FragCoord.x);" + open +
         "int t0=T*2;int t1=t0+1;int kvh=h/GROUP;float s0=0.0,s1=0.0;"
         // Bidirectional: score every key.  The *scan* in att_stats/att_v is
@@ -485,9 +489,7 @@ string att_stats(const AttnConfig& c) {
         // One fragment per head: (max, sum) packed into a single texel as two q16
         // values.  Previously two fragments per head did the identical scan and
         // only differed in which of the two statistics they wrote.
-        "vec2 qs(float v,float s){float q=clamp(floor(v*s+0.5),-32768.0,32767.0);"
-        "if(q<0.0)q+=65536.0;float hi=floor(q/256.0);"
-        "return vec2(hi/255.0,(q-hi*256.0)/255.0);}"
+        "vec2 qs(float v,float s){return x_q16enc_at(v,s);}"
         "void main(){int h=int(gl_FragCoord.x);float mx=-1e30;"
         // `pos` bounds the scan in *both* modes: causal, it is this query's
         // position; bidirectional, the host sets it to the last *valid* key.
@@ -721,11 +723,10 @@ string top2(int rows, int chunk) {
 // (.rg = even vocabulary index, .ba = odd).  Same chunking and same output
 // encoding as the unpacked versions, only the sample changes.
 string top2_fast_packed(int rows, int chunk) {
-    return "precision highp float;"
+    return "precision highp float;" + x_scaled_glsl() +
         "uniform sampler2D L;uniform float tr,nr;"
-        "float dv(float v){if(v>=32768.0)v-=65536.0;return v/256.0;}"
-        "float dl(vec4 c){return dv(floor(c.r*255.0+0.5)*256.0+floor(c.g*255.0+0.5));}"
-        "float dh(vec4 c){return dv(floor(c.b*255.0+0.5)*256.0+floor(c.a*255.0+0.5));}"
+        "float dl(vec4 c){return x_q16dec_at(c.rg,256.0);}"
+        "float dh(vec4 c){return x_q16dec_at(c.ba,256.0);}"
         "void main(){int x=int(gl_FragCoord.x);int ch=x/2;int rank=x-ch*2;int start=ch*" + to_string(chunk) + ";"
         "float best1=-1e30,best2=-1e30;int i1=0,i2=0;"
         "for(int k=0;k<" + to_string(chunk) + ";k++){int idx=start+k;if(idx>=" + to_string(rows) + ")break;"
@@ -755,15 +756,14 @@ string top2_fast_packed(int rows, int chunk) {
 // trailing chunks stay sentinel, and the smallest q16 value can never beat
 // a real winner (a tie keeps the earlier, real chunk).
 string top1_group(int n) {
-    return "precision highp float;"
+    return "precision highp float;" + x_scaled_glsl() +
         "uniform sampler2D L;uniform float nr;"
         "void main(){int g=int(gl_FragCoord.x);int r=int(gl_FragCoord.y);"
         "int start=g*16;"
         "float best1=-1e30,best2=-1e30;int i1=0,i2=0;"
         "for(int k=0;k<16;k++){int c=start+k;"
         "vec4 t=texture2D(L,vec2((float(c*2)+0.5)/" + to_string(n * 2) + ".0,(float(r)+0.5)/nr));"
-        "float v=floor(t.r*255.0+0.5)*256.0+floor(t.g*255.0+0.5);"
-        "if(v>=32768.0)v-=65536.0;"
+        "float v=x_q16raw_at(t.rg);"
         "int idx=int(floor(t.b*255.0+0.5)*256.0+floor(t.a*255.0+0.5));"
         "if(v>best1){best2=best1;i2=i1;best1=v;i1=idx;}else if(v>best2){best2=v;i2=idx;}}"
         "if(best1<0.0)best1+=65536.0;"
@@ -779,14 +779,13 @@ string top1_group(int n) {
 // across tiles, so the global winner is the smallest token id among the
 // maxima -- byte-identical to the full read-back + max_element.
 string top1_final(int groups) {
-    return "precision highp float;"
+    return "precision highp float;" + x_scaled_glsl() +
         "uniform sampler2D L;uniform float nr;"
         "void main(){int r=int(gl_FragCoord.y);"
         "float best1=-1e30,best2=-1e30;int i1=0,i2=0;"
         "for(int c=0;c<" + to_string(groups) + ";c++){"
         "vec4 t=texture2D(L,vec2((float(c)+0.5)/" + to_string(groups) + ".0,(float(r)+0.5)/nr));"
-        "float v=floor(t.r*255.0+0.5)*256.0+floor(t.g*255.0+0.5);"
-        "if(v>=32768.0)v-=65536.0;"
+        "float v=x_q16raw_at(t.rg);"
         "int idx=int(floor(t.b*255.0+0.5)*256.0+floor(t.a*255.0+0.5));"
         "if(v>best1){best2=best1;i2=i1;best1=v;i1=idx;}else if(v>best2){best2=v;i2=idx;}}"
         "if(best1<0.0)best1+=65536.0;"
@@ -798,9 +797,8 @@ string top1_final(int groups) {
 string top2_packed(int rows, int chunk) {
     return "precision highp float;"
         "uniform sampler2D L;uniform float tr,nr,invt;"
-        "float dv(float v){if(v>=32768.0)v-=65536.0;return v/256.0;}"
-        "float dl(vec4 c){return dv(floor(c.r*255.0+0.5)*256.0+floor(c.g*255.0+0.5));}"
-        "float dh(vec4 c){return dv(floor(c.b*255.0+0.5)*256.0+floor(c.a*255.0+0.5));}"
+        "float dl(vec4 c){return x_q16dec_at(c.rg,256.0);}"
+        "float dh(vec4 c){return x_q16dec_at(c.ba,256.0);}"
         "void main(){int x=int(gl_FragCoord.x);int ch=x/3;int rank=x-ch*3;int start=ch*" + to_string(chunk) + ";"
         "float best1=-1e30,best2=-1e30,lm=-1e30,ls=0.0;int i1=0,i2=0;"
         "for(int k=0;k<" + to_string(chunk) + ";k++){int idx=start+k;if(idx>=" + to_string(rows) + ")break;"

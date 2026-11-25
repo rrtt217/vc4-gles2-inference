@@ -23,6 +23,7 @@ no row, or a row with no file, fails the gate.
 | `switch_registry.py` | the parser for `src/switches.cpp` that the two above import | — | (library) |
 | `docset.py` | the Markdown files the documentation gates scan, derived from git (tracked + untracked, minus the vendored pages) | git for the set; a tree walk without it | (library: `check_docs_style.py`, `check_docs_links.py`, `docs_check.sh`) |
 | `check_docs_style.py` | canonical switch spellings in commands; four-decimal numbers carry a date | — | `docs_check.sh` |
+| `check_codecs.py` | no shader TU re-types a fixed-point layout: every fingerprint is xformat's or a registry entry with its owner | — | `docs_check.sh` |
 | `check_docs_links.py` | relative links and anchors resolve; the docs index is tracked; a documented switch is read | git (for the tracked check) | `docs_check.sh` |
 | `shader_hashes.sh` | did a builder change move the emitted GLSL (`--dump-shaders` digests) | the built binary | `make check`, CI, regression step 0b |
 | `shader_hashes.txt` | the golden digests `shader_hashes.sh` compares against | — | (data) |
