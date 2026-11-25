@@ -42,13 +42,18 @@ vector<float> GPU::matvec_from(const Mat& m, GLuint x){
     }
 
 void GPU::matvec_add(const Mat& m, GLuint x, GLuint residual, Target& out, XFormat xf){
-        matvec_add_bias(m, x, residual, 0, out, xf);
+        matvec_add_bias_rf(m, x, residual, 0, out, xf, res_fmt_);
+}
+
+void GPU::matvec_add_rf(const Mat& m, GLuint x, GLuint residual, Target& out,
+                        XFormat xf, XFormat rf){
+        matvec_add_bias_rf(m, x, residual, 0, out, xf, rf);
 }
 
 // `bias` folds the following `bias_add` into this draw, for the kernels that
 // carry the arm (the q8 row-pair one).  Zero is the shipped form, unchanged.
-void GPU::matvec_add_bias(const Mat& m, GLuint x, GLuint residual, GLuint bias,
-                          Target& out, XFormat xf){
+void GPU::matvec_add_bias_rf(const Mat& m, GLuint x, GLuint residual, GLuint bias,
+                             Target& out, XFormat xf, XFormat rf){
         if (!wf_accepts(m.type, xf)) wf_no_activation("matvec_add", m.type, xf);
         const bool pair = res_pack_ && (m.type == WeightType::INT8 ||
                                         m.type == WeightType::T3);
@@ -74,21 +79,21 @@ void GPU::matvec_add_bias(const Mat& m, GLuint x, GLuint residual, GLuint bias,
         GLuint p = 0;
         switch (m.type) {
             case WeightType::INT8:
-                p = res_pack_ ? x_q8_add_pair(m.rows, m.cols, xf, wr, bias != 0)
-                              : x_q8_add(m.rows, m.cols, xf, wr);
+                p = res_pack_ ? x_q8_add_pair(m.rows, m.cols, xf, rf, wr, bias != 0)
+                              : x_q8_add(m.rows, m.cols, xf, rf, wr);
                 break;
             case WeightType::INT16:
-                p = x_i16_add(m.rows, m.cols, xf);
+                p = x_i16_add(m.rows, m.cols, xf, rf);
                 break;
             case WeightType::INT4:
-                p = res_pack_ ? x_i4_add_pair(m.rows, m.cols, xf, m.fmt4)
-                              : x_i4_add(m.rows, m.cols, xf, m.fmt4);
+                p = res_pack_ ? x_i4_add_pair(m.rows, m.cols, xf, rf, m.fmt4)
+                              : x_i4_add(m.rows, m.cols, xf, rf, m.fmt4);
                 break;
             case WeightType::INT6:
                 wf_no_kernel("matvec_add", m.type);
             case WeightType::T3:
-                p = res_pack_ ? x_t3_add_pair(m, xf, res_fmt_, wr)
-                              : x_t3_add(m, xf, res_fmt_, wr);
+                p = res_pack_ ? x_t3_add_pair(m, xf, rf, wr)
+                              : x_t3_add(m, xf, rf, wr);
                 break;
         }
         if (!p) wf_no_kernel("matvec_add", m.type);

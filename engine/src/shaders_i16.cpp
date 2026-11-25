@@ -22,11 +22,12 @@ string matvec_i16(int rows, int cols, XFormat xf) {
         "gl_FragColor=x_q24encq(s*ws);}";
 }
 
-string matvec_i16_add(int rows, int cols, XFormat xf, XFormat rf) {
+string matvec_i16_add(int rows, int cols, XFormat xf, XFormat rf, XFormat of) {
     need_shape("matvec_i16_add", rows, cols, 1);
     const int tw = (cols + 1) / 2;
     const int axw = x_texels(cols, xf);
-    return head(xf) + x_residual_glsl(rf) +
+    const string ST = (of == rf) ? std::string("YST1Q") : std::string("xs1");
+    return head(xf) + x_residual_glsl(rf) + (of == rf ? std::string() : x_store_glsl(of)) +
         "uniform sampler2D W,X,R;uniform float ws;"
         "void main(){int r=int(gl_FragCoord.x);float s=0.0;"
         "for(int q=0;q<" + to_string(tw) + ";q++){"
@@ -36,5 +37,5 @@ string matvec_i16_add(int rows, int cols, XFormat xf, XFormat rf) {
         "vec2 x=X2Q(X,2*q," + to_string(axw) + ".0);"
         "s+=u0*x.x;if(2*q+1<" + to_string(cols) + ")s+=u1*x.y;}"
         "float res=Y1Q(R,r," + to_string(x_texels(rows, rf)) + ".0);"
-        "gl_FragColor=YST1Q(s*ws+res);}";
+        "gl_FragColor=" + ST + "(s*ws+res);}";
 }

@@ -195,12 +195,11 @@ string matvec_i4(int rows, int cols, XFormat xf, bool inl) {
 // q4 residual-add, two rows per fragment: rows 2t and 2t+1 share one activation
 // decode and one residual fetch, and are written as a raw q16 pair (x_st2q, since
 // the q4 accumulator works in raw q16 units, not activation units).
-string matvec_i4_add_pair(int rows, int cols, XFormat xf, XFormat rf, bool inl) {
+string matvec_i4_add_pair(int rows, int cols, XFormat xf, XFormat rf, XFormat of, bool inl) {
     need_shape("matvec_i4_add_pair", rows, cols, 32);
     const int texw = cols / 8;
     const int groups = (cols + 31) / 32;
-    const int rw = (rows + 1) / 2;
-    return q4_head(xf, inl) + x_pair2_glsl(rf) + x_residual_glsl(rf) +
+        return q4_head(xf, inl) + x_pair2_glsl(of) + x_residual_glsl(rf) +
         "uniform sampler2D W,P,X,R;uniform float ps;"
         "float dot4(vec4 w0,vec4 xa,vec4 xb){"
         + q4_taps("w0") +
@@ -225,7 +224,7 @@ string matvec_i4_add_pair(int rows, int cols, XFormat xf, XFormat rf, bool inl) 
         "(float(r1)+0.5)/float(" + to_string(rows) + ")));"
         "dotb+=dot4(w0,xa,xb);}"
         "s0+=sa*dota+ma*xsum;s1+=sb*dotb+mb*xsum;}"
-        "float res0=Y1Q(R,r0," + to_string(rw) + ".0),res1=Y1Q(R,r1," + to_string(rw) + ".0);"
+        "float res0=Y1Q(R,r0," + to_string(x_texels(rows, rf)) + ".0),""res1=Y1Q(R,r1," + to_string(x_texels(rows, rf)) + ".0);"
         "gl_FragColor=x_p2_stq(s0+res0,s1+res1);}";
 }
 
@@ -233,13 +232,12 @@ string matvec_i4_add_pair(int rows, int cols, XFormat xf, XFormat rf, bool inl) 
 // texels, two per eight weights, no decode, and the group scale folded as in
 // the gate.  The nibble reversal at upload (make_q4_texture) is what lets the
 // dot read the texel in natural column order.
-string matvec_i4_add_pair_4x4(int rows, int cols, XFormat xf, XFormat rf, bool inl) {
+string matvec_i4_add_pair_4x4(int rows, int cols, XFormat xf, XFormat rf, XFormat of, bool inl) {
     need_shape("matvec_i4_add_pair_4x4", rows, cols, 32);
     const int texw = cols / 4;
     const int groups = (cols + 31) / 32;
-    const int rw = (rows + 1) / 2;
-    const string ROWS = to_string(rows), GROUPS = to_string(groups), TEXW = to_string(texw);
-    return q4_head(xf, inl) + x_pair2_glsl(rf) + x_residual_glsl(rf) +
+        const string ROWS = to_string(rows), GROUPS = to_string(groups), TEXW = to_string(texw);
+    return q4_head(xf, inl) + x_pair2_glsl(of) + x_residual_glsl(rf) +
         "uniform sampler2D W,P,X,R;uniform float ps;"
         "void main(){int t=int(gl_FragCoord.x);int r0=2*t;int r1=r0+1;"
         "float s0=0.0,s1=0.0;"
@@ -260,7 +258,7 @@ string matvec_i4_add_pair_4x4(int rows, int cols, XFormat xf, XFormat rf, bool i
         "vec4 wr0=texture2D(W,vec2(c0,v1r)),wr1=texture2D(W,vec2(c1,v1r));"
         "dotb+=wr0.x*xa.x+wr0.y*xa.y+wr0.z*xa.z+wr0.w*xa.w+wr1.x*xb.x+wr1.y*xb.y+wr1.z*xb.z+wr1.w*xb.w;}"
         "s0+=sa*dota+ma*xsum;s1+=sb*dotb+mb*xsum;}"
-        "float res0=Y1Q(R,r0," + to_string(rw) + ".0),res1=Y1Q(R,r1," + to_string(rw) + ".0);"
+        "float res0=Y1Q(R,r0," + to_string(x_texels(rows, rf)) + ".0),""res1=Y1Q(R,r1," + to_string(x_texels(rows, rf)) + ".0);"
         "gl_FragColor=x_p2_stq(s0+res0,s1+res1);}";
 }
 
@@ -598,13 +596,14 @@ string matvec_i4_4x4(int rows, int cols, XFormat xf, bool inl) {
 // matvec_i4_add_4x4.  Keeps the generic X4Q activation decode (this kernel
 // never used the inline dA/dB form) and the residual add.  Same per-group
 // conditional float structure as the flat qkv/gate.
-static string i4_w2_flat(int rows, int cols, XFormat xf, XFormat rf) {
+static string i4_w2_flat(int rows, int cols, XFormat xf, XFormat rf, XFormat of) {
     const int texw = cols / 4;
     const int groups = (cols + 31) / 32;
     const int axw = x_texels(cols, xf);
     const string ROWS = to_string(rows), GROUPS = to_string(groups),
                  TEXW = to_string(texw), ITERS = to_string(cols / 8), AXW = to_string(axw);
-    return head(xf) + x_residual_glsl(rf) +
+    const string ST = (of == rf) ? std::string("YST1Q") : std::string("xs1");
+    return head(xf) + x_residual_glsl(rf) + (of == rf ? std::string() : x_store_glsl(of)) +
         "uniform sampler2D W,P,X,R;uniform float ps;"
         "void main(){int r=int(gl_FragCoord.x);float s=0.0;"
         "float vr=(float(r)+0.5)/float(" + ROWS + "),itw=1.0/float(" + TEXW + ");"
@@ -625,19 +624,20 @@ static string i4_w2_flat(int rows, int cols, XFormat xf, XFormat rf) {
         "d+=w0.x*xa.x+w0.y*xa.y+w0.z*xa.z+w0.w*xa.w+w1.x*xb.x+w1.y*xb.y+w1.z*xb.z+w1.w*xb.w;"
         "if(q-g*4==3){s+=sc*d+mn*xsum;}}"
         "float res=Y1Q(R,r," + to_string(x_texels(rows, rf)) + ".0);"
-        "gl_FragColor=YST1Q(s+res);}";
+        "gl_FragColor=" + ST + "(s+res);}";
 }
 
-string matvec_i4_add_4x4(int rows, int cols, XFormat xf, XFormat rf) {
+string matvec_i4_add_4x4(int rows, int cols, XFormat xf, XFormat rf, XFormat of) {
     need_shape("matvec_i4_add_4x4", rows, cols, 32);
-    if (q4w2_flat() && !q4_nomin()) return i4_w2_flat(rows, cols, xf, rf);
+    if (q4w2_flat() && !q4_nomin()) return i4_w2_flat(rows, cols, xf, rf, of);
     const int texw = cols / 4;
     const int groups = (cols + 31) / 32;
     const int axw = x_texels(cols, xf);
     const string ROWS = to_string(rows), GROUPS = to_string(groups), TEXW = to_string(texw);
     const bool nom = q4_nomin();
     const string MA = nom ? "" : "+mn*xsum";
-    return head(xf) + x_residual_glsl(rf) +
+    const string ST = (of == rf) ? std::string("YST1Q") : std::string("xs1");
+    return head(xf) + x_residual_glsl(rf) + (of == rf ? std::string() : x_store_glsl(of)) +
         "uniform sampler2D W,P,X,R;uniform float ps;"
         "void main(){int r=int(gl_FragCoord.x);float s=0.0;"
         "float vr=(float(r)+0.5)/float(" + ROWS + "),itw=1.0/float(" + TEXW + ");"
@@ -655,15 +655,16 @@ string matvec_i4_add_4x4(int rows, int cols, XFormat xf, XFormat rf) {
         "d+=w0.x*xa.x+w0.y*xa.y+w0.z*xa.z+w0.w*xa.w+w1.x*xb.x+w1.y*xb.y+w1.z*xb.z+w1.w*xb.w;}"
         "s+=sc*d" + MA + ";}"
         "float res=Y1Q(R,r," + to_string(x_texels(rows, rf)) + ".0);"
-        "gl_FragColor=YST1Q(s+res);}";
+        "gl_FragColor=" + ST + "(s+res);}";
 }
 
-string matvec_i4_add(int rows, int cols, XFormat xf, XFormat rf) {
+string matvec_i4_add(int rows, int cols, XFormat xf, XFormat rf, XFormat of) {
     need_shape("matvec_i4_add", rows, cols, 32);
     const int texw = cols / 8;
     const int groups = (cols + 31) / 32;
     const int axw = x_texels(cols, xf);
-    return head(xf) + x_residual_glsl(rf) +
+    const string ST = (of == rf) ? std::string("YST1Q") : std::string("xs1");
+    return head(xf) + x_residual_glsl(rf) + (of == rf ? std::string() : x_store_glsl(of)) +
         "uniform sampler2D W,P,X,R;uniform float ps;"
         "void main(){int r=int(gl_FragCoord.x);float s=0.0;"
         "for(int g=0;g<" + to_string(groups) + ";g++){"
@@ -685,5 +686,5 @@ string matvec_i4_add(int rows, int cols, XFormat xf, XFormat rf) {
         "float d3=l3*xb.z+h3*xb.w;"
         "s+=sc*(d0+d1+d2+d3)" + q4_mint() + ";}}"
         "float res=Y1Q(R,r," + to_string(x_texels(rows, rf)) + ".0);"
-        "gl_FragColor=YST1Q(s+res);}";
+        "gl_FragColor=" + ST + "(s+res);}";
 }

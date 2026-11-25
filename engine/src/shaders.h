@@ -153,11 +153,11 @@ std::string matvec_q8(int rows, int cols, XFormat xf, bool wrow = false);
 // `//T3` marker that link_program() keys on, exactly like the q4 nibble split's
 // "&15".  Sixteen weights a texel, four a byte, bit 0 magnitude and bit 1 sign.
 std::string matvec_t3(int rows, int cols, XFormat xf, bool wrow, int t3_th, int t3_tiles);
-std::string matvec_t3_add(int rows, int cols, XFormat xf, XFormat rf, bool wrow,
-                          int t3_th, int t3_tiles);
+std::string matvec_t3_add(int rows, int cols, XFormat xf, XFormat rf, XFormat of,
+                          bool wrow, int t3_th, int t3_tiles);
 std::string matvec_t3_pair(int rows, int cols, XFormat xf, bool wrow, int t3_th, int t3_tiles);
-std::string matvec_t3_add_pair(int rows, int cols, XFormat xf, XFormat rf, bool wrow,
-                               int t3_th, int t3_tiles);
+std::string matvec_t3_add_pair(int rows, int cols, XFormat xf, XFormat rf, XFormat of,
+                               bool wrow, int t3_th, int t3_tiles);
 // One draw for a whole batch of matvec inputs (RWKV-7 chunked prefill, P1):
 // matvec_q8's text with the input row taken from gl_FragCoord.y, so fragment
 // (row r, batch b) is matvec_q8's result for row r of input b.
@@ -174,28 +174,29 @@ std::string matvec_q8_p2_add(int rows, int cols, XFormat rf, bool wrow = false);
 std::string p2_split(int rows, XFormat rf);
 std::string matvec_q8_pair_fused(int rows, int cols, XFormat xf, bool wrow = false);
 std::string matvec_q8_pair_logits(int rows, int cols, XFormat xf, bool wrow = false);
-std::string matvec_q8_add(int rows, int cols, XFormat xf, XFormat rf, bool wrow = false);
-std::string matvec_q8_add_pair(int rows, int cols, XFormat xf, XFormat rf = XFormat::I16_2,
+std::string matvec_q8_add(int rows, int cols, XFormat xf, XFormat rf, XFormat of,
+                          bool wrow = false);
+std::string matvec_q8_add_pair(int rows, int cols, XFormat xf, XFormat rf, XFormat of,
                                bool inl = true, bool wrow = false, bool bias = false);
 std::string matvec_i16(int rows, int cols, XFormat xf);
-std::string matvec_i16_add(int rows, int cols, XFormat xf, XFormat rf);
+std::string matvec_i16_add(int rows, int cols, XFormat xf, XFormat rf, XFormat of);
 std::string matvec_i4(int rows, int cols, XFormat xf, bool inl = true);
 // Signed 6-bit head: a 4-bit low plane and a 2-bit high plane in two textures
 // (one sampler cannot be fetched twice in a fragment on VC4), one 24-bit value
 // per fragment, per-row scale plane when `wrow`.
 std::string matvec_q6(int rows, int cols, XFormat xf, bool wrow);
-std::string matvec_i4_add(int rows, int cols, XFormat xf, XFormat rf);
+std::string matvec_i4_add(int rows, int cols, XFormat xf, XFormat rf, XFormat of);
 std::string matvec_i4_4x4(int rows, int cols, XFormat xf, bool inl = true);
-std::string matvec_i4_add_4x4(int rows, int cols, XFormat xf, XFormat rf);
+std::string matvec_i4_add_4x4(int rows, int cols, XFormat xf, XFormat rf, XFormat of);
 std::string matvec_i4_pair(int rows, int cols, XFormat xf);
 std::string matvec_i4_pair_swiglu(int rows, int cols, XFormat xf, bool inl = true, int hs = 0);
 // Q4_FMT=rgba4: the same gate with the weights bound as 4-bit texels, four per
 // texel and zero decode.  A separate builder so the packed text (and its
 // shader hash) cannot move.
 std::string matvec_i4_pair_swiglu_4x4(int rows, int cols, XFormat xf, bool inl = true, int hs = 0);
-std::string matvec_i4_add_pair(int rows, int cols, XFormat xf, XFormat rf,
+std::string matvec_i4_add_pair(int rows, int cols, XFormat xf, XFormat rf, XFormat of,
                                bool inl = true);
-std::string matvec_i4_add_pair_4x4(int rows, int cols, XFormat xf, XFormat rf,
+std::string matvec_i4_add_pair_4x4(int rows, int cols, XFormat xf, XFormat rf, XFormat of,
                                    bool inl = true);
 
 // `hs` is the container's per-layer FFN-hidden scale exponent (metadata key

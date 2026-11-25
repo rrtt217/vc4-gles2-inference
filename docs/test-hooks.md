@@ -28,6 +28,14 @@ Five rules before using this list:
   `RES_PACK=0` -> `RES=i16_1`, `KV_PACK=16` -> `KV=q16`, `KV_FMT=bf16` ->
   `KV=bf16`, `KV_SCALE` -> `KV_GRID`, `ATT_SCALE` -> `ATT_SCORE_GRID`,
   `ATT_SUM_SCALE` -> `ATT_SUM_GRID`.
+- **What the two axes are, where a block adds into a LayerNorm's output.**  A
+  post-norm encoder-decoder (v5) adds each sublayer into the previous
+  LayerNorm's result, so that base is an *activation* stream and only the sum
+  is the residual: `matvec_add_rf` takes the base's format (`act_fmt_` there,
+  `res_fmt_` in the dense chain), and its store is always `res_fmt_`, which is
+  what the next LayerNorm reads.  The q/k/v projection target is neither: it
+  is a fixed q16 pair (or I24) shared with the rope, score and KV readers
+  (`GPU::qkv_fmt()`), so that path does not move with either axis.
 - **A closed set is validated, not defaulted.**  `ACT=i9` stops the run and
   prints the list; it does not fall back to `i16`.  Validation happens once, for
   every set switch, before any kernel reads one — including switches nothing in

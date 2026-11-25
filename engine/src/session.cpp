@@ -205,6 +205,17 @@ Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
                 }
             }
         }
+        // Paired qkv matvec: two output rows per fragment, half the activation
+        // decode.  Only the int8 checkpoint uses it; QKV_PAIR=0 restores the
+        // single-row kernel.  The int4 pair kernel was tried and rejected: it
+        // shifts q4 PPL 325.3751 -> 331.6324 and decodes 1.2% slower.
+        // Decided before the format block below because the v5 qkv bias is
+        // uploaded in the qkv target's own layout, which this flag picks.
+        bool qkv_pair = true;
+        for (const Mat& m : m_.qkv)
+            if ((m.type != WeightType::INT8 && m.type != WeightType::T3) || (m.rows & 1))
+                qkv_pair = false;
+        if (env_zero("QKV_PAIR")) qkv_pair = false;
         if (gpu_layer_) {
             // A stream's format is checked against the weight-format table, not
             // a hand-written "model family" list: `act_mask` owns which kernels
@@ -349,17 +360,10 @@ Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
             // row as that alpha byte -- a constant +255/256 on every odd
             // component, which is what the "odd components are wrong" hunt was
             // chasing for six commits.
-            if (m_.is_encdec()) gpu_.upload_v5_rows(m_);
+            if (m_.is_encdec())
+                gpu_.upload_v5_rows(m_, (qkv_pair && ((m_.dim + 2 * m_.kv_dim) % 2 == 0))
+                                            ? XFormat::I16_2 : XFormat::I24_1);
         }
-        // Paired qkv matvec: two output rows per fragment, half the activation
-        // decode.  Only the int8 checkpoint uses it; QKV_PAIR=0 restores the
-        // single-row kernel.  The int4 pair kernel was tried and rejected: it
-        // shifts q4 PPL 325.3751 -> 331.6324 and decodes 1.2% slower.
-        bool qkv_pair = true;
-        for (const Mat& m : m_.qkv)
-            if ((m.type != WeightType::INT8 && m.type != WeightType::T3) || (m.rows & 1))
-                qkv_pair = false;
-        if (env_zero("QKV_PAIR")) qkv_pair = false;
         if (gpu_attn_)
             gpu_.init_attention(m_.dim, m_.kv_dim, m_.heads, m_.kv_heads, m_.head_dim,
                                 m_.seq, m_.rope_half, m_.qk_norm, m_.layers,
@@ -2339,7 +2343,7 @@ void Session::encdec_encode(const vector<int>& src) {
                 vector<float> x = embedding(src[b], /*exact_f32=*/true);
                 const float* p = m.pos_table.data() + (size_t)b * D;
                 for (int i = 0; i < D; ++i) x[i] = x[i] * s + p[i];
-                h[b] = gpu_.upload_into(gpu_.grp_h(b, n), x);
+                h[b] = gpu_.upload_into_fmt(gpu_.v5_h(b, n), x, gpu_.act_fmt_);
         }
         gpu_.set_causal(false);            // the encoder sees every position
         // POST-norm, which is the order `normalize_before: false` states and the
@@ -2382,8 +2386,8 @@ void Session::encdec_encode(const vector<int>& src) {
                         lap.mark("encVRow", l);
                         lap.mark("encStatsV", l);
                         // r1 = x + wo*att + o_b, then x1 = LN1(r1)
-                        gpu_.matvec_add(m.u_enc_wo[l], gpu_.att_out_.tex,
-                                        h[b], gpu_.cd_b(), gpu_.act_fmt_);
+                        gpu_.matvec_add_rf(m.u_enc_wo[l], gpu_.att_out_.tex,
+                                           h[b], gpu_.cd_b(), gpu_.act_fmt_, gpu_.act_fmt_);
                         gpu_.bias_add(gpu_.cd_b().tex, gpu_.enc_rows_.enc_o_b[l], gpu_.cd_c());
                         lap.mark("encWo", l);
                         if (env_flag("ENCDEC_DUMP") && l == 0 && b == 0) {
@@ -2429,18 +2433,29 @@ void Session::encdec_encode(const vector<int>& src) {
                         // write-back: one draw instead of two, and a *different
                         // rounding* -- once instead of twice, by up to 1/256 of
                         // a value.  It is a dev arm because of that, not a
-                        // refactor.
+                        // refactor.  The bias belongs to exactly one arm: the
+                        // kernel's or the `bias_add` below.  Giving it to both
+                        // added it twice (measured: the non-fused r2 differs
+                        // from the fused row by exactly fc2.bias).
                         const GLuint fb = gpu_.enc_rows_.enc_fc2_b[l];
-                        gpu_.matvec_add_bias(m.u_enc_w2[l], hf, x1, fb, gpu_.cd_d(),
-                                             gpu_.act_fmt_);
+                        gpu_.matvec_add_bias_rf(m.u_enc_w2[l], hf, x1,
+                                                enc_ffn_fused ? gpu_.enc_rows_.enc_fc2_b_rf[l] : 0,
+                                                gpu_.cd_d(), gpu_.act_fmt_, gpu_.act_fmt_);
                         lap.mark("encW2", l);
                         if (enc_ffn_fused) gpu_.cd_c() = gpu_.cd_d();
                         else gpu_.bias_add(gpu_.cd_d().tex, fb, gpu_.cd_c());
+                        if (env_flag("ENCDEC_DUMP") && l == 0 && b == 0) {
+                                vector<float> rv = read_hidden(gpu_.cd_c());
+                                cerr << "ENCDEC r2[0..7]";
+                                for (int i = 0; i < 8 && i < (int)rv.size(); ++i)
+                                        cerr << " " << rv[i];
+                                cerr << "\n";
+                        }
                         lap.mark("encFC2b", l);
                         // x = LN2(r2), straight into the group slot the next layer reads.
                         h[b] = gpu_.ln_q16(gpu_.cd_c().tex, gpu_.enc_rows_.enc_ln2[l],
                                            gpu_.enc_rows_.enc_ln2b[l],
-                                           gpu_.grp_h(b, n), m.rms_eps, "enc", l, 2, b);
+                                           gpu_.v5_h(b, n), m.rms_eps, "enc", l, 2, b);
                 }
                 lap.mark("encFFN", l);
         }
@@ -2453,7 +2468,13 @@ void Session::encdec_encode(const vector<int>& src) {
         // look superlinear in the source length.
         if (env_flag("ENCDEC_DUMP")) {
                 for (int b = 0; b < n; ++b) {
-                        vector<float> row = read_hidden(gpu_.grp_h(b, n));
+                        // An ACT row: `read_hidden` would decode it as the
+                        // residual, which is a different format as soon as the
+                        // two axes differ (RES=f32 printed 3e38 against an
+                        // encoder that was exact).
+                        const Target& t = gpu_.v5_h(b, n);
+                        vector<uint8_t> bytes = gpu_.read_bytes(const_cast<Target&>(t), t.w, 1);
+                        vector<float> row = decode_act_row(bytes, t.w, gpu_.act_fmt_);
                         memcpy(cd_enc_.data() + (size_t)b * D, row.data(),
                                sizeof(float) * D);
                 }
@@ -2468,6 +2489,10 @@ void Session::encdec_encode(const vector<int>& src) {
                 for (float v : cd_enc_) { mx = fabsf(v) > mx ? fabsf(v) : mx; ss += v * v; }
                 cerr << "ENCDEC enc_out maxabs " << mx << " rms "
                      << sqrtf(ss / (float)cd_enc_.size()) << "\n";
+                cerr << "ENCDEC enc_out[0..7]";
+                for (int i = 0; i < 8 && i < (int)cd_enc_.size(); ++i)
+                        cerr << " " << cd_enc_[i];
+                cerr << "\n";
         }
         // The cross-attention's K/V live on the GPU now: one plane per decoder
         // layer, `[K | V]` a row, written from each projection's output.  No
@@ -2482,10 +2507,10 @@ void Session::encdec_encode(const vector<int>& src) {
                         // projection's I24 row and its bias row with the same
                         // reader, so the separate `bias_add_matvec` pass is gone
                         // and this is two draws a position instead of four.
-                        gpu_.matvec_to(m.u_cross_k[l], gpu_.grp_h(b, n).tex, gpu_.cd_b());
+                        gpu_.matvec_to(m.u_cross_k[l], gpu_.v5_h(b, n).tex, gpu_.cd_b());
                         gpu_.cross_kv_store(l, gpu_.cd_b().tex, b, /*v_half=*/false,
                                             gpu_.enc_rows_.ck_b[l]);
-                        gpu_.matvec_to(m.u_cross_v[l], gpu_.grp_h(b, n).tex, gpu_.cd_b());
+                        gpu_.matvec_to(m.u_cross_v[l], gpu_.v5_h(b, n).tex, gpu_.cd_b());
                         gpu_.cross_kv_store(l, gpu_.cd_b().tex, b, /*v_half=*/true,
                                             gpu_.enc_rows_.cv_b[l]);
                 }
@@ -2503,7 +2528,7 @@ vector<float> Session::encdec_step(int token, int pos) {
         vector<float> y = embedding(token, /*exact_f32=*/true);
         const float* p = m.pos_table.data() + (size_t)pos * D;
         for (int i = 0; i < D; ++i) y[i] = y[i] * s + p[i];
-        GLuint h = gpu_.upload_hidden(y);
+        GLuint h = gpu_.upload_hidden_fmt(y, gpu_.act_fmt_);
         const int n = cd_n_;
         for (int l = 0; l < m.layers; ++l) {
                 // Same post-norm order as the encoder: self-attention on the raw
@@ -2512,7 +2537,7 @@ vector<float> Session::encdec_step(int token, int pos) {
                 gpu_.set_qkv_bias(gpu_.enc_rows_.qkv_b[l]);
                 GLuint at = gpu_.attention_block(m.qkv[l], h, l, pos);
                 gpu_.set_qkv_bias(0);
-                gpu_.matvec_add(m.wo[l], at, h, gpu_.cd_b(), gpu_.act_fmt_);
+                gpu_.matvec_add_rf(m.wo[l], at, h, gpu_.cd_b(), gpu_.act_fmt_, gpu_.act_fmt_);
                 gpu_.bias_add(gpu_.cd_b().tex, gpu_.enc_rows_.o_b[l], gpu_.cd_c());
                 GLuint y1 = gpu_.ln_q16(gpu_.cd_c().tex, gpu_.enc_rows_.ln1[l],
                                         gpu_.enc_rows_.ln1b[l], gpu_.cd_a(), m.rms_eps,
@@ -2539,7 +2564,8 @@ vector<float> Session::encdec_step(int token, int pos) {
                                                       gpu_.cross_kv_tex(l),
                                                       /*stage_kv=*/false);
                 gpu_.set_qkv_bias(0);
-                gpu_.matvec_add(m.u_cross_o[l], ctx_tex, y1, gpu_.cd_b(), gpu_.act_fmt_);
+                gpu_.matvec_add_rf(m.u_cross_o[l], ctx_tex, y1, gpu_.cd_b(),
+                                   gpu_.act_fmt_, gpu_.act_fmt_);
                 gpu_.bias_add(gpu_.cd_b().tex, gpu_.enc_rows_.co_b[l], gpu_.cd_c());
                 GLuint y2 = gpu_.ln_q16(gpu_.cd_c().tex, gpu_.enc_rows_.ln2[l],
                                         gpu_.enc_rows_.ln2b[l], gpu_.cd_a(), m.rms_eps,
@@ -2548,20 +2574,23 @@ vector<float> Session::encdec_step(int token, int pos) {
                 GLuint hid = gpu_.act_swish_biased(gpu_.cd_d().tex, gpu_.enc_rows_.fc1_b[l],
                                                    gpu_.cd_b(), F, XFormat::I24_1,
                                                    gpu_.act_fmt_);
-                gpu_.matvec_add(m.w2[l], hid, y2, gpu_.cd_d(), gpu_.act_fmt_);
+                gpu_.matvec_add_rf(m.w2[l], hid, y2, gpu_.cd_d(), gpu_.act_fmt_, gpu_.act_fmt_);
                 gpu_.bias_add(gpu_.cd_d().tex, gpu_.enc_rows_.fc2_b[l], gpu_.cd_c());
                 h = gpu_.ln_q16(gpu_.cd_c().tex, gpu_.enc_rows_.ln3[l],
                                 gpu_.enc_rows_.ln3b[l], gpu_.cd_d(), m.rms_eps,
                                 "dec", l, 3, pos);
         }
         vector<float> lg = gpu_.logits_from(m.logits_tiles, h);
+        // The container's head bias: a Marian head is `final_logits_bias` plus
+        // the tied embedding, and the bias is per vocabulary row.  It has to
+        // go in before anything reads the argmax: the bias is per row, so it
+        // can *pick* the token (minecraft's step-0 argmax is 6590, while the
+        // pre-bias argmax this dump used to print was 8).
+        for (size_t i = 0; i < lg.size() && i < m_.logits_bias.size(); ++i) lg[i] += m_.logits_bias[i];
         if (env_flag("ENCDEC_DUMP") && pos == 0 && !lg.empty()) {
                 int best = 0;
                 for (int v = 1; v < (int)lg.size(); ++v) if (lg[v] > lg[best]) best = v;
                 cerr << "ENCDEC step0 argmax " << best << "\n";
         }
-        // The container's head bias: a Marian head is `final_logits_bias` plus
-        // the tied embedding, and the bias is per vocabulary row.
-        for (size_t i = 0; i < lg.size() && i < m_.logits_bias.size(); ++i) lg[i] += m_.logits_bias[i];
         return lg;
 }

@@ -517,6 +517,32 @@ std::string x_residual_glsl(XFormat f) {
 
 int x_pair2_texels(int count) { return count; }
 
+std::string x_store_glsl(XFormat f) {
+    switch (f) {
+        case XFormat::I16_1:
+        case XFormat::I16_2:
+            // Both are the q16 family's single-value texel (.rg, 2 bytes).
+            return "vec4 xs1(float q){return x_st1q(q);}\n";
+        case XFormat::I24_1:
+            return "vec4 xs1(float q){return x_q24encq(q);}\n";
+        case XFormat::BF16:
+            return x_codec_glsl(XFormat::BF16) +
+                "vec4 xs1(float q){return x_bf16enc(q/256.0);}\n";
+        case XFormat::F32:
+            return x_codec_glsl(XFormat::F32) +
+                "vec4 xs1(float q){return x_f32enc(q/256.0);}\n";
+        case XFormat::S24_1:
+            return x_codec_glsl(XFormat::S24_1) +
+                "vec4 xs1(float q){return x_s24enc(q);}\n";
+        case XFormat::I8_4:
+            // Not a residual stream; a caller that asks gets no store function
+            // and the program fails to compile (the same answer x_residual_glsl
+            // gives, for the same reason).
+            return {};
+    }
+    return {};
+}
+
 std::string x_pair2_glsl(XFormat f) {
     // Two values a texel, as the paired prefill kernels read and write them.
     // The default is the q16 pair; bf16 uses the same layout with its own

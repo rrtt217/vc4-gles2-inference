@@ -518,13 +518,13 @@ string matvec_q8_pair_fused(int rows, int cols, XFormat xf, bool wrow) {
         "gl_FragColor=x_st2q(s1*" + SC1 + ",s2*" + SC2 + ");}";
 }
 
-string matvec_q8_add(int rows, int cols, XFormat xf, XFormat rf, bool wrow) {
+string matvec_q8_add(int rows, int cols, XFormat xf, XFormat rf, XFormat of, bool wrow) {
     need_shape("matvec_q8_add", rows, cols, 4);
     const int axw = x_texels(cols, xf);
     const string ROWS = to_string(rows), COLS4 = to_string(cols / 4), AXW = to_string(axw);
     const string WD = wrow ? wrow_scale(rows) : "";
     const string SC = wrow ? "wsr(r)" : "ws";
-    if (xf == XFormat::I16_2 && rf == XFormat::I16_1) {
+    if (xf == XFormat::I16_2 && rf == XFormat::I16_1 && of == XFormat::I16_1) {
         // Inline form: VC4 compiles this noticeably faster than the generic
         // helper-based version (the helper takes two texel fetches as arguments).
         return "precision highp float;uniform sampler2D W,X,R;uniform float ws;" + WD +
@@ -546,7 +546,8 @@ string matvec_q8_add(int rows, int cols, XFormat xf, XFormat rf, bool wrow) {
                "float hi=floor(q/256.0),lo=q-hi*256.0;"
                "gl_FragColor=vec4(hi/255.0,lo/255.0,0.0,1.0);}";
     }
-    return head(xf) + x_residual_glsl(rf) +
+    const string ST = (of == rf) ? std::string("YST1Q") : std::string("xs1");
+    return head(xf) + x_residual_glsl(rf) + (of == rf ? std::string() : x_store_glsl(of)) +
         "uniform sampler2D W,X,R;uniform float ws;" + WD +
         "void main(){int r=int(gl_FragCoord.x);float s=0.0;"
         "for(int q=0;q<" + COLS4 + ";q++){"
@@ -556,14 +557,14 @@ string matvec_q8_add(int rows, int cols, XFormat xf, XFormat rf, bool wrow) {
         "vec4 x=X4Q(X,q*4," + AXW + ".0);"
         "s+=w.x*x.x+w.y*x.y+w.z*x.z+w.w*x.w;}"
         "float res=Y1Q(R,r," + to_string(x_texels(rows, rf)) + ".0);"
-        "gl_FragColor=YST1Q(s*" + SC + "+res);}";
+        "gl_FragColor=" + ST + "(s*" + SC + "+res);}";
 }
 
 // `bias` folds a separate `bias_add` pass into this one.  The bias rides the
 // output row, so the two rows a fragment writes are two reads of the bias plane
 // and no extra draw is issued.  It is **not** byte-identical to a `bias_add`
 // after the matvec: the sum rounds once here and twice there, by up to 1/256.
-string matvec_q8_add_pair(int rows, int cols, XFormat xf, XFormat rf, bool inl,
+string matvec_q8_add_pair(int rows, int cols, XFormat xf, XFormat rf, XFormat of, bool inl,
                           bool wrow, bool bias) {
     need_shape("matvec_q8_add_pair", rows, cols, 4);
     const int axw = x_texels(cols, xf);
@@ -574,7 +575,11 @@ string matvec_q8_add_pair(int rows, int cols, XFormat xf, XFormat rf, bool inl,
     const string WD = wrow ? wrow_scale(rows) : "";
     const string SP = wrow ? "vec2 sc=wsr2(r0);" : "";
     const string SC0 = wrow ? "sc.x" : "ws", SC1 = wrow ? "sc.y" : "ws";
-    const string BW = to_string(rw) + ".0";
+    // The base and the bias are read in rf, whose texel count is
+    // x_texels(rows, rf); rw is the *store*'s (the packed residual).  They
+    // coincide for the shipped I16_2 residual and diverge for f32/bf16/i24.
+    const string RTW = to_string(x_texels(rows, rf));
+    const string BW = RTW + ".0";
     const string BIAS_INL =
         bias ? "vec4 bt=texture2D(B,vec2((float(t)+0.5)/float(" + to_string(rw) + "),0.5));"
                "float b0=dA(bt),b1=dB(bt);"
@@ -589,7 +594,7 @@ string matvec_q8_add_pair(int rows, int cols, XFormat xf, XFormat rf, bool inl,
     // that loop measurably slower.  r0 is always even and r1 always odd, so the
     // two residuals are the halves of one I16_2 texel.  Accumulation order and
     // the q16 rounding are unchanged, so the packed output is bit-identical.
-    if (inl && xf == XFormat::I16_2 && rf == XFormat::I16_2) {
+    if (inl && xf == XFormat::I16_2 && rf == XFormat::I16_2 && of == XFormat::I16_2) {
         return "precision highp float;uniform sampler2D W,X,R" + BS + ";uniform float ws;" + WD +
                kDec16A + kDec16B
                + kEnc16Raw +
@@ -612,11 +617,11 @@ string matvec_q8_add_pair(int rows, int cols, XFormat xf, XFormat rf, bool inl,
                "p2=enc16(s1*" + SC1 + "+res1" + B1 + ");"
                "gl_FragColor=vec4(p1.x,p1.y,p2.x,p2.y);}";
     }
-    return head(xf) + x_pair2_glsl(rf) + x_residual_glsl(rf) +
+    return head(xf) + x_pair2_glsl(of) + x_residual_glsl(rf) +
         "uniform sampler2D W,X,R" + BS + ";uniform float ws;" + WD +
         "void main(){int t=int(gl_FragCoord.x);int r0=2*t;int r1=r0+1;" + SP +
-        "float res0=Y1Q(R,r0," + to_string(rw) + ".0);"
-        "float res1=Y1Q(R,r1," + to_string(rw) + ".0);" + BIAS_GEN +
+        "float res0=Y1Q(R,r0," + RTW + ".0);"
+        "float res1=Y1Q(R,r1," + RTW + ".0);" + BIAS_GEN +
         "float s0=0.0,s1=0.0;"
         "for(int q=0;q<" + to_string(cols / 4) + ";q++){"
         "vec4 c0=texture2D(W,vec2((float(q)+0.5)/float(" + to_string(cols / 4) + "),"

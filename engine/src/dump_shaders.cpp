@@ -110,13 +110,13 @@ vector<Case> cases() {
     add(v, "matvec_q8_pair_fused_2432x768_i16_2",
         [] { return matvec_q8_pair_fused(2432, 768, I16_2); });
     add(v, "matvec_q8_add_768x768_i16_2_i16_1",
-        [] { return matvec_q8_add(768, 768, I16_2, I16_1); });
+        [] { return matvec_q8_add(768, 768, I16_2, I16_1, I16_1); });
     add(v, "matvec_q8_add_768x768_i8_4_i16_1",
-        [] { return matvec_q8_add(768, 768, I8_4, I16_1); });
+        [] { return matvec_q8_add(768, 768, I8_4, I16_1, I16_1); });
     add(v, "matvec_q8_add_pair_768x768_i16_2_inl",
-        [] { return matvec_q8_add_pair(768, 768, I16_2, I16_2, true); });
+        [] { return matvec_q8_add_pair(768, 768, I16_2, I16_2, I16_2, true); });
     add(v, "matvec_q8_add_pair_768x768_i16_2_gen",
-        [] { return matvec_q8_add_pair(768, 768, I16_2, I16_2, false); });
+        [] { return matvec_q8_add_pair(768, 768, I16_2, I16_2, I16_2, false); });
 
     // --- 2-bit ternary weights (dtype 7).  Two shapes: the FFN gate's 4096 rows
     // tile into four, the qkv's 1280 into two, and the residual add takes both
@@ -126,24 +126,24 @@ vector<Case> cases() {
     add(v, "matvec_t3_4096x1024_i16_2_t1024x4",
         [] { return matvec_t3(4096, 1024, I16_2, true, 1024, 4); });
     add(v, "matvec_t3_add_1024x1024_i16_2_i16_1",
-        [] { return matvec_t3_add(1024, 1024, I16_2, I16_1, true, 1024, 1); });
+        [] { return matvec_t3_add(1024, 1024, I16_2, I16_1, I16_1, true, 1024, 1); });
     add(v, "matvec_t3_pair_1280x1024_i16_2_t640x1",
         [] { return matvec_t3_pair(1280, 1024, I16_2, true, 640, 1); });
     add(v, "swiglu_pair2row_4096_i16_2",
         [] { return swiglu_pair2row(4096, I16_2, 0); });
     add(v, "matvec_t3_add_pair_1024x1024_i16_2_i16_2",
-        [] { return matvec_t3_add_pair(1024, 1024, I16_2, I16_2, true, 512, 1); });
+        [] { return matvec_t3_add_pair(1024, 1024, I16_2, I16_2, I16_2, true, 512, 1); });
 
     // --- i16 weights (legacy precision, still loadable)
     add(v, "matvec_i16_6400x768_i16_2", [] { return matvec_i16(6400, 768, I16_2); });
     add(v, "matvec_i16_add_1536x768_i16_2_i16_1",
-        [] { return matvec_i16_add(1536, 768, I16_2, I16_1); });
+        [] { return matvec_i16_add(1536, 768, I16_2, I16_1, I16_1); });
 
     // --- q4
     add(v, "matvec_i4_6400x768_i16_2_inl", [] { return matvec_i4(6400, 768, I16_2, true); });
     add(v, "matvec_i4_6400x768_i16_2_gen", [] { return matvec_i4(6400, 768, I16_2, false); });
     add(v, "matvec_i4_add_768x768_i16_2_i16_1",
-        [] { return matvec_i4_add(768, 768, I16_2, I16_1); });
+        [] { return matvec_i4_add(768, 768, I16_2, I16_1, I16_1); });
     add(v, "matvec_i4_pair_2432x768_i16_2",
         [] { return matvec_i4_pair(2432, 768, I16_2); });
     add(v, "matvec_i4_pair_swiglu_2432x768_i16_2_inl",
@@ -151,9 +151,9 @@ vector<Case> cases() {
     add(v, "matvec_i4_pair_swiglu_2432x768_i16_2_gen",
         [] { return matvec_i4_pair_swiglu(2432, 768, I16_2, false); });
     add(v, "matvec_i4_add_pair_768x768_i16_2_inl",
-        [] { return matvec_i4_add_pair(768, 768, I16_2, I16_2, true); });
+        [] { return matvec_i4_add_pair(768, 768, I16_2, I16_2, I16_2, true); });
     add(v, "matvec_i4_add_pair_768x768_i16_2_gen",
-        [] { return matvec_i4_add_pair(768, 768, I16_2, I16_2, false); });
+        [] { return matvec_i4_add_pair(768, 768, I16_2, I16_2, I16_2, false); });
     // The 4-bit (Q4_FMT=rgba4) kernels, the default q4 path.  The gate is the
     // flat 8-wide form (byte-identical to the nested, ~43% faster on VC4).
     add(v, "matvec_i4_pair_swiglu_4x4_1216x768_i16_2",
@@ -163,7 +163,7 @@ vector<Case> cases() {
     add(v, "matvec_i4_4x4_1536x768_i16_2",
         [] { return matvec_i4_4x4(1536, 768, I16_2, true); });
     add(v, "matvec_i4_add_4x4_768x1216_i16_2_i16_1",
-        [] { return matvec_i4_add_4x4(768, 1216, I16_2, I16_1); });
+        [] { return matvec_i4_add_4x4(768, 1216, I16_2, I16_1, I16_1); });
 
     // --- elementwise / norm / logits
     add(v, "swiglu_pair_2432_i16_2", [] { return swiglu_pair(2432, I16_2); });

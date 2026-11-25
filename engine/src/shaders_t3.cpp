@@ -100,14 +100,16 @@ string matvec_t3(int rows, int cols, XFormat xf, bool wrow, int t3_th, int t3_ti
            "gl_FragColor=x_q24encq(s*" + SC + ");}";
 }
 
-string matvec_t3_add(int rows, int cols, XFormat xf, XFormat rf, bool wrow, int t3_th, int t3_tiles) {
+string matvec_t3_add(int rows, int cols, XFormat xf, XFormat rf, XFormat of, bool wrow, int t3_th, int t3_tiles) {
     need_shape("matvec_t3_add", rows, cols, 8);
     const int axw = x_texels(cols, xf);
     const int nq = (cols + 7) / 8;
     const string AXW = to_string(axw);
     const string WD = wrow ? wrow_scale(rows) : "";
     const string SC = wrow ? "wsr(r)" : "ws";
+    const string ST = (of == rf) ? std::string("YST1Q") : std::string("xs1");
     return "//T3\n" + head(xf) + "precision highp int;\n" + t3_dec_def() + x_residual_glsl(rf) +
+           (of == rf ? std::string() : x_store_glsl(of)) +
            "uniform sampler2D W,X,R;uniform float ws;" + WD +
            "void main(){int r=int(gl_FragCoord.x);int t=r/2;float h=float(r-2*t);float s=0.0;"
            "for(int g=0;g<" + to_string(nq) + ";g++){"
@@ -117,7 +119,7 @@ string matvec_t3_add(int rows, int cols, XFormat xf, XFormat rf, bool wrow, int 
            "vec4 xb=X4Q(X,g*8+4," + AXW + ".0);"
            "s+=dot(" + t3_byte("bb.x") + ",xa)+dot(" + t3_byte("bb.y") + ",xb);}"
            "float res=Y1Q(R,r," + to_string(x_texels(rows, rf)) + ".0);"
-           "gl_FragColor=YST1Q(s*" + SC + "+res);}";
+           "gl_FragColor=" + ST + "(s*" + SC + "+res);}";
 }
 
 // The 2-bit pair kernel: two output rows a fragment, so all four bytes of one
@@ -148,23 +150,22 @@ string matvec_t3_pair(int rows, int cols, XFormat xf, bool wrow, int t3_th, int 
            "gl_FragColor=x_st2q(s0*" + SC0 + ",s1*" + SC1 + ");}";
 }
 
-string matvec_t3_add_pair(int rows, int cols, XFormat xf, XFormat rf, bool wrow,
+string matvec_t3_add_pair(int rows, int cols, XFormat xf, XFormat rf, XFormat of, bool wrow,
                           int t3_th, int t3_tiles) {
     need_shape("matvec_t3_add_pair", rows, cols, 8);
     const int axw = x_texels(cols, xf);
-    const int rw = (rows + 1) / 2;
     const int nq = (cols + 7) / 8;
     const string AXW = to_string(axw);
     const string WD = wrow ? wrow_scale(rows) : "";
     const string SP = wrow ? "vec2 sc=wsr2(2*t);" : "";
     const string SC0 = wrow ? "sc.x" : "ws", SC1 = wrow ? "sc.y" : "ws";
-    return "//T3\n" + head(xf) + "precision highp int;\n" + t3_dec_def() + x_pair2_glsl(rf) +
+    return "//T3\n" + head(xf) + "precision highp int;\n" + t3_dec_def() + x_pair2_glsl(of) +
            x_residual_glsl(rf) +
            "uniform sampler2D W,X,R;uniform float ws;" + WD +
            "void main(){int t=int(gl_FragCoord.x);int r0=2*t;int r1=min(r0+1," +
            to_string(rows - 1) + ");" + SP +
-           "float res0=Y1Q(R,r0," + to_string(rw) + ".0);"
-           "float res1=Y1Q(R,r1," + to_string(rw) + ".0);"
+           "float res0=Y1Q(R,r0," + to_string(x_texels(rows, rf)) + ".0);"
+           "float res1=Y1Q(R,r1," + to_string(x_texels(rows, rf)) + ".0);"
            "float s0=0.0,s1=0.0;"
            "for(int g=0;g<" + to_string(nq) + ";g++){"
            "vec4 c=" + t3_fetch("float(g)", "float(t)", nq, t3_th, t3_tiles) + ";"

@@ -233,7 +233,11 @@ void GPU::init_persistent(int dim, int layers, const vector<float>& rms_att,
     }
 
 GLuint GPU::upload_hidden(const vector<float>& x){
-        const int tw = x_texels((int)x.size(), res_fmt_);
+        return upload_hidden_fmt(x, res_fmt_);
+    }
+
+GLuint GPU::upload_hidden_fmt(const vector<float>& x, XFormat f){
+        const int tw = x_texels((int)x.size(), f);
         // Allocate on demand: the two slots used to be created by
         // init_persistent(), which a v5 container skips (it has no model-wide
         // norm), so every decoder upload went to texture 0 and every read of it
@@ -244,7 +248,7 @@ GLuint GPU::upload_hidden(const vector<float>& x){
                 hidden_in_ = make_texture(tw, 1, nullptr);
                 hidden_in_w_ = tw;
         }
-        vector<uint8_t> data = x_pack(x, res_fmt_);
+        vector<uint8_t> data = x_pack(x, f);
         bind_upload_tex(hidden_in_);
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, tw, 1, GL_RGBA, GL_UNSIGNED_BYTE, data.data());
         layer_finish("NF_UPLOAD");
@@ -279,6 +283,18 @@ GLuint GPU::upload_hidden_grp(const vector<float>& x, int b, int n){
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, tw, 1, GL_RGBA, GL_UNSIGNED_BYTE, data.data());
         layer_finish("NF_UPLOAD");
         return grp_in_[b];
+}
+
+Target& GPU::v5_h(int b, int n){
+        // A textured row is addressed by act_fmt_'s texel count, so the
+        // texture has to *be* that wide.  grp_width's max(res, act, ffn)
+        // sized these 512 texels for a 256-texel f32 row, and the fetch at
+        // u=(i+0.5)/256 then read every other texel: RES=f32 alone gave an
+        // encoder r1[0] of 1.45 against the reference's 0.31.
+        const int w = x_texels(att_dim_, act_fmt_);
+        if ((int)v5_h_.size() < n) v5_h_.resize(n);
+        if (v5_h_[b].tex == 0 || v5_h_[b].w != w) v5_h_[b] = make_target(w, 1);
+        return v5_h_[b];
 }
 
 Target& GPU::grp_h(int b, int n){
@@ -343,7 +359,7 @@ GLuint GPU::upload_activations(const vector<float>& x){
 // the store (one q16 pair row), and a LayerNorm is the same packing two rows
 // tall with the bias underneath -- so `ln_q16` reads y=0.25 for w and y=0.75
 // for b, and `bias_add` reads a one-row texture.
-void GPU::upload_v5_rows(const Model& m){
+void GPU::upload_v5_rows(const Model& m, XFormat qkf){
         EncdecRows& r = enc_rows_;
         // A bias rides the format of the tensor it is added to: a matvec writes
         // act_fmt_ (I24_1 by default) and a residual add reads res_fmt_, so the
@@ -371,6 +387,7 @@ void GPU::upload_v5_rows(const Model& m){
         r.fc1_b.assign(L, 0); r.fc2_b.assign(L, 0);
         r.enc_qkv_b.assign(E, 0); r.enc_o_b.assign(E, 0);
         r.enc_fc1_b.assign(E, 0); r.enc_fc2_b.assign(E, 0);
+        r.enc_fc2_b_rf.assign(E, 0);
         for (int l = 0; l < L; ++l) {
                 const int B = m.dec_bias_row(l, Model::kRowQ);
                 r.ln1[l] = wrow(m.bias_dim_row(B + Model::kRowLn1W), D);
@@ -387,7 +404,11 @@ void GPU::upload_v5_rows(const Model& m){
                            m.bias_dim_row(B + Model::kRowK) + D);
                 qkv.insert(qkv.end(), m.bias_dim_row(B + Model::kRowV),
                            m.bias_dim_row(B + Model::kRowV) + D);
-                r.qkv_b[l] = upload_bias(qkv, act_fmt_);
+                // The q/k/v bias is added into the qkv target, whose layout is
+                // the pair/I24 one the rope, score and KV readers decode -- not
+                // an axis format.  It was uploaded as ACT and added as RES, which
+                // only agreed while both were x16_2.
+                r.qkv_b[l] = upload_bias(qkv, qkf);
                 r.o_b[l] = one(m.bias_dim_row(B + Model::kRowO), D);
                 // The cross query's bias rides `qkv_target_`'s width, not `dim`:
                 // `att_scores` reads the q out of that target through `RQKVQ`,
@@ -399,7 +420,7 @@ void GPU::upload_v5_rows(const Model& m){
                         vector<float> pad(m.bias_dim_row(B + Model::kRowCQ),
                                           m.bias_dim_row(B + Model::kRowCQ) + D);
                         pad.resize((size_t)3 * D, 0.0f);
-                        r.cq_b[l] = upload_bias(pad, res_fmt_);
+                        r.cq_b[l] = upload_bias(pad, qkf);
                 }
                 // I24 to match the projection it rides: `att_cross_kv` reads
                 // both with one `X1`.
@@ -424,10 +445,13 @@ void GPU::upload_v5_rows(const Model& m){
                 vector<float> qkv(m.bias_dim_row(B + 0), m.bias_dim_row(B + 0) + D);
                 qkv.insert(qkv.end(), m.bias_dim_row(B + 1), m.bias_dim_row(B + 1) + D);
                 qkv.insert(qkv.end(), m.bias_dim_row(B + 2), m.bias_dim_row(B + 2) + D);
-                r.enc_qkv_b[l] = upload_bias(qkv, act_fmt_);
+                r.enc_qkv_b[l] = upload_bias(qkv, qkf);
                 r.enc_o_b[l] = one(m.bias_dim_row(B + 3), D);
                 r.enc_fc1_b[l] = one_act(m.bias_ffn_row(L + l), F);
                 r.enc_fc2_b[l] = one(m.bias_dim_row(B + 8), D);
+                // The fused w2 arm reads its base in the activation format, so
+                // the bias it folds must be encoded the same way.
+                r.enc_fc2_b_rf[l] = one_act(m.bias_dim_row(B + 8), D);
         }
         // No logits-bias texture: a 65k-row bias is 32,501 texels wide, over
         // every GL target limit, and the head's bias is added on the host where
@@ -446,9 +470,13 @@ void GPU::upload_v5_rows(const Model& m){
 // group slots (`grp_h(b, n)`) are Targets, so the encoder writes there and the
 // ping-pong is the same one the prefill group loop keeps.
 GLuint GPU::upload_into(Target& t, const vector<float>& x){
-        const int tw = x_texels((int)x.size(), res_fmt_);
+        return upload_into_fmt(t, x, res_fmt_);
+    }
+
+GLuint GPU::upload_into_fmt(Target& t, const vector<float>& x, XFormat f){
+        const int tw = x_texels((int)x.size(), f);
         if (t.tex == 0 || t.w < tw) t = make_target(tw, 1);
-        vector<uint8_t> data = x_pack(x, res_fmt_);
+        vector<uint8_t> data = x_pack(x, f);
         bind_upload_tex(t.tex);
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, tw, 1, GL_RGBA, GL_UNSIGNED_BYTE, data.data());
         layer_finish("NF_UPLOAD");

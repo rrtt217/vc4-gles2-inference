@@ -35,29 +35,55 @@ translation, which is what `cmp_logits.py` compares the engine's dump against.
 """
 import argparse
 import json
+import os
 import sys
 
 import numpy as np
 
 from pth_legacy import load as load_legacy
+from ref_forward import load as load_safetensors
 
 
 def load_marian(model_dir):
     cfg = json.load(open(model_dir + "/config.json"))
-    w = load_legacy(model_dir + "/pytorch_model.bin")
+    # `model.safetensors` first: a current export ships only that, and this
+    # loader used to read `pytorch_model.bin` alone, so such a source had no
+    # oracle at all -- the packer's calibration caught the FileNotFoundError
+    # and silently skipped the rail check.  OPUS-MT's own release is the bare
+    # pickle, so that path stays.
+    st = os.path.join(model_dir, "model.safetensors")
+    if os.path.exists(st):
+        get, hdr = load_safetensors(st)
+        w = {k: get(k) for k in hdr if k != "__metadata__"}
+    else:
+        w = load_legacy(model_dir + "/pytorch_model.bin")
     g = lambda k: np.asarray(w[k], dtype=np.float32)
     dim = cfg["d_model"]
     L = cfg["encoder_layers"]
     Ld = cfg["decoder_layers"]
     ff = cfg["encoder_ffn_dim"]
     H = cfg["encoder_attention_heads"]
+    # A current export with `static_position_embeddings: true` carries no
+    # `embed_positions` tensor at all (the table is a buffer, regenerated at
+    # load).  The same synthesis mmcf_hf.load_marian uses: it reproduces the
+    # OPUS-MT table, which does ship one, to max|diff| 0.0.
+    if "model.encoder.embed_positions.weight" in w:
+        pos = g("model.encoder.embed_positions.weight")
+        pos_dec = g("model.decoder.embed_positions.weight")
+    else:
+        rows = int(cfg.get("max_position_embeddings") or 512)
+        h = dim // 2
+        inv = 10000.0 ** (-np.arange(0, h, dtype=np.float64) / h)
+        ang = np.arange(rows, dtype=np.float64)[:, None] * inv[None, :]
+        pos = np.concatenate([np.sin(ang), np.cos(ang)], axis=1).astype(np.float32)
+        pos_dec = pos
     out = {
         "dim": dim, "layers": L, "dec_layers": Ld, "hidden": ff, "heads": H,
         "vocab": cfg["vocab_size"], "seq": cfg["max_position_embeddings"],
         "shared": g("model.shared.weight"),
         "final_logits_bias": g("final_logits_bias").reshape(-1),
-        "pos": g("model.encoder.embed_positions.weight"),
-        "pos_dec": g("model.decoder.embed_positions.weight"),
+        "pos": pos,
+        "pos_dec": pos_dec,
         "scale_emb": float(np.sqrt(dim)) if cfg.get("scale_embedding") else 1.0,
         "start_id": cfg["decoder_start_token_id"],
         "eos_id": cfg["eos_token_id"],

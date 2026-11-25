@@ -81,7 +81,7 @@ public:
     void upload_batch_begin();
     void upload_batch_end();
     // v5: build the bias and LayerNorm row textures (needs the container's rows).
-    void upload_v5_rows(const class Model& m);
+    void upload_v5_rows(const class Model& m, XFormat qkf);
     // The row passes (src/gpu_row.cpp).  `wb` is one texture holding a
     // LayerNorm's weight at row 0 and its bias at row 1; each pass takes the
     // format its *caller* uses, because a matvec output is act_fmt_ and a
@@ -93,9 +93,16 @@ public:
     GLuint ln_q16(GLuint x, GLuint w, GLuint b, Target& out, float eps,
                   const char* kind = nullptr, int layer = -1, int site_no = -1,
                   int pos = -1);
+    // The q/k/v projection target's own layout: a fixed q16 pair (or I24)
+    // shared with the rope/score/KV readers, not res_fmt_.  The bias add and
+    // the bias upload use it, so the qkv path cannot drift with ACT/RES.
+    XFormat qkv_fmt() const {
+        return att_qkv_pair_ ? XFormat::I16_2 : XFormat::I24_1;
+    }
     Target& ln_stat_probe() { return ln_stat_; }
     GLuint upload_bias(const vector<float>& b, XFormat f);
     GLuint upload_into(Target& t, const vector<float>& x);
+    GLuint upload_into_fmt(Target& t, const vector<float>& x, XFormat f);
     void attach_dump_fbo(Target& t);
     GLuint bias_add(GLuint x, GLuint b, Target& out);
     GLuint bias_add_wide(GLuint x, GLuint b, Target& out, int dim);
@@ -246,6 +253,7 @@ public:
     // loop ping-pongs through (grp_tmp_ is the shared wo output / x1 scratch).
     GLuint upload_hidden_grp(const vector<float>& x, int b, int n);
     Target& grp_h(int b, int n);
+    Target& v5_h(int b, int n);
     Target& grp_tmp();
     Target& grp_w2a();
 
@@ -253,17 +261,30 @@ public:
                         const vector<float>& rms_ffn, const vector<float>& rms_final);
 
     GLuint upload_hidden(const vector<float>& x);
+    // A v5 block reads its input as an activation (the first attention and
+    // the first add both take it), so that upload names its format.
+    GLuint upload_hidden_fmt(const vector<float>& x, XFormat f);
     // Second hidden upload slot, so two positions can be in flight at once.
     GLuint upload_hidden_b(const vector<float>& x);
 
     GLuint rmsnorm(GLuint x, GLuint w, Target& out);
 
     void matvec_add(const Mat& m, GLuint x, GLuint residual, Target& out, XFormat xf);
+    // `rf` is the format of the *base* being added into.  It is res_fmt_ in
+    // the dense chain, and act_fmt_ in a v5 block, where every sublayer
+    // adds into the previous LayerNorm's output.  The store is always
+    // res_fmt_: that is what the next LayerNorm reads.
+    void matvec_add_rf(const Mat& m, GLuint x, GLuint residual, Target& out,
+                       XFormat xf, XFormat rf);
     // The same, with a bias folded into the write-back: one draw where the
     // caller would otherwise add another.  `bias` on a kernel without the arm
     // is ignored, so a caller must still pay its own `bias_add` there.
     void matvec_add_bias(const Mat& m, GLuint x, GLuint residual, GLuint bias,
-                         Target& out, XFormat xf);
+                         Target& out, XFormat xf) {
+        matvec_add_bias_rf(m, x, residual, bias, out, xf, res_fmt_);
+    }
+    void matvec_add_bias_rf(const Mat& m, GLuint x, GLuint residual, GLuint bias,
+                            Target& out, XFormat xf, XFormat rf);
 
     // LFM2 conv block.  The three in_proj row slices are drawn into their own
     // 1024-wide targets (a 3072-wide draw would exceed VC4's 2048), the gates
@@ -414,17 +435,17 @@ private:
     GLuint x_q8_pair_fused(int rows, int cols, bool wrow = false);
     GLuint x_i4_pair(int rows, int cols);
     GLuint x_i4_pair_swiglu(int rows, int cols, int hs = 0, bool fmt4 = false);
-    GLuint x_q8_add(int rows, int cols, XFormat xf, bool wrow = false);
+    GLuint x_q8_add(int rows, int cols, XFormat xf, XFormat rf, bool wrow = false);
     GLuint x_t3(const Mat& m, bool wrow = false);
     GLuint x_t3_add(const Mat& m, XFormat xf, XFormat rf, bool wrow = false);
     GLuint x_t3_pair(const Mat& m, bool wrow = false);
     GLuint x_t3_add_pair(const Mat& m, XFormat xf, XFormat rf, bool wrow = false);
-    GLuint x_q8_add_pair(int rows, int cols, XFormat xf, bool wrow, bool bias);
-    GLuint x_i4_add_pair(int rows, int cols, XFormat xf, bool fmt4 = false);
+    GLuint x_q8_add_pair(int rows, int cols, XFormat xf, XFormat rf, bool wrow, bool bias);
+    GLuint x_i4_add_pair(int rows, int cols, XFormat xf, XFormat rf, bool fmt4 = false);
     GLuint x_i16(int rows, int cols);
-    GLuint x_i16_add(int rows, int cols, XFormat xf);
+    GLuint x_i16_add(int rows, int cols, XFormat xf, XFormat rf);
     GLuint x_i4(int rows, int cols, bool fmt4 = false);
-    GLuint x_i4_add(int rows, int cols, XFormat xf, bool fmt4 = false);
+    GLuint x_i4_add(int rows, int cols, XFormat xf, XFormat rf, bool fmt4 = false);
     GLuint x_swiglu_pair(int hidden, int hs = 0);
     GLuint x_swiglu_2row(int hidden, int hs = 0);
     GLuint x_swiglu(int hidden, bool fused, int hs = 0);
@@ -533,6 +554,11 @@ private:
     // score texture (seq/2 x heads*n), plus the group's residual store.
     Target qrot_batch_, scores_batch_;
     vector<Target> grp_h_;
+    // The v5 encoder's per-position rows.  Separate from grp_h_ because the
+    // width differs: grp_h_ is the widest of res/act/ffn (the dense group
+    // loop writes it in more than one format), while every writer and reader
+    // of a v5 row is the activation stream.
+    vector<Target> v5_h_;
     Target grp_tmp_, grp_w2a_;
     vector<GLuint> grp_in_;
     // 8-bit KV: one per-head V step texel per position, one plane per layer.
@@ -680,6 +706,10 @@ private:  // matvec input (qkv/wo/gate/logits)
         vector<GLuint> enc_ln1, enc_ln1b, enc_ln2, enc_ln2b;
         vector<GLuint> qkv_b, o_b, cq_b, ck_b, cv_b, co_b, fc1_b, fc2_b;  // [layer]
         vector<GLuint> enc_qkv_b, enc_o_b, enc_fc1_b, enc_fc2_b;          // [enc layer]
+        // The fused w2 arm's copy of enc_fc2_b, encoded in the format that
+        // arm reads its base in (the activation stream); the plain one is
+        // res for the separate bias_add.
+        vector<GLuint> enc_fc2_b_rf;                                    // [enc layer]
         GLuint logits_b = 0;
         GLuint pos = 0;
         // Cleared on a release: these are the only handles of this set the
@@ -694,6 +724,7 @@ private:  // matvec input (qkv/wo/gate/logits)
                 qkv_b.clear(); o_b.clear(); cq_b.clear(); ck_b.clear();
                 cv_b.clear(); co_b.clear(); fc1_b.clear(); fc2_b.clear();
                 enc_qkv_b.clear(); enc_o_b.clear(); enc_fc1_b.clear(); enc_fc2_b.clear();
+                enc_fc2_b_rf.clear();
                 logits_b = pos = 0;
         }    } enc_rows_;
     GLuint rwkv_mul(GLuint a, GLuint b, Target& out, int adiv);

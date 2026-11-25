@@ -49,8 +49,8 @@ GLuint GPU::x_t3_add(const Mat& m, XFormat xf, XFormat rf, bool wrow){
         // ACT=i8 on the t3 body: layer 0's FFN was decoded as I8_4).
         return x_prog("xt3a_" + to_string(m.rows) + "_" + to_string(m.cols) + "_" +
                       x_format_name(xf) + "_" + x_format_name(rf) + "_" +
-                      to_string(th) + (wrow ? "_wr" : ""),
-                      matvec_t3_add(m.rows, m.cols, xf, rf, wrow, th, tiles));
+                      x_format_name(res_fmt_) + "_" + to_string(th) + (wrow ? "_wr" : ""),
+                      matvec_t3_add(m.rows, m.cols, xf, rf, res_fmt_, wrow, th, tiles));
     }
 
 GLuint GPU::x_q6(int rows, int cols, bool wrow){
@@ -160,45 +160,47 @@ GLuint GPU::x_t3_add_pair(const Mat& m, XFormat xf, XFormat rf, bool wrow){
         const int tiles = m.t3_tiles();
         return x_prog("xt3ap_" + to_string(m.rows) + "_" + to_string(m.cols) + "_" +
                       x_format_name(xf) + "_" + x_format_name(rf) + "_" +
-                      to_string(th) + (wrow ? "_wr" : ""),
-                      matvec_t3_add_pair(m.rows, m.cols, xf, rf, wrow, th, tiles));
+                      x_format_name(res_fmt_) + "_" + to_string(th) + (wrow ? "_wr" : ""),
+                      matvec_t3_add_pair(m.rows, m.cols, xf, rf, res_fmt_, wrow, th, tiles));
     }
 
-GLuint GPU::x_q8_add(int rows, int cols, XFormat xf, bool wrow){
+GLuint GPU::x_q8_add(int rows, int cols, XFormat xf, XFormat rf, bool wrow){
+        // `rf` is the base's format; the store is always the residual's.
         return x_prog("xq8a_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(xf) + "_" +
-                      x_format_name(res_fmt_) + (wrow ? "_wr" : ""),
-                      matvec_q8_add(rows, cols, xf, res_fmt_, wrow));
+                      x_format_name(rf) + "_" + x_format_name(res_fmt_) + (wrow ? "_wr" : ""),
+                      matvec_q8_add(rows, cols, xf, rf, res_fmt_, wrow));
     }
 
-GLuint GPU::x_q8_add_pair(int rows, int cols, XFormat xf, bool wrow, bool bias){
+GLuint GPU::x_q8_add_pair(int rows, int cols, XFormat xf, XFormat rf, bool wrow, bool bias){
         // The inline I16_2 decode is the default; Q8AP_INLINE=0 restores the
         // generic X4Q form in the same binary, so the two can be A/B-ed
         // interleaved without a second build.
         const char* v = getenv("Q8AP_INLINE");
         const bool inl = !(v && strcmp(v, "0") == 0);
-        // The residual's format belongs in the key as well as in the text: a
-        // bf16 residual takes the generic path even when the fast I16_2 one is
-        // available, and the two are different programs.
+        // rf is the base's format and res_fmt_ the store's; both belong in the
+        // key, and the fast path only applies when all three coincide.
         return x_prog("xq8ap_" + to_string(rows) + "_" + to_string(cols) + "_" +
-                      x_format_name(xf) + (inl ? "" : "_gen") + (wrow ? "_wr" : "") +
-                      (bias ? "_b" : "") +
+                      x_format_name(xf) + "_" + x_format_name(rf) + (inl ? "" : "_gen") +
+                      (wrow ? "_wr" : "") + (bias ? "_b" : "") +
                       (res_fmt_ == XFormat::I16_2 ? std::string() : std::string("_") + x_format_name(res_fmt_)),
-                      matvec_q8_add_pair(rows, cols, xf, res_fmt_, inl, wrow, bias));
+                      matvec_q8_add_pair(rows, cols, xf, rf, res_fmt_, inl, wrow, bias));
     }
 
-GLuint GPU::x_i4_add_pair(int rows, int cols, XFormat xf, bool fmt4){
+GLuint GPU::x_i4_add_pair(int rows, int cols, XFormat xf, XFormat rf, bool fmt4){
         const bool inl = q4_inline("w2");
-        // The residual's format is part of the key: this kernel writes two rows
-        // into one texel, so a bf16 residual and a q16 one are different texts.
+        // The base's and the store's formats are both part of the key: this
+        // kernel writes two rows into one texel, so a bf16 residual and a q16
+        // one are different texts.
         const string key = string(fmt4 ? "xi4ap4_" : "xi4ap_") + to_string(rows) + "_" +
                            to_string(cols) + "_" + x_format_name(xf) + "_" +
-                           x_format_name(res_fmt_) + (inl ? "" : "_gen");
+                           x_format_name(rf) + "_" + x_format_name(res_fmt_) +
+                           (inl ? "" : "_gen");
         auto it = programs_.find(key);
         if (it != programs_.end()) return it->second;
         g_prog_key = key;
         const string text = glsl_text(key,
-                                     fmt4 ? matvec_i4_add_pair_4x4(rows, cols, xf, res_fmt_, inl)
-                                          : matvec_i4_add_pair(rows, cols, xf, res_fmt_, inl));
+                                     fmt4 ? matvec_i4_add_pair_4x4(rows, cols, xf, rf, res_fmt_, inl)
+                                          : matvec_i4_add_pair(rows, cols, xf, rf, res_fmt_, inl));
         GLuint p = link_program(text);
         programs_[key] = p;
         return p;
@@ -209,9 +211,10 @@ GLuint GPU::x_i16(int rows, int cols){
                       matvec_i16(rows, cols, act_fmt_));
     }
 
-GLuint GPU::x_i16_add(int rows, int cols, XFormat xf){
-        return x_prog("xi16a_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(xf) + "_" + x_format_name(res_fmt_),
-                      matvec_i16_add(rows, cols, xf, res_fmt_));
+GLuint GPU::x_i16_add(int rows, int cols, XFormat xf, XFormat rf){
+        return x_prog("xi16a_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(xf) + "_" +
+                      x_format_name(rf) + "_" + x_format_name(res_fmt_),
+                      matvec_i16_add(rows, cols, xf, rf, res_fmt_));
     }
 
 GLuint GPU::x_i4(int rows, int cols, bool fmt4){
@@ -222,11 +225,11 @@ GLuint GPU::x_i4(int rows, int cols, bool fmt4){
                            : matvec_i4(rows, cols, act_fmt_, inl));
     }
 
-GLuint GPU::x_i4_add(int rows, int cols, XFormat xf, bool fmt4){
+GLuint GPU::x_i4_add(int rows, int cols, XFormat xf, XFormat rf, bool fmt4){
         return x_prog(string(fmt4 ? "xi4a4_" : "xi4a_") + to_string(rows) + "_" + to_string(cols) + "_" +
-                          x_format_name(xf) + "_" + x_format_name(res_fmt_),
-                      fmt4 ? matvec_i4_add_4x4(rows, cols, xf, res_fmt_)
-                           : matvec_i4_add(rows, cols, xf, res_fmt_));
+                          x_format_name(xf) + "_" + x_format_name(rf) + "_" + x_format_name(res_fmt_),
+                      fmt4 ? matvec_i4_add_4x4(rows, cols, xf, rf, res_fmt_)
+                           : matvec_i4_add(rows, cols, xf, rf, res_fmt_));
     }
 
 GLuint GPU::x_swiglu_pair(int hidden, int hs){

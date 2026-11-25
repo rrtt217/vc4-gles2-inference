@@ -268,7 +268,13 @@ void GPU::att_qkv_draw(const Mat& qkv, GLuint x){
         // their text moves -- the same "flag, not a new kernel" rule the causal
         // and rope switches follow.
         if (att_qkv_bias_) {
-                bias_add_wide(qkv_target_.tex, att_qkv_bias_, qkv_biased_, 3 * att_dim_);
+                // In and out are the qkv target's own layout, not res: the
+                // rope/score/KV readers decode q16 pairs from this texture, and
+                // the bias is uploaded in the same one (upload_v5_rows).  It
+                // used to be bias_add_wide (res on both sides), which was only
+                // right while ACT, RES and the pair layout were all x16_2.
+                bias_add_f(qkv_target_.tex, att_qkv_bias_, qkv_biased_, 3 * att_dim_,
+                           qkv_fmt(), qkv_fmt());
                 std::swap(qkv_target_, qkv_biased_);
         }
 }

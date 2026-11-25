@@ -150,3 +150,10 @@ int x_pair2_texels(int count);
 // two *real* values as one P2 texel (x_st2 multiplies by 256), x_p2_stq packs two
 // values already in q16 units.  Call after x_glsl(): both use its encoders.
 std::string x_pair2_glsl(XFormat f = XFormat::I16_2);
+
+// `xs1(q)`: one value, q16 units, written in this format -- the add kernels'
+// store when the stream they add *into* is a different format from the one the
+// base was read in (a v5 FFN add: activation base, residual sum).  Distinct
+// names from x_residual_glsl's YST1Q so both blocks can live in one program.
+// Returns empty for a format that is not a residual (I8_4).
+std::string x_store_glsl(XFormat f);

@@ -105,6 +105,7 @@ void GPU::reset_targets(){
         qrot_batch_ = Target();
         scores_batch_ = Target();
         grp_h_.clear();
+        v5_h_.clear();
         grp_tmp_ = Target();
         grp_w2a_ = Target();
         hidden_a_ = Target();
