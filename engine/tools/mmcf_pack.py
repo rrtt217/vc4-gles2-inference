@@ -661,15 +661,19 @@ def main():
                  " ".join("%.0f" % v for v in peaks)))
         if worst > 4 * rail and not args.allow_over_rail:
             if meta.get('encdec'):
-                # The measurement is real (a v5 decoder's FFN residual reaches
-                # thousands on real sentences), but the wide-residual path the
-                # suggestion would use (--res q24) does not run yet, and the
-                # reference and the engine differ by a scale the LayerNorm hides.
-                # Refusing here would block the one configuration that works.
-                print("warning: the v5 residual (mean-centred max) reaches %.0f, "
-                      "%.0fx the %.1f rail.  --res q24 is not validated for v5 and "
-                      "the encoder-decoder's residual scale is still open, so this "
-                      "is not refused." % (worst, worst / rail, rail))
+                # The measurement is the source's own forward, not a conversion
+                # artifact: at OPUS-MT's dec1 FFN the reference row carries one
+                # 5959 dim at the start token, and replaying just the q16 store
+                # reproduces the engine's row at that site (numpy mean -1.01 /
+                # sd 16.6 against the engine's ENCDEC_DUMP `dec1 ln3 p0`
+                # -1.10 / 16.4).  The clip is real; the greedy text was
+                # unchanged on the sampled sentences.  But the wide path the
+                # suggestion would use (--res q24) does not run on v5 yet, so
+                # refusing would block the only configuration that works.
+                print("warning: the v5 residual reaches %.0f, %.0fx the %.1f rail.  "
+                      "The q16 store clips it (ENCDEC_DUMP prints the clipped "
+                      "site), and --res q24 is not validated for v5, so this is "
+                      "not refused." % (worst, worst / rail, rail))
             else:
                 raise SystemExit(
                     "this model's residual reaches %.0f, %.0fx the engine's %s rail (%.1f).\n"
@@ -679,7 +683,7 @@ def main():
                        "Pack it anyway with --allow-over-rail." if args.res == "q24" else
                        "Pack it with --res q24 (same 1/256 step, +-32768) if it fits, "
                        "or with --allow-over-rail."))
-        if worst > warn:
+        if worst > warn and not (meta.get('encdec') and worst > 4 * rail):
             print("warning: residual peak %.1f is %.0f%% of the %.1f rail; expect degraded "
                   "answers" % (worst, 100.0 * worst / rail, rail))
     # The residual's *format* is not the only thing a large residual breaks: the
@@ -689,8 +693,10 @@ def main():
     # 2048), and then inv_rms is wrong for every layer after the peak -- the
     # container answers with its end token, /not/ because the residual lost
     # range (measured 2026-11-18: PPL 4.4e55 with the 24-bit store against
-    # 7.7157 with RMS_STORE=f32, same container, one switch).
-    if peaks:
+    # 7.7157 with RMS_STORE=f32, same container, one switch).  A v5 block does
+    # not have that store: its LayerNorm is the split scan (f32 lane sums, a
+    # pair store), so the bound does not apply.
+    if peaks and not meta.get('encdec'):
         lanebound = worst * worst * (int(meta.get('dim') or 0) / 32.0)
         if lanebound > RMS_LANE_RAIL:
             print("rms store: a lane sum can reach %.1e against the 24-bit rail %.0f "
@@ -722,10 +728,17 @@ def main():
                 % (scaled, scaled / hrail, hrail))
         if scaled > hrail:
             loss = 100.0 * (1.0 - hrail / scaled)
-            print("warning: the FFN SwiGLU hidden is still clamped by the q16 activation "
-                  "rail at the positions that reach %.0f after scaling (%.0f%% of that "
-                  "hidden is cut); the error is silent.  See docs/checkpoint-container.md."
-                  % (scaled, loss))
+            if meta.get('encdec'):
+                print("warning: the v5 FFN hidden (swish) reaches %.0f and is clamped "
+                      "by the q16 activation rail (%.0f%% of that hidden is cut).  A v5 "
+                      "block does not read the per-layer scale (key 15), so the value "
+                      "is clamped whenever ACT is q16; widen ACT instead of scaling at "
+                      "pack time." % (scaled, loss))
+            else:
+                print("warning: the FFN SwiGLU hidden is still clamped by the q16 "
+                      "activation rail at the positions that reach %.0f after scaling "
+                      "(%.0f%% of that hidden is cut); the error is silent.  See "
+                      "docs/checkpoint-container.md." % (scaled, loss))
     # RWKV-7's channel mix is relu(x)^2 and its *square* is what travels through
     # the q16 activation rail -- the block's only amplifier, and on 0.1B the
     # stream closest to the rail.  The block above already reports the peak and

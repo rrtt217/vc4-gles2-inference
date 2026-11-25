@@ -1885,8 +1885,10 @@ def calibrate_encdec(model_dir, tok=None):
     res_fmt_) and the swish hidden per layer, plus the decoder's final
     LayerNorm output.  Vocabulary runs are not used: a post-norm block's first
     attention reads the unscaled embedding, so arbitrary ids reach thousands
-    while real text stays in the tens (4090 against 45 on OPUS-MT), and a
-    calibration that sampled them would refuse a container that translates.
+    where real text reaches 4 (4090 against 4 on OPUS-MT), and a calibration
+    that sampled them would refuse a container that translates.  Real text
+    has its own large value -- OPUS-MT's dec1 FFN carries one 5959 dim at the
+    start token -- and the calibration reports that rather than hiding it.
     """
     from ref_encdec import load_marian as forward_marian, Tok, greedy_peaks
     if not tok or not os.path.exists(tok):
@@ -1959,13 +1961,13 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
     rwkv = m.get('arch') == 'rwkv7'
     encdec = m.get('arch') == 'marian'
     enc_layers = int(m['enc']['layers']) if encdec else 0
-    if encdec:
-        # No rail measurement: every residual add in a post-norm block is
-        # followed by a LayerNorm, so the stream is normalised at every layer
-        # boundary and there is no growing sum to probe.  (The decoder-only
-        # check exists because a pre-norm stream *does* grow; docs/benchmarks.md
-        # has the two cases that had to be scaled.)
-        rail_check = False
+    # A post-norm block measures too, for the same reason a pre-norm one does:
+    # the residual is stored q16 *before* the LayerNorm, and the store's rail is
+    # absolute, so a large post-add value is clipped regardless of the LN that
+    # follows.  This used to be skipped on the argument that a post-norm stream
+    # is "normalised at every layer boundary"; OPUS-MT's dec1 FFN carries a
+    # 5960 dim at the start token, and the q16 store is what flattens it (the
+    # engine's ENCDEC_DUMP `dec1 ln3 p0` row replays the clip).
     # The FFN width that is written to the file is the expert width for a MoE
     # container: the dense mlp does not exist there.
     ffn_w = moe['hidden'] if moe else hidden

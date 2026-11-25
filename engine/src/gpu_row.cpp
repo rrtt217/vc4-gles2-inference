@@ -15,7 +15,8 @@
 using std::string;
 using std::to_string;
 
-GLuint GPU::ln_q16(GLuint x, GLuint w, GLuint b, Target& out, float eps){
+GLuint GPU::ln_q16(GLuint x, GLuint w, GLuint b, Target& out, float eps,
+                   const char* kind, int layer, int site_no, int pos){
         const int dim = att_dim_;
         const int ow = x_texels(dim, act_fmt_);
         if (out.tex == 0 || out.w != ow) out = make_target(ow, 1);
@@ -50,14 +51,18 @@ GLuint GPU::ln_q16(GLuint x, GLuint w, GLuint b, Target& out, float eps){
         }
         layer_finish("NF_LN");
         if (getenv("ENCDEC_DUMP")) {
-                static int ln_no = 0;
                 sync();
                 const vector<uint8_t> b = read_bytes(ln_stat_, 1, 2);
                 const float ms = x_unpack(b.data(), 0, kLnPairFmt);
                 const float ss = x_unpack(b.data(), 1, kLnPairFmt);
                 const float kf = x_unpack(b.data(), 2, kLnPairFmt);
                 const float sc = exp2f(kf);
-                fprintf(stderr, "LNS %d mean %.3f sd %.3f (k %d)\n", ln_no++,
+                // The label is the reference's site name (`enc0 ln1 p3`), so a
+                // line can be diffed against its own site and position: this
+                // line's stat is the *row*, and a max over all rows is a
+                // different quantity.
+                fprintf(stderr, "LNS %s%d ln%d p%d mean %.3f sd %.3f (k %d)\n",
+                        kind ? kind : "?", layer, site_no, pos,
                         (double)(ms * sc), (double)(ss * sc), (int)kf);
         }
         if (getenv("ENCDEC_DUMP")) {

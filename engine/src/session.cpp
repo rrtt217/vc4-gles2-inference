@@ -2402,7 +2402,7 @@ void Session::encdec_encode(const vector<int>& src) {
                         }
                         GLuint x1 = gpu_.ln_q16(gpu_.cd_c().tex, gpu_.enc_rows_.enc_ln1[l],
                                                 gpu_.enc_rows_.enc_ln1b[l],
-                                                gpu_.cd_a(), m.rms_eps);
+                                                gpu_.cd_a(), m.rms_eps, "enc", l, 1, b);
                         lap.mark("encLN1b", l);
                         // f = fc2(swish(fc1(x1) + b1)) + b2, then r2 = x1 + f.
                         // cd_b holds the fc1 side, so x1 (cd_a) survives as the
@@ -2440,7 +2440,7 @@ void Session::encdec_encode(const vector<int>& src) {
                         // x = LN2(r2), straight into the group slot the next layer reads.
                         h[b] = gpu_.ln_q16(gpu_.cd_c().tex, gpu_.enc_rows_.enc_ln2[l],
                                            gpu_.enc_rows_.enc_ln2b[l],
-                                           gpu_.grp_h(b, n), m.rms_eps);
+                                           gpu_.grp_h(b, n), m.rms_eps, "enc", l, 2, b);
                 }
                 lap.mark("encFFN", l);
         }
@@ -2515,7 +2515,8 @@ vector<float> Session::encdec_step(int token, int pos) {
                 gpu_.matvec_add(m.wo[l], at, h, gpu_.cd_b(), gpu_.act_fmt_);
                 gpu_.bias_add(gpu_.cd_b().tex, gpu_.enc_rows_.o_b[l], gpu_.cd_c());
                 GLuint y1 = gpu_.ln_q16(gpu_.cd_c().tex, gpu_.enc_rows_.ln1[l],
-                                        gpu_.enc_rows_.ln1b[l], gpu_.cd_a(), m.rms_eps);
+                                        gpu_.enc_rows_.ln1b[l], gpu_.cd_a(), m.rms_eps,
+                                        "dec", l, 1, pos);
                 // cross-attention: q from y1, k/v from the encoder (read-back
                 // planes; the cross kernel is the remaining host step)
                 // The cross-attention runs where the self-attention runs: the
@@ -2541,7 +2542,8 @@ vector<float> Session::encdec_step(int token, int pos) {
                 gpu_.matvec_add(m.u_cross_o[l], ctx_tex, y1, gpu_.cd_b(), gpu_.act_fmt_);
                 gpu_.bias_add(gpu_.cd_b().tex, gpu_.enc_rows_.co_b[l], gpu_.cd_c());
                 GLuint y2 = gpu_.ln_q16(gpu_.cd_c().tex, gpu_.enc_rows_.ln2[l],
-                                        gpu_.enc_rows_.ln2b[l], gpu_.cd_a(), m.rms_eps);
+                                        gpu_.enc_rows_.ln2b[l], gpu_.cd_a(), m.rms_eps,
+                                        "dec", l, 2, pos);
                 gpu_.matvec_to(m.w1[l], y2, gpu_.cd_d());
                 GLuint hid = gpu_.act_swish_biased(gpu_.cd_d().tex, gpu_.enc_rows_.fc1_b[l],
                                                    gpu_.cd_b(), F, XFormat::I24_1,
@@ -2549,7 +2551,8 @@ vector<float> Session::encdec_step(int token, int pos) {
                 gpu_.matvec_add(m.w2[l], hid, y2, gpu_.cd_d(), gpu_.act_fmt_);
                 gpu_.bias_add(gpu_.cd_d().tex, gpu_.enc_rows_.fc2_b[l], gpu_.cd_c());
                 h = gpu_.ln_q16(gpu_.cd_c().tex, gpu_.enc_rows_.ln3[l],
-                                gpu_.enc_rows_.ln3b[l], gpu_.cd_d(), m.rms_eps);
+                                gpu_.enc_rows_.ln3b[l], gpu_.cd_d(), m.rms_eps,
+                                "dec", l, 3, pos);
         }
         vector<float> lg = gpu_.logits_from(m.logits_tiles, h);
         if (env_flag("ENCDEC_DUMP") && pos == 0 && !lg.empty()) {

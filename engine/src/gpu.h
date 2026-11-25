@@ -87,7 +87,12 @@ public:
     // format its *caller* uses, because a matvec output is act_fmt_ and a
     // residual is res_fmt_ and reading one as the other silently shrinks the
     // row to a fixed factor.
-    GLuint ln_q16(GLuint x, GLuint w, GLuint b, Target& out, float eps);
+    // `kind`/`layer`/`site_no`/`pos` are the dump's label only (ENCDEC_DUMP):
+    // a bare counter could not be matched to a site of the reference's forward,
+    // which is how a per-row number once got compared to a max over positions.
+    GLuint ln_q16(GLuint x, GLuint w, GLuint b, Target& out, float eps,
+                  const char* kind = nullptr, int layer = -1, int site_no = -1,
+                  int pos = -1);
     Target& ln_stat_probe() { return ln_stat_; }
     GLuint upload_bias(const vector<float>& b, XFormat f);
     GLuint upload_into(Target& t, const vector<float>& x);

@@ -171,43 +171,45 @@ def residual_peaks(M, src_ids, tgt_ids):
 
     A "residual" here is what the engine stores in res_fmt_ between two
     sublayers: x + sublayer(x) *before* the LayerNorm, not the LN's output.
-    Its rail metric is the **mean-centred** max: a LayerNorm removes a uniform
-    offset, and a v5 block's fc2/o bias is large enough to put the raw max in
-    the thousands while the deviation the LN actually reads stays in the tens
-    (OPUS-MT: 5960 raw against ~10 centred).  The hidden is the
-    swish(fc1(.)) a non-gated FFN writes in ACT; nothing subtracts its mean,
-    so its plain max is the rail.  Encoder and decoder layers are combined by
-    index; the head input is the decoder's final LayerNorm output.
+    Its rail metric is the row's plain max, the same quantity rail_peaks()
+    measures for a dense model: the store is absolute, and the LN subtracts
+    the mean only on the way out, so a large uniform offset is as
+    unrecoverable as a large deviation from it.  On OPUS-MT the two maxima
+    happen to coincide (dec1's FFN carries one 5959 dim at the start token).
+    The hidden is the swish(fc1(.)) a non-gated FFN writes in ACT; nothing
+    subtracts its mean, so its plain max is the rail.  Encoder and decoder
+    layers are combined by index; the head input is the decoder's final
+    LayerNorm output.
     """
     import numpy as np
     dim, H, eps = M["dim"], M["heads"], M["ln_eps"]
     x = M["shared"][src_ids] * M["scale_emb"] + M["pos"][:len(src_ids)]
-    def dev(r):
-        return float(np.abs(r - r.mean(-1, keepdims=True)).max())
+    def mx(r):
+        return float(np.abs(r).max())
     er, eh = [], []
     for m in M["enc"]:
         r = x + attn(self_attn(m), x, dim, H)
-        er.append(dev(r))
+        er.append(mx(r))
         x = ln(r, m["ln1w"], m["ln1b"], eps)
         h = act(x @ m["w1"].T + m["b1"], M["swish"])
         eh.append(float(np.abs(h).max()))
         r = x + h @ m["w2"].T + m["b2"]
-        er[-1] = max(er[-1], dev(r))
+        er[-1] = max(er[-1], mx(r))
         x = ln(r, m["ln2w"], m["ln2b"], eps)
     enc_out = x
     y = M["shared"][tgt_ids] * M["scale_emb"] + M["pos_dec"][:len(tgt_ids)]
     dr, dh = [], []
     for m in M["dec"]:
         r = y + attn(self_attn(m), y, dim, H, causal=True)
-        dr.append(dev(r))
+        dr.append(mx(r))
         y = ln(r, m["ln1w"], m["ln1b"], eps)
         r = y + attn(cross_attn(m), y, dim, H, k_in=enc_out, v_in=enc_out)
-        dr[-1] = max(dr[-1], dev(r))
+        dr[-1] = max(dr[-1], mx(r))
         y = ln(r, m["ln2w"], m["ln2b"], eps)
         h = act(y @ m["w1"].T + m["b1"], M["swish"])
         dh.append(float(np.abs(h).max()))
         r = y + h @ m["w2"].T + m["b2"]
-        dr[-1] = max(dr[-1], dev(r))
+        dr[-1] = max(dr[-1], mx(r))
         y = ln(r, m["ln3w"], m["ln3b"], eps)
     n = max(len(er), len(dr))
     res = [max(er[i] if i < len(er) else 0.0, dr[i] if i < len(dr) else 0.0)
@@ -275,9 +277,11 @@ def greedy_peaks(M, tok, text, max_gen=16):
     Same source convention as translate() -- a leading space and the source
     <eos> -- and the decoder target is the model's own greedy output.  A random
     vocabulary run is *not* representative of a post-norm block: its first
-    attention reads the unscaled embedding, and arbitrary ids drive the
-    residual to thousands (4090 on OPUS-MT) while real sentences stay in the
-    tens.  The peaks are over a sequence the model actually produces.
+    attention reads the unscaled embedding, and arbitrary ids drive that
+    residual to thousands (4090 on OPUS-MT) where real text reaches 4.  A real
+    sentence has its own peak elsewhere -- OPUS-MT's dec1 FFN carries one
+    5959 dim at the start token -- and that is a value the model really
+    produces, so the calibration keeps it.
     """
     import numpy as np
     src = tok.encode(" " + text) + [int(M["eos_id"])]
