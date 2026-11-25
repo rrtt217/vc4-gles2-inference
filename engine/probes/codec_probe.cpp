@@ -156,6 +156,8 @@ enum class Opt {
     Ship,
     PairHoist,  // one fetch, then select the texel half (the shipped X1's
                 // ternary names texture2D twice and both sides are evaluated)
+    PairFunc,   // the same as PairHoist, in the shape a macro can carry: a
+                // helper that takes the sampler and fetches inside
     I8Mask,     // I8_4: one vec4 conversion, then a basis dot for the component
     I8Index,    // I8_4: one vec4 conversion, dynamic component index
     NoSnap,     // I24/S24: the bytes as one dot with the byte weights, no int()
@@ -183,6 +185,10 @@ static string dec_body(XFormat f, Opt o, int n) {
                        "float v=(((i/2)*2==i)?x_bf16(c.rg):x_bf16(c.ba));";
             return "vec4 c=texture2D(T,vec2((float(i/2)+0.5)/" + TW + ",0.5));"
                    "float v=x_i16(((i/2)*2==i)?c.rg:c.ba);";
+        case Opt::PairFunc:
+            if (f == XFormat::BF16)
+                return "float v=x_bf16_of2(T,(float(i/2)+0.5)/" + TW + ",i-(i/2)*2);";
+            return "float v=x_i16_of2(T,(float(i/2)+0.5)/" + TW + ",i-(i/2)*2);";
         case Opt::I8Mask:
             return "vec4 c=texture2D(T,vec2((float(i/4)+0.5)/" + TW + ",0.5));"
                    "vec4 q=floor(c*255.0+0.5)-128.0;"
@@ -211,10 +217,25 @@ static string dec_body(XFormat f, Opt o, int n) {
 
 // One fragment a value.  `f32out` writes the value itself (a bit-cast, so the
 // comparison is exact) instead of the fract probe.
+// The PairFunc helpers: the fetch would move into the callee, which is what
+// a macro replacement can actually be.  (probes/README.md records that a
+// helper taking a *fetch* as an argument compiles badly on VC4; this one
+// takes the sampler.)
+static string pair_func_glsl(XFormat f) {
+    if (f == XFormat::BF16)
+        return "float x_bf16_of2(sampler2D T,float u,int odd){"
+               "vec4 c=texture2D(T,vec2(u,0.5));"
+               "return (odd==1)?x_bf16(c.ba):x_bf16(c.rg);}\n";
+    return "float x_i16_of2(sampler2D T,float u,int odd){"
+           "vec4 c=texture2D(T,vec2(u,0.5));"
+           "return x_i16((odd==1)?c.ba:c.rg);}\n";
+}
+
 static string dec_shader(XFormat f, int n, Opt o, bool f32out) {
     // The f32 codec is a bit-cast: it is only emitted for the check's f32
     // output, and that programme is ESSL 3.00 whatever the codec is.
     return head(f) + (f32out ? x_codec_glsl(XFormat::F32) : std::string()) +
+        ((o == Opt::PairFunc) ? pair_func_glsl(f) : std::string()) +
         "uniform sampler2D T;" +
         (f32out ? "" : "uniform float sc1;uniform float sc2;") +
         "void main(){int i=int(gl_FragCoord.x);" + dec_body(f, o, n) +
@@ -335,7 +356,9 @@ int main(int argc, char** argv) {
         {"bf16",         XFormat::BF16,  true,  Opt::Ship,      Opt::Ship},
         // decode variants
         {"i16_2 hoist",  XFormat::I16_2, false, Opt::PairHoist, Opt::Ship},
+        {"i16_2 func",   XFormat::I16_2, false, Opt::PairFunc,  Opt::Ship},
         {"bf16 hoist",   XFormat::BF16,  true,  Opt::PairHoist, Opt::Ship},
+        {"bf16 func",    XFormat::BF16,  true,  Opt::PairFunc,  Opt::Ship},
         {"i8_4 mask",    XFormat::I8_4,  false, Opt::I8Mask,    Opt::Ship},
         {"i8_4 index",   XFormat::I8_4,  false, Opt::I8Index,   Opt::Ship},
         {"i24_1 nosnap", XFormat::I24_1, false, Opt::NoSnap,    Opt::Ship},
