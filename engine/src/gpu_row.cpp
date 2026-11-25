@@ -53,17 +53,15 @@ GLuint GPU::ln_q16(GLuint x, GLuint w, GLuint b, Target& out, float eps,
         if (getenv("ENCDEC_DUMP")) {
                 sync();
                 const vector<uint8_t> b = read_bytes(ln_stat_, 1, 2);
-                const float ms = x_unpack(b.data(), 0, kLnPairFmt);
-                const float ss = x_unpack(b.data(), 1, kLnPairFmt);
-                const float kf = x_unpack(b.data(), 2, kLnPairFmt);
-                const float sc = exp2f(kf);
+                const float mean = x_unpack(b.data(), 0, XFormat::F32);
+                const float inv = x_unpack(b.data(), 1, XFormat::F32);
                 // The label is the reference's site name (`enc0 ln1 p3`), so a
                 // line can be diffed against its own site and position: this
                 // line's stat is the *row*, and a max over all rows is a
                 // different quantity.
-                fprintf(stderr, "LNS %s%d ln%d p%d mean %.3f sd %.3f (k %d)\n",
+                fprintf(stderr, "LNS %s%d ln%d p%d mean %.3f sd %.3f\n",
                         kind ? kind : "?", layer, site_no, pos,
-                        (double)(ms * sc), (double)(ss * sc), (int)kf);
+                        (double)mean, inv > 0.0f ? 1.0 / (double)inv : 0.0);
         }
         if (getenv("ENCDEC_DUMP")) {
                 static bool once = false;

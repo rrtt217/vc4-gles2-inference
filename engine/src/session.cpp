@@ -360,9 +360,21 @@ Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
             // row as that alpha byte -- a constant +255/256 on every odd
             // component, which is what the "odd components are wrong" hunt was
             // chasing for six commits.
-            if (m_.is_encdec())
+            if (m_.is_encdec()) {
+                // The v5 LayerNorm's statistics are f32 (a bit-cast), so every
+                // norm pass is an ESSL 3.00 kernel.  The ES 3.0 context request
+                // and the Mesa override the q4 path sets normally provide it;
+                // say it here rather than let the first layer die in a shader
+                // compile with a line number.
+                if (!gpu_es3_ok()) {
+                    cerr << "encoder-decoder: the v5 LayerNorm statistics are f32 and "
+                            "need an ESSL 3.00 context; this driver reports less "
+                            "(on Mesa, Q4_SHIFT=0 turns off the version override)\n";
+                    exit(2);
+                }
                 gpu_.upload_v5_rows(m_, (qkv_pair && ((m_.dim + 2 * m_.kv_dim) % 2 == 0))
                                             ? XFormat::I16_2 : XFormat::I24_1);
+            }
         }
         if (gpu_attn_)
             gpu_.init_attention(m_.dim, m_.kv_dim, m_.heads, m_.kv_heads, m_.head_dim,

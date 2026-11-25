@@ -5,15 +5,16 @@
 // flattens).  Those have different dimensions, and that is the whole
 // question: one fixed-point pair cannot serve both as the spread moves.
 //
-//   K   the shipped pair: (mean, sd) * 2^-k as two q16 halves of one texel,
-//       k in the second row (`ln_stats_split` + `ln_stats_reduce` +
-//       `ln_apply_q16`, exactly the engine's text).  The k exists because the
-//       pair is absolute (+-128); x is scaled by 2^-k to match.
+//   S   the shipped pair: mean in row 0 and 1/sd in row 1, both f32, through
+//       the engine's own split -> reduce -> apply.  This is the encoding the
+//       probe argues for: no grid, no k, no rail.
+//   K   the pair it replaced: (mean, sd) * 2^-k as two q16 halves of one texel,
+//       k in the second row.  The k exists because that pair is absolute
+//       (+-128); x is scaled by 2^-k to match.
 //   B   mean in the residual format (it is a value of the row), invstd as f32
 //       (a per-value exponent, so no k and no rail).
 //   C   the same with invstd as bf16 (7-bit mantissa, 0.4% relative).
 //   D   (mean, sd) both bf16 in one texel -- a per-value exponent, no k.
-//   E   (mean, invstd) both f32: no encoding at all, the floor.
 //
 // All arms read the same I24 input row (the q16 stream would clamp before the
 // statistics do at large spreads), sum in f32, and write an f32 output, so
@@ -265,15 +266,37 @@ int main() {
     GLuint d_apply = prog(apply_shader(RF,
         "vec4 st=texture2D(S,vec2(0.5,0.25));float mu=x_bf16(st.rg),sd=x_bf16(st.ba);"
         "gl_FragColor=x_f32enc((x-mu)/sd*wv(i)+bv(i));"));
-    // E: (mean, invstd) f32.
-    GLuint e_stats = prog(cand_stats(RF, "gl_FragColor=x_f32enc(mean);",
-                                     "gl_FragColor=x_f32enc(1.0/sd);"));
-    GLuint e_apply = prog(apply_shader(RF,
-        "float mu=x_f32(texture2D(S,vec2(0.5,0.25)));"
-        "float inv=x_f32(texture2D(S,vec2(0.5,0.75)));"
-        "gl_FragColor=x_f32enc((x-mu)*inv*wv(i)+bv(i));"));
-    if (!k_split || !k_reduce || !k_apply || !b_stats || !b_apply || !c_stats || !c_apply ||
-        !d_stats || !d_apply || !e_stats || !e_apply)
+    // K: the pair the shipped one replaced, kept as the reference point.
+    const string RW = to_string(x_texels(D, RF));
+    const string WW = to_string(x_texels(D, kLnPairFmt));
+    const string KSTATS =
+        "void main(){float s=0.0,s2=0.0;"
+        "for(int i=0;i<" + to_string(D) + ";i++){float v=Y1(X,i," + RW + ".0);s+=v;s2+=v*v;}"
+        "float mean=s/float(" + to_string(D) + ");"
+        "float sd=sqrt(max(s2/float(" + to_string(D) + ")-mean*mean,0.0)+eps);"
+        "float smax=max(abs(mean),sd);"
+        "float k=clamp(ceil(log2(max(smax,1e-20)/96.0)),-16.0,16.0);"
+        "if(gl_FragCoord.y<1.0)gl_FragColor=XST2(mean*exp2(-k),sd*exp2(-k));"
+        "else gl_FragColor=x_st1(k);}";
+    const string KWB =
+        "float wv(int i){vec4 c=texture2D(W,vec2((float(i/2)+0.5)/float(" + WW + "),0.5));"
+        "return ((i/2)*2==i)?x_i16(c.rg):x_i16(c.ba);}\n"
+        "float bv(int i){vec4 c=texture2D(B,vec2((float(i/2)+0.5)/float(" + WW + "),0.5));"
+        "return ((i/2)*2==i)?x_i16(c.rg):x_i16(c.ba);}\n";
+    GLuint kold_stats = prog("precision highp float;\n" + x_glsl(kLnPairFmt) +
+                             x_residual_glsl(RF) + x_codec_glsl(XFormat::F32) +
+                             "uniform sampler2D X;uniform float eps;" + KSTATS);
+    GLuint kold_apply = prog(
+        "precision highp float;\n" + x_glsl(kLnPairFmt) + x_residual_glsl(RF) +
+        x_codec_glsl(XFormat::F32) + "uniform sampler2D X,S,W,B;\n" + KWB +
+        "void main(){vec4 sp=texture2D(S,vec2(0.5,0.25));"
+        "float ms=x_i16(sp.rg),ss=x_i16(sp.ba);"
+        "float k=x_i16(texture2D(S,vec2(0.5,0.75)).rg);"
+        "float sc=exp2(-k),inv=1.0/ss;"
+        "int i=int(gl_FragCoord.x);float x=Y1(X,i," + RW + ".0);"
+        "gl_FragColor=x_f32enc((x*sc-ms)*inv*wv(i)+bv(i));}");
+    if (!k_split || !k_reduce || !k_apply || !kold_stats || !kold_apply ||
+        !b_stats || !b_apply || !c_stats || !c_apply || !d_stats || !d_apply)
         return 1;
 
     vector<float> w(D), b(D);
@@ -287,8 +310,8 @@ int main() {
     const GLuint stat = target_tex(1, 2);
     const GLuint out = target_tex(OW, 1);
 
-    printf("K = shipped (mean, sd)*2^-k q16 pair; B = mean in res + invstd f32; "
-           "C = same, invstd bf16; D = (mean, sd) bf16; E = (mean, invstd) f32\n");
+    printf("S = shipped (mean, 1/sd) f32; K = the previous (mean, sd)*2^-k q16 pair; "
+           "B = mean in res + 1/sd f32; C = same, 1/sd bf16; D = (mean, sd) bf16\n");
 
     auto run = [&](const char* tag, const vector<float>& x) {
         const vector<uint8_t> xb = x_pack(x, RF);
@@ -351,15 +374,15 @@ int main() {
             for (int i = 0; i < D; ++i) yy[(size_t)i] = x_unpack(px.data(), i, XFormat::F32);
             return compare(yy, yr);
         };
+        const Err ekold = cand(kold_stats, kold_apply, 2);
         const Err eb = cand(b_stats, b_apply, 2);
         const Err ec = cand(c_stats, c_apply, 2);
         const Err ed = cand(d_stats, d_apply, 1);
-        const Err ee = cand(e_stats, e_apply, 2);
 
-        printf("  %-22s mu %8.3f sd %8.3f | K %.2g/%.2g | B %.2g/%.2g | C %.2g/%.2g | "
-               "D %.2g/%.2g | E %.2g/%.2g\n",
-               tag, mu, sd, ek.maxabs, ek.rms, eb.maxabs, eb.rms, ec.maxabs, ec.rms,
-               ed.maxabs, ed.rms, ee.maxabs, ee.rms);
+        printf("  %-22s mu %8.3f sd %8.3f | S %.2g/%.2g | K %.2g/%.2g | B %.2g/%.2g | "
+               "C %.2g/%.2g | D %.2g/%.2g\n",
+               tag, mu, sd, ek.maxabs, ek.rms, ekold.maxabs, ekold.rms,
+               eb.maxabs, eb.rms, ec.maxabs, ec.rms, ed.maxabs, ed.rms);
         glDeleteTextures(1, &xt);
     };
 

@@ -461,6 +461,15 @@ std::string ln_stats_split(int dim, XFormat rf) {
 
 std::string ln_stats_reduce(int dim) {
     const string D = to_string(dim);
+    // Row 0 is the mean, row 1 the inverse standard deviation, both f32.  The
+    // two have reciprocal scales: the mean lives on the row's own grid, while
+    // 1/sd is unbounded as the row flattens, so one fixed-point pair cannot
+    // serve both.  The pair this replaced scaled both by 2^-k (k from
+    // max(|mean|, sd)) and rescaled x in the apply to match; probes/
+    // lnstats_probe measures that pair against this one, and this one is the
+    // floor on every row, including the rows where |mean| >> sd and the
+    // subtraction cancels.  f32 here means a bit-cast, i.e. an ESSL 3.00
+    // kernel -- the f32 and bf16 streams already are.
     return head(kLnPairFmt) + x_codec_glsl(XFormat::F32) +
         "uniform sampler2D S;uniform float eps;"
         "void main(){float sx=0.0,sxx=0.0;"
@@ -469,36 +478,30 @@ std::string ln_stats_reduce(int dim) {
         "sxx+=x_f32(texture2D(S,vec2((float(p+32)+0.5)/64.0,0.5)));}"
         "float mean=sx/float(" + D + ");"
         "float sd=sqrt(max(sxx/float(" + D + ")-mean*mean,0.0)+eps);"
-        "float smax=max(abs(mean),sd);"
-        "float k=clamp(ceil(log2(max(smax,1e-20)/96.0)),-16.0,16.0);"
-        "float sc=exp2(-k);"
-        "if(gl_FragCoord.y<1.0)gl_FragColor=XST2(mean*sc,sd*sc);"
-        "else gl_FragColor=x_st1(k);}";
+        "if(gl_FragCoord.y<1.0)gl_FragColor=x_f32enc(mean);"
+        "else gl_FragColor=x_f32enc(1.0/sd);}";
 }
 
 std::string ln_apply_q16(int dim, XFormat rf, XFormat out) {
     need_dim("ln_apply_q16", dim);
     const string RW = to_string(x_texels(dim, rf));
     const string WW = to_string(x_texels(dim, kLnPairFmt));
-    // S row 0 is (mean*2^-k, sd*2^-k) on kLnPairFmt; row 1 is k.  x is
-    // multiplied by 2^-k so the pair never leaves q16 -- see ln_stats_reduce.
-    // W and B are their own layout (kLnPairFmt), not the residual's: `rf` is
-    // the format of X only.
+    // S row 0 is the mean and row 1 the inverse std, both f32 (see
+    // ln_stats_reduce); W and B are their own layout (kLnPairFmt), not the
+    // residual's: `rf` is the format of X only.
     // The *output* shape follows `x_per_texel(out)`, not a per-format literal:
     // `x_f32enc2` never existed in the format module, and writing it here made
     // every ACT=f32 run of the encoder fail to compile.
     const auto term = [&](const string& k) {
-        return "(Y1(X," + k + "," + RW + ".0)*sc-ms)*inv*wv(" + k + ")+bv(" + k + ")";
+        return "(Y1(X," + k + "," + RW + ".0)-mu)*inv*wv(" + k + ")+bv(" + k + ")";
     };
     string body =
         "float wv(int i){vec4 c=texture2D(W,vec2((float(i/2)+0.5)/float(" + WW + "),0.5));"
         "return ((i/2)*2==i)?x_i16(c.rg):x_i16(c.ba);}\n"
         "float bv(int i){vec4 c=texture2D(B,vec2((float(i/2)+0.5)/float(" + WW + "),0.5));"
         "return ((i/2)*2==i)?x_i16(c.rg):x_i16(c.ba);}\n"
-        "void main(){vec4 sp=texture2D(S,vec2(0.5,0.25));"
-        "float ms=x_i16(sp.rg),ss=x_i16(sp.ba);"
-        "float k=x_i16(texture2D(S,vec2(0.5,0.75)).rg);"
-        "float sc=exp2(-k),inv=1.0/ss;";
+        "void main(){float mu=x_f32(texture2D(S,vec2(0.5,0.25)));"
+        "float inv=x_f32(texture2D(S,vec2(0.5,0.75)));";
     const int n = x_per_texel(out);
     if (n == 4)
         body += "int t=int(gl_FragCoord.x);int i0=4*t;"
@@ -511,7 +514,7 @@ std::string ln_apply_q16(int dim, XFormat rf, XFormat out) {
     else
         body += "int i0=int(gl_FragCoord.x);"
                 "gl_FragColor=XST1(" + term("i0") + ");}";
-    return head(out) + x_residual_glsl(rf) +
+    return head(out) + x_residual_glsl(rf) + x_codec_glsl(XFormat::F32) +
         "uniform sampler2D X,S,W,B;" + body;
 }
 
