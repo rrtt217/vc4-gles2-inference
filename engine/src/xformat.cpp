@@ -217,6 +217,23 @@ std::string x_scaled_glsl() {
         "#endif\n";
 }
 
+std::string x_proj_glsl(XFormat f) {
+    if (f == XFormat::F32)
+        return x_scaled_glsl() + "\n#ifndef X_PROJ_GLSL\n#define X_PROJ_GLSL\n" +
+               x_codec_glsl(XFormat::F32) +
+               "vec4 x_projenc(float q){return x_f32enc(q/256.0);}\n"
+               "float x_projdec(vec4 c){return x_f32(c);}\n"
+               "#endif\n";
+    // I24: the q16 units the epilogue already has.  The rail is the q16 one
+    // (|q| <= 32768) and the split is x_i24enc_at's -- a second copy of that
+    // arithmetic here is exactly what gate/check_codecs.py exists to refuse.
+    return x_scaled_glsl() + "\n#ifndef X_PROJ_GLSL\n#define X_PROJ_GLSL\n"
+           "vec4 x_projenc(float q){return x_i24enc_at("
+           "clamp(floor(q+0.5),-32768.0,32767.0)/256.0,256.0);}\n"
+           "float x_projdec(vec4 c){return x_i24dec_at(c,256.0);}\n"
+           "#endif\n";
+}
+
 static std::string q16_raw_glsl() {
         if (q16_decode_exact())
                 return x_scaled_glsl() +

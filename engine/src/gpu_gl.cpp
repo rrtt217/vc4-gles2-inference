@@ -262,6 +262,33 @@ vector<int32_t> GPU::read_i32_rows(Target& t, int w, int y, int h){
         }
         return out;
 }
+vector<float> GPU::read_proj(Target& t, int w, int h){
+        if (proj_fmt_ == XFormat::F32) {
+                bind_fbo(t.fbo);
+                glViewport(0, 0, t.w, t.h);
+                vector<uint8_t> b((size_t)w * h * 4);
+                note_sync();
+                glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, b.data());
+                vector<float> out((size_t)w * h);
+                for (int i = 0; i < w * h; ++i) {
+                        const uint32_t u = ((uint32_t)b[(size_t)i * 4] << 24) |
+                                           ((uint32_t)b[(size_t)i * 4 + 1] << 16) |
+                                           ((uint32_t)b[(size_t)i * 4 + 2] << 8) |
+                                           (uint32_t)b[(size_t)i * 4 + 3];
+                        memcpy(&out[(size_t)i], &u, 4);
+                }
+                return out;
+        }
+        vector<int32_t> raw = read_i32(t, w, h);
+        vector<float> out((size_t)w * h);
+        for (int i = 0; i < w * h; ++i) {
+                int v = raw[(size_t)i];
+                if (v >= 32768) v -= 65536;
+                out[(size_t)i] = (float)v / ACT_SCALE;
+        }
+        return out;
+}
+
 vector<int32_t> GPU::read_i32(Target& t, int w, int h){
         bind_fbo(t.fbo);
         glViewport(0, 0, t.w, t.h);

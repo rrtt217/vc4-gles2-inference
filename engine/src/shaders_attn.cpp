@@ -14,10 +14,6 @@ namespace {
 
 // 24-bit logits decode, shared by the sum and the two Top-K passes.  The
 // layout is xformat's (x_i24dec_at at the 1/256 grid), not a copy of it.
-const string kDec24Q =
-    x_scaled_glsl() +
-    "float dec(vec4 c){return x_i24dec_at(c,256.0);}";
-
 // QKV holds the q/k/v matvec output.  When the qkv matvec pairs two output
 // rows into one texel the reads become a half-width fetch plus a component
 // select; otherwise the original 24-bit fetch is emitted verbatim.
@@ -228,11 +224,11 @@ string att_helpers(const AttnConfig& c) {
             "if(KVVPT==2)return x_q16dec_at((odd==1)?c.ba:c.rg,KVSCALE);"
             "if(KVVPT==4)return x_i8byte_at(c[odd])/KVSCALE;return decKV1(c);}\n";
     }
-    return x_scaled_glsl() +
+    return x_scaled_glsl() + x_proj_glsl(c.proj) +
         x_codec_glsl(XFormat::F32) + x_codec_glsl(XFormat::BF16) +
         "vec4 q16(float v){return vec4(x_q16enc_at(v,256.0),0.0,1.0);}\n"
         "float dec24raw(vec4 c){return x_i24raw_at(c);}\n"
-        "float dec24q(vec4 c){return x_i24dec_at(c,256.0);}\n"
+        "float dec24q(vec4 c){return x_projdec(c);}\n"
         "vec4 enc24s(float v,float s){return x_i24enc_at(v,s);}\n"
         "float dec24s(vec4 c,float s){return x_i24dec_at(c,s);}\n"
         "float dec16(vec2 c){return x_q16dec_at(c,256.0);}\n"
@@ -685,14 +681,16 @@ string att_v_fold_shader(const AttnConfig& c, XFormat out, int nseg, bool accumu
            "void main(){int t=int(gl_FragCoord.x);" + init + reads + enc;
 }
 
-string top2_fast(int rows, int chunk) {
-    return "precision highp float;"
+string top2_fast(int rows, int chunk, XFormat proj) {
+    // L is a projection store: one logit a texel, written by whatever the
+    // logits pass drew (the ACT axis does not reach it).  x_projdec is that
+    // store's reader, so PROJ=f32 reaches here too.
+    return "precision highp float;" + x_proj_glsl(proj) +
         "uniform sampler2D L;uniform float tr,nr;"
-               + kDec24Q +
         "void main(){int x=int(gl_FragCoord.x);int ch=x/2;int rank=x-ch*2;int start=ch*" + to_string(chunk) + ";"
         "float best1=-1e30,best2=-1e30;int i1=0,i2=0;"
         "for(int k=0;k<" + to_string(chunk) + ";k++){int idx=start+k;if(idx>=" + to_string(rows) + ")break;"
-        "vec4 c=texture2D(L,vec2((float(idx)+0.5)/" + to_string(kLogitsGrid) + ".0,(tr+0.5)/nr));float v=dec(c);"
+        "vec4 c=texture2D(L,vec2((float(idx)+0.5)/" + to_string(kLogitsGrid) + ".0,(tr+0.5)/nr));float v=x_projdec(c);"
         "if(v>best1){best2=best1;i2=i1;best1=v;i1=idx;}else if(v>best2){best2=v;i2=idx;}}"
         "float bv=(rank==0?best1:best2)*256.0;int bi=rank==0?i1:i2;"
         "if(bv<0.0)bv+=65536.0;float vh=floor(bv/256.0),vl=bv-vh*256.0;"
@@ -700,14 +698,13 @@ string top2_fast(int rows, int chunk) {
         "gl_FragColor=vec4(vh/255.0,vl/255.0,ih/255.0,il/255.0);}";
 }
 
-string top2(int rows, int chunk) {
-    return "precision highp float;"
+string top2(int rows, int chunk, XFormat proj) {
+    return "precision highp float;" + x_proj_glsl(proj) +
         "uniform sampler2D L;uniform float tr,nr,invt;"
-               + kDec24Q +
         "void main(){int x=int(gl_FragCoord.x);int ch=x/3;int rank=x-ch*3;int start=ch*" + to_string(chunk) + ";"
         "float best1=-1e30,best2=-1e30,lm=-1e30,ls=0.0;int i1=0,i2=0;"
         "for(int k=0;k<" + to_string(chunk) + ";k++){int idx=start+k;if(idx>=" + to_string(rows) + ")break;"
-        "vec4 c=texture2D(L,vec2((float(idx)+0.5)/" + to_string(kLogitsGrid) + ".0,(tr+0.5)/nr));float v=dec(c);"
+        "vec4 c=texture2D(L,vec2((float(idx)+0.5)/" + to_string(kLogitsGrid) + ".0,(tr+0.5)/nr));float v=x_projdec(c);"
         "if(v>best1){best2=best1;i2=i1;best1=v;i1=idx;}else if(v>best2){best2=v;i2=idx;}"
         "if(v>lm){ls=ls*exp((lm-v)*invt)+1.0;lm=v;}else{ls+=exp((v-lm)*invt);}}"
         "if(rank<2){float bv=(rank==0?best1:best2)*256.0;int bi=rank==0?i1:i2;"

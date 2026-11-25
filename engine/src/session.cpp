@@ -352,6 +352,18 @@ Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
             gpu_.res_pack_ = x_per_texel(gpu_.res_fmt_) == 2;
             if (res && strcmp(res, "i16") && m_.res_q24 && strcmp(res, "i24"))
                 cerr << "RES overrides the container's q24 residual\n";
+            // A projection's output: the single-value matvec store (the pair
+            // kernels keep their packed q16).  `f32` is exact and costs the
+            // same to decode (probes/codec_probe: 6.08 ns against 6.08) but
+            // needs ESSL 3.00 for the bit-cast; `i24` is the shipped default.
+            const char* proj = sw_enum("PROJ");
+            if (proj && !strcmp(proj, "f32")) gpu_.proj_fmt_ = XFormat::F32;
+            else gpu_.proj_fmt_ = XFormat::I24_1;
+            if (gpu_.proj_fmt_ == XFormat::F32 && !gpu_es3_ok()) {
+                cerr << "PROJ=f32: the projection store is a bit-cast and needs an "
+                        "ESSL 3.00 context; this driver reports less\n";
+                exit(2);
+            }
             // The v5 bias and LayerNorm rows are packed *in the formats chosen
             // above*, so they cannot be uploaded before this block runs.  They
             // were uploaded from App::upload_weights(), i.e. while res_fmt_ was
@@ -383,8 +395,10 @@ Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
                             "the previous LayerNorm's output\n";
                     exit(2);
                 }
+                // The qkv bias rides in the qkv target's own layout, which is
+                // the pair it packs into or -- unpaired -- the projection's.
                 gpu_.upload_v5_rows(m_, (qkv_pair && ((m_.dim + 2 * m_.kv_dim) % 2 == 0))
-                                            ? XFormat::I16_2 : XFormat::I24_1);
+                                            ? XFormat::I16_2 : gpu_.proj_fmt_);
             }
         }
         if (gpu_attn_)
@@ -401,16 +415,16 @@ Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
                             : gpu_.kv_.bits == 16 ? "q16"
                             : gpu_.kv_.bits == 8 ? "q8" : "i24";
             const char* rms = sw_str("RMS_STORE");
-            fprintf(stderr, "formats: act %s res %s ffn %s | kv %s width %d | "
+            fprintf(stderr, "formats: act %s res %s ffn %s proj %s | kv %s width %d | "
                             "qkv_pair %d | rms %s\n",
                     x_format_name(gpu_.act_fmt_), x_format_name(gpu_.res_fmt_),
-                    x_format_name(gpu_.ffn_fmt_), kvs, gpu_.kv_.texels,
-                    (int)gpu_.att_qkv_pair_, rms ? rms : "i24");
+                    x_format_name(gpu_.ffn_fmt_), x_format_name(gpu_.proj_fmt_), kvs,
+                    gpu_.kv_.texels, (int)gpu_.att_qkv_pair_, rms ? rms : "i24");
             // The parse above is inside `if (gpu_layer_)`; saying so is the
             // difference between "the axis was applied" and "the axis was
             // ignored and the defaults ran".
             if (!gpu_layer_)
-                fprintf(stderr, "formats: ACT/RES/FFN_HID apply only with "
+                fprintf(stderr, "formats: ACT/RES/FFN_HID/PROJ apply only with "
                                 "GPU_LAYER=1; this run uses the defaults above\n");
         }
         // A v5 container has no model-wide norm: every layer carries its own
@@ -2437,15 +2451,26 @@ void Session::encdec_encode(const vector<int>& src) {
                         gpu_.matvec_to(m.u_enc_w1[l], x1, gpu_.cd_d());
                         lap.mark("encFC1", l);
                         // X is what `matvec_q8` wrote, and that kernel's
-                        // output store is I24 unconditionally -- the ACT axis
-                        // does not reach it.  Reading it as act_fmt_ is the
+                        // output store is the projection's (PROJ), not the
+                        // ACT axis's.  Reading it as act_fmt_ is the
                         // "FFN hidden is fine in one half only" bug.
                         // swish(fc1 + b) in one pass: the bias add was 0.59 ms
                         // against the 0.50 ms matvec that fed it, and both were
                         // their own draw.
+                        if (env_flag("ENCDEC_DUMP") && l == 0 && b == 0) {
+                                // The projection store itself: the tensor the
+                                // PROJ axis changes, decoded by the same codec
+                                // the GPU reads it with.
+                                Target& t = gpu_.cd_d();
+                                vector<uint8_t> wb = gpu_.read_bytes(t, 8, 1);
+                                cerr << "ENCDEC w1store[0..7] " << x_format_name(gpu_.proj_fmt_);
+                                for (int i = 0; i < 8; ++i)
+                                        cerr << " " << x_unpack(wb.data(), i, gpu_.proj_fmt_);
+                                cerr << "\n";
+                        }
                         GLuint hf = gpu_.act_swish_biased(gpu_.cd_d().tex,
                                                           gpu_.enc_rows_.enc_fc1_b[l],
-                                                          gpu_.cd_b(), F, XFormat::I24_1,
+                                                          gpu_.cd_b(), F, gpu_.proj_fmt_,
                                                           gpu_.act_fmt_);
                         lap.mark("encSwishB", l);
                         // hf lives in cd_b, so the add must not write there: a
@@ -2528,7 +2553,7 @@ void Session::encdec_encode(const vector<int>& src) {
                 for (int b = 0; b < n; ++b) {
                         // The bias rides the store: `att_cross_kv` reads the
                         // projection's I24 row and its bias row with the same
-                        // reader, so the separate `bias_add_matvec` pass is gone
+                        // reader, so the separate bias-add pass is gone
                         // and this is two draws a position instead of four.
                         gpu_.matvec_to(m.u_cross_k[l], gpu_.v5_h(b, n).tex, gpu_.cd_b());
                         gpu_.cross_kv_store(l, gpu_.cd_b().tex, b, /*v_half=*/false,
@@ -2595,7 +2620,7 @@ vector<float> Session::encdec_step(int token, int pos) {
                                         "dec", l, 2, pos);
                 gpu_.matvec_to(m.w1[l], y2, gpu_.cd_d());
                 GLuint hid = gpu_.act_swish_biased(gpu_.cd_d().tex, gpu_.enc_rows_.fc1_b[l],
-                                                   gpu_.cd_b(), F, XFormat::I24_1,
+                                                   gpu_.cd_b(), F, gpu_.proj_fmt_,
                                                    gpu_.act_fmt_);
                 gpu_.matvec_add_rf(m.w2[l], hid, y2, gpu_.cd_d(), gpu_.act_fmt_, gpu_.act_fmt_);
                 gpu_.bias_add(gpu_.cd_d().tex, gpu_.enc_rows_.fc2_b[l], gpu_.cd_c());

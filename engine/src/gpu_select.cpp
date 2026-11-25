@@ -18,8 +18,8 @@ using std::to_string;
 
 GLuint GPU::x_q8(int rows, int cols, bool wrow){
         return x_prog("xq8_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(act_fmt_) +
-                      (wrow ? "_wr" : ""),
-                      matvec_q8(rows, cols, act_fmt_, wrow));
+                      "_" + x_format_name(proj_fmt_) + (wrow ? "_wr" : ""),
+                      matvec_q8(rows, cols, act_fmt_, proj_fmt_, wrow));
     }
 
 GLuint GPU::x_t3(const Mat& m, bool wrow){
@@ -34,8 +34,9 @@ GLuint GPU::x_t3(const Mat& m, bool wrow){
                 fprintf(stderr, "T3GEOM mv rows=%d cols=%d tile_h=%d th=%d tiles=%d\n",
                         m.rows, m.cols, m.t3_tile_h, th, tiles);
         return x_prog("xt3_" + to_string(m.rows) + "_" + to_string(m.cols) + "_" +
-                      x_format_name(act_fmt_) + "_" + to_string(th) + (wrow ? "_wr" : ""),
-                      matvec_t3(m.rows, m.cols, act_fmt_, wrow, th, tiles));
+                      x_format_name(act_fmt_) + "_" + x_format_name(proj_fmt_) + "_" +
+                      to_string(th) + (wrow ? "_wr" : ""),
+                      matvec_t3(m.rows, m.cols, act_fmt_, proj_fmt_, wrow, th, tiles));
     }
 
 GLuint GPU::x_t3_add(const Mat& m, XFormat xf, XFormat rf, bool wrow){
@@ -55,8 +56,9 @@ GLuint GPU::x_t3_add(const Mat& m, XFormat xf, XFormat rf, bool wrow){
 
 GLuint GPU::x_q6(int rows, int cols, bool wrow){
         return x_prog("xq6_" + to_string(rows) + "_" + to_string(cols) + "_" +
-                      x_format_name(act_fmt_) + (wrow ? "_wr" : ""),
-                      matvec_q6(rows, cols, act_fmt_, wrow));
+                      x_format_name(act_fmt_) + "_" + x_format_name(proj_fmt_) +
+                      (wrow ? "_wr" : ""),
+                      matvec_q6(rows, cols, act_fmt_, proj_fmt_, wrow));
     }
 
 GLuint GPU::x_q8_pair(int rows, int cols, bool wrow){
@@ -207,8 +209,9 @@ GLuint GPU::x_i4_add_pair(int rows, int cols, XFormat xf, XFormat rf, bool fmt4)
     }
 
 GLuint GPU::x_i16(int rows, int cols){
-        return x_prog("xi16_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(act_fmt_),
-                      matvec_i16(rows, cols, act_fmt_));
+        return x_prog("xi16_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(act_fmt_) +
+                      "_" + x_format_name(proj_fmt_),
+                      matvec_i16(rows, cols, act_fmt_, proj_fmt_));
     }
 
 GLuint GPU::x_i16_add(int rows, int cols, XFormat xf, XFormat rf){
@@ -220,9 +223,9 @@ GLuint GPU::x_i16_add(int rows, int cols, XFormat xf, XFormat rf){
 GLuint GPU::x_i4(int rows, int cols, bool fmt4){
         const bool inl = q4_inline("qkv");
         return x_prog(string(fmt4 ? "xi44_" : "xi4_") + to_string(rows) + "_" + to_string(cols) + "_" +
-                          x_format_name(act_fmt_) + (inl ? "" : "_gen"),
-                      fmt4 ? matvec_i4_4x4(rows, cols, act_fmt_, inl)
-                           : matvec_i4(rows, cols, act_fmt_, inl));
+                          x_format_name(act_fmt_) + "_" + x_format_name(proj_fmt_) + (inl ? "" : "_gen"),
+                      fmt4 ? matvec_i4_4x4(rows, cols, act_fmt_, proj_fmt_, inl)
+                           : matvec_i4(rows, cols, act_fmt_, proj_fmt_, inl));
     }
 
 GLuint GPU::x_i4_add(int rows, int cols, XFormat xf, XFormat rf, bool fmt4){
@@ -245,8 +248,8 @@ GLuint GPU::x_swiglu_2row(int hidden, int hs){
     }
 
 GLuint GPU::x_swiglu(int hidden, bool fused, int hs){
-        return x_prog(string("xsw_") + (fused ? "f_" : "s_") + to_string(hidden) + "_" + x_format_name(ffn_fmt_) +
-                          (hs ? "_h" + to_string(hs) : ""),
+        return x_prog(string("xsw_") + (fused ? "f_" : "s_") + to_string(hidden) + "_" +
+                          x_format_name(ffn_fmt_) + (hs ? "_h" + to_string(hs) : ""),
                       swiglu(hidden, fused, ffn_fmt_, hs));
     }
 
@@ -326,11 +329,15 @@ GLuint GPU::x_v_row(int n){
 GLuint GPU::x_prob(){ return x_prog("xpr", att_prob(att_cfg())); }
 
 GLuint GPU::x_top2_fast(int rows, int chunk){
-        return x_prog("xt2f_" + to_string(rows) + "_" + to_string(chunk), top2_fast(rows, chunk));
+        return x_prog("xt2f_" + to_string(rows) + "_" + to_string(chunk) + "_" +
+                          x_format_name(proj_fmt_),
+                      top2_fast(rows, chunk, proj_fmt_));
     }
 
 GLuint GPU::x_top2(int rows, int chunk){
-        return x_prog("xt2_" + to_string(rows) + "_" + to_string(chunk), top2(rows, chunk));
+        return x_prog("xt2_" + to_string(rows) + "_" + to_string(chunk) + "_" +
+                          x_format_name(proj_fmt_),
+                      top2(rows, chunk, proj_fmt_));
     }
 
 GLuint GPU::x_q8_pair_logits(int rows, int cols, bool wrow){
@@ -357,6 +364,7 @@ GLuint GPU::x_top1_final(int groups){
 
 GLuint GPU::x_q8_batch(int rows, int cols, bool wrow){
         return x_prog("xq8b_" + std::to_string(rows) + "_" + std::to_string(cols) + "_" +
-                          x_format_name(act_fmt_) + (wrow ? "_wr" : ""),
-                      matvec_q8_batch(rows, cols, act_fmt_, wrow));
+                          x_format_name(act_fmt_) + "_" + x_format_name(proj_fmt_) +
+                          (wrow ? "_wr" : ""),
+                      matvec_q8_batch(rows, cols, act_fmt_, proj_fmt_, wrow));
 }

@@ -68,29 +68,32 @@ void add_attn(vector<Case>& v, const string& tag, const AttnConfig& c) {
 
 vector<Case> cases() {
     vector<Case> v;
-    const XFormat I16_1 = XFormat::I16_1, I16_2 = XFormat::I16_2, I8_4 = XFormat::I8_4;
+    const XFormat I16_1 = XFormat::I16_1, I16_2 = XFormat::I16_2, I8_4 = XFormat::I8_4,
+                  I24_1 = XFormat::I24_1;
 
     // --- q8 matvec family: the shapes the engine actually asks for
     // (qkv 1536, logits 6400, FFN 2432, hidden 768; cols = dim 768).
-    add(v, "matvec_q8_1536x768_i16_2", [] { return matvec_q8(1536, 768, I16_2); });
-    add(v, "matvec_q8_6400x768_i16_2", [] { return matvec_q8(6400, 768, I16_2); });
-    add(v, "matvec_q8_2432x768_i8_4", [] { return matvec_q8(2432, 768, I8_4); });
-    add(v, "matvec_q8_2432x768_i16_1", [] { return matvec_q8(2432, 768, I16_1); });
+    add(v, "matvec_q8_1536x768_i16_2", [] { return matvec_q8(1536, 768, I16_2, I24_1); });
+    add(v, "matvec_q8_1536x768_i16_2_projf32",
+        [] { return matvec_q8(1536, 768, I16_2, XFormat::F32); });
+    add(v, "matvec_q8_6400x768_i16_2", [] { return matvec_q8(6400, 768, I16_2, I24_1); });
+    add(v, "matvec_q8_2432x768_i8_4", [] { return matvec_q8(2432, 768, I8_4, I24_1); });
+    add(v, "matvec_q8_2432x768_i16_1", [] { return matvec_q8(2432, 768, I16_1, I24_1); });
     // The chunked prefill's batched kernel (P1, task-13): matvec_q8's text with
     // the input row from gl_FragCoord.y.  Its own line in the golden file, so a
     // change to either kernel's arithmetic is visible in both.
     add(v, "matvec_q8_batch_768x768_i16_2",
-        [] { return matvec_q8_batch(768, 768, I16_2); });
+        [] { return matvec_q8_batch(768, 768, I16_2, I24_1); });
     // No per-row-scale (wrow) entry: its unsigned scale decode carries no rail
     // fold and check_q16_decode.sh counts decodes against folds per line, which
     // is also why matvec_q8's own wrow form is not registered here.  The wrow
     // text is wrow_scale()'s, shared verbatim with that kernel.
     add(v, "matvec_q8_batch_64x768_i16_2",
-        [] { return matvec_q8_batch(64, 768, I16_2); });
+        [] { return matvec_q8_batch(64, 768, I16_2, I24_1); });
     add(v, "matvec_q8_batch_768x3072_i16_2",
-        [] { return matvec_q8_batch(768, 3072, I16_2); });
+        [] { return matvec_q8_batch(768, 3072, I16_2, I24_1); });
     add(v, "matvec_q8_batch_768x768_i24_1",
-        [] { return matvec_q8_batch(768, 768, XFormat::I24_1); });
+        [] { return matvec_q8_batch(768, 768, XFormat::I24_1, I24_1); });
     add(v, "matvec_q8_pair_2432x768_i16_2", [] { return matvec_q8_pair(2432, 768, I16_2); });
     add(v, "matvec_q8_pair_2432x768_i8_4", [] { return matvec_q8_pair(2432, 768, I8_4); });
     add(v, "matvec_q8_pair_logits_6400x768_i16_2",
@@ -122,9 +125,9 @@ vector<Case> cases() {
     // tile into four, the qkv's 1280 into two, and the residual add takes both
     // res layouts the engine can hand it.
     add(v, "matvec_t3_1280x1024_i16_2_t1024x2",
-        [] { return matvec_t3(1280, 1024, I16_2, true, 1024, 2); });
+        [] { return matvec_t3(1280, 1024, I16_2, I24_1, true, 1024, 2); });
     add(v, "matvec_t3_4096x1024_i16_2_t1024x4",
-        [] { return matvec_t3(4096, 1024, I16_2, true, 1024, 4); });
+        [] { return matvec_t3(4096, 1024, I16_2, I24_1, true, 1024, 4); });
     add(v, "matvec_t3_add_1024x1024_i16_2_i16_1",
         [] { return matvec_t3_add(1024, 1024, I16_2, I16_1, I16_1, true, 1024, 1); });
     add(v, "matvec_t3_pair_1280x1024_i16_2_t640x1",
@@ -135,13 +138,13 @@ vector<Case> cases() {
         [] { return matvec_t3_add_pair(1024, 1024, I16_2, I16_2, I16_2, true, 512, 1); });
 
     // --- i16 weights (legacy precision, still loadable)
-    add(v, "matvec_i16_6400x768_i16_2", [] { return matvec_i16(6400, 768, I16_2); });
+    add(v, "matvec_i16_6400x768_i16_2", [] { return matvec_i16(6400, 768, I16_2, I24_1); });
     add(v, "matvec_i16_add_1536x768_i16_2_i16_1",
         [] { return matvec_i16_add(1536, 768, I16_2, I16_1, I16_1); });
 
     // --- q4
-    add(v, "matvec_i4_6400x768_i16_2_inl", [] { return matvec_i4(6400, 768, I16_2, true); });
-    add(v, "matvec_i4_6400x768_i16_2_gen", [] { return matvec_i4(6400, 768, I16_2, false); });
+    add(v, "matvec_i4_6400x768_i16_2_inl", [] { return matvec_i4(6400, 768, I16_2, I24_1, true); });
+    add(v, "matvec_i4_6400x768_i16_2_gen", [] { return matvec_i4(6400, 768, I16_2, I24_1, false); });
     add(v, "matvec_i4_add_768x768_i16_2_i16_1",
         [] { return matvec_i4_add(768, 768, I16_2, I16_1, I16_1); });
     add(v, "matvec_i4_pair_2432x768_i16_2",
@@ -161,7 +164,7 @@ vector<Case> cases() {
     add(v, "matvec_i4_pair_swiglu_4x4_2432x768_i16_2",
         [] { return matvec_i4_pair_swiglu_4x4(2432, 768, I16_2, true, 0); });
     add(v, "matvec_i4_4x4_1536x768_i16_2",
-        [] { return matvec_i4_4x4(1536, 768, I16_2, true); });
+        [] { return matvec_i4_4x4(1536, 768, I16_2, I24_1, true); });
     add(v, "matvec_i4_add_4x4_768x1216_i16_2_i16_1",
         [] { return matvec_i4_add_4x4(768, 1216, I16_2, I16_1, I16_1); });
 
@@ -201,8 +204,10 @@ vector<Case> cases() {
         [] { return rms_norm_pair2(768, I16_1, false); });
     add(v, "rms_norm_pair2_768_i16_1_eps",
         [] { return rms_norm_pair2(768, I16_1, true); });
-    add(v, "top2_fast_6400_256", [] { return top2_fast(6400, 256); });
-    add(v, "top2_6400_256", [] { return top2(6400, 256); });
+    add(v, "top2_fast_6400_256", [] { return top2_fast(6400, 256, I24_1); });
+    add(v, "top2_fast_6400_256_projf32", [] { return top2_fast(6400, 256, XFormat::F32); });
+    add(v, "top2_6400_256", [] { return top2(6400, 256, I24_1); });
+    add(v, "top2_6400_256_projf32", [] { return top2(6400, 256, XFormat::F32); });
     add(v, "top2_fast_packed_6400_256", [] { return top2_fast_packed(6400, 256); });
     add(v, "top2_packed_6400_256", [] { return top2_packed(6400, 256); });
     add(v, "top1_group_96", [] { return top1_group(96); });

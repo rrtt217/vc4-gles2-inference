@@ -885,8 +885,9 @@ void GPU::cross_kv_store(int layer, GLuint x, int b, bool v_half, GLuint bias){
         if (layer < 0 || (size_t)layer >= cross_kv_.size() || cross_kv_[layer].tex == 0) return;
         const int half = kv_.texels / 2;
         GLuint p = x_prog(string("xkv_") + (v_half ? "v" : "k") + "_" +
-                              to_string(kv_.texels) + "_" + to_string((int)kv_.codec),
-                          ::att_cross_kv(att_cfg(), v_half, XFormat::I24_1, bias != 0));
+                              to_string(kv_.texels) + "_" + to_string((int)kv_.codec) +
+                              "_" + x_format_name(proj_fmt_),
+                          ::att_cross_kv(att_cfg(), v_half, proj_fmt_, bias != 0));
         bind_fbo(cross_kv_[layer].fbo);
         glViewport(v_half ? half : 0, b, half, 1);
         use_program(p);

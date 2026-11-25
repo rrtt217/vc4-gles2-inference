@@ -429,6 +429,15 @@ vector<float> GPU::read_logits_full(const vector<Mat>& tiles){
             }
             return out;
         }
+        // The unpacked target is a projection store; read_proj owns its two
+        // encodings (i24 at 1/256, or an f32 bit-cast under PROJ=f32).
+        if (proj_fmt_ == XFormat::F32) {
+            vector<float> f = read_proj(logits_target_, kLogitsGrid, rows);
+            for (int i = 0; i < rows; ++i)
+                for (int j = 0; j < tiles[i].rows; ++j)
+                    out.push_back(f[(size_t)i * kLogitsGrid + j]);
+            return out;
+        }
         vector<int32_t> raw = read_i32(logits_target_, kLogitsGrid, rows);
         for (int i = 0; i < rows; ++i) {
             for (int j = 0; j < tiles[i].rows; ++j) {

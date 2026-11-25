@@ -168,6 +168,12 @@ std::string x_pair2_glsl(XFormat f = XFormat::I16_2);
 //        units like every decoder's raw form.
 std::string x_scaled_glsl();
 
+// A *projection*'s output, in the format `PROJ` selects (`i24` default,
+// `f32` the exact one).  The value goes in at the q16 grid every matvec
+// epilogue computes (`s * scale`), and `x_projdec` reads it back as a
+// value; the readers therefore take the same format as their `xf`.
+std::string x_proj_glsl(XFormat f);
+
 // Whether this format can be a residual stream.  I8_4 answers no, by design
 // (x_residual_glsl's empty set is the same statement): a residual has to
 // survive every layer unscaled and 1/16 at +-7.94 cannot.  A block whose

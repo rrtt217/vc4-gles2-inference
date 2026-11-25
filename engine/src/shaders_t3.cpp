@@ -78,14 +78,14 @@ static string t3_fetch(const string& g, const string& t, int nq, int th, int til
 }
 }  // namespace
 
-string matvec_t3(int rows, int cols, XFormat xf, bool wrow, int t3_th, int t3_tiles) {
+string matvec_t3(int rows, int cols, XFormat xf, XFormat of, bool wrow, int t3_th, int t3_tiles) {
     need_shape("matvec_t3", rows, cols, 8);
     const int axw = x_texels(cols, xf);
     const int nq = (cols + 7) / 8;                    // texels a row pair
     const string AXW = to_string(axw);
     const string WD = wrow ? wrow_scale(rows) : "";
     const string SC = wrow ? "wsr(r)" : "ws";
-    return "//T3\n" + head(xf) + "precision highp int;\n" + t3_dec_def() +
+    return "//T3\n" + head(xf) + x_proj_glsl(of) + "precision highp int;\n" + t3_dec_def() +
            "uniform sampler2D W,X;uniform float ws;" + WD +
            "void main(){int r=int(gl_FragCoord.x);int t=r/2;float h=float(r-2*t);float s=0.0;"
            "for(int g=0;g<" + to_string(nq) + ";g++){"
@@ -97,7 +97,7 @@ string matvec_t3(int rows, int cols, XFormat xf, bool wrow, int t3_th, int t3_ti
            "vec4 xa=X4Q(X,g*8," + AXW + ".0);"
            "vec4 xb=X4Q(X,g*8+4," + AXW + ".0);"
            "s+=dot(" + t3_byte("bb.x") + ",xa)+dot(" + t3_byte("bb.y") + ",xb);}"
-           "gl_FragColor=x_q24encq(s*" + SC + ");}";
+           "gl_FragColor=x_projenc(s*" + SC + ");}";
 }
 
 string matvec_t3_add(int rows, int cols, XFormat xf, XFormat rf, XFormat of, bool wrow, int t3_th, int t3_tiles) {

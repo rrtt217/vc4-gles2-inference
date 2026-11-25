@@ -48,8 +48,6 @@ REGISTRY = [
      "the T3 weight decode's sign-magnitude bit-cast, not a stream"),
     # Stream layouts not yet moved: these are the next slice, and they are
     # named here so the debt is visible rather than silent.
-    ("src/shaders_q8.cpp", r"-32768\.0,32767\.0\)\+8388608\.0",
-     "the matvec's I24 output store at the q16 rail (the 34-store site)"),
     ("src/shaders_rwkv.cpp", r"bcWr|uintBitsToFloat\(u\)|>>24|<<24",
      "the RWKV state's bit-cast f32/bf16 (docs/rwkv7.md owns the state)"),
 ]

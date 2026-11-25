@@ -479,13 +479,15 @@ These were paid for; do not relearn them.
 
 - **Container only**: the engine loads the MMCF family (v2, v3, v4) and nothing
   else (see above).
-- **Q4 draw and q4 residual-add do not share a layout.**  A matvec writes its
-  output in the *activation* format (`act_fmt_`, the `ACT` axis) and an
-  add-into-residual writes in the *residual* format (`res_fmt_`, the `RES`
-  axis), so the two are different textures whenever those axes differ.  On the
-  shipped q4 containers that is 24-bit (I24_1) for the draw and the packed q16
-  pair (I16_2) for the add.  Do not merge the two encodings, and do not assume
-  one axis's format for the other.
+- **A q4 draw and a q4 residual-add do not share a layout.**  A matvec's
+  single-value output is the *projection* store (`proj_fmt_`, the `PROJ` axis:
+  I24_1 by default, or F32) and an add-into-residual writes in the *residual*
+  format (`res_fmt_`, the `RES` axis), so the two are different textures
+  whenever those axes differ.  On the shipped q4 containers that is 24-bit
+  (I24_1) for the draw and the packed q16 pair (I16_2) for the add.  The qkv
+  *pair* kernel is the exception that keeps its packed q16: that is a packing
+  decision, not the projection's precision.  Do not merge the encodings, and do
+  not assume one axis's format for another.
 - **Q4 source**: quantize from F16/I16, not from q8. q8 → q4 is a second
   quantization and loses quality.
 - **KV cache**: Pi and laptop caches are not byte-identical. Build disk cache

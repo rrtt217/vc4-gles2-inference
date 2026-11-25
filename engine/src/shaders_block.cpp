@@ -305,16 +305,18 @@ string rms_stats_reduce() {
 // 24-bit side costs two.
 static string mul_act_read(const char* tex, const char* var, XFormat f, int dim, int tw) {
     // GLSL for `vec2 var` = the two values at output texel q, in activation
-    // units: an I16_2 texel already holds the pair, a 24-bit one holds a value
-    // per texel, so it takes two fetches and no /256.
+    // units: an I16_2 texel already holds the pair, a one-value-per-texel store
+    // (the projection's i24 or f32) takes two fetches and no /256.
     const string TW = to_string(tw), AW = to_string(dim);
     if (f == XFormat::I16_2)
         return string("vec2 ") + var + "=x_i16pairq(texture2D(" + tex +
                ",vec2((float(q)+0.5)/" + TW + ".0,0.5)))/256.0;";
-    // Both operands can be 24-bit, so the coordinate gets a per-operand name.
+    // Both operands can be the projection's, so the coordinate gets a
+    // per-operand name.  x_projdec is that store's reader (i24 at 1/256, or the
+    // f32 bit-cast under PROJ=f32) -- reading an f32 texel as i24 is noise.
     return string("vec2 ") + var + "=vec2(0.0);{float t=(float(2*q)+0.5)/" + AW + ".0;"
-                  + var + "=vec2(x_q24(texture2D(" + tex + ",vec2(t,0.5))),"
-               "x_q24(texture2D(" + tex + ",vec2(t+1.0/" + AW + ".0,0.5))));}";
+                  + var + "=vec2(x_projdec(texture2D(" + tex + ",vec2(t,0.5))),"
+               "x_projdec(texture2D(" + tex + ",vec2(t+1.0/" + AW + ".0,0.5))));}";
 }
 
 string mul_act(int dim, XFormat xf, XFormat af, XFormat bf) {
@@ -325,7 +327,7 @@ string mul_act(int dim, XFormat xf, XFormat af, XFormat bf) {
     // for both mixes; an I16_2 operand is raw q16, hence the /256.
     const string ra = mul_act_read("A", "av", af, dim, x_texels(dim, af));
     const string rb = mul_act_read("B", "bv", bf, dim, x_texels(dim, bf));
-    return head(xf) +
+    return head(xf) + x_proj_glsl(af) + x_proj_glsl(bf) +
         "uniform sampler2D A,B;"
         "void main(){int q=int(gl_FragCoord.x);" + ra + rb +
         "gl_FragColor=x_st2(av.x*bv.x,av.y*bv.y);}";

@@ -112,7 +112,7 @@ Two matvec-shaped stores are *not* on this axis:
 
 | store | layout | readers |
 |---|---|---|
-| a projection (`matvec_to` -> the weight kernel's write) | I24_1, 1/256, +-32768, fixed -- except the qkv pair kernel, whose target is its own q16-pair layout (`qkv_fmt`) shared with the rope/score readers | `act_swish`, `bias_add_matvec`, `att_cross_kv` -- each names I24 |
+| a projection (`matvec_to` -> the weight kernel's write) | `proj_fmt_` -- `PROJ`: `i24` (default, 1/256, +-32768) or `f32` (exact, the same decode cost) -- except the qkv pair kernel, whose target is its own q16-pair layout (`qkv_fmt`) shared with the rope/score readers | the attention's qkv reads (`dec24q`), `act_swish`, the LFM2 conv block's `mul_act`, the unpacked logits (`top2`, `top2_fast`, `read_logits_full`), `att_cross_kv`, and the host readback (`read_proj`) |
 | an add-into-residual (`matvec_add`) | `res_fmt_` (the next section) | the norm, the next add |
 
 So `ACT` decides what a matvec *reads* and what the elementwise passes (norm,

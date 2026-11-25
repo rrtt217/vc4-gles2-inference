@@ -6,7 +6,7 @@
 using std::string;
 using std::to_string;
 
-string matvec_q6(int rows, int cols, XFormat xf, bool wrow) {
+string matvec_q6(int rows, int cols, XFormat xf, XFormat of, bool wrow) {
     need_shape("matvec_q6", rows, cols, 8);
     // X4Q is format-generic, so a float32 activation row works here too; the
     // q16 pair grid is only what the VC4 fast path was tuned for.
@@ -19,7 +19,7 @@ string matvec_q6(int rows, int cols, XFormat xf, bool wrow) {
     const string SC = wrow ? "wsr(r)" : "ws";
     // The scale uniforms must be declared before the wrow helper that uses
     // them (the q8 kernels order it that way; GLSL has no forward declaration).
-    return head(xf) +
+    return head(xf) + x_proj_glsl(of) +
         "uniform sampler2D W,W2,X;uniform float ws;" + WD +
         "void main(){int r=int(gl_FragCoord.x);float s=0.0;float sc=" + SC + ";"
         "for(int q=0;q<" + to_string(lo_w) + ";q++){"
@@ -46,5 +46,5 @@ string matvec_q6(int rows, int cols, XFormat xf, bool wrow) {
         "vec4 xa=X4Q(X,q*8," + to_string(axw) + ".0);"
         "vec4 xb=X4Q(X,q*8+4," + to_string(axw) + ".0);"
         "s+=v0*xa.x+v1*xa.y+v2*xa.z+v3*xa.w+v4*xb.x+v5*xb.y+v6*xb.z+v7*xb.w;}"
-        "gl_FragColor=x_q24encq(s*sc);}";
+        "gl_FragColor=x_projenc(s*sc);}";
 }

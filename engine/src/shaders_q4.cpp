@@ -165,11 +165,11 @@ static string q4_h(const string& w) {
 }
 }  // namespace
 
-string matvec_i4(int rows, int cols, XFormat xf, bool inl) {
+string matvec_i4(int rows, int cols, XFormat xf, XFormat of, bool inl) {
     need_shape("matvec_i4", rows, cols, 32);
     const int texw = cols / 8;
     const int groups = (cols + 31) / 32;
-    return q4_head(xf, inl) +
+    return q4_head(xf, inl) + x_proj_glsl(of) +
         "uniform sampler2D W,P,X;uniform float ps;"
         "void main(){int r=int(gl_FragCoord.x);float s=0.0;"
         "for(int g=0;g<" + to_string(groups) + ";g++){"
@@ -189,7 +189,7 @@ string matvec_i4(int rows, int cols, XFormat xf, bool inl) {
         "float d2=l2*xb.x+h2*xb.y;"
         "float d3=l3*xb.z+h3*xb.w;"
         "s+=sc*(d0+d1+d2+d3)" + q4_mint() + ";}}"
-        "gl_FragColor=x_q24encq(s);}";
+        "gl_FragColor=x_projenc(s);}";
 }
 
 // q4 residual-add, two rows per fragment: rows 2t and 2t+1 share one activation
@@ -541,12 +541,12 @@ string matvec_i4_pair_swiglu_4x4(int rows, int cols, XFormat xf, bool inl, int h
 // per fragment, d/xsum reset at the group start (q%4==0), accumulate per
 // iteration, flush s+=sc*d+mn*xsum at the group end (q%4==3).  Conditional
 // float updates, which VC4 preserves (docs/vc4-glsl-costs.md §6).
-static string i4_qkv_flat(int rows, int cols, XFormat xf, bool inl) {
+static string i4_qkv_flat(int rows, int cols, XFormat xf, XFormat of, bool inl) {
     const int texw = cols / 4;
     const int groups = (cols + 31) / 32;
     const string ROWS = to_string(rows), GROUPS = to_string(groups),
                  TEXW = to_string(texw), ITERS = to_string(cols / 8);
-    return q4_head(xf, inl) +
+    return q4_head(xf, inl) + x_proj_glsl(of) +
         "uniform sampler2D W,P,X;uniform float ps;"
         "void main(){int r=int(gl_FragCoord.x);float s=0.0;"
         "float vr=(float(r)+0.5)/float(" + ROWS + "),itw=1.0/float(" + TEXW + ");"
@@ -563,18 +563,18 @@ static string i4_qkv_flat(int rows, int cols, XFormat xf, bool inl) {
         "vec4 w0=texture2D(W,vec2(c0,vr)),w1=texture2D(W,vec2(c1,vr));"
         "d+=w0.x*xa.x+w0.y*xa.y+w0.z*xa.z+w0.w*xa.w+w1.x*xb.x+w1.y*xb.y+w1.z*xb.z+w1.w*xb.w;"
         "if(q-g*4==3){s+=sc*d+mn*xsum;}}"
-        "gl_FragColor=x_q24encq(s);}";
+        "gl_FragColor=x_projenc(s);}";
 }
 
-string matvec_i4_4x4(int rows, int cols, XFormat xf, bool inl) {
+string matvec_i4_4x4(int rows, int cols, XFormat xf, XFormat of, bool inl) {
     need_shape("matvec_i4_4x4", rows, cols, 32);
-    if (q4qkv_flat() && !q4_nomin()) return i4_qkv_flat(rows, cols, xf, inl);
+    if (q4qkv_flat() && !q4_nomin()) return i4_qkv_flat(rows, cols, xf, of, inl);
     const int texw = cols / 4;
     const int groups = (cols + 31) / 32;
     const string ROWS = to_string(rows), GROUPS = to_string(groups), TEXW = to_string(texw);
     const bool nom = q4_nomin();
     const string MA = nom ? "" : "+mn*xsum";
-    return q4_head(xf, inl) +
+    return q4_head(xf, inl) + x_proj_glsl(of) +
         "uniform sampler2D W,P,X;uniform float ps;"
         "void main(){int r=int(gl_FragCoord.x);float s=0.0;"
         "float vr=(float(r)+0.5)/float(" + ROWS + "),itw=1.0/float(" + TEXW + ");"
@@ -589,7 +589,7 @@ string matvec_i4_4x4(int rows, int cols, XFormat xf, bool inl) {
         "vec4 w0=texture2D(W,vec2(c0,vr)),w1=texture2D(W,vec2(c1,vr));"
         "d+=w0.x*xa.x+w0.y*xa.y+w0.z*xa.z+w0.w*xa.w+w1.x*xb.x+w1.y*xb.y+w1.z*xb.z+w1.w*xb.w;}"
         "s+=sc*d" + MA + ";}"
-        "gl_FragColor=x_q24encq(s);}";
+        "gl_FragColor=x_projenc(s);}";
 }
 
 // Flat 8-wide w2/wo residual-add matvec, byte-identical to the nested

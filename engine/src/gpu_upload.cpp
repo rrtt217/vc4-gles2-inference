@@ -422,16 +422,15 @@ void GPU::upload_v5_rows(const Model& m, XFormat qkf){
                         pad.resize((size_t)3 * D, 0.0f);
                         r.cq_b[l] = upload_bias(pad, qkf);
                 }
-                // I24 to match the projection it rides: `att_cross_kv` reads
-                // both with one `X1`.
+                // The projection's format (`PROJ`), not a literal: the
+                // matvec store is proj_fmt_ and `att_cross_kv` reads both
+                // with one `X1`.
                 r.ck_b[l] = upload_bias(vector<float>(m.bias_dim_row(B + Model::kRowCK),
                                                m.bias_dim_row(B + Model::kRowCK) + D),
-                                 XFormat::I24_1);
-                // I24 to match the projection it rides: `att_cross_kv` reads
-                // both with one `X1`.
+                                 proj_fmt_);
                 r.cv_b[l] = upload_bias(vector<float>(m.bias_dim_row(B + Model::kRowCV),
                                                m.bias_dim_row(B + Model::kRowCV) + D),
-                                 XFormat::I24_1);
+                                 proj_fmt_);
                 r.co_b[l] = one(m.bias_dim_row(B + Model::kRowCO), D);
                 r.fc1_b[l] = one_act(m.bias_ffn_row(l), F);
                 r.fc2_b[l] = one(m.bias_dim_row(B + Model::kRowFc2B), D);

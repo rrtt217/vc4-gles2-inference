@@ -97,7 +97,9 @@ public:
     // shared with the rope/score/KV readers, not res_fmt_.  The bias add and
     // the bias upload use it, so the qkv path cannot drift with ACT/RES.
     XFormat qkv_fmt() const {
-        return att_qkv_pair_ ? XFormat::I16_2 : XFormat::I24_1;
+        // The pair is a packing decision (two rows a texel) and keeps its q16;
+        // the unpaired store is a plain projection and follows PROJ.
+        return att_qkv_pair_ ? XFormat::I16_2 : proj_fmt_;
     }
     Target& ln_stat_probe() { return ln_stat_; }
     GLuint upload_bias(const vector<float>& b, XFormat f);
@@ -106,10 +108,9 @@ public:
     void attach_dump_fbo(Target& t);
     GLuint bias_add(GLuint x, GLuint b, Target& out);
     GLuint bias_add_wide(GLuint x, GLuint b, Target& out, int dim);
-    GLuint bias_add_matvec(GLuint x, GLuint b, Target& out, int dim);
-    // `xf` is what wrote x (a matvec writes I24, a *add-into-residual* writes
-    // res_fmt_), `f` is the bias and the output.  They are different axes and
-    // the same format only by accident.
+    // `xf` is what wrote x (a matvec writes the projection's format, an
+    // *add-into-residual* writes res_fmt_), `f` is the bias and the output.
+    // They are different axes and the same format only by accident.
     GLuint bias_add_f(GLuint x, GLuint b, Target& out, int dim, XFormat xf, XFormat f);
     GLuint act_swish(GLuint x, Target& out, int n, XFormat f);
     // swish(x + b) in one pass: the bias add and the activation are one
@@ -597,6 +598,9 @@ private:
     bool layer_fast_finish_ = false;
     bool res_pack_ = false;   // residual stream holds two int16 per texel
     XFormat act_fmt_ = XFormat::I16_2;
+    // A *projection*'s output (the single-value matvec store; the pair
+    // kernels keep their packed q16).  PROJ=i24 (default) | f32.
+    XFormat proj_fmt_ = XFormat::I24_1;
 public:
     XFormat act_fmt() const { return act_fmt_; }
     // The attention's resolved geometry.  A scan bound is the first thing to
@@ -864,6 +868,9 @@ private:  // matvec input (qkv/wo/gate/logits)
     void draw(const Mat& m, GLuint x, Target& t, int row = 0);
 
     vector<int32_t> read_i32(Target& t, int w, int h);
+    // A readback of the projection store: f32 reads the floats, i24 the
+    // offset-binary layout at 1/256 (what read_i32 decodes).
+    vector<float> read_proj(Target& t, int w, int h);
     // One row of it, starting at `y` (the group bisect's per-row arm).
     vector<int32_t> read_i32_rows(Target& t, int w, int y, int h);
 };

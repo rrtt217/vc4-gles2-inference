@@ -188,12 +188,15 @@ GLuint GPU::conv_block(const Mat& in_b, const Mat& in_c, const Mat& in_x,
         const int cur = conv_cur_[layer];
         const int prev = (cur + 2) % 3;
         const int nxt = (cur + 1) % 3;
-        const GLuint gated = conv_mul(conv_t_b_.tex, XFormat::I24_1, conv_t_x_.tex,
-                                      XFormat::I24_1, conv_slot(layer, nxt));
+        // conv_t_b_/conv_t_x_ are matvec_to outputs, so they are read in the
+        // projection's format (PROJ), not a literal: an f32 store has no i24
+        // texel to decode, and the misread turns the whole conv block to noise.
+        const GLuint gated = conv_mul(conv_t_b_.tex, proj_fmt_, conv_t_x_.tex,
+                                      proj_fmt_, conv_slot(layer, nxt));
         const GLuint cv = conv3(conv_slot(layer, prev).tex, conv_slot(layer, cur).tex, gated,
                                 conv_k_tex_[layer], conv_cv_);
         conv_cur_[layer] = (uint8_t)nxt;
-        const GLuint y = conv_mul(conv_t_c_.tex, XFormat::I24_1, cv, act_fmt_, conv_y_);
+        const GLuint y = conv_mul(conv_t_c_.tex, proj_fmt_, cv, act_fmt_, conv_y_);
         matvec_add(out_proj, y, residual, out, act_fmt_);
         if (getenv("CONV_DEBUG") && layer == 0 && out.tex) {
             vector<uint8_t> b = read_bytes(out, out.w, 1);

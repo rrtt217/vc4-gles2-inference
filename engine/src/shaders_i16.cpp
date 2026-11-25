@@ -6,11 +6,11 @@
 using std::string;
 using std::to_string;
 
-string matvec_i16(int rows, int cols, XFormat xf) {
+string matvec_i16(int rows, int cols, XFormat xf, XFormat of) {
     need_shape("matvec_i16", rows, cols, 1);
     const int tw = (cols + 1) / 2;
     const int axw = x_texels(cols, xf);
-    return head(xf) +
+    return head(xf) + x_proj_glsl(of) +
         "uniform sampler2D W,X;uniform float ws;"
         "void main(){int r=int(gl_FragCoord.x);float s=0.0;"
         "for(int q=0;q<" + to_string(tw) + ";q++){"
@@ -19,7 +19,7 @@ string matvec_i16(int rows, int cols, XFormat xf) {
         "float u0=x_i16raw(c.gr);float u1=x_i16raw(c.ab);"
         "vec2 x=X2Q(X,2*q," + to_string(axw) + ".0);"
         "s+=u0*x.x;if(2*q+1<" + to_string(cols) + ")s+=u1*x.y;}"
-        "gl_FragColor=x_q24encq(s*ws);}";
+        "gl_FragColor=x_projenc(s*ws);}";
 }
 
 string matvec_i16_add(int rows, int cols, XFormat xf, XFormat rf, XFormat of) {

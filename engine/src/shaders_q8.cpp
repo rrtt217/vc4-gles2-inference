@@ -18,7 +18,7 @@ const string kEnc16Raw =
     "return vec2(hi/255.0,(v-hi*256.0)/255.0);}";
 }  // namespace
 
-string matvec_q8(int rows, int cols, XFormat xf, bool wrow) {
+string matvec_q8(int rows, int cols, XFormat xf, XFormat of, bool wrow) {
     need_shape("matvec_q8", rows, cols, 4);
     const int axw = x_texels(cols, xf);
     const string ROWS = to_string(rows), COLS4 = to_string(cols / 4), AXW = to_string(axw);
@@ -29,7 +29,8 @@ string matvec_q8(int rows, int cols, XFormat xf, bool wrow) {
     // the fetches and the two scalar decoders inline is measurably faster, so
     // the I16_2 fast path keeps the inline form.
     if (xf == XFormat::I16_2) {
-        return "precision highp float;uniform sampler2D W,X;uniform float ws;" + WD +
+        return "precision highp float;" + x_proj_glsl(of) +
+               "uniform sampler2D W,X;uniform float ws;" + WD +
                kDec16A + kDec16B +
                "void main(){int r=int(gl_FragCoord.x);float s=0.0;"
                "for(int q=0;q<" + COLS4 + ";q++){"
@@ -44,13 +45,9 @@ string matvec_q8(int rows, int cols, XFormat xf, bool wrow) {
                // packing), so every negative matvec output came back 256 too large: the
                // LFM2 conv block, the only user of this non-pair q8 path, then read
                // garbage from the second texel on (gated 55.98 against 0.07, 2026-11-12).
-               "float v=clamp(floor(s*" + SC + "+0.5),-32768.0,32767.0)+8388608.0;"
-               "float g=floor(v/65536.0);"
-               "float b=floor(v/256.0)-g*256.0;"
-               "float a=v-g*65536.0-b*256.0;"
-               "gl_FragColor=vec4(0.0,g/255.0,b/255.0,a/255.0);}";
+               "gl_FragColor=x_projenc(s*" + SC + ");}";
     }
-    return head(xf) +
+    return head(xf) + x_proj_glsl(of) +
         "uniform sampler2D W,X;uniform float ws;" + WD +
         "void main(){int r=int(gl_FragCoord.x);float s=0.0;"
         "for(int q=0;q<" + COLS4 + ";q++){"
@@ -59,7 +56,7 @@ string matvec_q8(int rows, int cols, XFormat xf, bool wrow) {
         "vec4 w=c*255.0-128.0;"
         "vec4 x=X4Q(X,q*4," + AXW + ".0);"
         "s+=w.x*x.x+w.y*x.y+w.z*x.z+w.w*x.w;}"
-        "gl_FragColor=x_q24encq(s*" + SC + ");}";
+        "gl_FragColor=x_projenc(s*" + SC + ");}";
 }
 
 // The batched matvec: one draw for N inputs (RWKV-7 chunked prefill, P1).
@@ -79,7 +76,7 @@ string matvec_q8(int rows, int cols, XFormat xf, bool wrow) {
 // The texture height is the uniform `xh` rather than a literal so one program
 // serves every batch size (a literal would link a program per N); sampling is
 // GL_NEAREST at a pixel center, so the row select cannot be off by a texel.
-string matvec_q8_batch(int rows, int cols, XFormat xf, bool wrow) {
+string matvec_q8_batch(int rows, int cols, XFormat xf, XFormat of, bool wrow) {
     need_shape("matvec_q8_batch", rows, cols, 4);
     const string ROWS = to_string(rows), COLS4 = to_string(cols / 4);
     const string WD = wrow ? wrow_scale(rows) : "";
@@ -100,7 +97,8 @@ string matvec_q8_batch(int rows, int cols, XFormat xf, bool wrow) {
         // matvec_q8's I16_2 fast path verbatim (two fetches, dA/dB inline); the
         // only edits are the row coordinate and the encode's local name for the
         // blue channel, which the batch index b occupies here.
-        return "precision highp float;uniform sampler2D W,X;uniform float ws;"
+        return "precision highp float;" + x_proj_glsl(of) +
+               "uniform sampler2D W,X;uniform float ws;"
                "uniform float xh;uniform float xw;" + WD +
                kDec16A + kDec16B +
                "void main(){int r=int(gl_FragCoord.x);" + AY + "float s=0.0;"
@@ -108,11 +106,7 @@ string matvec_q8_batch(int rows, int cols, XFormat xf, bool wrow) {
                "vec4 xa=texture2D(X,vec2((float(2*q)+0.5)/xw,ay));"
                "vec4 xb=texture2D(X,vec2((float(2*q+1)+0.5)/xw,ay));"
                "s+=w.x*dA(xa)+w.y*dB(xa)+w.z*dA(xb)+w.w*dB(xb);}"
-               "float v=clamp(floor(s*" + SC + "+0.5),-32768.0,32767.0)+8388608.0;"
-               "float g=floor(v/65536.0);"
-               "float bl=floor(v/256.0)-g*256.0;"
-               "float a=v-g*65536.0-bl*256.0;"
-               "gl_FragColor=vec4(0.0,g/255.0,bl/255.0,a/255.0);}";
+               "gl_FragColor=x_projenc(s*" + SC + ");}";
     }
     // The other layouts keep the generic X4Q decode matvec_q8 uses, with the row
     // substituted: one fetch per value (I24_1, I16_1) or per four (I8_4).
@@ -123,14 +117,14 @@ string matvec_q8_batch(int rows, int cols, XFormat xf, bool wrow) {
             return "x_i16raw(texture2D(X,vec2((float(" + i + ")+0.5)/xw,ay)).rg)";
         return "((texture2D(X,vec2((float((" + i + ")/4)+0.5)/xw,ay))*255.0-128.0)*16.0)";
     };
-    return head(xf) +
+    return head(xf) + x_proj_glsl(of) +
         "uniform sampler2D W,X;uniform float ws;uniform float xh;uniform float xw;" + WD +
         "void main(){int r=int(gl_FragCoord.x);" + AY + "float s=0.0;"
         "for(int q=0;q<" + COLS4 + ";q++){" + WROW +
         "vec4 x=vec4(" + fetch("q*4") + "," + fetch("q*4+1") + ","
         + fetch("q*4+2") + "," + fetch("q*4+3") + ");"
         "s+=w.x*x.x+w.y*x.y+w.z*x.z+w.w*x.w;}"
-        "gl_FragColor=x_q24encq(s*" + SC + ");}";
+        "gl_FragColor=x_projenc(s*" + SC + ");}";
 }
 
 string matvec_q8_pair(int rows, int cols, XFormat xf, bool wrow) {

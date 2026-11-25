@@ -59,7 +59,7 @@ The rows below are the registry, one per switch, grouped by the axis they move.
 diagnostic or a pricing arm; `retired` is gone (`--dump-switches` prints the
 same table with what *this* environment resolved to).
 
-154 switches: 29 permanent, 111 probe, 14 retired; 16 legacy spellings are translated.
+155 switches: 30 permanent, 111 probe, 14 retired; 16 legacy spellings are translated.
 
 ### The activation streams
 
@@ -68,6 +68,7 @@ same table with what *this* environment resolved to).
 | `ACT` <br><sub>`ACT_FMT`</sub> | `i16\|i8\|bf16\|f32` | the GPU activation streams' format: i16 q16 grid (default), i8, bf16, or bit-cast f32 |
 | `ACT_CPU` <br><sub>`ACT_F32`</sub> | `q16\|f32` | the CPU layer loop's activation grid (ACT_F32 meant f32, whatever its value) |
 | `FFN_HID` | `i16\|i8\|bf16\|f32` | the FFN hidden stream's format: q16 (default), i8, bf16, or f32 past the q16 rail |
+| `PROJ` | `i24\|f32` | a projection's output: i24 (default) or f32 (exact, same decode cost, needs ESSL 3.00) |
 | `Q16_DECODE` | value | the q16 decode: fast classifies the -32768 rail at 32767.5, exact is integer |
 | `EXP` <br><sub>`ATT_EXP`</sub> | `drv\|poly` | every exponential the shaders emit: drv (default) or a portable polynomial; VC4's SFU exp is 20x Xe's error |
 | `QKV_PAIR` | `=1` | two qkv rows per fragment (int8 only, default on); QKV_PAIR=0 disables |

@@ -32,13 +32,7 @@ void GPU::matvec_to_row(const Mat& m, GLuint x, Target& out, int row){
 vector<float> GPU::matvec_from(const Mat& m, GLuint x){
         Target& t = target_for(m.rows);
         draw(m, x, t);
-        vector<int32_t> raw = read_i32(t, m.rows, 1);
-        vector<float> out(m.rows);
-        for (int i = 0; i < m.rows; ++i) {
-            int v = raw[i]; if (v >= 32768) v -= 65536;
-            out[i] = (float)v / ACT_SCALE;
-        }
-        return out;
+        return read_proj(t, m.rows, 1);
     }
 
 void GPU::matvec_add(const Mat& m, GLuint x, GLuint residual, Target& out, XFormat xf){
@@ -162,16 +156,10 @@ vector<float> GPU::matvec(const Mat& m, const vector<float>& x){
                 rwkv_prof.draw_ms += elapsed_ms(td0, now);
         }
         const auto tr0 = Clock::now();
-        vector<int32_t> raw = read_i32(t, m.rows, 1);
+        vector<float> out = read_proj(t, m.rows, 1);
         if (prof) {
                 const auto now = Clock::now();
                 rwkv_prof.read_ms += elapsed_ms(tr0, now);
-        }
-        vector<float> out(m.rows);
-        for (int i = 0; i < m.rows; ++i) {
-            int v = raw[i];
-            if (v >= 32768) v -= 65536;
-            out[i] = (float)v / ACT_SCALE;
         }
         return out;
     }

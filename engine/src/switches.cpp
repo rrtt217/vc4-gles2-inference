@@ -173,6 +173,8 @@ static const SwitchDef kSwitches[] = {
     // ---- Res: the residual stream's format --------------------------------
     {"RES", "RES_FMT", SwKind::Str, "i16|i16_1|i24|bf16|f32", SwStatus::Permanent, SwAxis::Res,
      "residual format: i16 packed pairs (default), i16_1 one a texel, i24, bf16, or f32"},
+    {"PROJ", "", SwKind::Str, "i24|f32", SwStatus::Permanent, SwAxis::Act,
+     "a projection's output: i24 (default) or f32 (exact, same decode cost, needs ESSL 3.00)"},
 
     // ---- Ffn: the FFN hidden stream and the finish policy ------------------
     {"FFN_FLUSH", "", SwKind::Flag, "", SwStatus::Probe, SwAxis::Ffn,

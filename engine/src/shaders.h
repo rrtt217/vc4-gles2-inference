@@ -66,6 +66,9 @@ struct AttnConfig {
     // per-head V grid is part of it: 8-bit KV only, derived from the head max,
     // with K on the global KVSCALE grid (qk-normed, so already unit RMS).
     KvLayout kv;
+    // The projection store's format (`PROJ`): the qkv target when it is not
+    // the pair layout, and the cross K/V projection the cross-kv kernel reads.
+    XFormat proj = XFormat::I24_1;
     // ATT_EXP=poly: use the portable exp (x_exp) instead of the driver's.
     // VC4's exp/exp2 are the same fixed-point sequence at 4.6e-05 worst
     // relative error against Xe's 2.2e-06; the polynomial is 1.5e-06 on
@@ -151,11 +154,11 @@ std::string att_defs(const AttnConfig& c);
 std::string att_cross_kv(const AttnConfig& c, bool v_half, XFormat xf, bool bias);
 std::string att_helpers(const AttnConfig& c);
 
-std::string matvec_q8(int rows, int cols, XFormat xf, bool wrow = false);
+std::string matvec_q8(int rows, int cols, XFormat xf, XFormat of, bool wrow = false);
 // The 2-bit ternary body (dtype 7, --quant t3).  ESSL 3.00: the text carries a
 // `//T3` marker that link_program() keys on, exactly like the q4 nibble split's
 // "&15".  Sixteen weights a texel, four a byte, bit 0 magnitude and bit 1 sign.
-std::string matvec_t3(int rows, int cols, XFormat xf, bool wrow, int t3_th, int t3_tiles);
+std::string matvec_t3(int rows, int cols, XFormat xf, XFormat of, bool wrow, int t3_th, int t3_tiles);
 std::string matvec_t3_add(int rows, int cols, XFormat xf, XFormat rf, XFormat of,
                           bool wrow, int t3_th, int t3_tiles);
 std::string matvec_t3_pair(int rows, int cols, XFormat xf, bool wrow, int t3_th, int t3_tiles);
@@ -164,7 +167,7 @@ std::string matvec_t3_add_pair(int rows, int cols, XFormat xf, XFormat rf, XForm
 // One draw for a whole batch of matvec inputs (RWKV-7 chunked prefill, P1):
 // matvec_q8's text with the input row taken from gl_FragCoord.y, so fragment
 // (row r, batch b) is matvec_q8's result for row r of input b.
-std::string matvec_q8_batch(int rows, int cols, XFormat xf, bool wrow = false);
+std::string matvec_q8_batch(int rows, int cols, XFormat xf, XFormat of, bool wrow = false);
 std::string matvec_q8_pair(int rows, int cols, XFormat xf, bool wrow = false);
 std::string matvec_q8_pair_swiglu(int rows, int cols, XFormat xf, bool inl = true, bool wrow = false, int hs = 0);
 std::string matvec_q8_gate2(int rows, int cols);
@@ -181,15 +184,15 @@ std::string matvec_q8_add(int rows, int cols, XFormat xf, XFormat rf, XFormat of
                           bool wrow = false);
 std::string matvec_q8_add_pair(int rows, int cols, XFormat xf, XFormat rf, XFormat of,
                                bool inl = true, bool wrow = false, bool bias = false);
-std::string matvec_i16(int rows, int cols, XFormat xf);
+std::string matvec_i16(int rows, int cols, XFormat xf, XFormat of);
 std::string matvec_i16_add(int rows, int cols, XFormat xf, XFormat rf, XFormat of);
-std::string matvec_i4(int rows, int cols, XFormat xf, bool inl = true);
+std::string matvec_i4(int rows, int cols, XFormat xf, XFormat of, bool inl = true);
 // Signed 6-bit head: a 4-bit low plane and a 2-bit high plane in two textures
 // (one sampler cannot be fetched twice in a fragment on VC4), one 24-bit value
 // per fragment, per-row scale plane when `wrow`.
-std::string matvec_q6(int rows, int cols, XFormat xf, bool wrow);
+std::string matvec_q6(int rows, int cols, XFormat xf, XFormat of, bool wrow);
 std::string matvec_i4_add(int rows, int cols, XFormat xf, XFormat rf, XFormat of);
-std::string matvec_i4_4x4(int rows, int cols, XFormat xf, bool inl = true);
+std::string matvec_i4_4x4(int rows, int cols, XFormat xf, XFormat of, bool inl = true);
 std::string matvec_i4_add_4x4(int rows, int cols, XFormat xf, XFormat rf, XFormat of);
 std::string matvec_i4_pair(int rows, int cols, XFormat xf);
 std::string matvec_i4_pair_swiglu(int rows, int cols, XFormat xf, bool inl = true, int hs = 0);
@@ -245,8 +248,8 @@ std::string att_v(const AttnConfig& c, XFormat out);
 std::string att_v_fold_shader(const AttnConfig& c, XFormat out, int nseg,
                               bool accumulate = false);
 
-std::string top2_fast(int rows, int chunk);
-std::string top2(int rows, int chunk);
+std::string top2_fast(int rows, int chunk, XFormat proj = XFormat::I24_1);
+std::string top2(int rows, int chunk, XFormat proj = XFormat::I24_1);
 std::string top2_fast_packed(int rows, int chunk);
 std::string top2_packed(int rows, int chunk);
 // Greedy argmax over the packed logits target: stage 1 reuses top2_fast_packed;
