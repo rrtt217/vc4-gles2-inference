@@ -1947,6 +1947,17 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
                 # key 10's third byte: the tokenizer's per-run space marker.
                 rope_factors=m.get('rope_factors'),
                 sp_prefix=int(m.get('sp_prefix') or 0))
+    # v5: the LayerNorm weight rows are read by ln_apply in kLnPairFmt (q16,
+    # rail +-127.996) and clamp silently.  Record their peaks for the packer's
+    # line; the residual stream still has no encoder-decoder calibration, which
+    # mmcf_pack says out loud for a Marian source.
+    if m.get('enc_bias') and m.get('dec_bias'):
+        meta['norm_peaks'] = [float(max(np.abs(m['enc_bias'][l][4]).max(),
+                                        np.abs(m['enc_bias'][l][6]).max(),
+                                        np.abs(m['dec_bias'][l][8]).max(),
+                                        np.abs(m['dec_bias'][l][10]).max(),
+                                        np.abs(m['dec_bias'][l][12]).max()))
+                              for l in range(layers)]
     if m.get('layer_types'):
         meta['layer_types'] = list(m['layer_types'])
     if moe:

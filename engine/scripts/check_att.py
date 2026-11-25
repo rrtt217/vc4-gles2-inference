@@ -14,7 +14,10 @@ without a second engine path:
 q and att_out are q16 activations (int/256); K and V are on the KV grid
 (int/KVSCALE); scores and the stats max on 1/1024; the stats sum on 1/2048 in
 the log2 domain.
-All grids and shapes come from the ATTD meta line.
+All grids and shapes come from the ATTD meta line (trailing fields such as
+`vpt` are ignored; the K/V lines carry one integer a value whatever the
+layout).  The sum check is the log2 domain: run the engine with ATT_SUM=log2;
+the default linear grid is out of scope and its mismatch is expected.
 
 Usage: check_att.py <log>
 """
