@@ -1875,8 +1875,44 @@ def load_marian(model_dir, seq=0, enc_seq=0):
     return m
 
 
+def calibrate_encdec(model_dir, tok=None):
+    """(residual peaks, FFN-hidden peaks, head input peak) for a Marian dir.
+
+    rail_peaks() samples the dense transformer's forward and cannot run an
+    encoder-decoder.  This runs ref_encdec's forward on a handful of *real*
+    sentences -- through the container's own tokenizer -- and greedily decodes
+    each, recording the post-add residual (the value the engine stores in
+    res_fmt_) and the swish hidden per layer, plus the decoder's final
+    LayerNorm output.  Vocabulary runs are not used: a post-norm block's first
+    attention reads the unscaled embedding, so arbitrary ids reach thousands
+    while real text stays in the tens (4090 against 45 on OPUS-MT), and a
+    calibration that sampled them would refuse a container that translates.
+    """
+    from ref_encdec import load_marian as forward_marian, Tok, greedy_peaks
+    if not tok or not os.path.exists(tok):
+        return None, None, None
+    F = forward_marian(model_dir)
+    T = Tok(tok)
+    texts = ["The weather is nice.",
+             "I love you.",
+             "Where is the train station?",
+             "The cat sleeps on the table.",
+             "The capital of France is Paris.",
+             "This mod adds a new ore to the overworld below y=16."]
+    res = hid = None
+    head = 0.0
+    for text in texts:
+        if not T.encode(" " + text):
+            continue
+        r, h, f = greedy_peaks(F, T, text)
+        res = r if res is None else [max(a, b) for a, b in zip(res, r)]
+        hid = h if hid is None else [max(a, b) for a, b in zip(hid, h)]
+        head = max(head, f)
+    return res, hid, head
+
+
 def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit=None,
-                    q8_row=False, head_dedup=False, head_q6=False, enc_seq=64):
+                    q8_row=False, head_dedup=False, head_q6=False, enc_seq=64, tok=None):
     """Build the tensor list directly from an HF safetensors directory.
 
     Same list shape the legacy reader produces, so build() cannot tell them
@@ -1943,6 +1979,7 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
                 vocab=vocab, seq=seq, head_dim=head_dim,
                 theta=float(m['theta']), half=bool(m['half']), qk_norm=bool(qk),
                 scheme=scheme, group=(32 if scheme == 'q4' else 0), split=bool(split),
+                encdec=bool(m.get('encdec')),
                 # key 18: a longrope model's static per-dimension table, and
                 # key 10's third byte: the tokenizer's per-run space marker.
                 rope_factors=m.get('rope_factors'),
@@ -2026,8 +2063,22 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
             print("note: that matrix loses most of its small weights at one scale; "
                   "--q8-row-scale writes one scale per output row instead")
     if rail_check:
-        res_peaks, hid_peaks = rail_peaks(m)
-        meta['res_peaks'] = res_peaks
+        if m.get('encdec'):
+            try:
+                res_peaks, hid_peaks, head = calibrate_encdec(model_dir, tok)
+                if res_peaks is None:
+                    print("note: no tokenizer for the encoder-decoder calibration; "
+                          "the residual and hidden rails are unchecked")
+                else:
+                    m['final_ln_peak'] = head
+            except (FileNotFoundError, OSError) as e:
+                print("note: no encoder-decoder calibration for this source (%s); "
+                      "the residual and hidden rails are unchecked" % e)
+                res_peaks, hid_peaks = None, None
+        else:
+            res_peaks, hid_peaks = rail_peaks(m)
+        if res_peaks is not None:
+            meta['res_peaks'] = res_peaks
         # The per-layer RMSNorm weight vectors are read in kLnPairFmt (I16_2:
         # 1/256, rail +-127.996) by the norm passes.  They are O(1) in every
         # container packed so far, but that is an observation; this records the
@@ -2039,15 +2090,19 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
                 for l in range(m['layers'])]
         if hid_peaks is not None:
             meta['hid_peaks'] = hid_peaks
-            # A hidden over the q16 activation rail is stored *2^-k (key 15)
-            # instead of being clamped at run time: k is the smallest power of
-            # two whose store fits, and the engine folds 2^k back into w2 after
-            # load.  k is capped at 5 (the shader literal table's end).
-            k = [0 if peak <= ACTIVATION_RAIL
-                 else min(5, max(0, int(math.ceil(math.log2(peak / ACTIVATION_RAIL)))))
-                 for peak in hid_peaks]
-            if any(k):
-                meta['hid_scale'] = k
+            if not m.get('encdec'):
+                # A hidden over the q16 activation rail is stored *2^-k (key 15)
+                # instead of being clamped at run time: k is the smallest power
+                # of two whose store fits, and the engine folds 2^k back into w2
+                # after load.  k is capped at 5 (the shader literal table's end).
+                # A v5 block's FFN hidden is the ACT stream and does not read
+                # key 15, so the scale is not written for it -- the peak is,
+                # and mmcf_pack's warning names the fix (ACT=f32/bf16).
+                k = [0 if peak <= ACTIVATION_RAIL
+                     else min(5, max(0, int(math.ceil(math.log2(peak / ACTIVATION_RAIL)))))
+                     for peak in hid_peaks]
+                if any(k):
+                    meta['hid_scale'] = k
     if rwkv and m.get('state_peaks'):
         # The WKV state's per-layer |max| is not a rail: it is the number that
         # decides the Pi's state encoding (docs/engine-internals.md).  It
@@ -2066,8 +2121,17 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
         meta['final_ln_peak'] = peak
         meta['final_ln_bound'] = m.get('final_ln_bound')
         if peak > ACTIVATION_RAIL:
-            meta['logit_shift'] = min(5, max(0, int(
-                math.ceil(math.log2(peak / ACTIVATION_RAIL)))))
+            if m.get('encdec'):
+                # The v5 head reads the final LayerNorm's output straight from
+                # ACT; key 17's read side is not in that loop, so folding 2^k
+                # into the logits tiles would move the logits without scaling
+                # the input.  Name the axis that does reach it instead.
+                print("warning: the head input reaches %.1f, %.2fx the %.1f ACT rail; "
+                      "run this container with ACT=f32 or ACT=bf16 (key 17 does not "
+                      "reach the v5 head)" % (peak, peak / ACTIVATION_RAIL, ACTIVATION_RAIL))
+            else:
+                meta['logit_shift'] = min(5, max(0, int(
+                    math.ceil(math.log2(peak / ACTIVATION_RAIL)))))
     T = []
 
     def f32(a):

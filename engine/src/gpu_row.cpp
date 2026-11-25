@@ -50,6 +50,17 @@ GLuint GPU::ln_q16(GLuint x, GLuint w, GLuint b, Target& out, float eps){
         }
         layer_finish("NF_LN");
         if (getenv("ENCDEC_DUMP")) {
+                static int ln_no = 0;
+                sync();
+                const vector<uint8_t> b = read_bytes(ln_stat_, 1, 2);
+                const float ms = x_unpack(b.data(), 0, kLnPairFmt);
+                const float ss = x_unpack(b.data(), 1, kLnPairFmt);
+                const float kf = x_unpack(b.data(), 2, kLnPairFmt);
+                const float sc = exp2f(kf);
+                fprintf(stderr, "LNS %d mean %.3f sd %.3f (k %d)\n", ln_no++,
+                        (double)(ms * sc), (double)(ss * sc), (int)kf);
+        }
+        if (getenv("ENCDEC_DUMP")) {
                 static bool once = false;
                 if (!once) { once = true;
                         cerr << "ENCDEC ln formats dim=" << dim

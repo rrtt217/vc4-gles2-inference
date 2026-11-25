@@ -166,6 +166,58 @@ def logits_last(M, tgt_ids, enc_out):
     return y[-1] @ M["shared"].T + M["final_logits_bias"]
 
 
+def residual_peaks(M, src_ids, tgt_ids):
+    """Per-layer post-add residual and FFN-hidden peaks, plus the head input.
+
+    A "residual" here is what the engine stores in res_fmt_ between two
+    sublayers: x + sublayer(x) *before* the LayerNorm, not the LN's output.
+    Its rail metric is the **mean-centred** max: a LayerNorm removes a uniform
+    offset, and a v5 block's fc2/o bias is large enough to put the raw max in
+    the thousands while the deviation the LN actually reads stays in the tens
+    (OPUS-MT: 5960 raw against ~10 centred).  The hidden is the
+    swish(fc1(.)) a non-gated FFN writes in ACT; nothing subtracts its mean,
+    so its plain max is the rail.  Encoder and decoder layers are combined by
+    index; the head input is the decoder's final LayerNorm output.
+    """
+    import numpy as np
+    dim, H, eps = M["dim"], M["heads"], M["ln_eps"]
+    x = M["shared"][src_ids] * M["scale_emb"] + M["pos"][:len(src_ids)]
+    def dev(r):
+        return float(np.abs(r - r.mean(-1, keepdims=True)).max())
+    er, eh = [], []
+    for m in M["enc"]:
+        r = x + attn(self_attn(m), x, dim, H)
+        er.append(dev(r))
+        x = ln(r, m["ln1w"], m["ln1b"], eps)
+        h = act(x @ m["w1"].T + m["b1"], M["swish"])
+        eh.append(float(np.abs(h).max()))
+        r = x + h @ m["w2"].T + m["b2"]
+        er[-1] = max(er[-1], dev(r))
+        x = ln(r, m["ln2w"], m["ln2b"], eps)
+    enc_out = x
+    y = M["shared"][tgt_ids] * M["scale_emb"] + M["pos_dec"][:len(tgt_ids)]
+    dr, dh = [], []
+    for m in M["dec"]:
+        r = y + attn(self_attn(m), y, dim, H, causal=True)
+        dr.append(dev(r))
+        y = ln(r, m["ln1w"], m["ln1b"], eps)
+        r = y + attn(cross_attn(m), y, dim, H, k_in=enc_out, v_in=enc_out)
+        dr[-1] = max(dr[-1], dev(r))
+        y = ln(r, m["ln2w"], m["ln2b"], eps)
+        h = act(y @ m["w1"].T + m["b1"], M["swish"])
+        dh.append(float(np.abs(h).max()))
+        r = y + h @ m["w2"].T + m["b2"]
+        dr[-1] = max(dr[-1], dev(r))
+        y = ln(r, m["ln3w"], m["ln3b"], eps)
+    n = max(len(er), len(dr))
+    res = [max(er[i] if i < len(er) else 0.0, dr[i] if i < len(dr) else 0.0)
+           for i in range(n)]
+    nh = max(len(eh), len(dh))
+    hid = [max(eh[i] if i < len(eh) else 0.0, dh[i] if i < len(dh) else 0.0)
+           for i in range(nh)]
+    return res, hid, float(np.abs(y).max())
+
+
 # --- the tokenizer, over the .tok blob the engine loads ---------------------
 class Tok:
     """Viterbi over the blob `make_tok_spm.py` writes: (score, bytes) per id."""
@@ -215,6 +267,29 @@ class Tok:
 
     def decode(self, ids):
         return b"".join(self.ids[i][1] for i in ids).decode("utf-8", "replace")
+
+
+def greedy_peaks(M, tok, text, max_gen=16):
+    """Real-text residual/hidden peaks, for a container's rail check.
+
+    Same source convention as translate() -- a leading space and the source
+    <eos> -- and the decoder target is the model's own greedy output.  A random
+    vocabulary run is *not* representative of a post-norm block: its first
+    attention reads the unscaled embedding, and arbitrary ids drive the
+    residual to thousands (4090 on OPUS-MT) while real sentences stay in the
+    tens.  The peaks are over a sequence the model actually produces.
+    """
+    import numpy as np
+    src = tok.encode(" " + text) + [int(M["eos_id"])]
+    enc_out = encoder(M, np.array(src, dtype=np.int64))
+    cur = [int(M["start_id"])]
+    for _ in range(max_gen):
+        lg = logits_last(M, np.array(cur, dtype=np.int64), enc_out)
+        nxt = int(np.argmax(lg))
+        if nxt == int(M["eos_id"]):
+            break
+        cur.append(nxt)
+    return residual_peaks(M, src, cur)
 
 
 def translate(M, tok, text, max_gen=32):
