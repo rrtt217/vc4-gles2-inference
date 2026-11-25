@@ -131,6 +131,17 @@ evaluates them on the CPU before the backend ever sees them.  That is how an
 earlier version of `docs/engine-internals.md` came to claim half precision was
 reachable through `packHalf2x16`; it is not.
 
+**A sampler passed as a function parameter is not a reliable reader.**  A
+one-fetch decode helper (`float x_i16_of2(sampler2D T, float u, int odd)`)
+returned the right value on a one-row probe -- and in the engine, on the same
+board, the same build produced three different replies in ten identical runs
+(2026-11-25; the previous text, which writes the fetch inside each ternary
+arm, was 10/10 stable in the same session).  The engine's decoders are macros
+partly for this reason: a sampler is program uniform state, and a callee that
+receives it is not dependable on this driver.  `probes/codec_probe` prices the
+win the helper would buy (13.3 -> 7.5 ns a value); it has to be had by
+hoisting the fetch at the call site instead.
+
 ## 6. What this means for this engine's kernels
 
 - The inner loops are `mul + add` chains: the pairing is what makes a matvec

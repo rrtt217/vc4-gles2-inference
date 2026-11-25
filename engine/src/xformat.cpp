@@ -199,27 +199,6 @@ static const char* q16_raw_glsl() {
             "if(u>=32767.5)u-=65536.0;return u;}\n";
 }
 
-// One fetch, one decode: the pair layouts' per-value reads.  Guards make the
-// two emitters (x_glsl and x_residual_glsl) safe in one programme, and a
-// callee that fetches is the shape that does not hit the "helper taking a
-// fetch as an argument" slowdown (docs/vc4-glsl-costs.md).
-static std::string q16_of2_glsl() {
-    return "\n#ifndef X_Q16_OF2_GLSL\n#define X_Q16_OF2_GLSL\n"
-           "float x_i16raw_of2(sampler2D T,float u,int odd){"
-           "vec4 c=texture2D(T,vec2(u,0.5));return x_i16raw((odd==1)?c.ba:c.rg);}\n"
-           "float x_i16_of2(sampler2D T,float u,int odd){"
-           "return x_i16raw_of2(T,u,odd)/256.0;}\n"
-           "#endif\n";
-}
-
-static std::string bf16_of2_glsl() {
-    return "\n#ifndef X_BF16_OF2_GLSL\n#define X_BF16_OF2_GLSL\n"
-           "float x_bf16_of2(sampler2D T,float u,int odd){"
-           "vec4 c=texture2D(T,vec2(u,0.5));"
-           "return (odd==1)?x_bf16(c.ba):x_bf16(c.rg);}\n"
-           "#endif\n";
-}
-
 static const char* q16_pair_glsl() {
         if (q16_decode_exact())
                 return
@@ -402,8 +381,10 @@ std::string x_glsl(XFormat f) {
             // scale, and the Q variants return value*256 like every other
             // format's do (the matvec kernels carry the 1/256 in their scale).
             s +=
-                x_codec_glsl(XFormat::BF16) + bf16_of2_glsl() +
-                "#define X1(T,I,TW) x_bf16_of2(T,(float((I)/2)+0.5)/(TW),int((I)-(I)/2*2))\n"
+                x_codec_glsl(XFormat::BF16) +
+                "#define X1(T,I,TW) ((((I)/2)*2)==(I) ? "
+                "x_bf16(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).rg) : "
+                "x_bf16(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).ba))\n"
                 "#define X2(T,BASE,TW) x_bf16pair(texture2D(T,vec2((float((BASE)/2)+0.5)/(TW),0.5)))\n"
                 "#define X4(T,BASE,TW) vec4(X2(T,(BASE),TW),X2(T,(BASE)+2,TW))\n"
                 "#define XST1(V) x_bf16enc(V)\n"
@@ -426,19 +407,20 @@ std::string x_glsl(XFormat f) {
                 "#define X4Q(T,B,TW) vec4(X1Q(T,(B),TW),X1Q(T,(B)+1,TW),X1Q(T,(B)+2,TW),X1Q(T,(B)+3,TW))\n";
             break;
         case XFormat::I16_2:
-            s += q16_of2_glsl() +
-                // One fetch, select the half, decode once.  The ternary used to
-                // name texture2D in both arms, and the packed layout is decoded
-                // one value at a time by the row passes (the norm, the residual
-                // adds, bias_add), so both arms were evaluated: 13.3 ns a value
-                // against 7.5 for this form, bit for bit the same value
-                // (probes/codec_probe, VC4 2026-11-25).
-                "#define X1(T,I,TW) x_i16_of2(T,(float((I)/2)+0.5)/(TW),int((I)-(I)/2*2))\n"
+            s +=
+                // Reverted from a one-fetch helper: a function taking the
+                // *sampler* as a parameter reads undefined data on VC4 (the
+                // engine's q8 decode then produced three different texts in
+                // ten identical runs).  probes/codec_probe's isolated check
+                // could not see it -- it reads one row per arm.
+                "#define X1(T,I,TW) ((((I)/2)*2)==(I) ? x_i16(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).rg) "
+                ": x_i16(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).ba))\n"
                 "#define X2(T,BASE,TW) x_i16pair(texture2D(T,vec2((float((BASE)/2)+0.5)/(TW),0.5)))\n"
                 "#define X4(T,BASE,TW) vec4(X2(T,(BASE),TW),X2(T,(BASE)+2,TW))\n"
                 "#define XST2(A,B) x_st2(A,B)\n"
                 
-                "#define X1Q(T,I,TW) x_i16raw_of2(T,(float((I)/2)+0.5)/(TW),int((I)-(I)/2*2))\n"
+                "#define X1Q(T,I,TW) ((((I)/2)*2)==(I) ? x_i16raw(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).rg) "
+                ": x_i16raw(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).ba))\n"
                 "#define X2Q(T,B,TW) x_i16pairq(texture2D(T,vec2((float((B)/2)+0.5)/(TW),0.5)))\n"
                 "#define X4Q(T,B,TW) x_i16quadq(texture2D(T,vec2((float((B)/2)+0.5)/(TW),0.5)),"
                 "texture2D(T,vec2((float((B)/2+1)+0.5)/(TW),0.5)))\n";
@@ -498,10 +480,12 @@ std::string x_residual_glsl(XFormat f) {
                 "#define YST1(V) x_st1(V)\n"
                 "#define YST1Q(Q) x_st1q(Q)\n";
         case XFormat::I16_2:
-            return q16_of2_glsl() +
-                "#define Y1(T,I,TW) x_i16_of2(T,(float((I)/2)+0.5)/(TW),int((I)-(I)/2*2))\n"
+            return
+                "#define Y1(T,I,TW) ((((I)/2)*2)==(I) ? x_i16(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).rg) "
+                ": x_i16(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).ba))\n"
                 "#define Y2(T,BASE,TW) x_i16pair(texture2D(T,vec2((float((BASE)/2)+0.5)/(TW),0.5)))\n"
-                "#define Y1Q(T,I,TW) x_i16raw_of2(T,(float((I)/2)+0.5)/(TW),int((I)-(I)/2*2))\n"
+                "#define Y1Q(T,I,TW) ((((I)/2)*2)==(I) ? x_i16raw(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).rg) "
+                ": x_i16raw(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).ba))\n"
                 "#define YST1(V) x_st1(V)\n"
                 "#define YST1Q(Q) x_st1q(Q)\n";
         case XFormat::F32:
@@ -522,8 +506,10 @@ std::string x_residual_glsl(XFormat f) {
             // defined ("no function with name 'x_bf16'", found by running
             // RES=bf16 on a q8 container, 2026-11-18; the q4 grid happened not
             // to reach that builder).  The include guard makes it idempotent.
-            return x_codec_glsl(XFormat::BF16) + bf16_of2_glsl() +
-                "#define Y1(T,I,TW) x_bf16_of2(T,(float((I)/2)+0.5)/(TW),int((I)-(I)/2*2))\n"
+            return x_codec_glsl(XFormat::BF16) +
+                "#define Y1(T,I,TW) ((((I)/2)*2)==(I) ? "
+                "x_bf16(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).rg) : "
+                "x_bf16(texture2D(T,vec2((float((I)/2)+0.5)/(TW),0.5)).ba))\n"
                 "#define Y2(T,BASE,TW) vec2(Y1(T,(BASE),TW),Y1(T,(BASE)+1,TW))\n"
                 "#define Y1Q(T,I,TW) (Y1(T,(I),(TW))*256.0)\n"
                 "#define YST1(V) x_bf16enc(V)\n"
