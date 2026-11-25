@@ -151,6 +151,13 @@ int x_pair2_texels(int count);
 // values already in q16 units.  Call after x_glsl(): both use its encoders.
 std::string x_pair2_glsl(XFormat f = XFormat::I16_2);
 
+// Whether this format can be a residual stream.  I8_4 answers no, by design
+// (x_residual_glsl's empty set is the same statement): a residual has to
+// survive every layer unscaled and 1/16 at +-7.94 cannot.  A block whose
+// *add base* is a residual stream (the v5 post-norm block: its base is the
+// previous LayerNorm's output) asks this before it builds a programme.
+bool x_can_residual(XFormat f);
+
 // `xs1(q)`: one value, q16 units, written in this format -- the add kernels'
 // store when the stream they add *into* is a different format from the one the
 // base was read in (a v5 FFN add: activation base, residual sum).  Distinct

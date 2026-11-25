@@ -372,6 +372,17 @@ Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
                             "(on Mesa, Q4_SHIFT=0 turns off the version override)\n";
                     exit(2);
                 }
+                // Every v5 add reads its base as a *residual* stream (the
+                // previous LayerNorm's output, see matvec_add_rf), so the
+                // activation format has to be one the residual codec covers.
+                // ACT=i8 does not, and without this it dies in a link error
+                // ("no function with name Y1Q") at the first layer.
+                if (!x_can_residual(gpu_.act_fmt_)) {
+                    cerr << "encoder-decoder: ACT=" << x_format_name(gpu_.act_fmt_)
+                         << " cannot be a residual stream, and a v5 block adds into "
+                            "the previous LayerNorm's output\n";
+                    exit(2);
+                }
                 gpu_.upload_v5_rows(m_, (qkv_pair && ((m_.dim + 2 * m_.kv_dim) % 2 == 0))
                                             ? XFormat::I16_2 : XFormat::I24_1);
             }

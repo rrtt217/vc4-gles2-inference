@@ -312,11 +312,17 @@ std::string x_glsl(XFormat f) {
         "if(q<0.0)q+=65536.0;float hi=floor(q/256.0);"
         "return vec2(hi/255.0,(q-hi*256.0)/255.0);}\n"
         "vec2 x_i16enc(float v){return x_q16enc(v*256.0);}\n"
+        // x_i8q is in q16 units like every other decoder's raw form: the grid
+        // is 1/16, so value*256 = (byte-128)*16.  The real-value forms divide
+        // by 256, not by 16 -- the 16 is the grid factor and is already in
+        // x_i8q; dividing by it again returned the value *16, which no hot
+        // kernel reads (they all use X1Q) and probes/codec_probe caught on the
+        // first real-value read of an I8_4 stream.
         "float x_i8q(float c){return (floor(c*255.0+0.5)-128.0)*16.0;}\n"
         "float x_i8cq(vec4 c,int i){if(i==0)return x_i8q(c.r);if(i==1)return x_i8q(c.g);"
         "if(i==2)return x_i8q(c.b);return x_i8q(c.a);}\n"
-        "float x_i8(float c){return x_i8q(c)/16.0;}\n"
-        "float x_i8c(vec4 c,int i){return x_i8cq(c,i)/16.0;}\n"
+        "float x_i8(float c){return x_i8q(c)/256.0;}\n"
+        "float x_i8c(vec4 c,int i){return x_i8cq(c,i)/256.0;}\n"
         "vec4 x_i8enc4(float a,float b,float c,float d){"
         "vec4 q=clamp(floor(vec4(a,b,c,d)*16.0+0.5),-127.0,127.0);"
         "return (q+128.0)/255.0;}\n"
@@ -514,6 +520,8 @@ std::string x_residual_glsl(XFormat f) {
 
     return {};
 }
+
+bool x_can_residual(XFormat f) { return !x_residual_glsl(f).empty(); }
 
 int x_pair2_texels(int count) { return count; }
 
