@@ -1855,6 +1855,17 @@ bool Session::pair_ok() const {
         // The check is here, not in the table: the view is a property of the
         // loaded Mats, not of the format.
         if (w1[0].type == WeightType::INT4 && !(w1[0].fmt4 && w2[0].fmt4)) return false;
+        // The q4 and t3 two-position kernels are an Iris Xe result.  On the
+        // board every pass is finished before the next, and the pair's four
+        // live accumulators and eight activation fetches a group cost more
+        // than the draws it removes: q4 warm prefill is 16.5 s against 12.4 s
+        // on a 72-token prompt (2026-11-25, three interleaved pairs), and the
+        // t3 gate is not even exact there (its LOGITS differ from the serial
+        // arm in 71943 of 73448 words).  The q8 family predates these and is
+        // the board's status quo (wall-neutral, CPU-cheaper), so it stays.
+        if (gpu_.needs_finish() &&
+            (w1[0].type == WeightType::INT4 || w1[0].type == WeightType::T3))
+                return false;
         return true;
     }
 

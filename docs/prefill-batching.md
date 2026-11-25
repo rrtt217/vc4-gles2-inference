@@ -122,6 +122,16 @@ positions at every layer matches, `--ppl` is 35.6726 on both arms and the chat
 text is identical.  Warm prefill of that prompt is 2.193 s serial against
 1.712 s paired (same protocol).
 
+On the board those two formats keep the serial loop (`pair_ok()` refuses them,
+2026-11-25): a pass there is finished before the next, and the pair's four live
+accumulators and eight activation fetches a group outweigh the draws it
+removes.  q4 is exact on the Pi as well (LOGITS byte-identical on the 72-token
+prompt, PPL 326.8056 on both arms) but its warm prefill is 16.5 s against
+12.4 s (three interleaved pairs, same prompt).  t3's gate is slower there and
+not exact: its LOGITS differ from the serial arm in 71943 of 73448 words, so
+the refusal is a correctness boundary, not only a speed one.  q8 keeps the
+pair on the board -- it is the status quo, wall-neutral and cheaper in CPU.
+
 **On Xe the q8 pair's byte-exactness is open, and it is not the weight half.**
 The q8 pair diverges from its serial arm by one LSB at a late layer (first at
 token 12, layer 5, in the attention output), while q4's pair is exact on the

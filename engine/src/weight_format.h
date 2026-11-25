@@ -109,8 +109,9 @@ constexpr WeightFormat kWeightFormats[] = {
     // q4: eight packed nibbles a texel plus the group scale/min plane.  A
     // column slice must stay on a group boundary; rows are independent.
     // P2/P2Add are the 4-bit view's (Q4_FMT=rgba4, the chunked FFN's default):
-    // the packed nibble view has no two-position kernel, so pair_ok() also
-    // asks for fmt4 rather than pretending.
+    // the packed nibble view has no two-position kernel, and a
+    // finish-per-draw backend keeps the serial loop (the pair is slower
+    // there), so pair_ok() asks for both rather than pretending.
     {WeightType::INT4, "q4", kWScaleGroupMinMax, 1, 32, false, kActAll8,
      wstage_bit(WStage::Serial) | wstage_bit(WStage::Add) |
          wstage_bit(WStage::FfnPair) | wstage_bit(WStage::FfnFusedGate) |
@@ -124,7 +125,8 @@ constexpr WeightFormat kWeightFormats[] = {
     // is eight columns.  The FFN pair path is bespoke (matvec_pair_to_row +
     // swiglu_pair2row), which is why the capability is still FfnPair; the
     // two-position family reads only the half of the texel its row owns and
-    // fuses the gate, one row for both positions.
+    // fuses the gate, one row for both positions.  pair_ok() refuses it on a
+    // finish-per-draw backend, where it is slower and (t3 only) not exact.
     {WeightType::T3, "t3", kWScaleUniform | kWScalePerRow, 2, 8, true, kActAll,
      wstage_bit(WStage::Serial) | wstage_bit(WStage::Add) |
          wstage_bit(WStage::QkvPair) | wstage_bit(WStage::FfnPair) |

@@ -204,7 +204,10 @@ gate fused).  The shipped container cannot use them -- layer 23 carries
 serial.  A `--no-rail-check` repack of the same source exercises the path: on
 Iris Xe (2026-11-25) `LOGITS_OUT`, every hidden state at every layer and
 `--ppl` (35.6726) are identical between `PREFILL_PAIR=0` and `1`, and warm
-prefill of a 65-token prompt is 2.193 s against 1.712 s.
+prefill of a 65-token prompt is 2.193 s against 1.712 s.  On the board
+`pair_ok()` refuses the t3 pair (2026-11-25): it is slower there and its gate
+is not exact on VC4 (the LOGITS differ from the serial arm), so the board
+keeps the serial loop either way.
 
 The board figure is the point of the kind: 167.5 MB of container, 85 MB of
 texture, and 358 M parameters that the q8 body (435 MB) and the q4 body (337 MB)
