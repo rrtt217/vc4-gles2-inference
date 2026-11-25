@@ -591,11 +591,12 @@ std::string x_pair2_glsl(XFormat f) {
             "vec4 x_p2_st(float a,float b){return x_bf16enc2(a,b);}\n"
             "vec4 x_p2_stq(float qa,float qb){return x_bf16enc2(qa/256.0,qb/256.0);}\n";
     }
-    return
-        "float x_p2_a(vec4 c){float u=c.r*65280.0+c.g*255.0;"
-        "if(u>=32768.0)u-=65536.0;return u;}\n"
-        "float x_p2_b(vec4 c){float u=c.b*65280.0+c.a*255.0;"
-        "if(u>=32768.0)u-=65536.0;return u;}\n"
+    return x_scaled_glsl() +
+        // The two-position reader is the same raw decoder as the pair layout:
+        // it used the pre-6234328 rail (>= 32768), which on VC4 reads the
+        // negative rail as +127.99.
+        "float x_p2_a(vec4 c){return x_q16raw_at(c.rg);}\n"
+        "float x_p2_b(vec4 c){return x_q16raw_at(c.ba);}\n"
         "vec4 x_p2_st(float a,float b){return x_st2(a,b);}\n"
         "vec4 x_p2_stq(float qa,float qb){vec2 p=x_q16enc(qa),q=x_q16enc(qb);"
         "return vec4(p.x,p.y,q.x,q.y);}\n";

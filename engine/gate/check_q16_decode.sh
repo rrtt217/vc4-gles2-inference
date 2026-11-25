@@ -2,18 +2,15 @@
 # One rule, one place: every q16 decode in the emitted GLSL.
 #
 # The q16 decode is `u = hi*65280 + lo*255`, then the negative rail is folded back
-# (`u >= T` subtracts 65536).  The rule lives in xformat.cpp, but its *text* is
-# copied into every kernel that reads q16 by hand: the x_i16 family, the q4
-# kernels' dA/dB, the KV decoders, the pair readers.  Ten spellings across four
-# shader TUs, and two thresholds.
+# (`u >= 32767.5` subtracts 65536).  The rule has one body now, x_q16raw_at in
+# xformat.cpp, and every reader is a macro or an instantiation of it; this gate
+# is the check that a decode site keeps the fold and the threshold, so an edit
+# cannot drop one silently.
 #
-# The two thresholds are both correct and that is why this is a check and not a
-# refactor: a decoded u is always a multiple of 255 (the bytes are 1/255 steps),
-# so no value can land in [32767.5, 32768).  Changing the text would change the
-# numerics by the letter of the rule in AGENTS.md ("the emitted text *is* the
-# numerics"), so the text stays and this gate keeps the *rule* single: a decode
-# site must carry one of the two known thresholds and the fold, and a new spelling
-# fails here instead of on the board as a sign error.
+# The threshold is 32767.5 and only 32767.5.  The 32768.0 spelling that the
+# copies used is *not* equivalent on VC4: the (128,0) pair reconstructs as
+# 32767.99x there, so `>= 32768` reads the negative rail as +127.99 -- a full
+# 256 q16 units (6234328).  Those copies are gone; a new one fails here.
 #
 # Usage: gate/check_q16_decode.sh [dump-file]   (no dump = run --dump-shaders=raw)
 set -u
@@ -55,6 +52,7 @@ report=$(printf '%s\n' "$dump" | awk '
     f1c = gsub(/>=32767\.5/, "&", line); f2c = gsub(/>=32768\.0/, "&", line)
     f = f1c + f2c
     sites += d; f1 += f1c; f2 += f2c
+    if (f2c > 0) bad = bad "  a decode uses the pre-6234328 rail (>= 32768): " substr($0, 1, 110) "\n"
     if (d > f) { bad = bad "  " d " decode(s), " f " fold(s): " substr($0, 1, 110) "\n" } }
   END { printf "%d %d %d", sites, f1, f2
         if (bad != "") { printf "\n%s", bad > "/dev/stderr"; exit 1 } }')
@@ -64,11 +62,11 @@ t1=$(printf '%s\n' "$report" | cut -d' ' -f2)
 t2=$(printf '%s\n' "$report" | cut -d' ' -f3)
 
 odd=$(printf '%s\n' "$dump" | grep -o '>=[0-9][0-9]*\.[0-9]' | sort -u |
-      grep -vE '^>=32767\.5$|^>=32768\.0$|^>=128\.0$' | head -3)
+      grep -vE '^>=32767\.5$|^>=128\.0$' | head -3)
 if [ -n "$odd" ]; then
     echo "FAIL  a decode uses a threshold that is not one of the documented ones:" >&2
     printf '%s\n' "$odd" | sed 's/^/      /' >&2
     exit 1
 fi
 
-echo "q16 decode: ok ($sites sites; ${t1}x 32767.5, ${t2}x 32768.0 -- equivalent at 255 steps)"
+echo "q16 decode: ok ($sites sites; ${t1}x 32767.5, ${t2}x 32768.0)"

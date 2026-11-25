@@ -98,50 +98,44 @@ engine keeps `glFlush(); glFinish();` on VC4:
 
 Iris does not force these finishes.
 
-### 4. Activation textures hold two int16 values per texel
+### 4. The activation stream is an axis; a matvec's output is not in it
 
-Every texture passed as `X` to a matvec program contains **two** int16
-activations per RGBA8 texel: `(r,g)` is element `2t`, `(b,a)` is `2t+1`, both
-big-endian in the same way as before.  Texture width is therefore
-`(cols + 1) / 2`, not `cols`.
+Every texture a matvec reads as `X` is `act_fmt_`, one of five layouts: I16_1
+(one q16 a texel), I16_2 (two, the default), I8_4 (four at 1/16), BF16 (two),
+F32 (one).  The width is `x_texels(cols, act_fmt_)`; no producer hardcodes one,
+and a stream written in one layout and read in another is the "repeated single
+token" failure the old packed/unpacked split caused (`scripts/verify_packing.sh`
+compares the first sixteen greedy tokens against a reference binary when that
+layout moves).
 
-Why: before this change each multiply-accumulate cost one activation fetch plus
-a quarter of a weight fetch (weights are 4-per-texel), i.e. 1.25 texture samples
-per MAC.  Packing the activations halves the activation traffic to 0.75 samples
-per MAC.  The logits pass predicted 6.14M samples / ~185 Msamples/s = 32ms and
-measured 33.4ms, which is what identified texture sampling as the bottleneck.
+Two matvec-shaped stores are *not* on this axis:
 
-Producers of an `X` texture — **all four must use the packed layout**:
+| store | layout | readers |
+|---|---|---|
+| a projection (`matvec_to` -> the weight kernel's write) | I24_1, 1/256, +-32768, fixed -- except the qkv pair kernel, whose target is its own q16-pair layout (`qkv_fmt`) shared with the rope/score readers | `act_swish`, `bias_add_matvec`, `att_cross_kv` -- each names I24 |
+| an add-into-residual (`matvec_add`) | `res_fmt_` (the next section) | the norm, the next add |
 
-| producer | where |
-|---|---|
-| host upload | `upload_activations` (used by `upload_input`, `logits`) |
-| RMSNorm output | `rms_norm_program` (writes pairs, width `att_dim_/2`) |
-| SwiGLU output | `swiglu_2row_program`, `swiglu_program` (width `hidden/2`) |
-| attention output | `v_program` (width `att_dim_/2`) |
+So `ACT` decides what a matvec *reads* and what the elementwise passes (norm,
+swish, bias, the attention output) *write*; it does not move a projection's
+output.  The capability table (`weight_format.h`, `wf_can`) is what refuses a
+weight format that cannot read the chosen axis.
 
-Residual (`R`) textures, matvec outputs and the KV cache are **unchanged**: one
-value per texel.  `rms_stats_program` and `rms_norm_program` still *read* their
-input one value per texel, because their input is a residual, not an `X`.
+### 4b. The residual stream is an axis, and its rail is the format's
 
-Missing any one of the four producers silently degrades generation into
-repeated single tokens (the model sees near-constant activations).  That is what
-`engine/scripts/verify_packing.sh` guards: it compares the first 16 greedy tokens
-against the pre-packing engine byte for byte.
+`res_fmt_` is one of five: I16_1 (1/256, +-128), I16_2 (two a texel, same
+grid), I24_1 (1/256, +-32768), BF16 (two a texel, f32's exponent) and F32.
+The step and the rail are the format's contract (`xformat.h`); the switch is
+`RES` (`docs/test-hooks.md`).  A value past the rail is clamped silently, so
+the packer measures each model's peaks and refuses (dense) or warns (v5) --
+`mmcf_pack.py`, and `models/README.md` for the models that trip it (SmolLM2's
+residual reaches 26884, supra2's 2300).
 
-
-### 4b. The residual stream is q16, and that is a 128 rail
-
-The residual is fixed point at 1/256, so it cannot hold a value beyond **±128**;
-`add_q16` clamps there.  That is invisible for the models here (MiniMind3's
-residual peaks around 40, see `docs/benchmarks.md`), and it is the hard limit
-for a model whose residual is larger: supra2-100M reaches **2300** at layer 4
-and saturates, which reproduces exactly as a wrong argmax
-(`models/README.md` has the measurement, including the clamped-simulation
-proof).  A per-layer power-of-two residual scale is the fix that fits
-(`GPU::set_residual_scale` exists but no caller does), and a single global
-factor does not work: the early layers need ~1e-2 resolution while the late
-ones need ~1e3 of range.
+The LayerNorm's *input* is this stream; its output is the activation.  In the
+dense chain every add reads and writes `res`.  In a v5 block the add's *base*
+is the activation -- the previous LayerNorm's output -- and only the sum is
+written as `res` (`matvec_add_rf`); `docs/test-hooks.md` states that contract
+next to the axes, and the v5 entry refuses an activation format that is not
+residual-capable (`ACT=i8`).
 
 ### 4c. Which GLSL ES builtins actually run
 
@@ -222,36 +216,26 @@ before the KV cache and attention targets are allocated.  On VC4 that limit is
 clamps, instead of dying later with `FBO incomplete`.  A context longer than
 the limit would need a tiled KV cache, which is not implemented.
 
-## The q16 decode rule, and its two thresholds
+## The q16 decode rule
 
 A q16 value is two bytes (`hi`, `lo`); the decode is
 
 ```glsl
 u = hi * 65280.0 + lo * 255.0;      // 0 .. 65535
-if (u >= T) u -= 65536.0;           // fold the negative rail
+if (u >= 32767.5) u -= 65536.0;     // fold the negative rail
 ```
 
-The rule lives in `engine/src/xformat.cpp`, but the *text* is repeated by every
-kernel that reads q16 by hand -- the `x_i16` family, the q4 kernels' `dA`/`dB`,
-the KV decoders in `shaders_attn.cpp`, the pair readers -- ten spellings across
-four shader TUs, with two thresholds:
+One body: `x_q16raw_at` in `engine/src/xformat.cpp` (with the scaled
+instantiations in `x_scaled_glsl`), and every reader is a macro or a call to
+it -- the `x_i16` family, the pair and two-position readers, the attention's
+decoders, the q4 kernels' `dA`/`dB`.  The threshold is 32767.5 and only
+32767.5: the (128,0) pair reconstructs as 32767.99x on VC4, so the older
+`>= 32768` spelling read the negative rail as +127.99 there -- a full 256 q16
+units.  The copies that still carried it were unified on 2026-11-25
+(`fdb2daa`); `engine/gate/check_q16_decode.sh` (gate step 0d) fails on a
+decode that drops its fold or uses the old threshold, and
+`engine/gate/check_codecs.py` on a re-typed layout.
 
-| spelling | where | threshold |
-|---|---|---|
-| fast float, `if` form | `xformat.cpp` (raw, pair, quad) | `32767.5` |
-| fast float, `if` form | `xformat.cpp` pair-of-positions, `shaders_attn.cpp` `dec16` | `32768.0` |
-| ternary form | `shaders_common.cpp` `dA`/`dB`, `shaders_q8.cpp` `dr` | `32768.0` |
-
-**Both thresholds are correct**, and that is why the text is not unified: a
-decoded `u` is always a multiple of 255 (the bytes hold 1/255 steps), so no value
-can land in `[32767.5, 32768)`.  `32767.5` is the documented rail test (it
-classifies the VC4 rail exactly); `32768.0` is the older spelling and behaves
-identically.  Changing the text would change the numerics by the letter of
-"the emitted text *is* the numerics", so the rule is enforced instead:
-`engine/gate/check_q16_decode.sh` (gate step 0d) requires every decode in
-`--dump-shaders=raw` to carry one fold per decode and one of the two thresholds.
-A third spelling, or a fold dropped in an edit, fails there instead of on the
-board as a sign error.
 
 ## FFN policy
 
@@ -280,14 +264,15 @@ GPU `wo` matvec; the CPU still handles the residual and FFN.
 
 Layout:
 
-- `qkv_rope` / `kv_cache`: 24-bit (or packed q16/q8) KV, scale 16384;
-- rotated q and scores: q16 pairs, scale 1024; scores pack two positions per
-  texel;
-- stats: one texel per head, `(max, sum)` packed as q16 with scales 1024 and
-  32;
-- probabilities: decoded inside `att_v`; the separate probability texture is
-  retired after the q16 score layout;
-- attention output: the active X format (q16 pair or `I8_4`), ready for `wo`.
+- KV cache and the cross plane: one `KvLayout` (`docs/prefix-cache.md`), the
+  codec `i24|q8|q16|bf16|f32` (`KV`), its grid (`KV_GRID`: 16384 at 24-bit,
+  2048 at q16, 16 at q8), one or four values a texel, and the optional
+  per-head V step plane;
+- rotated q and scores: q16 pairs at the score grid (`ATT_SCORE_GRID`, 1024),
+  two positions a texel; the sum uses `ATT_SUM_GRID` (32) or `ATT_SUM=log2`;
+- stats: one texel per head, `(max, sum)` as a q16 pair;
+- probabilities: decoded inside `att_v`;
+- attention output: the activation axis (`act_fmt_`), read by `wo`.
 
 The CPU KV cache is not allocated when `GPU_ATTN=1`, so for 42M the 33 MB CPU
 cache is replaced by a 33 MB GPU cache instead of adding both.
