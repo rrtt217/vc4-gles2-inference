@@ -181,7 +181,7 @@ same table with what *this* environment resolved to).
 | `RMS_DUMP` | value | prints the 32 rms partial sums as the shader wrote them (RMS_DUMP=<layer> for one layer) |
 | `RWKV_DUMP` | `=1` | the RWKV block's per-layer peaks (state/residual/sqrelu rails) |
 | `SHADER_SRC` | value | print the GLSL of every program whose key contains the substring |
-| `STAGE_DUMP` | value | per-layer xb/att/x1/xbf/hid/hidA as q16 texels; diff_paths.sh reads it |
+| `STAGE_DUMP` | value | per-layer xb/att/x1/xbf/hid/hidA as q16 texels (the pair path adds x1b/p2in/p2part); diff_paths.sh reads it |
 | `T3_GEOM` | value | the 2-bit body's tile geometry as the uploader made it and as the shader reads it -- two machines comparing numbers need this to be the same lines |
 | `TOKENS_OUT` | value | prompt and generated token ids (int32) |
 

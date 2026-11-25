@@ -19,7 +19,7 @@ static const SwitchDef kSwitches[] = {
     {"T3_GEOM", "", SwKind::Str, "", SwStatus::Probe, SwAxis::Dump,
      "the 2-bit body's tile geometry as the uploader made it and as the shader reads it -- two machines comparing numbers need this to be the same lines"},
     {"STAGE_DUMP", "", SwKind::Str, "", SwStatus::Probe, SwAxis::Dump,
-     "per-layer xb/att/x1/xbf/hid/hidA as q16 texels; diff_paths.sh reads it"},
+     "per-layer xb/att/x1/xbf/hid/hidA as q16 texels (the pair path adds x1b/p2in/p2part); diff_paths.sh reads it"},
     {"HIDDEN_DUMP", "", SwKind::Str, "", SwStatus::Probe, SwAxis::Dump,
      "the same for the layer output on the GPU path (GPU_LAYER 0 vs 1)"},
     {"DUMP_F32", "", SwKind::Str, "", SwStatus::Probe, SwAxis::Dump,

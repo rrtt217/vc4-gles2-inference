@@ -223,20 +223,44 @@ string rms_stats2(int dim, XFormat rf) {
         "gl_FragColor=S_ST(s);}";
 }
 
-string rms_norm_pair2(int dim, XFormat rf, bool use_eps_uniform) {
+// The two-position reduce: rms_stats_reduce's 32-add loop, once per position,
+// over the 64-wide partial texture.  A split-reduce backend runs this as its
+// own draw and the pair norm reads the two totals, which is what makes the
+// pair's divisor the serial norm's to the bit.  Summing the partials inside
+// the normalising fragment instead is a different loop shape and the compiler
+// lands 2 of 768 q16 values one LSB apart (Xe, 2026-11-25).
+string rms_stats_reduce2(int partials) {
+    const string P = to_string(partials), P2 = to_string(2 * partials);
+    return std::string("precision highp float;\n") +
+        "uniform sampler2D S;" + encs_glsl() +
+        "void main(){int w=int(gl_FragCoord.x);float s=0.0;"
+        "for(int p=0;p<" + P + ";p++){int i=w*" + P + "+p;"
+        "s+=S_LD(texture2D(S,vec2((float(i)+0.5)/" + P2 + ".0,0.5)));}"
+        "gl_FragColor=S_ST(s);}";
+}
+
+string rms_norm_pair2(int dim, XFormat rf, bool use_eps_uniform, bool fused_reduce) {
     need_dim("rms_norm_pair2", dim);
     const string eps_src = use_eps_uniform ? "eps" : "1e-5";
     const string D = to_string(dim);
     const string RW = to_string(x_texels(dim, rf));
     const string DW = to_string(x_texels(dim, XFormat::I16_2));
+    // The serial path's total is the backend's: VC4 folds the 32-way reduce
+    // into each normalising fragment (raw float), every other backend runs
+    // rms_stats_reduce, which stores the total through S_ST and reads it back
+    // through S_LD.  Read the same number here -- the fused form sums, the
+    // split form takes the two totals rms_stats_reduce2 already made.
+    const string SS = fused_reduce
+        ? "float ssa=0.0,ssb=0.0;"
+          "for(int p=0;p<32;p++){"
+          "ssa+=S_LD(texture2D(S,vec2((float(p)+0.5)/64.0,0.5)));"
+          "ssb+=S_LD(texture2D(S,vec2((float(p+32)+0.5)/64.0,0.5)));}"
+        : "float ssa=S_LD(texture2D(S,vec2(0.25,0.5)));"
+          "float ssb=S_LD(texture2D(S,vec2(0.75,0.5)));";
     return head(XFormat::I16_2) + encs_glsl() + x_residual_glsl(rf) + x_pair2_glsl(rf) +
         (use_eps_uniform ? "uniform sampler2D XA,XB,W,S;uniform float eps;"
                          : "uniform sampler2D XA,XB,W,S;") +
-        "void main(){int k=int(gl_FragCoord.x);"
-        "float ssa=0.0,ssb=0.0;"
-        "for(int p=0;p<32;p++){"
-        "ssa+=S_LD(texture2D(S,vec2((float(p)+0.5)/64.0,0.5)));"
-        "ssb+=S_LD(texture2D(S,vec2((float(p+32)+0.5)/64.0,0.5)));}"
+        "void main(){int k=int(gl_FragCoord.x);" + SS +
         "float inva=inversesqrt(ssa/float(" + D + ")+" + eps_src + ");"
         "float invb=inversesqrt(ssb/float(" + D + ")+" + eps_src + ");"
         "vec4 wc=texture2D(W,vec2((float(k/2)+0.5)/float(" + DW + "),0.5));"

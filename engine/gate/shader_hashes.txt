@@ -92,6 +92,9 @@ b49396d2f55910c9    4917 matvec_i16_6400x768_i16_2
 fad0ba9ca94c63fc    3936 matvec_i16_add_1536x768_i16_2_i16_1
 8e8f3f71c65b86e5    6754 matvec_i4_4x4_1536x768_i16_2
 00057dcb25b91d99    4295 matvec_i4_add_4x4_768x1216_i16_2_i16_1
+bfc09d7c721f1842    6936 matvec_i4_gate2_p2_2432x768
+cc62a7800134e256    6572 matvec_i4_p2_add_768x768_i16_1
+533c9f3888757252    6337 matvec_i4_p2_add_p2_768x768
 464a1c25a9f84b0c    6810 matvec_i4_pair_swiglu_4x4_1216x768_i16_2
 e802425212571418    6810 matvec_i4_pair_swiglu_4x4_2432x768_i16_2
 e385c7b4c0c78431    2865 matvec_q8_1536x768_i16_2
@@ -146,9 +149,12 @@ cacef64c6268e4f8    6742 q4shift1/matvec_i4_pair_swiglu_2432x768_i16_2_inl
 d92497f47c0daecf    4977 rms_norm_768_i16_1_i8_4
 d21b0e0c79db30eb    5349 rms_norm_768_i16_2_i16_2_fused_eps
 ac80f2a3c1633fad    5941 rms_norm_pair2_768_i16_1_eps
+26d937a2fa46aed7    5873 rms_norm_pair2_768_i16_1_eps_q
 130bba942a56bf84    5925 rms_norm_pair2_768_i16_1_lit
+381020b27c4697e2    5857 rms_norm_pair2_768_i16_1_lit_q
 1b37e82e90647591    4343 rms_stats2_768_i16_1
 82ed6b2a17fa2005     679 rms_stats_reduce
+748d5456758b0fd3     718 rms_stats_reduce2_32
 15258e700e44bb9d    4077 rms_stats_split_768_i16_1
 ccd65f0d840b8349    3859 rms_stats_split_768_i8_4
 e440cf4880abe06e    3523 rwkv_decay_768

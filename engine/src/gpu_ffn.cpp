@@ -240,17 +240,38 @@ GLuint GPU::ffn_pair_swiglu_chunk2(const Mat& w1, const Mat& w3, GLuint x2, int 
 GLuint GPU::ffn_pair_swiglu_chunk2_p2(const Mat& w1, const Mat& w3, GLuint xp2, int rows, Target& out){
         if (out.tex == 0 || out.w != rows) out = make_target(rows, 1);
         const bool wr = w1.has_row_scale() && w3.has_row_scale();
-        GLuint p = x_q8_gate2_p2(rows, w1.cols, wr);
+        // The weight half is the table's answer, the adapter names the text:
+        // q8's packed byte decode and q4's 4-bit view write the same P2 texel.
+        GLuint p = 0;
+        switch (w1.type) {
+            case WeightType::INT8:
+                p = x_q8_gate2_p2(rows, w1.cols, wr);
+                break;
+            case WeightType::INT4:
+                p = x_i4_gate2_p2(rows, w1.cols);
+                break;
+            case WeightType::INT16:
+            case WeightType::INT6:
+            case WeightType::T3:
+                wf_no_kernel("ffn_gate2_p2", w1.type);
+        }
         bind_fbo(out.fbo);
         use_program(p);
         bind_tex(0, w1.tex); set_sampler(p, "W1", 0);
         bind_tex(1, w3.tex); set_sampler(p, "W2", 1);
         bind_tex(2, xp2); set_sampler(p, "X", 2);
-        glUniform1f(uloc(p, "ws1"), w1.scale);
-        glUniform1f(uloc(p, "ws2"), w3.scale);
-        if (wr) {
-            bind_tex(3, w1.row_scale_tex); set_sampler(p, "WS1", 3);
-            bind_tex(4, w3.row_scale_tex); set_sampler(p, "WS2", 4);
+        if (w1.type == WeightType::INT4) {
+            bind_tex(3, w1.q4_param_tex); set_sampler(p, "P1", 3);
+            bind_tex(4, w3.q4_param_tex); set_sampler(p, "P2", 4);
+            glUniform1f(uloc(p, "ps1"), w1.q4_param_scale);
+            glUniform1f(uloc(p, "ps2"), w3.q4_param_scale);
+        } else {
+            glUniform1f(uloc(p, "ws1"), w1.scale);
+            glUniform1f(uloc(p, "ws2"), w3.scale);
+            if (wr) {
+                bind_tex(3, w1.row_scale_tex); set_sampler(p, "WS1", 3);
+                bind_tex(4, w3.row_scale_tex); set_sampler(p, "WS2", 4);
+            }
         }
         setup_attrib(p);
         for (int x0 = 0; x0 < rows; x0 += kDrawCap) {

@@ -534,6 +534,191 @@ string matvec_i4_pair_swiglu_4x4(int rows, int cols, XFormat xf, bool inl, int h
 }
 
 
+// ---- the two-position (P2) family, 4-bit view ------------------------------
+//
+// One fragment is one output row for BOTH prefill positions: the weight texels
+// of that row are fetched once and feed two activation decodes, so the matrix
+// body is read once per two positions.  Everything around the weight half is
+// the format-neutral P2 scheme (rms_stats2/rms_norm_pair2 build the input,
+// p2_split hands the layer residual back), which is why only these three
+// kernels are q4's own.
+//
+// Exactness: per (row, position) the arithmetic is the serial kernel's, in the
+// serial order -- the group's four 8-column iterations, the same dot operand
+// order and the same `scale*dot + min*xsum` commit -- so the output q16 is the
+// one two single-position passes would have written.  The P2 input holds one
+// value per texel per position (x_p2_a/x_p2_b), not the serial I16_2 pair.
+string matvec_i4_gate2_p2_4x4(int rows, int cols) {
+    need_shape("matvec_i4_gate2_p2_4x4", rows, cols, 32);
+    const int texw = cols / 4;              // one 4-bit texel = four weights
+    const int groups = (cols + 31) / 32;
+    const string ROWS = to_string(rows), COLS = to_string(cols),
+                 GROUPS = to_string(groups), TEXW = to_string(texw);
+    const bool nom = q4_nomin();
+    const string XS = nom ? ""
+        : "xsumA+=xaA.x+xaA.y+xaA.z+xaA.w+xbA.x+xbA.y+xbA.z+xbA.w;"
+          "xsumB+=xaB.x+xaB.y+xaB.z+xaB.w+xbB.x+xbB.y+xbB.z+xbB.w;";
+    const string MA1 = nom ? "" : "+ma1*xsumA", MA2 = nom ? "" : "+ma2*xsumA";
+    const string MB1 = nom ? "" : "+ma1*xsumB", MB2 = nom ? "" : "+ma2*xsumB";
+    // Same operand order as the serial flat gate's `dot`: weight lane times
+    // activation lane, eight terms.
+    auto dot = [](const char* wt0, const char* wt1, const char* xa, const char* xb) {
+        const string w0(wt0), w1(wt1), a(xa), b(xb);
+        return w0 + ".x*" + a + ".x+" + w0 + ".y*" + a + ".y+" +
+               w0 + ".z*" + a + ".z+" + w0 + ".w*" + a + ".w+" +
+               w1 + ".x*" + b + ".x+" + w1 + ".y*" + b + ".y+" +
+               w1 + ".z*" + b + ".z+" + w1 + ".w*" + b + ".w";
+    };
+    return q4_head(XFormat::I16_2, false) + x_pair2_glsl() +
+        "uniform sampler2D W1,W2,P1,P2,X;uniform float ps1,ps2;" + qz_sl() +
+        "void main(){int r=int(gl_FragCoord.x);"
+        "float vr=(float(r)+0.5)/float(" + ROWS + ");"
+        "float itw=1.0/float(" + TEXW + ");"
+        "float u1s=65280.0*15.0*ps1,v1s=255.0*15.0*ps1;"
+        "float u2s=65280.0*15.0*ps2,v2s=255.0*15.0*ps2;"
+        "float s10=0.0,s20=0.0,s11=0.0,s21=0.0;"
+        "for(int g=0;g<" + GROUPS + ";g++){"
+        "float gp=(float(g)+0.5)/float(" + GROUPS + ");"
+        "vec4 q1=texture2D(P1,vec2(gp,vr)),q2=texture2D(P2,vec2(gp,vr));"
+        "float sa1=q1.r*u1s+q1.g*v1s,sa2=q2.r*u2s+q2.g*v2s;"
+        "float ma1=x_i16raw(q1.ba)*ps1,ma2=x_i16raw(q2.ba)*ps2;"
+        "float xsumA=0.0,xsumB=0.0;"
+        "float dA1=0.0,dA2=0.0,dB1=0.0,dB2=0.0;"
+        "for(int q=0;q<4;q++){int c=g*32+q*8;"
+        // Eight P2 texels carry columns c..c+7 for both positions, so each
+        // fetch is decoded twice (once per position) instead of fetched once
+        // per position.
+        "vec4 t0=texture2D(X,vec2((float(c)+0.5)/float(" + COLS + "),0.5));"
+        "vec4 t1=texture2D(X,vec2((float(c+1)+0.5)/float(" + COLS + "),0.5));"
+        "vec4 t2=texture2D(X,vec2((float(c+2)+0.5)/float(" + COLS + "),0.5));"
+        "vec4 t3=texture2D(X,vec2((float(c+3)+0.5)/float(" + COLS + "),0.5));"
+        "vec4 t4=texture2D(X,vec2((float(c+4)+0.5)/float(" + COLS + "),0.5));"
+        "vec4 t5=texture2D(X,vec2((float(c+5)+0.5)/float(" + COLS + "),0.5));"
+        "vec4 t6=texture2D(X,vec2((float(c+6)+0.5)/float(" + COLS + "),0.5));"
+        "vec4 t7=texture2D(X,vec2((float(c+7)+0.5)/float(" + COLS + "),0.5));"
+        "vec4 xaA=vec4(x_p2_a(t0),x_p2_a(t1),x_p2_a(t2),x_p2_a(t3));"
+        "vec4 xbA=vec4(x_p2_a(t4),x_p2_a(t5),x_p2_a(t6),x_p2_a(t7));"
+        "vec4 xaB=vec4(x_p2_b(t0),x_p2_b(t1),x_p2_b(t2),x_p2_b(t3));"
+        "vec4 xbB=vec4(x_p2_b(t4),x_p2_b(t5),x_p2_b(t6),x_p2_b(t7));" + XS +
+        "float c0=(float(g*8+q*2)+0.5)*itw,c1=c0+itw;"
+        "vec4 wt0=texture2D(W1,vec2(c0,vr)),wt1=texture2D(W1,vec2(c1,vr));"
+        "vec4 wt2=texture2D(W2,vec2(c0,vr)),wt3=texture2D(W2,vec2(c1,vr));"
+        "dA1+=" + dot("wt0", "wt1", "xaA", "xbA") + ";"
+        "dA2+=" + dot("wt2", "wt3", "xaA", "xbA") + ";"
+        "dB1+=" + dot("wt0", "wt1", "xaB", "xbB") + ";"
+        "dB2+=" + dot("wt2", "wt3", "xaB", "xbB") + ";}"
+        "s10+=sa1*dA1" + MA1 + ";s20+=sa2*dA2" + MA2 + ";"
+        "s11+=sa1*dB1" + MB1 + ";s21+=sa2*dB2" + MB2 + ";}"
+        "gl_FragColor=x_p2_st(sl(qz(s10),qz(s20)),sl(qz(s11),qz(s21)));}";
+}
+
+// The w2 side: one row for both positions, with the two per-position residuals
+// added inside the kernel.  The residual fetch and the add are per position;
+// only the weights are shared, but that is the whole point -- w2 is half the
+// FFN's weight bytes.
+string matvec_i4_p2_add_4x4(int rows, int cols, XFormat rf) {
+    need_shape("matvec_i4_p2_add_4x4", rows, cols, 32);
+    const int texw = cols / 4;
+    const int groups = (cols + 31) / 32;
+    const string ROWS = to_string(rows), COLS = to_string(cols),
+                 GROUPS = to_string(groups), TEXW = to_string(texw),
+                 RW = to_string(x_texels(rows, rf));
+    const string XS = q4_nomin() ? ""
+        : "xsumA+=xaA.x+xaA.y+xaA.z+xaA.w+xbA.x+xbA.y+xbA.z+xbA.w;"
+          "xsumB+=xaB.x+xaB.y+xaB.z+xaB.w+xbB.x+xbB.y+xbB.z+xbB.w;";
+    auto dot = [](const char* wt0, const char* wt1, const char* xa, const char* xb) {
+        const string w0(wt0), w1(wt1), a(xa), b(xb);
+        return w0 + ".x*" + a + ".x+" + w0 + ".y*" + a + ".y+" +
+               w0 + ".z*" + a + ".z+" + w0 + ".w*" + a + ".w+" +
+               w1 + ".x*" + b + ".x+" + w1 + ".y*" + b + ".y+" +
+               w1 + ".z*" + b + ".z+" + w1 + ".w*" + b + ".w";
+    };
+    return q4_head(XFormat::I16_2, false) + x_pair2_glsl(rf) + x_residual_glsl(rf) +
+        "uniform sampler2D W,P,X,RA,RB;uniform float ps;"
+        "void main(){int r=int(gl_FragCoord.x);"
+        "float vr=(float(r)+0.5)/float(" + ROWS + ");"
+        "float itw=1.0/float(" + TEXW + ");"
+        "float sA=0.0,sB=0.0;"
+        "for(int g=0;g<" + GROUPS + ";g++){"
+        "vec4 pa=texture2D(P,vec2((float(g)+0.5)/float(" + GROUPS + "),vr));"
+        "float u1s=65280.0*15.0*ps,v1s=255.0*15.0*ps;"
+        "float sa=pa.r*u1s+pa.g*v1s;"
+        "float ma=x_i16raw(pa.ba)*ps;"
+        "float xsumA=0.0,xsumB=0.0,dotA=0.0,dotB=0.0;"
+        "for(int q=0;q<4;q++){int c=g*32+q*8;"
+        "vec4 t0=texture2D(X,vec2((float(c)+0.5)/float(" + COLS + "),0.5));"
+        "vec4 t1=texture2D(X,vec2((float(c+1)+0.5)/float(" + COLS + "),0.5));"
+        "vec4 t2=texture2D(X,vec2((float(c+2)+0.5)/float(" + COLS + "),0.5));"
+        "vec4 t3=texture2D(X,vec2((float(c+3)+0.5)/float(" + COLS + "),0.5));"
+        "vec4 t4=texture2D(X,vec2((float(c+4)+0.5)/float(" + COLS + "),0.5));"
+        "vec4 t5=texture2D(X,vec2((float(c+5)+0.5)/float(" + COLS + "),0.5));"
+        "vec4 t6=texture2D(X,vec2((float(c+6)+0.5)/float(" + COLS + "),0.5));"
+        "vec4 t7=texture2D(X,vec2((float(c+7)+0.5)/float(" + COLS + "),0.5));"
+        "vec4 xaA=vec4(x_p2_a(t0),x_p2_a(t1),x_p2_a(t2),x_p2_a(t3));"
+        "vec4 xbA=vec4(x_p2_a(t4),x_p2_a(t5),x_p2_a(t6),x_p2_a(t7));"
+        "vec4 xaB=vec4(x_p2_b(t0),x_p2_b(t1),x_p2_b(t2),x_p2_b(t3));"
+        "vec4 xbB=vec4(x_p2_b(t4),x_p2_b(t5),x_p2_b(t6),x_p2_b(t7));" + XS +
+        "float c0=(float(g*8+q*2)+0.5)*itw,c1=c0+itw;"
+        "vec4 wt0=texture2D(W,vec2(c0,vr)),wt1=texture2D(W,vec2(c1,vr));"
+        "dotA+=" + dot("wt0", "wt1", "xaA", "xbA") + ";"
+        "dotB+=" + dot("wt0", "wt1", "xaB", "xbB") + ";}"
+        "sA+=sa*dotA+ma*xsumA;sB+=sa*dotB+ma*xsumB;}"
+        "float ra=Y1Q(RA,r," + RW + ".0),rb=Y1Q(RB,r," + RW + ".0);"
+        "gl_FragColor=x_p2_stq(sA+ra,sB+rb);}";
+}
+
+// The second w2 chunk's add: its base is the first chunk's P2 output, one
+// texel for both positions, so the add reads one texture instead of two.
+string matvec_i4_p2_add_p2_4x4(int rows, int cols) {
+    need_shape("matvec_i4_p2_add_p2_4x4", rows, cols, 32);
+    const int texw = cols / 4;
+    const int groups = (cols + 31) / 32;
+    const string ROWS = to_string(rows), COLS = to_string(cols),
+                 GROUPS = to_string(groups), TEXW = to_string(texw);
+    const string XS = q4_nomin() ? ""
+        : "xsumA+=xaA.x+xaA.y+xaA.z+xaA.w+xbA.x+xbA.y+xbA.z+xbA.w;"
+          "xsumB+=xaB.x+xaB.y+xaB.z+xaB.w+xbB.x+xbB.y+xbB.z+xbB.w;";
+    auto dot = [](const char* wt0, const char* wt1, const char* xa, const char* xb) {
+        const string w0(wt0), w1(wt1), a(xa), b(xb);
+        return w0 + ".x*" + a + ".x+" + w0 + ".y*" + a + ".y+" +
+               w0 + ".z*" + a + ".z+" + w0 + ".w*" + a + ".w+" +
+               w1 + ".x*" + b + ".x+" + w1 + ".y*" + b + ".y+" +
+               w1 + ".z*" + b + ".z+" + w1 + ".w*" + b + ".w";
+    };
+    return q4_head(XFormat::I16_2, false) + x_pair2_glsl() +
+        "uniform sampler2D W,P,X,RA;uniform float ps;"
+        "void main(){int r=int(gl_FragCoord.x);"
+        "float vr=(float(r)+0.5)/float(" + ROWS + ");"
+        "float itw=1.0/float(" + TEXW + ");"
+        "float sA=0.0,sB=0.0;"
+        "for(int g=0;g<" + GROUPS + ";g++){"
+        "vec4 pa=texture2D(P,vec2((float(g)+0.5)/float(" + GROUPS + "),vr));"
+        "float u1s=65280.0*15.0*ps,v1s=255.0*15.0*ps;"
+        "float sa=pa.r*u1s+pa.g*v1s;"
+        "float ma=x_i16raw(pa.ba)*ps;"
+        "float xsumA=0.0,xsumB=0.0,dotA=0.0,dotB=0.0;"
+        "for(int q=0;q<4;q++){int c=g*32+q*8;"
+        "vec4 t0=texture2D(X,vec2((float(c)+0.5)/float(" + COLS + "),0.5));"
+        "vec4 t1=texture2D(X,vec2((float(c+1)+0.5)/float(" + COLS + "),0.5));"
+        "vec4 t2=texture2D(X,vec2((float(c+2)+0.5)/float(" + COLS + "),0.5));"
+        "vec4 t3=texture2D(X,vec2((float(c+3)+0.5)/float(" + COLS + "),0.5));"
+        "vec4 t4=texture2D(X,vec2((float(c+4)+0.5)/float(" + COLS + "),0.5));"
+        "vec4 t5=texture2D(X,vec2((float(c+5)+0.5)/float(" + COLS + "),0.5));"
+        "vec4 t6=texture2D(X,vec2((float(c+6)+0.5)/float(" + COLS + "),0.5));"
+        "vec4 t7=texture2D(X,vec2((float(c+7)+0.5)/float(" + COLS + "),0.5));"
+        "vec4 xaA=vec4(x_p2_a(t0),x_p2_a(t1),x_p2_a(t2),x_p2_a(t3));"
+        "vec4 xbA=vec4(x_p2_a(t4),x_p2_a(t5),x_p2_a(t6),x_p2_a(t7));"
+        "vec4 xaB=vec4(x_p2_b(t0),x_p2_b(t1),x_p2_b(t2),x_p2_b(t3));"
+        "vec4 xbB=vec4(x_p2_b(t4),x_p2_b(t5),x_p2_b(t6),x_p2_b(t7));" + XS +
+        "float c0=(float(g*8+q*2)+0.5)*itw,c1=c0+itw;"
+        "vec4 wt0=texture2D(W,vec2(c0,vr)),wt1=texture2D(W,vec2(c1,vr));"
+        "dotA+=" + dot("wt0", "wt1", "xaA", "xbA") + ";"
+        "dotB+=" + dot("wt0", "wt1", "xaB", "xbB") + ";}"
+        "sA+=sa*dotA+ma*xsumA;sB+=sa*dotB+ma*xsumB;}"
+        "vec4 rc=texture2D(RA,vec2((float(r)+0.5)/float(" + ROWS + "),0.5));"
+        "gl_FragColor=x_p2_stq(sA+x_p2_a(rc),sB+x_p2_b(rc));}";
+}
+
 // Q4_FMT=rgba4 for qkv (one row a fragment) and wo (residual add).  Same
 // transformation as the gate: two 4-bit texels per eight weights, no decode,
 // the group scale folded into two constants, nibbles reversed at upload.

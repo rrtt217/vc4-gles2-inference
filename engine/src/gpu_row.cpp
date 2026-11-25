@@ -230,7 +230,23 @@ GLuint GPU::rmsnorm_pair2(GLuint xa, GLuint xb, GLuint w, Target& out){
         setup_attrib(ps);
         glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         layer_finish("NF_RMS");
-        GLuint pn = x_rms_norm_pair2(rms_eps_stated_);
+        // The split-reduce backend takes its total through rms_stats_reduce;
+        // run the same 32-add loop for each position here, so the pair norm's
+        // divisor is the serial norm's to the bit.  (In-shader summing is a
+        // different loop shape and landed 2 of 768 values one LSB apart.)
+        const bool fused = rms_fused();
+        if (!fused) {
+                if (rms_stats2_.tex == 0 || rms_stats2_.w != 2) rms_stats2_ = make_target(2, 1);
+                GLuint pr = x_rms_reduce2();
+                bind_fbo(rms_stats2_.fbo);
+                glViewport(0, 0, 2, 1);
+                use_program(pr);
+                bind_tex(0, rms_partial2_.tex); set_sampler(pr, "S", 0);
+                setup_attrib(pr);
+                glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+                layer_finish("NF_RMS");
+        }
+        GLuint pn = x_rms_norm_pair2(rms_eps_stated_, fused);
         bind_fbo(out.fbo);
         glViewport(0, 0, aw, 1);
         use_program(pn);
@@ -238,7 +254,7 @@ GLuint GPU::rmsnorm_pair2(GLuint xa, GLuint xb, GLuint w, Target& out){
         bind_tex(0, xa); set_sampler(pn, "XA", 0);
         bind_tex(1, xb); set_sampler(pn, "XB", 1);
         bind_tex(2, w); set_sampler(pn, "W", 2);
-        bind_tex(3, rms_partial2_.tex); set_sampler(pn, "S", 3);
+        bind_tex(3, fused ? rms_partial2_.tex : rms_stats2_.tex); set_sampler(pn, "S", 3);
         setup_attrib(pn);
         glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         layer_finish("NF_RMS");

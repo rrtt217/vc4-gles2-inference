@@ -89,7 +89,36 @@ refuses what has no dense attention block to fuse (RWKV, hybrid conv) or
 routes per position (MoE).  `--ppl` groups each window's warm-up run, so the
 perplexity gate exercises the path.
 
-## Acceptance
+## The pair path and the weight formats
+
+`PREFILL_PAIR` (on by default) is the older scheme: two consecutive positions
+share one layer pass for the FFN, so each weight texel is fetched and decoded
+once per two positions.  It does not touch the attention draws.  Its
+format-neutral half is the P2 layout plus `rms_stats2`/`rms_norm_pair2` and
+`p2_split` (see `docs/engine-layout.md`); the format-bound half is three
+kernels under `WStage::P2`/`P2Add`: the gate for two positions, w2 with the two
+per-position residuals, and the chunked second w2 add.
+
+Only q8 and q4 have them.  q4's kernels read the 4-bit view, which is the
+chunked FFN's default; `Q4_FMT=0` keeps the packed nibble view and `pair_ok()`
+then refuses q4's pair (the slow serial loop is still correct).  i16 and q6
+have no pair family at all, and t3's FFN pair is a row-pair layout of one
+matrix, so a two-position kernel there would be a third bespoke form for a body
+whose weight traffic is already two bits.
+
+Acceptance (Iris Xe, 2026-11-25, MiniMind3 q4, 72-token prompt): `LOGITS_OUT`
+is byte-identical between `PREFILL_PAIR=0` and `1`, every hidden state of both
+positions matches the serial arm's (`HIDDEN_DUMP`), `--ppl` is 326.1483 on both
+arms, and the greedy strings are unchanged.  Warm prefill of that prompt is
+0.630 s serial against 0.454 s paired (median of three interleaved pairs,
+`PREFILL_REPEAT=3`); q8 on the same protocol is 0.583 s against 0.449 s.
+
+**On Xe the q8 pair's byte-exactness is open, and it is not the weight half.**
+The q8 pair diverges from its serial arm by one LSB at a late layer (first at
+token 12, layer 5, in the attention output), while q4's pair is exact on the
+same prompt.  q8's extra stage is the row-pair qkv kernel (`qkv_pair 1`); the
+drift predates this work (it reproduces at f1bbf44 with the norm fusion forced
+on both arms), and `--ppl` and the pinned strings do not see it.
 
 The pair path's rule is the one to keep, because it caught a real defect:
 its first wiring rounded the matvec to q16 and added the residual in a

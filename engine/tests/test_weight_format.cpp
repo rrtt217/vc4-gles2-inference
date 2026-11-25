@@ -59,12 +59,14 @@ void test_caps() {
     CHECK(!has(WeightType::INT16, WStage::FfnPair));
     CHECK(!has(WeightType::INT6, WStage::Add));
     CHECK(!has(WeightType::INT6, WStage::Batch));
-    // q4: FFN pair/fused only; no qkv/logits/P2 kernels (they run serial).
+    // q4: FFN pair/fused and the two-position family in the 4-bit view;
+    // no qkv/logits pair kernels (they run serial).
     CHECK(has(WeightType::INT4, WStage::FfnPair));
     CHECK(has(WeightType::INT4, WStage::FfnFusedGate));
     CHECK(!has(WeightType::INT4, WStage::QkvPair));
     CHECK(!has(WeightType::INT4, WStage::LogitsPair));
-    CHECK(!has(WeightType::INT4, WStage::P2));
+    CHECK(has(WeightType::INT4, WStage::P2));
+    CHECK(has(WeightType::INT4, WStage::P2Add));
     // t3: qkv pair and its bespoke FFN pair, but no logits pair or P2.
     CHECK(has(WeightType::T3, WStage::QkvPair));
     CHECK(has(WeightType::T3, WStage::FfnPair));

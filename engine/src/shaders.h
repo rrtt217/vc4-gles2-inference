@@ -173,10 +173,17 @@ std::string matvec_q8_pair_swiglu(int rows, int cols, XFormat xf, bool inl = tru
 std::string matvec_q8_gate2(int rows, int cols);
 std::string matvec_q8_p2(int rows, int cols, bool wrow = false);
 std::string rms_stats2(int dim, XFormat rf);
-std::string rms_norm_pair2(int dim, XFormat rf, bool use_eps_uniform);
+std::string rms_stats_reduce2(int partials);
+std::string rms_norm_pair2(int dim, XFormat rf, bool use_eps_uniform, bool fused_reduce);
 std::string matvec_q8_gate2_p2(int rows, int cols, bool wrow = false);
 std::string matvec_q8_p2_add_p2(int rows, int cols, bool wrow = false);
 std::string matvec_q8_p2_add(int rows, int cols, XFormat rf, bool wrow = false);
+// The same two-position family for q4, in the 4-bit view (Q4_FMT=rgba4, the
+// chunked FFN's default).  The packed nibble view has no P2 kernels; pair_ok()
+// asks for fmt4 rather than pretend.
+std::string matvec_i4_gate2_p2_4x4(int rows, int cols);
+std::string matvec_i4_p2_add_4x4(int rows, int cols, XFormat rf);
+std::string matvec_i4_p2_add_p2_4x4(int rows, int cols);
 std::string p2_split(int rows, XFormat rf);
 std::string matvec_q8_pair_fused(int rows, int cols, XFormat xf, bool wrow = false);
 std::string matvec_q8_pair_logits(int rows, int cols, XFormat xf, bool wrow = false);

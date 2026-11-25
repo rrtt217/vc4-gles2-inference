@@ -94,10 +94,15 @@ GLuint GPU::x_rms_stats2(){
                       ::rms_stats2(att_dim_, res_fmt_));
     }
 
-GLuint GPU::x_rms_norm_pair2(bool use_eps_uniform){
+GLuint GPU::x_rms_reduce2(){
+        return x_prog("xrms2r_" + to_string(RMS_PARTIALS),
+                      ::rms_stats_reduce2(RMS_PARTIALS));
+    }
+
+GLuint GPU::x_rms_norm_pair2(bool use_eps_uniform, bool fused_reduce){
         return x_prog("xrms2n_" + to_string(att_dim_) + "_" + x_format_name(res_fmt_) +
-                          (use_eps_uniform ? "_e" : ""),
-                      ::rms_norm_pair2(att_dim_, res_fmt_, use_eps_uniform));
+                          (use_eps_uniform ? "_e" : "") + (fused_reduce ? "" : "_q"),
+                      ::rms_norm_pair2(att_dim_, res_fmt_, use_eps_uniform, fused_reduce));
     }
 
 GLuint GPU::x_q8_gate2_p2(int rows, int cols, bool wrow){
@@ -113,6 +118,24 @@ GLuint GPU::x_q8_p2_add_p2(int rows, int cols, bool wrow){
 GLuint GPU::x_q8_p2_add(int rows, int cols, bool wrow){
         return x_prog("xq8p2a_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(res_fmt_) + (wrow ? "_wr" : ""),
                       ::matvec_q8_p2_add(rows, cols, res_fmt_, wrow));
+    }
+
+// The q4 half of the two-position family, 4-bit view only (the view pair_ok()
+// asks for).  Keyed like the q8 selectors: the shape, and the residual format
+// for the kernel that reads it.
+GLuint GPU::x_i4_gate2_p2(int rows, int cols){
+        return x_prog("xi4g2p2_" + to_string(rows) + "_" + to_string(cols),
+                      ::matvec_i4_gate2_p2_4x4(rows, cols));
+    }
+
+GLuint GPU::x_i4_p2_add_p2(int rows, int cols){
+        return x_prog("xi4p2a2_" + to_string(rows) + "_" + to_string(cols),
+                      ::matvec_i4_p2_add_p2_4x4(rows, cols));
+    }
+
+GLuint GPU::x_i4_p2_add(int rows, int cols){
+        return x_prog("xi4p2a_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(res_fmt_),
+                      ::matvec_i4_p2_add_4x4(rows, cols, res_fmt_));
     }
 
 GLuint GPU::x_p2_split(int rows){

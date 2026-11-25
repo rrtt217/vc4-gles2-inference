@@ -428,10 +428,14 @@ private:
     GLuint x_q8_gate2(int rows, int cols);
     GLuint x_q8_p2(int rows, int cols, bool wrow = false);
     GLuint x_rms_stats2();
-    GLuint x_rms_norm_pair2(bool use_eps_uniform);
+    GLuint x_rms_reduce2();
+    GLuint x_rms_norm_pair2(bool use_eps_uniform, bool fused_reduce);
     GLuint x_q8_gate2_p2(int rows, int cols, bool wrow = false);
     GLuint x_q8_p2_add_p2(int rows, int cols, bool wrow = false);
     GLuint x_q8_p2_add(int rows, int cols, bool wrow = false);
+    GLuint x_i4_gate2_p2(int rows, int cols);
+    GLuint x_i4_p2_add_p2(int rows, int cols);
+    GLuint x_i4_p2_add(int rows, int cols);
     GLuint x_p2_split(int rows);
     GLuint x_q8_pair_fused(int rows, int cols, bool wrow = false);
     GLuint x_i4_pair(int rows, int cols);
@@ -588,7 +592,7 @@ private:
     // True when this position needs the generic (multi-segment) path.
     bool seg_split() const { return att_nseg_ > 1; }
     void bind_seg(int base_unit, const char* base, const std::vector<GLuint>& tex, GLuint prog);
-    Target hidden_a_, hidden_b_, xb_, xbf_, xf_, rms_stats_, rms_partial_, rms_partial2_, ffn_pair_a_, ffn_pair_b_;
+    Target hidden_a_, hidden_b_, xb_, xbf_, xf_, rms_stats_, rms_stats2_, rms_partial_, rms_partial2_, ffn_pair_a_, ffn_pair_b_;
     // Prefill pair (7c): two hidden streams, their post-attention scratch and
     // the FFN chunk-0 intermediate.  pp_a_ is also the layer output slot, so
     // the three roles rotate inside one layer and never feedback.  pp_a3_/pp_b3_

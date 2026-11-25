@@ -1777,17 +1777,21 @@ GLuint Session::forward_gpu_hidden(int token, int pos, bool want_logits){
     }
 
 // Prefill batching, steps 7c-7e.  The packed path handles two consecutive
-// token positions in one layer pass: the FFN reads each q8 weight texel once
-// and feeds both positions.  It is byte-identical to the serial path (every
-// hidden state, the logits, the greedy strings and the KV bytes), and since
-// step 7d it is also cheaper: the FFN input is built in P2 and the second w2
-// chunk residual stays there, so a layer needs 14 draws against 18 serial and
-// warm prefill CPU drops from 6.81-6.96 s to 5.66-5.74 s (21-token prompt);
-// wall time is neutral within this board noise (+1.5% median over 14 warm
-// samples, against a 6.30-7.50 s spread), so CPU is what the default buys.
-// Step 7e makes it the default; PREFILL_PAIR=0 restores the serial loop.
-// Attention and rmsnorm stay per position (latency, not weight traffic) and
-// q4 / ACT8 / int16 / fused-w13 models keep the serial loop.
+// token positions in one layer pass: the FFN reads each weight texel once and
+// feeds both positions.  On q4 it is byte-identical to the serial path (every
+// hidden state, the logits, the PPL and the greedy strings; Iris Xe
+// 2026-11-25), and since step 7d it is also cheaper: the FFN input is built in
+// P2 and the second w2 chunk residual stays there, so a layer needs 14 draws
+// against 18 serial and warm prefill CPU drops from 6.81-6.96 s to 5.66-5.74 s
+// (21-token prompt); wall time is neutral within this board noise (+1.5%
+// median over 14 warm samples, against a 6.30-7.50 s spread), so CPU is what
+// the default buys.  Step 7e makes it the default; PREFILL_PAIR=0 restores the
+// serial loop.  Attention and rmsnorm stay per position (latency, not weight
+// traffic); ACT8 / int16 / fused-w13 models keep the serial loop, and so does
+// a q4 model in the packed nibble view (Q4_FMT=0).  The q8 weight half is
+// exact but its row-pair qkv kernel adds a 1-LSB drift on Xe at late
+// positions, so byte-exactness is a per-format measurement
+// (docs/prefill-batching.md).
 bool Session::pair_ok() const {
         if (!gpu_layer_) return false;
         // Two positions per layer pass is a property of the attention and FFN
@@ -1829,7 +1833,8 @@ bool Session::pair_ok() const {
         }
         const char* e = getenv("PREFILL_PAIR");
         if (e && strcmp(e, "0") == 0) return false;
-        // The packed kernels are INT8-only and read and write I16_2 activations.
+        // The pair kernels read and write I16_2 activations (q8 and q4's 4-bit
+        // view).
         if (gpu_.act_fmt_ != XFormat::I16_2 || gpu_.ffn_fmt_ != XFormat::I16_2) return false;
         // The pair-prefill path stores two positions into one texel; a 24-bit
         // residual is one value per texel, so it cannot take part.
@@ -1840,10 +1845,17 @@ bool Session::pair_ok() const {
         const vector<Mat>& w2 = !m_.w2a.empty() ? m_.w2a : m_.w2;
         if (w1.empty() || w3.empty() || w2.empty()) return false;
         // The weight half is the table's answer; the stream half (I16_2 pairs,
-        // a residual that is not I24/F32) is checked above.  Today only q8 has
-        // the two-position family, so a q4/i16/t3 container takes serial.
-        return wf_can(w1[0].type, WStage::P2) && wf_can(w3[0].type, WStage::P2) &&
-               wf_can(w2[0].type, WStage::P2);
+        // a residual that is not I24/F32) is checked above.  q8 and q4 have
+        // the two-position family; i16/q6/t3 take the serial loop.
+        if (!(wf_can(w1[0].type, WStage::P2) && wf_can(w3[0].type, WStage::P2) &&
+              wf_can(w2[0].type, WStage::P2)))
+                return false;
+        // q4's P2 kernels read the 4-bit view (Q4_FMT=rgba4), which only the
+        // chunked FFN marks; the packed nibble view keeps the serial loop.
+        // The check is here, not in the table: the view is a property of the
+        // loaded Mats, not of the format.
+        if (w1[0].type == WeightType::INT4 && !(w1[0].fmt4 && w2[0].fmt4)) return false;
+        return true;
     }
 
 vector<float> Session::step_pair(int tok_a, int pos_a, int tok_b, int pos_b, bool want_logits){
@@ -1861,10 +1873,20 @@ vector<float> Session::step_pair(int tok_a, int pos_a, int tok_b, int pos_b, boo
             // ordered, so attention can stay per position and single-draw.
             GLuint xba = gpu_.rmsnorm(h_a, gpu_.rms_att_tex_[l], gpu_.xb_);
             GLuint att_a = gpu_.attention_block(m_.qkv[l], xba, l, pos_a);
+            if (getenv("STAGE_DUMP")) { gpu_.sync(); gpu_.dump_target(gpu_.att_out_, "att", 4096); }
             gpu_.matvec_add(m_.wo[l], att_a, h_a, gpu_.pp_a2_, gpu_.act_fmt_);
             GLuint xbb = gpu_.rmsnorm(h_b, gpu_.rms_att_tex_[l], gpu_.xb2_);
             GLuint att_b = gpu_.attention_block(m_.qkv[l], xbb, l, pos_b);
             gpu_.matvec_add(m_.wo[l], att_b, h_b, gpu_.pp_b2_, gpu_.act_fmt_);
+            // The same dump names the serial loop uses for position A, so the
+            // two paths' layer 0 can be diffed; "b" is the pair's second
+            // position.  pp_in2_ is the P2 layout (A in .rg, B in .ba), not the
+            // serial I16_2 pair, so it has its own name.
+            if (getenv("STAGE_DUMP")) {
+                gpu_.sync();
+                gpu_.dump_target(gpu_.pp_a2_, "x1", 4096);
+                gpu_.dump_target(gpu_.pp_b2_, "x1b", 4096);
+            }
             plap("att");
             // 7d: the FFN input is built straight into P2 - one stats draw for
             // both positions, one normalising draw - so there is no pack pass,
@@ -1874,6 +1896,11 @@ vector<float> Session::step_pair(int tok_a, int pos_a, int tok_b, int pos_b, boo
             // remain.
             GLuint xin2 = gpu_.rmsnorm_pair2(gpu_.pp_a2_.tex, gpu_.pp_b2_.tex,
                                              gpu_.rms_ffn_tex_[l], gpu_.pp_in2_);
+            if (getenv("STAGE_DUMP")) {
+                gpu_.sync();
+                gpu_.dump_target(gpu_.pp_in2_, "p2in", 4096);
+                gpu_.dump_target(gpu_.rms_partial2_, "p2part", 64);
+            }
             if (m_.ffn_chunked) {
                 gpu_.ffn_pair_swiglu_chunk2_p2(m_.w1a[l], m_.w3a[l], xin2,
                                                m_.ffn_chunk, gpu_.pp_g_);

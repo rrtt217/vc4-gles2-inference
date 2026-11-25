@@ -108,9 +108,13 @@ constexpr WeightFormat kWeightFormats[] = {
      wstage_bit(WStage::Serial) | wstage_bit(WStage::Add)},
     // q4: eight packed nibbles a texel plus the group scale/min plane.  A
     // column slice must stay on a group boundary; rows are independent.
+    // P2/P2Add are the 4-bit view's (Q4_FMT=rgba4, the chunked FFN's default):
+    // the packed nibble view has no two-position kernel, so pair_ok() also
+    // asks for fmt4 rather than pretending.
     {WeightType::INT4, "q4", kWScaleGroupMinMax, 1, 32, false, kActAll8,
      wstage_bit(WStage::Serial) | wstage_bit(WStage::Add) |
-         wstage_bit(WStage::FfnPair) | wstage_bit(WStage::FfnFusedGate)},
+         wstage_bit(WStage::FfnPair) | wstage_bit(WStage::FfnFusedGate) |
+         wstage_bit(WStage::P2) | wstage_bit(WStage::P2Add)},
     // q6: two planes (4-bit low, 2-bit high), tied head only.  It is the one
     // format that refuses the 8-bit activation formats.
     {WeightType::INT6, "q6", kWScaleUniform | kWScalePerRow, 1, 8, true, kActQ6,

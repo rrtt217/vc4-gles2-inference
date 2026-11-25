@@ -157,6 +157,13 @@ vector<Case> cases() {
         [] { return matvec_i4_add_pair(768, 768, I16_2, I16_2, I16_2, true); });
     add(v, "matvec_i4_add_pair_768x768_i16_2_gen",
         [] { return matvec_i4_add_pair(768, 768, I16_2, I16_2, I16_2, false); });
+    // The q4 two-position family (4-bit view only), the same shapes as q8's.
+    add(v, "matvec_i4_gate2_p2_2432x768",
+        [] { return matvec_i4_gate2_p2_4x4(2432, 768); });
+    add(v, "matvec_i4_p2_add_768x768_i16_1",
+        [] { return matvec_i4_p2_add_4x4(768, 768, I16_1); });
+    add(v, "matvec_i4_p2_add_p2_768x768",
+        [] { return matvec_i4_p2_add_p2_4x4(768, 768); });
     // The 4-bit (Q4_FMT=rgba4) kernels, the default q4 path.  The gate is the
     // flat 8-wide form (byte-identical to the nested, ~43% faster on VC4).
     add(v, "matvec_i4_pair_swiglu_4x4_1216x768_i16_2",
@@ -200,10 +207,17 @@ vector<Case> cases() {
     add(v, "rms_norm_768_i16_2_i16_2_fused_eps",
         [] { return rms_norm(768, I16_2, I16_2, true, true); });
     add(v, "rms_stats2_768_i16_1", [] { return rms_stats2(768, I16_1); });
+    add(v, "rms_stats_reduce2_32", [] { return rms_stats_reduce2(32); });
     add(v, "rms_norm_pair2_768_i16_1_lit",
-        [] { return rms_norm_pair2(768, I16_1, false); });
+        [] { return rms_norm_pair2(768, I16_1, false, true); });
     add(v, "rms_norm_pair2_768_i16_1_eps",
-        [] { return rms_norm_pair2(768, I16_1, true); });
+        [] { return rms_norm_pair2(768, I16_1, true, true); });
+    // The split-reduce backends quantise the total through S24_1 before the
+    // normalise (rms_stats_reduce's round trip); these two are that text.
+    add(v, "rms_norm_pair2_768_i16_1_lit_q",
+        [] { return rms_norm_pair2(768, I16_1, false, false); });
+    add(v, "rms_norm_pair2_768_i16_1_eps_q",
+        [] { return rms_norm_pair2(768, I16_1, true, false); });
     add(v, "top2_fast_6400_256", [] { return top2_fast(6400, 256, I24_1); });
     add(v, "top2_fast_6400_256_projf32", [] { return top2_fast(6400, 256, XFormat::F32); });
     add(v, "top2_6400_256", [] { return top2(6400, 256, I24_1); });
