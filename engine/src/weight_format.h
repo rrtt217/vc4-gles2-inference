@@ -122,10 +122,13 @@ constexpr WeightFormat kWeightFormats[] = {
     // t3: 16 ternary weights a texel, two bit each, plus a part-3 row plane.
     // One texel carries a row pair, so a row slice is two rows; a column group
     // is eight columns.  The FFN pair path is bespoke (matvec_pair_to_row +
-    // swiglu_pair2row), which is why the capability is still FfnPair.
+    // swiglu_pair2row), which is why the capability is still FfnPair; the
+    // two-position family reads only the half of the texel its row owns and
+    // fuses the gate, one row for both positions.
     {WeightType::T3, "t3", kWScaleUniform | kWScalePerRow, 2, 8, true, kActAll,
      wstage_bit(WStage::Serial) | wstage_bit(WStage::Add) |
-         wstage_bit(WStage::QkvPair) | wstage_bit(WStage::FfnPair)},
+         wstage_bit(WStage::QkvPair) | wstage_bit(WStage::FfnPair) |
+         wstage_bit(WStage::P2) | wstage_bit(WStage::P2Add)},
 };
 
 constexpr size_t kWeightFormatCount = sizeof(kWeightFormats) / sizeof(kWeightFormats[0]);

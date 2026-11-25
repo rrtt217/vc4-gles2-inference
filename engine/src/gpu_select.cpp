@@ -189,6 +189,32 @@ GLuint GPU::x_t3_add_pair(const Mat& m, XFormat xf, XFormat rf, bool wrow){
                       matvec_t3_add_pair(m.rows, m.cols, xf, rf, res_fmt_, wrow, th, tiles));
     }
 
+// The t3 two-position family, keyed by the body's tile geometry the way the
+// row-pair selectors are.
+GLuint GPU::x_t3_gate2_p2(const Mat& m, bool wrow){
+        const int th = m.t3_tile_h > 0 ? m.t3_tile_h : (m.rows + 1) / 2;
+        const int tiles = m.t3_tiles();
+        return x_prog("xt3g2p2_" + to_string(m.rows) + "_" + to_string(m.cols) + "_" +
+                      to_string(th) + (wrow ? "_wr" : ""),
+                      matvec_t3_gate2_p2(m.rows, m.cols, wrow, th, tiles));
+    }
+
+GLuint GPU::x_t3_p2_add(const Mat& m, bool wrow){
+        const int th = m.t3_tile_h > 0 ? m.t3_tile_h : (m.rows + 1) / 2;
+        const int tiles = m.t3_tiles();
+        return x_prog("xt3p2a_" + to_string(m.rows) + "_" + to_string(m.cols) + "_" +
+                      x_format_name(res_fmt_) + "_" + to_string(th) + (wrow ? "_wr" : ""),
+                      matvec_t3_p2_add(m.rows, m.cols, res_fmt_, wrow, th, tiles));
+    }
+
+GLuint GPU::x_t3_p2_add_p2(const Mat& m, bool wrow){
+        const int th = m.t3_tile_h > 0 ? m.t3_tile_h : (m.rows + 1) / 2;
+        const int tiles = m.t3_tiles();
+        return x_prog("xt3p2a2_" + to_string(m.rows) + "_" + to_string(m.cols) + "_" +
+                      to_string(th) + (wrow ? "_wr" : ""),
+                      matvec_t3_p2_add_p2(m.rows, m.cols, wrow, th, tiles));
+    }
+
 GLuint GPU::x_q8_add(int rows, int cols, XFormat xf, XFormat rf, bool wrow){
         // `rf` is the base's format; the store is always the residual's.
         return x_prog("xq8a_" + to_string(rows) + "_" + to_string(cols) + "_" + x_format_name(xf) + "_" +

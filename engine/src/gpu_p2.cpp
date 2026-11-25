@@ -43,9 +43,11 @@ void GPU::matvec_p2_add_p2(const Mat& m, GLuint xp2, GLuint rp2, Target& out){
             case WeightType::INT4:
                 p = x_i4_p2_add_p2(m.rows, m.cols);
                 break;
+            case WeightType::T3:
+                p = x_t3_p2_add_p2(m, wr);
+                break;
             case WeightType::INT16:
             case WeightType::INT6:
-            case WeightType::T3:
                 wf_no_kernel("matvec_p2_add_p2", m.type);
         }
         bind_fbo(out.fbo);
@@ -82,9 +84,11 @@ void GPU::matvec_p2_add(const Mat& m, GLuint xp2, GLuint ra, GLuint rb, Target& 
             case WeightType::INT4:
                 p = x_i4_p2_add(m.rows, m.cols);
                 break;
+            case WeightType::T3:
+                p = x_t3_p2_add(m, wr);
+                break;
             case WeightType::INT16:
             case WeightType::INT6:
-            case WeightType::T3:
                 wf_no_kernel("matvec_p2_add", m.type);
         }
         bind_fbo(out.fbo);

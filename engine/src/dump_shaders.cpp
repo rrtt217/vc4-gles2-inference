@@ -136,6 +136,12 @@ vector<Case> cases() {
         [] { return swiglu_pair2row(4096, I16_2, 0); });
     add(v, "matvec_t3_add_pair_1024x1024_i16_2_i16_2",
         [] { return matvec_t3_add_pair(1024, 1024, I16_2, I16_2, I16_2, true, 512, 1); });
+    add(v, "matvec_t3_gate2_p2_1280x1024_t640x1",
+        [] { return matvec_t3_gate2_p2(1280, 1024, true, 640, 1); });
+    add(v, "matvec_t3_p2_add_1024x1024_i16_2_t512x1",
+        [] { return matvec_t3_p2_add(1024, 1024, I16_2, true, 512, 1); });
+    add(v, "matvec_t3_p2_add_p2_1024x1024_t512x1",
+        [] { return matvec_t3_p2_add_p2(1024, 1024, true, 512, 1); });
 
     // --- i16 weights (legacy precision, still loadable)
     add(v, "matvec_i16_6400x768_i16_2", [] { return matvec_i16(6400, 768, I16_2, I24_1); });

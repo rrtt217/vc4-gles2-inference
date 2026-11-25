@@ -197,6 +197,15 @@ register/L1 to hold it (the vec4-LUT arm measured +22%), which is why T-MAC is
 CPU-only.  The remaining ~43% of a layer is attention draws and rmsnorm
 elementwise (`LAYER_PROFILE`), the format-agnostic fusion lever, not decode.
 
+The **pair prefill** runs on this body: `WStage::P2` has t3 kernels (one row
+for two positions, reading the half of the pair texel that row owns, with the
+gate fused).  The shipped container cannot use them -- layer 23 carries
+`k = 1`, and the two-position gate has no hidden scale -- so its prefill stays
+serial.  A `--no-rail-check` repack of the same source exercises the path: on
+Iris Xe (2026-11-25) `LOGITS_OUT`, every hidden state at every layer and
+`--ppl` (35.6726) are identical between `PREFILL_PAIR=0` and `1`, and warm
+prefill of a 65-token prompt is 2.193 s against 1.712 s.
+
 The board figure is the point of the kind: 167.5 MB of container, 85 MB of
 texture, and 358 M parameters that the q8 body (435 MB) and the q4 body (337 MB)
 cannot fit.  It is 7.1x slower a token than MiniMind3 q4 on the same board

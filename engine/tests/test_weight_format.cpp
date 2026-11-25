@@ -67,11 +67,13 @@ void test_caps() {
     CHECK(!has(WeightType::INT4, WStage::LogitsPair));
     CHECK(has(WeightType::INT4, WStage::P2));
     CHECK(has(WeightType::INT4, WStage::P2Add));
-    // t3: qkv pair and its bespoke FFN pair, but no logits pair or P2.
+    // t3: qkv pair, its bespoke FFN pair and the two-position family; no
+    // logits pair.
     CHECK(has(WeightType::T3, WStage::QkvPair));
     CHECK(has(WeightType::T3, WStage::FfnPair));
     CHECK(!has(WeightType::T3, WStage::LogitsPair));
-    CHECK(!has(WeightType::T3, WStage::P2));
+    CHECK(has(WeightType::T3, WStage::P2));
+    CHECK(has(WeightType::T3, WStage::P2Add));
 }
 
 void test_scale_and_activations() {

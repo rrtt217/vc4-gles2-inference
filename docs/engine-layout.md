@@ -106,7 +106,8 @@ position B in `.ba`, so `x_per_texel()` does not apply and the width is
 The scheme around that layout is format-neutral except for the weight half:
 `rms_stats2`/`rms_norm_pair2` build the FFN input and `p2_split` hands the layer
 residual back, so only the gate and w2 kernels belong to a weight format
-(`WStage::P2`/`P2Add`, in `shaders_q8.cpp` and `shaders_q4.cpp`).  The pair
+(`WStage::P2`/`P2Add`, in `shaders_q8.cpp`, `shaders_q4.cpp` and
+`shaders_t3.cpp`).  The pair
 normaliser's divisor must be the serial normaliser's: on a fused-reduce backend
 (VC4) it sums the 32 partials in the normalising fragment, on a split-reduce one
 it reads the two totals `rms_stats_reduce2` wrote, because the serial path

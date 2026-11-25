@@ -164,6 +164,12 @@ std::string matvec_t3_add(int rows, int cols, XFormat xf, XFormat rf, XFormat of
 std::string matvec_t3_pair(int rows, int cols, XFormat xf, bool wrow, int t3_th, int t3_tiles);
 std::string matvec_t3_add_pair(int rows, int cols, XFormat xf, XFormat rf, XFormat of,
                                bool wrow, int t3_th, int t3_tiles);
+// The t3 two-position family (WStage::P2/P2Add): one row for both positions,
+// using the half of the body texel that row owns.  The gate fuses w1/w3 and
+// the SwiGLU, which the serial t3 gate does in three draws.
+std::string matvec_t3_gate2_p2(int rows, int cols, bool wrow, int t3_th, int t3_tiles);
+std::string matvec_t3_p2_add(int rows, int cols, XFormat rf, bool wrow, int t3_th, int t3_tiles);
+std::string matvec_t3_p2_add_p2(int rows, int cols, bool wrow, int t3_th, int t3_tiles);
 // One draw for a whole batch of matvec inputs (RWKV-7 chunked prefill, P1):
 // matvec_q8's text with the input row taken from gl_FragCoord.y, so fragment
 // (row r, batch b) is matvec_q8's result for row r of input b.

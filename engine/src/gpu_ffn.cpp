@@ -250,9 +250,11 @@ GLuint GPU::ffn_pair_swiglu_chunk2_p2(const Mat& w1, const Mat& w3, GLuint xp2, 
             case WeightType::INT4:
                 p = x_i4_gate2_p2(rows, w1.cols);
                 break;
+            case WeightType::T3:
+                p = x_t3_gate2_p2(w1, wr);
+                break;
             case WeightType::INT16:
             case WeightType::INT6:
-            case WeightType::T3:
                 wf_no_kernel("ffn_gate2_p2", w1.type);
         }
         bind_fbo(out.fbo);

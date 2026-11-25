@@ -99,12 +99,13 @@ format-neutral half is the P2 layout plus `rms_stats2`/`rms_norm_pair2` and
 kernels under `WStage::P2`/`P2Add`: the gate for two positions, w2 with the two
 per-position residuals, and the chunked second w2 add.
 
-Only q8 and q4 have them.  q4's kernels read the 4-bit view, which is the
+Only q8, q4 and t3 have them.  q4's kernels read the 4-bit view, which is the
 chunked FFN's default; `Q4_FMT=0` keeps the packed nibble view and `pair_ok()`
-then refuses q4's pair (the slow serial loop is still correct).  i16 and q6
-have no pair family at all, and t3's FFN pair is a row-pair layout of one
-matrix, so a two-position kernel there would be a third bespoke form for a body
-whose weight traffic is already two bits.
+then refuses q4's pair (the slow serial loop is still correct).  t3's body
+texel carries a row pair, so its two-position kernel reads only the half its
+row owns and fuses gate + SwiGLU in one draw where the serial t3 gate is three;
+its weight traffic is already two bits, so what it buys is draws.  i16 and q6
+have no pair family at all.
 
 Acceptance (Iris Xe, 2026-11-25, MiniMind3 q4, 72-token prompt): `LOGITS_OUT`
 is byte-identical between `PREFILL_PAIR=0` and `1`, every hidden state of both
@@ -112,6 +113,14 @@ positions matches the serial arm's (`HIDDEN_DUMP`), `--ppl` is 326.1483 on both
 arms, and the greedy strings are unchanged.  Warm prefill of that prompt is
 0.630 s serial against 0.454 s paired (median of three interleaved pairs,
 `PREFILL_REPEAT=3`); q8 on the same protocol is 0.583 s against 0.449 s.
+
+t3 was accepted the same way on BitCPM-CANN-0.5B (2026-11-25).  Its shipped
+container carries a hidden-scale key (`k = 1` on layer 23, which `pair_ok()`
+must refuse), so the run used a `--no-rail-check` repack of the same source:
+`LOGITS_OUT` is byte-identical on a 65-token prompt, every hidden state of both
+positions at every layer matches, `--ppl` is 35.6726 on both arms and the chat
+text is identical.  Warm prefill of that prompt is 2.193 s serial against
+1.712 s paired (same protocol).
 
 **On Xe the q8 pair's byte-exactness is open, and it is not the weight half.**
 The q8 pair diverges from its serial arm by one LSB at a late layer (first at

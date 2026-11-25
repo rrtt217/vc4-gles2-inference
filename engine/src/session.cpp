@@ -1778,8 +1778,8 @@ GLuint Session::forward_gpu_hidden(int token, int pos, bool want_logits){
 
 // Prefill batching, steps 7c-7e.  The packed path handles two consecutive
 // token positions in one layer pass: the FFN reads each weight texel once and
-// feeds both positions.  On q4 it is byte-identical to the serial path (every
-// hidden state, the logits, the PPL and the greedy strings; Iris Xe
+// feeds both positions.  On q4 and t3 it is byte-identical to the serial path
+// (every hidden state, the logits, the PPL and the greedy strings; Iris Xe
 // 2026-11-25), and since step 7d it is also cheaper: the FFN input is built in
 // P2 and the second w2 chunk residual stays there, so a layer needs 14 draws
 // against 18 serial and warm prefill CPU drops from 6.81-6.96 s to 5.66-5.74 s
@@ -1845,8 +1845,8 @@ bool Session::pair_ok() const {
         const vector<Mat>& w2 = !m_.w2a.empty() ? m_.w2a : m_.w2;
         if (w1.empty() || w3.empty() || w2.empty()) return false;
         // The weight half is the table's answer; the stream half (I16_2 pairs,
-        // a residual that is not I24/F32) is checked above.  q8 and q4 have
-        // the two-position family; i16/q6/t3 take the serial loop.
+        // a residual that is not I24/F32) is checked above.  q8, q4 and t3
+        // have the two-position family; i16/q6 take the serial loop.
         if (!(wf_can(w1[0].type, WStage::P2) && wf_can(w3[0].type, WStage::P2) &&
               wf_can(w2[0].type, WStage::P2)))
                 return false;
