@@ -439,54 +439,66 @@ string rms_norm(int dim, XFormat residual, XFormat out, bool fused_reduce,
 // a transformer is: they are row-elementwise on the streams the block already
 // uses, so a decoder-only post-norm model would call the same kernels.  The
 // block's layer order is Session's.
-std::string ln_stats_q16(int dim, XFormat rf) {
-    need_dim("ln_stats_q16", dim);
+// The v5 LayerNorm's statistics, as a split scan: 64 lanes hold sum(x)
+// (0..31) and sum(x^2) (32..63) as f32 bit-cast values, so no magnitude rails
+// them.  The reduce folds them into (mean, sd), scales both by a per-row
+// 2^-k that puts the larger near 96 and writes k in the second row of the
+// stats target; the apply multiplies x by 2^-k, so the pair is scale-free.
+// The one-fragment (mean, 1/sd) q16 this replaces was safe only near sd=1
+// (probes/lnstats_probe: 0.32% at 1, 17% at 100, 99% at 1000).
+std::string ln_stats_split(int dim, XFormat rf) {
+    need_dim("ln_stats_split", dim);
     const string D = to_string(dim), RW = to_string(x_texels(dim, rf));
-    // One fragment, one XST2 store: the pair is (mean, invstd) in .rg/.ba of a
-    // single kLnPairFmt texel.  XFORMAT's rule is that producers use XST* and
-    // consumers use X1/X2/X4; the RWKV bit-cast form (kBC) looked available
-    // because it is a helper in this file, but it is a *private* codec of that
-    // block -- using it here forces the whole program to ESSL 3.00 while the
-    // matching reader below is ESSL 1.00, which is exactly the mixed-language
-    // kernel the format module exists to prevent.
-    //
-    // The q16 grid is fine for this pair because both are O(1) after a
-    // normalisation: mean is a *mean* of a normalised row and invstd is
-    // 1/sigma with sigma O(1) for a post-norm residual.  A model whose
-    // residual is far from O(1) would need ACT=f32 here (the ACT axis), not a
-    // second private codec.
-    return head(kLnPairFmt) + x_residual_glsl(rf) +
-        "uniform sampler2D X;uniform float eps;"
-        "void main(){float s=0.0,s2=0.0;"
-        "for(int i=0;i<" + D + ";i++){float v=Y1(X,i," + RW + ".0);s+=v;s2+=v*v;}"
-        "float m=s/float(" + D + ");"
-        "float inv=inversesqrt(max(s2/float(" + D + ")-m*m,0.0)+eps);"
-        "gl_FragColor=XST2(m,inv);}";
+    const string PER = to_string((dim + 31) / 32);
+    return head(kLnPairFmt) + x_residual_glsl(rf) + x_codec_glsl(XFormat::F32) +
+        "uniform sampler2D X;"
+        "void main(){int j=int(gl_FragCoord.x);int lane=j-(j/32)*32;bool sq=(j>=32);"
+        "int i0=lane*" + PER + ";float s=0.0;"
+        "for(int k=0;k<" + PER + ";k++){int i=i0+k;if(i<" + D + "){"
+        "float v=Y1(X,i," + RW + ".0);s+=sq?v*v:v;}}"
+        "gl_FragColor=x_f32enc(s);}";
+}
+
+std::string ln_stats_reduce(int dim) {
+    const string D = to_string(dim);
+    return head(kLnPairFmt) + x_codec_glsl(XFormat::F32) +
+        "uniform sampler2D S;uniform float eps;"
+        "void main(){float sx=0.0,sxx=0.0;"
+        "for(int p=0;p<32;p++){"
+        "sx+=x_f32(texture2D(S,vec2((float(p)+0.5)/64.0,0.5)));"
+        "sxx+=x_f32(texture2D(S,vec2((float(p+32)+0.5)/64.0,0.5)));}"
+        "float mean=sx/float(" + D + ");"
+        "float sd=sqrt(max(sxx/float(" + D + ")-mean*mean,0.0)+eps);"
+        "float smax=max(abs(mean),sd);"
+        "float k=clamp(ceil(log2(max(smax,1e-20)/96.0)),-16.0,16.0);"
+        "float sc=exp2(-k);"
+        "if(gl_FragCoord.y<1.0)gl_FragColor=XST2(mean*sc,sd*sc);"
+        "else gl_FragColor=x_st1(k);}";
 }
 
 std::string ln_apply_q16(int dim, XFormat rf, XFormat out) {
     need_dim("ln_apply_q16", dim);
     const string RW = to_string(x_texels(dim, rf));
     const string WW = to_string(x_texels(dim, kLnPairFmt));
-    // X is the residual and decodes with `rf`.  W, B and S are not residual
-    // streams: their producers (upload_v5_rows, ln_stats_q16) pack kLnPairFmt,
-    // one q16 pair a texel, and this reads that layout directly.  Using Y1 for
-    // them decoded an I16_2 pair with whatever layout the residual happened to
-    // use -- the same bytes only while RES=i16_2, and wrong for every other
-    // axis value.  (The dump's I16_1 case used to pin that mistake as text.)
+    // S row 0 is (mean*2^-k, sd*2^-k) on kLnPairFmt; row 1 is k.  x is
+    // multiplied by 2^-k so the pair never leaves q16 -- see ln_stats_reduce.
+    // W and B are their own layout (kLnPairFmt), not the residual's: `rf` is
+    // the format of X only.
     // The *output* shape follows `x_per_texel(out)`, not a per-format literal:
     // `x_f32enc2` never existed in the format module, and writing it here made
     // every ACT=f32 run of the encoder fail to compile.
     const auto term = [&](const string& k) {
-        return "(Y1(X," + k + "," + RW + ".0)-m)*inv*wv(" + k + ")+bv(" + k + ")";
+        return "(Y1(X," + k + "," + RW + ".0)*sc-ms)*inv*wv(" + k + ")+bv(" + k + ")";
     };
     string body =
         "float wv(int i){vec4 c=texture2D(W,vec2((float(i/2)+0.5)/float(" + WW + "),0.5));"
         "return ((i/2)*2==i)?x_i16(c.rg):x_i16(c.ba);}\n"
         "float bv(int i){vec4 c=texture2D(B,vec2((float(i/2)+0.5)/float(" + WW + "),0.5));"
         "return ((i/2)*2==i)?x_i16(c.rg):x_i16(c.ba);}\n"
-        "void main(){vec4 sc=texture2D(S,vec2(0.5,0.5));"
-        "float m=x_i16(sc.rg);float inv=x_i16(sc.ba);";
+        "void main(){vec4 sp=texture2D(S,vec2(0.5,0.25));"
+        "float ms=x_i16(sp.rg),ss=x_i16(sp.ba);"
+        "float k=x_i16(texture2D(S,vec2(0.5,0.75)).rg);"
+        "float sc=exp2(-k),inv=1.0/ss;";
     const int n = x_per_texel(out);
     if (n == 4)
         body += "int t=int(gl_FragCoord.x);int i0=4*t;"

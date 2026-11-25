@@ -15,7 +15,7 @@ constexpr float kAttnSumScale = 32.0f;       // (max,sum) texel, sum step 1/32
 constexpr float kAttnSumLogScale = 2048.0f;  // sum stored as log2(sum)*this
 
 // The post-norm block's LayerNorm rows and its (mean, invstd) texel: one q16
-// pair a texel.  The producers (upload_v5_rows, ln_stats_q16) and the reader
+// pair a texel.  The producers (upload_v5_rows, ln_stats_split) and the reader
 // (ln_apply_q16) share this one name -- it is a layout, not an axis, because
 // both numbers are O(1) after a normalisation.  Decoding it with another
 // stream's format (the residual's, as this used to) is right only by accident.
@@ -303,7 +303,8 @@ std::string rwkv_wkv_out(int heads, int hs);
 // the non-gated FFN's swish.  RWKV's rwkv_ln_* above are a different
 // implementation with its own bit-cast stats codec; these are the ones a
 // post-norm transformer block calls.
-std::string ln_stats_q16(int dim, XFormat rf);
+std::string ln_stats_split(int dim, XFormat rf);
+std::string ln_stats_reduce(int dim);
 std::string ln_apply_q16(int dim, XFormat rf, XFormat out);
 std::string bias_add_q16(int dim, XFormat xf, XFormat f);
 std::string act_swish(int dim, XFormat f);

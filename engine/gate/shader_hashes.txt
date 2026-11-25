@@ -81,12 +81,13 @@ e689d09973afed94    8075 attn_q8_kv16_unpaired/att_v_i8_4
 3d152d6000b54b81    2893 bias_add_q16_512
 d9504f8855126699    3192 conv3_1024
 a0368fa798334641    2864 conv_copy_1024
-e9245098e7df9ff9    3280 ln_apply_q16_512
+6dfcceb8ecd8ea9d    3354 ln_apply_q16_512
 0d02ce37a7d608f1    3336 ln_norm_768_i16_1
 3923194aff2fd786    3344 ln_norm_p_768
+67851f3c54c35830    3570 ln_reduce_768
+36eb1b0b5e5f599f    3586 ln_split_768_i16_1
 8fba8225afcc8061    3244 ln_stats_768_i16_1
 b25a2154c3a3d220    3252 ln_stats_p_768
-3ef9baef542f18b8    3234 ln_stats_q16_512
 32322d5188b241a3    3070 matvec_i16_6400x768_i16_2
 c673abb9578fe827    3360 matvec_i16_add_1536x768_i16_2_i16_1
 9bbb77af9ac07d4e    3901 matvec_i4_4x4_1536x768_i16_2

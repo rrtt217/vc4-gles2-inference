@@ -511,7 +511,8 @@ private:
     Target sum_target_;
     Target ffn_a_, ffn_b_, ffn_h_, ffn_ab_;
     Target ffn_ab_a_, ffn_ab_b_, ffn_h_a_, ffn_h_b_;
-    Target ln_stat_;   // v5: one texel, (mean, invstd)
+    Target ln_stat_;   // v5: row 0 (mean, sd)*2^-k, row 1 k
+    Target ln_partial_; // v5: 64 lanes, sum(x) then sum(x^2), f32 bit-cast
     Target qkv_biased_;  // v5: the biased qkv, swapped with qkv_target_
     Target qkv_target_, att_scores_, att_stats_, att_probs_, att_out_, qrot_target_, qscale_target_;
     // v5 scratch (session.cpp): the LN output, r, the FFN hidden, one matvec

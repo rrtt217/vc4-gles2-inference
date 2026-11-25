@@ -19,12 +19,36 @@ GLuint GPU::ln_q16(GLuint x, GLuint w, GLuint b, Target& out, float eps){
         const int dim = att_dim_;
         const int ow = x_texels(dim, act_fmt_);
         if (out.tex == 0 || out.w != ow) out = make_target(ow, 1);
-        // Two texels: the stats kernel writes mean at x<1 and invstd at x>=1,
-        // and ln_apply reads them at uv 0.25 / 0.75 (texel 0 / texel 1).  A
-        // one-wide target draws only the mean and leaves invstd at zero, which
-        // makes the LayerNorm return its bias alone.
-        // ONE texel: (mean, invstd) is an x_st2q pair in .rg/.ba.
-        if (ln_stat_.tex == 0 || ln_stat_.w != 1) ln_stat_ = make_target(1, 1);
+        // S is two rows: (mean*2^-k, sd*2^-k) and k.  The statistics are a
+        // split scan (64 lanes: sum(x), sum(x^2)) and a reduce, not one serial
+        // fragment: the pair is scale-free, so a residual far from O(1) no
+        // longer loses the whole row to a fixed 1/256 step.
+        if (ln_stat_.tex == 0 || ln_stat_.w != 1 || ln_stat_.h != 2)
+                ln_stat_ = make_target(1, 2);
+        if (ln_partial_.tex == 0 || ln_partial_.w != 64)
+                ln_partial_ = make_target(64, 1);
+        {
+                GLuint ps = x_prog("lnsp_" + to_string(dim) + "_" + x_format_name(res_fmt_),
+                                   ln_stats_split(dim, res_fmt_));
+                bind_fbo(ln_partial_.fbo);
+                glViewport(0, 0, 64, 1);
+                use_program(ps);
+                bind_tex(0, x); set_sampler(ps, "X", 0);
+                setup_attrib(ps);
+                glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+        }
+        layer_finish("NF_LN");
+        {
+                GLuint pr = x_prog("lnrd_" + to_string(dim), ln_stats_reduce(dim));
+                bind_fbo(ln_stat_.fbo);
+                glViewport(0, 0, 1, 2);
+                use_program(pr);
+                bind_tex(0, ln_partial_.tex); set_sampler(pr, "S", 0);
+                glUniform1f(uloc(pr, "eps"), eps);
+                setup_attrib(pr);
+                glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+        }
+        layer_finish("NF_LN");
         if (getenv("ENCDEC_DUMP")) {
                 static bool once = false;
                 if (!once) { once = true;
@@ -33,15 +57,6 @@ GLuint GPU::ln_q16(GLuint x, GLuint w, GLuint b, Target& out, float eps){
                              << " texels=" << x_texels(dim, res_fmt_)
                              << " act=" << x_format_name(act_fmt_) << "\n"; }
         }
-        GLuint ps = x_prog("lns_" + to_string(dim) + "_" + to_string((int)res_fmt_),
-                           ln_stats_q16(dim, res_fmt_));
-        bind_fbo(ln_stat_.fbo);
-        glViewport(0, 0, 1, 1);
-        use_program(ps);
-        bind_tex(0, x); set_sampler(ps, "X", 0);
-        glUniform1f(uloc(ps, "eps"), eps);
-        setup_attrib(ps);
-        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         GLuint pn = x_prog("lna_" + to_string(dim) + "_" + to_string((int)res_fmt_) +
                            "_" + to_string((int)act_fmt_),
                            ln_apply_q16(dim, res_fmt_, act_fmt_));

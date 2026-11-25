@@ -116,8 +116,9 @@ void GPU::reset_targets(){
         // v5: the cross-attention planes, one per decoder layer (a Target
         // container, so this is the list the gate checks it against).
         cross_kv_.clear();
-        // v5: the LayerNorm's (mean, invstd), one texel.
+        // v5: the LayerNorm's (mean, sd)*2^-k / k rows, and the split scan's lanes.
         ln_stat_ = Target();
+        ln_partial_ = Target();
         qkv_biased_ = Target();
         // v5 scratch
         cd_a_ = Target();

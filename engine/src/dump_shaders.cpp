@@ -294,7 +294,8 @@ vector<Case> cases() {
     add(v, "act_sqrelu_768", [] { return act_sqrelu(768); });
     // post-norm block row passes.  512 is Marian's width; the kernels are
     // dim-parameterised, so one case each is what the digest covers.
-    add(v, "ln_stats_q16_512", [] { return ln_stats_q16(512, I16_1); });
+    add(v, "ln_split_768_i16_1", [] { return ln_stats_split(768, I16_1); });
+    add(v, "ln_reduce_768", [] { return ln_stats_reduce(768); });
     add(v, "ln_apply_q16_512", [] { return ln_apply_q16(512, XFormat::I16_1, XFormat::I24_1); });
     add(v, "bias_add_q16_512", [] { return bias_add_q16(512, XFormat::I24_1, I16_1); });
     add(v, "act_swish_i24_512", [] { return act_swish(512, XFormat::I24_1); });
