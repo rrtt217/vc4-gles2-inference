@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "app.h"
+#include "constrain.h"
 #include "session.h"
 
 struct Chat {
@@ -26,6 +27,12 @@ struct Chat {
     std::vector<int> kv_tokens;      // tokens already in the session's KV
     std::vector<int> cli_cache_tokens;   // what --prefix-cache loaded
     std::string tools_array;         // the normalised tool list the CLI passed
+    CliConstraint constrain_;        // the reply's constraint, if any (flags or /constrain)
+    // From the flags, after the model and tokenizer exist.  false + the message
+    // already printed = the process should stop: a grammar the engine cannot
+    // compile is a startup error, not a reply that silently ran unconstrained.
+    bool seed_constraint();
+    std::vector<int> constraint_eos() const;
 
     // The REPL's command surface, in one table (chat.cpp, `kCmd`): `repl_command`
     // parses "/name rest", finds the row and calls the handler, and `/help` is
@@ -48,6 +55,7 @@ struct Chat {
     bool cmd_params(const std::string& arg);
     bool cmd_help(const std::string& arg);
     bool cmd_system(const std::string& arg);
+    bool cmd_constrain(const std::string& arg);
     bool cmd_exit(const std::string& arg);
     bool cmd_param(const std::string& name, const std::string& arg);
     // One line after each turn, on stderr and only at a terminal, so a redirected

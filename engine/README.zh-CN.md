@@ -318,6 +318,37 @@ FFN hidden 2432 超过 VC4 2048 像素 FBO 限制。
 
 64M 模型在 64 token 内经常不输出 `</think>`；工具调用更可靠。
 
+## 约束输出
+
+每一步解码都可以把词表掩码到一份语法上——与 HTTP 服务器 `response_format`
+相同的三个层级（在 logits 之上、宿主侧完成，不改任何数值），另加一个固定字面量
+集合的快捷方式：
+
+```bash
+# 一个合法的 JSON 值
+...  --prompt "Return a JSON object with name and age." --gen 64 --json-object
+
+# JSON Schema 文件（支持的子集与服务器相同）
+...  --prompt "Extract the person." --gen 64 --json-schema person.json
+
+# GBNF 语法文件
+...  --prompt "Write a shopping list." --grammar list.gbnf
+
+# 固定字面量之一（编译为一条 GBNF root 规则）
+...  --prompt "Is this review positive? Answer yes or no." --gen 4 --choice yes|no
+```
+
+四者最多给一个。约束会强制走完整 logits 路径（不用 GPU argmax，也不支持
+`--top-k-candidates`），temperature、top-k、top-p 只作用于合法 token。只有语法
+可以结束时才释放 EOS，所以能写完的回复以模型自己的结束符收尾；`--gen` 先用完
+则留下一个合法的*前缀*。它保证形状而不保证内容——值仍然要在提示词里要。
+
+REPL 里对应的是 `/constrain`：裸 `/constrain` 显示当前设置，`/constrain off`
+清除，`json`、`schema FILE`、`gbnf FILE`、`choice A|B|C` 分别设置。与采样参数
+一样，改动从下一回合生效；`/model` 会按新词表重建约束（无法再编译时丢弃并说明
+原因）。带 `--tools` 时约束作用于每一个模型回合，因此表达不了工具调用的语法会
+让该会话不再发起工具调用。
+
 ## 环境变量
 
 | 变量 | 含义 |

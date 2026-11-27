@@ -80,11 +80,11 @@ class GbnfConstraint : public Constraint {
 public:
     void init(const Tokenizer& tok, int vocab, const std::vector<int>& eos_ids,
               const GbnfGrammar& g);
-    void reset();
+    void reset() override;
     void mask(std::vector<float>& logits) const override;
     void accept(int token) override;
     bool done() const override;
-    bool allows(int id) const;
+    bool allows(int id) const override;
 
 private:
     bool is_eos(int id) const;

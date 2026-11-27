@@ -102,6 +102,47 @@ void Chat::load_cli_cache() {
         cerr << "PREFIX_CACHE ignored " << app.opt.prefix_cache_path << "\n";}
 
 
+std::vector<int> Chat::constraint_eos() const {
+    // The same rule the worker applies: the ids that end a turn are legal only
+    // once the parse can finish, and never as ordinary bytes.
+    std::vector<int> eos;
+    if (app.model.have_specials) {
+        eos.push_back(app.model.id_eos);
+        if (app.model.id_stop >= 0) eos.push_back(app.model.id_stop);
+    } else {
+        eos.push_back(1);
+        eos.push_back(2);
+    }
+    return eos;
+}
+
+bool Chat::seed_constraint() {
+    ConstraintSpec spec;
+    if (app.opt.json_object) {
+        spec.kind = ConstraintSpec::JsonObject;
+    } else if (!app.opt.json_schema_path.empty()) {
+        spec.kind = ConstraintSpec::JsonSchema;
+        spec.arg = app.opt.json_schema_path;
+    } else if (!app.opt.grammar_path.empty()) {
+        spec.kind = ConstraintSpec::Gbnf;
+        spec.arg = app.opt.grammar_path;
+    } else if (!app.opt.choice_list.empty()) {
+        spec.kind = ConstraintSpec::Choice;
+        spec.arg = app.opt.choice_list;
+    } else {
+        return true;
+    }
+    string err;
+    if (!constrain_.build(spec, app.tokenizer, app.model.vocab, constraint_eos(), err)) {
+        cerr << "constrained decoding: " << err << "\n";
+        return false;
+    }
+    if (!quiet)
+        cerr << "[constrain] " << constraint_spec_describe(constrain_.spec()) << "\n";
+    return true;
+}
+
+
 bool Chat::is_bos_token(int id) {
     return app.model.id_bos >= 0 && id == app.model.id_bos;
 }
@@ -134,6 +175,8 @@ void Chat::mask_markers(std::vector<float>& logits) {
 void Chat::run_turn(const std::string& user, bool first, int pos, std::vector<ChatMsg>* hist) {
     TurnTiming tt;
     tt.out = &last_turn;   // the REPL's status line, interrupted turns included
+    const bool constrained = constrain_.active();
+    if (constrained) constrain_.reset();   // one reply, one parse
     string text;
     vector<PromptPart> parts;
     if (app.chat_tmpl) {
@@ -228,12 +271,14 @@ void Chat::run_turn(const std::string& user, bool first, int pos, std::vector<Ch
     for (int i = 0; i < skip; ++i) pos = i + 1;
     vector<float> logits;
     CandidateResult cand;
-    bool cand_mode = app.opt.top_k_candidates && app.opt.top_k > 0 && !app.opt.greedy && !sampling_penalties_active();
+    bool cand_mode = app.opt.top_k_candidates && app.opt.top_k > 0 && !app.opt.greedy &&
+                     !sampling_penalties_active() && !constrained;
     // Greedy fast path: the argmax runs on the GPU and only the winning id
     // crosses the bus.  Everything that touches the logits vector on the CPU
-    // (penalties, the marker mask, the LOGITS_OUT dump) disqualifies it; the
-    // reduction itself is byte-identical to argmax_token (GPU_ARGMAX=0 A/Bs).
-    const bool fast_greedy = app.opt.greedy && !sampling_penalties_active()
+    // (penalties, the marker mask, a grammar mask, the LOGITS_OUT dump)
+    // disqualifies it; the reduction itself is byte-identical to argmax_token
+    // (GPU_ARGMAX=0 A/Bs).
+    const bool fast_greedy = app.opt.greedy && !sampling_penalties_active() && !constrained
                           && marker_mask.empty() && !getenv("LOGITS_OUT")
                           && session.greedy_fast_ok();
     int next_fast = -1;
@@ -316,12 +361,18 @@ void Chat::run_turn(const std::string& user, bool first, int pos, std::vector<Ch
         if (fast_greedy) {
             next = next_fast;   // produced by the previous step_greedy
         } else {
+            // The grammar mask goes first, as in the worker: the penalties'
+            // max-relative cut (min_p) is then measured over the legal set.
+            if (constrained) constrain_.matcher()->mask(logits);
             if (!marker_mask.empty()) mask_markers(logits);
             apply_sampling_penalties(logits, recent);
             next = app.opt.greedy ? argmax_token(logits)
                           : (cand_mode ? sample_candidate_result(cand, app.opt.temp, app.opt.top_p, app.opt.top_k, rng)
                                        : sample_token(logits, app.opt.temp, app.opt.top_p, app.opt.top_k, rng));
         }
+        // Advance the parse by the drawn token (a no-op for EOS), reproducing
+        // mask()'s end state so the next step's mask is exact.
+        if (constrained) constrain_.matcher()->accept(next);
         if (!getenv("IGNORE_EOS") && is_stop_token(next)) {
             session.step(next, pos++, false);
             break;
@@ -416,6 +467,11 @@ void Chat::run_tool_turn(const std::string& user, bool first, std::vector<ChatMs
     for (int round = 0; round < 3; ++round) {
         TurnTiming tt;   // one line per model turn, interrupted or not
         tt.out = &last_turn;
+        // Each model turn is a reply of its own, so a constraint starts from its
+        // start state every round: with `--json-object` a tool-call round and an
+        // answer round are each one JSON value.
+        const bool constrained = constrain_.active();
+        if (constrained) constrain_.reset();
         vector<PromptPart> parts;
         if (app.chat_tmpl)
             parts = app.chat_tmpl->render(msgs, tools_array, /*add_generation_prompt=*/true,
@@ -454,10 +510,12 @@ void Chat::run_tool_turn(const std::string& user, bool first, std::vector<ChatMs
         if ((int)tokens.size() >= app.model.seq) { tt.cut = "context"; cout << "[context full]\n"; return; }
         vector<float> logits;
         CandidateResult cand;
-        bool cand_mode = app.opt.top_k_candidates && app.opt.top_k > 0 && !app.opt.greedy && !sampling_penalties_active();
+        bool cand_mode = app.opt.top_k_candidates && app.opt.top_k > 0 && !app.opt.greedy &&
+                         !sampling_penalties_active() && !constrained;
         // Same greedy fast path as run_turn; this loop has no marker mask
-        // and no LOGITS_OUT dump, so only the penalties can disqualify it.
-        const bool fast_greedy = app.opt.greedy && !sampling_penalties_active()
+        // and no LOGITS_OUT dump, so only the penalties and a grammar
+        // constraint can disqualify it.
+        const bool fast_greedy = app.opt.greedy && !sampling_penalties_active() && !constrained
                               && session.greedy_fast_ok();
         int next_fast = -1;
         int skip = 0;
@@ -513,11 +571,13 @@ void Chat::run_tool_turn(const std::string& user, bool first, std::vector<ChatMs
             if (fast_greedy) {
                 next = next_fast;
             } else {
+                if (constrained) constrain_.matcher()->mask(logits);
                 apply_sampling_penalties(logits, recent);
                 next = app.opt.greedy ? argmax_token(logits)
                               : (cand_mode ? sample_candidate_result(cand, app.opt.temp, app.opt.top_p, app.opt.top_k, rng)
                                            : sample_token(logits, app.opt.temp, app.opt.top_p, app.opt.top_k, rng));
             }
+            if (constrained) constrain_.matcher()->accept(next);
             if (is_stop_token(next)) {
                 if (!quiet && is_bos_token(next))
                     fprintf(stderr, "\n[stopped after %d tokens: the model emitted its "
@@ -644,6 +704,9 @@ static const CmdDef kCmd[] = {
      &Chat::cmd_params},
     {"/system", "", "TEXT", "replace the system prompt (forgets the conversation)",
      &Chat::cmd_system},
+    {"/constrain", "", "",
+     "constrain the reply: off, json, schema FILE, gbnf FILE, choice A|B|C",
+     &Chat::cmd_constrain},
     {"/exit", "/quit", "", "leave", &Chat::cmd_exit},
 };
 
@@ -722,6 +785,31 @@ bool Chat::cmd_system(const std::string& text) {
 
 bool Chat::cmd_params(const std::string&) {
     print_params();
+    return true;
+}
+
+bool Chat::cmd_constrain(const std::string& arg) {
+    // Like the sampler knobs: the setting takes effect on the next turn, because
+    // the REPL reads stdin only between turns.  A build failure keeps the old
+    // constraint -- the token table and the grammar are installed together, so
+    // a typo costs nothing.
+    if (arg.empty()) {
+        cout << "constrain " << constraint_spec_describe(constrain_.spec()) << "\n";
+        return true;
+    }
+    ConstraintSpec spec;
+    string err;
+    if (!constraint_spec_parse(arg, spec, err)) {
+        cerr << "/constrain: " << err << "\n";
+        return true;
+    }
+    if (spec.kind != ConstraintSpec::None &&
+        !constrain_.build(spec, app.tokenizer, app.model.vocab, constraint_eos(), err)) {
+        cerr << "/constrain: " << err << "\n";
+        return true;
+    }
+    if (spec.kind == ConstraintSpec::None) constrain_.clear();
+    cout << "constrain " << constraint_spec_describe(constrain_.spec()) << "\n";
     return true;
 }
 
@@ -901,6 +989,17 @@ bool Chat::cmd_model(const std::string& path) {
     if (!app.setup_from_model()) { quit_after_line = true; return true; }
     app.upload_weights();
     session.reset();
+    // The token table and the grammar's token boundaries belong to the old
+    // vocabulary, so a swap rebuilds the constraint from its spec.  A build
+    // failure drops it rather than keeping a table that indexes the wrong ids.
+    if (constrain_.active()) {
+        const ConstraintSpec spec = constrain_.spec();
+        string err;
+        if (!constrain_.build(spec, app.tokenizer, app.model.vocab, constraint_eos(), err)) {
+            cerr << "/model: constraint dropped: " << err << "\n";
+            constrain_.clear();
+        }
+    }
     cleared_ = true;
     cout << "[model] " << (app.model.template_name.empty() ? string("(kind 0)") : app.model.template_name)
          << "  chat_template " << (app.chat_tmpl ? "yes" : "no")
@@ -942,6 +1041,7 @@ void Chat::print_stats() const {
                 m.seq > 0 ? (int)(100.0 * used / m.seq) : 0);
     if (!cli_cache_tokens.empty())
         cout << fmt("cache    %zu tokens loaded from --prefix-cache\n", cli_cache_tokens.size());
+    cout << "constrain " << constraint_spec_describe(constrain_.spec()) << "\n";
     cout << flush;
 }
 
@@ -1029,11 +1129,14 @@ for (int t : tokens) cout << " " << t;
 cout << "\n";
 vector<float> logits;
 CandidateResult cand;
-bool cand_mode = app.opt.top_k_candidates && app.opt.top_k > 0 && !app.opt.greedy && !sampling_penalties_active();
+const bool constrained = constrain_.active();
+if (constrained) constrain_.reset();   // one reply, one parse
+bool cand_mode = app.opt.top_k_candidates && app.opt.top_k > 0 && !app.opt.greedy &&
+                 !sampling_penalties_active() && !constrained;
 // Greedy fast path, same rules as run_turn.  The per-token decode timer
 // below wraps step_greedy, so the argmax reduction is inside the measured
 // per-token cost, exactly as the read-back it replaces was.
-const bool fast_greedy = app.opt.greedy && !sampling_penalties_active()
+const bool fast_greedy = app.opt.greedy && !sampling_penalties_active() && !constrained
                       && marker_mask.empty() && !getenv("LOGITS_OUT")
                       && session.greedy_fast_ok();
 int next_fast = -1;
@@ -1137,12 +1240,14 @@ for (int i = 0; i < app.opt.gen; ++i) {
     if (fast_greedy) {
         next = next_fast;
     } else {
+        if (constrained) constrain_.matcher()->mask(logits);
         if (!marker_mask.empty()) mask_markers(logits);
         apply_sampling_penalties(logits, recent);
         next = app.opt.greedy ? argmax_token(logits)
                       : (cand_mode ? sample_candidate_result(cand, app.opt.temp, app.opt.top_p, app.opt.top_k, rng)
                                    : sample_token(logits, app.opt.temp, app.opt.top_p, app.opt.top_k, rng));
     }
+    if (constrained) constrain_.matcher()->accept(next);
     if (!getenv("IGNORE_EOS") && is_stop_token(next)) {
         ended_on_eos = true;
         stop_reason = is_bos_token(next) ? "the model emitted its BOS token mid-generation"

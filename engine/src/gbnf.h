@@ -79,11 +79,11 @@ class GrammarConstraint : public Constraint {
 public:
     void init(const Tokenizer& tok, int vocab, const std::vector<int>& eos_ids,
               const Grammar& g);
-    void reset();
+    void reset() override;
     void mask(std::vector<float>& logits) const;
     void accept(int token);
     bool done() const;
-    bool allows(int id) const;
+    bool allows(int id) const override;
     int allowed_count() const;
     bool ready() const { return grammar_ != nullptr && !bytes_.empty(); }
 

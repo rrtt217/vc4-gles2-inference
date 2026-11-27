@@ -468,6 +468,41 @@ turn on the legacy string path -- and re-prefills. Up to 3 rounds.
 Thinking mode often fails to close `</think>` within 64 tokens on the 64M
 model; tool calls are much more reliable.
 
+## Constrained output
+
+The reply can be masked to a grammar at every decode step -- the same three
+tiers the HTTP server's `response_format` exposes (host-side, above the logits:
+no numerics change), plus a shortcut for a fixed set of literals:
+
+```bash
+# one valid JSON value
+...  --prompt "Return a JSON object with name and age." --gen 64 --json-object
+
+# a JSON Schema file (the subset in docs is the server's)
+...  --prompt "Extract the person." --gen 64 --json-schema person.json
+
+# a GBNF grammar file
+...  --prompt "Write a shopping list." --grammar list.gbnf
+
+# one of a fixed set of literals (compiles to a GBNF root rule)
+...  --prompt "Is this review positive? Answer yes or no." --gen 4 --choice yes|no
+```
+
+Give at most one of the four.  A constraint forces the full-logits path (no GPU
+argmax, no `--top-k-candidates`), and temperature, top-k and top-p act on the
+legal tokens only.  EOS is released only when the grammar can finish, so a
+reply that fits ends on the model's own end token; a `--gen` that runs out
+first leaves a valid *prefix*.  It guarantees shape, not content -- prompt for
+the values you want as well.
+
+In the REPL the same thing is `/constrain`: bare `/constrain` shows the current
+setting, `/constrain off` clears it, and `json`, `schema FILE`, `gbnf FILE`,
+`choice A|B|C` set one.  Like the sampler knobs, a change applies to the next
+turn, and `/model` rebuilds the constraint against the new vocabulary (a
+grammar that no longer compiles is dropped, with the reason).  With `--tools`
+the constraint applies to every model turn, so a grammar that cannot express a
+tool call turns tool use off for that session.
+
 ## Environment variables
 
 | Variable | Meaning |

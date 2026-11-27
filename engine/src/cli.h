@@ -25,6 +25,7 @@ enum class CliOpt {
     Greedy, Temp, Topp, TopK, TopKCandidates, Seed, MinP,
     RepeatPenalty, FrequencyPenalty, PresencePenalty, NoRepeatNgram,
     Thinking, Tools, ToolsFile,
+    JsonObject, JsonSchema, Grammar, Choice,
     PrefixCache, BuildPrefixCache,
     DumpShaders, DumpSwitches, Tokenize,
     Quiet, Version, Help,
@@ -60,6 +61,12 @@ struct Options {
     float temp = 1.0f, top_p = 0.9f;
     int top_k = 0;
     bool top_k_candidates = false;
+    // Constrained decoding: at most one of the four (parse_args refuses more).
+    // The first three are the server's response_format tiers; Choice is the
+    // literal-list shortcut that compiles to a GBNF root rule.  The REPL's
+    // `/constrain` sets the same kind of thing at runtime.
+    bool json_object = false;
+    std::string json_schema_path, grammar_path, choice_list;
 };
 
 int flag_count();

@@ -298,6 +298,9 @@ int main(int argc, char** argv) {
     // CLI prefix cache.  Built before the dispatch below so both paths share it.
     Chat chat(app, session, enc_bos, chat_dump, g_quiet);
     chat.load_cli_cache();
+    // A grammar that does not compile is a startup error: the alternative is a
+    // run that looks constrained and quietly is not.
+    if (!chat.seed_constraint()) return 2;
 
     if (app.opt.chat) return chat.repl();
     return chat.complete();

@@ -29,14 +29,18 @@
 
 #include "tokenizer.h"
 
-// The contract both matchers present to the worker: a host-side vocabulary mask
-// applied above the logits boundary.  json_object uses the JSON automaton below;
-// json_schema uses the grammar-driven matcher in gbnf.h.
+// The contract the three matchers present: a host-side vocabulary mask applied
+// above the logits boundary.  json_object uses the JSON automaton below;
+// json_schema uses the grammar-driven matcher in gbnf.h.  The worker builds one
+// per request; the CLI's CliConstraint (constrain.h) resets instead.
 struct Constraint {
     virtual ~Constraint() = default;
+    virtual void reset() = 0;
     virtual void mask(std::vector<float>& logits) const = 0;
     virtual void accept(int token) = 0;
     virtual bool done() const = 0;
+    // The same test mask() applies, for one id (EOS only when done()).
+    virtual bool allows(int id) const = 0;
 };
 
 class JsonConstraint : public Constraint {
@@ -48,7 +52,7 @@ public:
     void init(const Tokenizer& tok, int vocab, const std::vector<int>& eos_ids);
 
     // Back to "expect one top-level value".  Called at the start of a request.
-    void reset();
+    void reset() override;
 
     // Set every token the automaton cannot continue with to -1e30f.  EOS is
     // passed through only when done(); empty-byte tokens are always masked (they
@@ -65,7 +69,7 @@ public:
 
     // True when the automaton can continue with this token from the current
     // state (EOS only when done()).  mask() is this applied to the whole vocab.
-    bool allows(int id) const;
+    bool allows(int id) const override;
 
     // Number of tokens mask() would keep at the current state (diagnostics/tests).
     int allowed_count() const;

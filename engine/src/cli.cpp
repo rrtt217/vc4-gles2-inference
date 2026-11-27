@@ -69,6 +69,15 @@ static const FlagDef kFlags[] = {
     {CliOpt::Worker, "--worker", "", 0, "", "Chat and tools",
      "JSON-lines worker (the HTTP server drives this)"},
 
+    {CliOpt::JsonObject, "--json-object", "", 0, "", "Constrained output",
+     "the reply is one valid JSON value"},
+    {CliOpt::JsonSchema, "--json-schema", "", 1, "FILE", "Constrained output",
+     "constrain the reply to a JSON Schema (a file)"},
+    {CliOpt::Grammar, "--grammar", "", 1, "FILE", "Constrained output",
+     "constrain the reply to a GBNF grammar (a file)"},
+    {CliOpt::Choice, "--choice", "", 1, "A|B|C", "Constrained output",
+     "constrain the reply to one of these literals"},
+
     {CliOpt::PrefixCache, "--prefix-cache", "", 1, "F", "Prefix cache",
      "load a prefix cache (needs GPU attention)"},
     {CliOpt::BuildPrefixCache, "--build-prefix-cache", "", 2, "PROMPT OUT", "Prefix cache",
@@ -157,7 +166,7 @@ void print_usage(FILE* out) {
     }
     fprintf(out,
             "\nIn the REPL: /help, /model PATH, /system TEXT, /temp F, /top-k N,\n"
-            "/greedy, /clear, /exit.  Sampling penalties and the rest of the\n"
+            "/greedy, /constrain, /clear, /exit.  Sampling penalties and the rest of the\n"
             "environment switches are in docs/test-hooks.md.  The container carries\n"
             "the tokenizer, the template, rope and the special-token ids, so there\n"
             "are no flags for those.\n");
@@ -185,6 +194,10 @@ static bool apply(CliOpt id, const char* const* v, int n, Options& opt, bool& qu
         case CliOpt::Gen: opt.gen = atoi(v[0]); opt.gen_set = true; break;
         case CliOpt::Ppl: opt.ppl_path = v[0]; break;
         case CliOpt::Worker: opt.worker = true; break;
+        case CliOpt::JsonObject: opt.json_object = true; break;
+        case CliOpt::JsonSchema: opt.json_schema_path = v[0]; break;
+        case CliOpt::Grammar: opt.grammar_path = v[0]; break;
+        case CliOpt::Choice: opt.choice_list = v[0]; break;
         case CliOpt::Greedy: opt.greedy = true; break;
         case CliOpt::Temp: opt.temp = atof(v[0]); break;
         case CliOpt::Topp: opt.top_p = atof(v[0]); break;
@@ -302,6 +315,25 @@ bool parse_args(int argc, char** argv, Options& opt, bool& quiet, int& exit_code
     // fast path on: before this, `--temp 0` divided by zero, every probability came
     // out NaN and the draw returned the *least* likely token -- silently.
     if (opt.temp <= 0.0f) opt.greedy = true;
+
+    // A constraint is a mask on a reply, so two of them would have no meaning
+    // together, and the paths that never sample (or sample through their own
+    // protocol) would only ignore it -- an error is cheaper than a run that
+    // looks constrained and is not.
+    const int n_constraints = (opt.json_object ? 1 : 0) + (!opt.json_schema_path.empty() ? 1 : 0) +
+                              (!opt.grammar_path.empty() ? 1 : 0) + (!opt.choice_list.empty() ? 1 : 0);
+    if (n_constraints > 1) {
+        fprintf(stderr, "give at most one of --json-object, --json-schema, --grammar, --choice\n");
+        exit_code = 2;
+        return false;
+    }
+    if (n_constraints > 0 &&
+        (opt.worker || !opt.ppl_path.empty() || !opt.build_cache_prompt.empty() || opt.tokenize)) {
+        fprintf(stderr, "a constraint applies to a reply; it does not combine with --worker, "
+                        "--ppl, --tokenize or --build-prefix-cache\n");
+        exit_code = 2;
+        return false;
+    }
 
     return true;
 }

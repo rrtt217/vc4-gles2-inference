@@ -33,7 +33,7 @@ CORE := $(SRC)/engine.cpp $(SRC)/common.cpp $(SRC)/xformat.cpp $(SRC)/switches.c
         $(SHADERLIB) $(SRC)/dump_shaders.cpp $(SRC)/glsl_io.cpp \
         $(wildcard $(SRC)/gpu*.cpp) \
         $(SRC)/tokenizer.cpp $(SRC)/model.cpp $(SRC)/session.cpp $(SRC)/prefix_cache.cpp $(SRC)/lineedit.cpp $(SRC)/lineedit_layout.cpp \
-        $(SRC)/sampling.cpp $(SRC)/grammar.cpp $(SRC)/gbnf.cpp $(SRC)/gbnf_full.cpp $(SRC)/schema.cpp $(SRC)/tools.cpp $(SRC)/ppl.cpp $(SRC)/cli.cpp $(SRC)/chat_format.cpp $(SRC)/prefix_build.cpp $(SRC)/app.cpp $(SRC)/worker.cpp $(SRC)/chat.cpp $(SRC)/chattmpl.cpp $(JINJA)
+        $(SRC)/sampling.cpp $(SRC)/grammar.cpp $(SRC)/gbnf.cpp $(SRC)/gbnf_full.cpp $(SRC)/schema.cpp $(SRC)/constrain.cpp $(SRC)/tools.cpp $(SRC)/ppl.cpp $(SRC)/cli.cpp $(SRC)/chat_format.cpp $(SRC)/prefix_build.cpp $(SRC)/app.cpp $(SRC)/worker.cpp $(SRC)/chat.cpp $(SRC)/chattmpl.cpp $(JINJA)
 HEADERS := $(wildcard $(SRC)/*.h)
 # Incremental build: one object per translation unit, dependencies from -MMD.
 # Each toolchain gets its own tree -- a native, a cross and an armv6 object
@@ -378,13 +378,14 @@ check: test warncheck
 # The compiled tests, built and run without warncheck's forced engine rebuild:
 # `make test` is the fast loop (a few seconds), and `check` runs it first so a
 # broken unit fails before the minute-long build.
-test: test_lineedit test_tokenizer test_xformat test_grammar test_schema test_gbnf_full test_weight_format
+test: test_lineedit test_tokenizer test_xformat test_grammar test_schema test_gbnf_full test_constraint test_weight_format
 	./test_lineedit
 	./test_tokenizer
 	./test_xformat
 	./test_grammar
 	./test_schema
 	./test_gbnf_full
+	./test_constraint
 	./test_weight_format
 
 # Warnings from src/ are a defect: -Wall -Wextra is on by default and this makes a
@@ -453,6 +454,14 @@ test_gbnf_full: tests/test_gbnf_full.cpp tests/checks.h $(SRC)/gbnf_full.cpp \
 	$(CXX) $(ALL_CXXFLAGS) $(INCS) -o $@ tests/test_gbnf_full.cpp $(SRC)/gbnf_full.cpp \
 	  $(SRC)/tokenizer.cpp $(SRC)/common.cpp $(SRC)/switches.cpp -lm
 
+test_constraint: tests/test_constraint.cpp tests/checks.h $(SRC)/constrain.cpp \
+                 $(SRC)/gbnf.cpp $(SRC)/gbnf_full.cpp $(SRC)/schema.cpp $(SRC)/grammar.cpp \
+                 $(SRC)/tokenizer.cpp $(SRC)/common.cpp $(SRC)/switches.cpp \
+                 $(TP)/jinja/json.cpp $(HEADERS)
+	$(CXX) $(ALL_CXXFLAGS) $(INCS) -o $@ tests/test_constraint.cpp $(SRC)/constrain.cpp \
+	  $(SRC)/gbnf.cpp $(SRC)/gbnf_full.cpp $(SRC)/schema.cpp $(SRC)/grammar.cpp \
+	  $(SRC)/tokenizer.cpp $(SRC)/common.cpp $(SRC)/switches.cpp $(TP)/jinja/json.cpp -lm
+
 # The weight-format contract: row order, caps, slice alignment, the wire dtype
 # mapping and mat_bytes' arithmetic.  Header-only, so no GPU and no model.
 test_weight_format: tests/test_weight_format.cpp tests/checks.h $(SRC)/weight_format.h \
@@ -461,7 +470,7 @@ test_weight_format: tests/test_weight_format.cpp tests/checks.h $(SRC)/weight_fo
 
 clean:
 	rm -rf build
-	rm -f engine engine_mm3 engine_mm3_pi test_lineedit test_tokenizer test_xformat test_grammar test_schema test_gbnf_full test_weight_format
+	rm -f engine engine_mm3 engine_mm3_pi test_lineedit test_tokenizer test_xformat test_grammar test_schema test_gbnf_full test_constraint test_weight_format
 	rm -f probes/vc4_probe probes/vc4_ffn_probe probes/vc4_topk_probe probes/load_probe_pi
 	rm -f probes/matvec_probe probes/texsize_probe probes/q4fmt_probe_pi probes/glsl_probe_pi probes/q4mv_probe_pi probes/draw_probe_pi probes/packunpack_probe probes/packunpack_probe_pi probes/logits_grid_probe probes/wrow_probe probes/wrow_probe_pi probes/conv_probe probes/conv_probe_pi probes/t3mv_probe probes/t3mv_probe_pi probes/t3dec_probe probes/t3dec_probe_pi probes/t3lut_probe probes/t3lut_probe_pi probes/t3act_probe probes/t3act_probe_pi probes/rmsfuse_probe probes/rmsfuse_probe_pi probes/att_batch_probe probes/att_batch_probe_pi probes/att_out_probe probes/att_out_probe_pi \
 	rm -f probes/sumorder_probe probes/sumorder_probe_pi probes/q4mv_probe probes/progbinary_probe_pi probes/ffn2_probe_pi probes/rgba4444_probe probes/rgba4444_probe_pi
