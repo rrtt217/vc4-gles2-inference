@@ -203,28 +203,60 @@ int main(int argc, char** argv) {
         vector<int> src = app.tokenizer.encode(opt.prompt, /*bos=*/false,
                                               /*dummy_prefix=*/true);
         src.push_back(app.model.id_eos);
-        const auto t0 = std::chrono::steady_clock::now();
-        session.encdec_encode(src);
-        const double enc_s = std::chrono::duration<double>(
-            std::chrono::steady_clock::now() - t0).count();
-        const auto t_enc = std::chrono::steady_clock::now();
         fprintf(stderr, "encdec: %zu source tokens, %d decoder layers (act %s res %s)\n",
                 src.size(), app.model.layers,
                 x_format_name(app.gpu.act_fmt()), x_format_name(app.gpu.res_fmt()));
         // The attention's geometry, because a scan bound is the first thing to
         // check when a pass costs 20x what the same pass costs on another model.
         if (env_flag("LAYER_PROFILE")) app.gpu.att_geometry_line();
+        // ENCDEC_REPEAT=n repeats encode+greedy decode in this process and
+        // reports the last one.  A translation is short enough (a second or
+        // two) that a fresh process measures shader compilation and a
+        // downclocked GPU: two runs of the same binary spread by 30%, which is
+        // wider than every draw-fusion option this path has.  A repeat is safe
+        // because the encoder rewrites the K/V cache the decoder used and the
+        // decode is greedy.
+        const int reps = std::max(1, env_int("ENCDEC_REPEAT", 1));
         vector<int> out;
-        int tok = app.model.decoder_start_id;
-        const int max_gen = opt.gen_set ? opt.gen : 32;
-        for (int i = 0; i < max_gen; ++i) {
-                vector<float> lg = session.encdec_step(tok, i);
-                if (lg.empty()) { fprintf(stderr, "encdec: no logits at %d\n", i); break; }
-                int best = 0;
-                for (int v = 1; v < (int)lg.size(); ++v) if (lg[v] > lg[best]) best = v;
-                if (best == app.model.id_eos) break;
-                out.push_back(best);
-                tok = best;
+        double enc_s = 0.0, dec_ms = 0.0;
+        long d0 = 0, d_enc = 0, d_dec = 0;
+        for (int rep = 0; rep < reps; ++rep) {
+            const int max_gen = opt.gen_set ? opt.gen : 32;
+            d0 = app.gpu.draws();
+            const auto t0 = std::chrono::steady_clock::now();
+            session.encdec_encode(src);
+            enc_s = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - t0).count();
+            d_enc = app.gpu.draws();
+            const auto t_enc = std::chrono::steady_clock::now();
+            out.clear();
+            int tok = app.model.decoder_start_id;
+            for (int i = 0; i < max_gen; ++i) {
+                    vector<float> lg = session.encdec_step(tok, i);
+                    if (lg.empty()) { fprintf(stderr, "encdec: no logits at %d\n", i); break; }
+                    int best = 0;
+                    for (int v = 1; v < (int)lg.size(); ++v) if (lg[v] > lg[best]) best = v;
+                    // IGNORE_EOS extends the run for timing: a translation stops
+                    // after a dozen tokens, which is too short to average the
+                    // board's decode and leaves a fresh process measuring a
+                    // clock ramp.  The tokens after EOS are garbage, the cost
+                    // of one is not.
+                    if (best == app.model.id_eos && !env_flag("IGNORE_EOS")) break;
+                    out.push_back(best);
+                    tok = best;
+            }
+            dec_ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - t_enc).count();
+            d_dec = app.gpu.draws() - d_enc;
+            // A per-repetition line is what the repeat exists for: this GPU's
+            // clock moves by 4x inside one run (the draws are small and bursty),
+            // so the last repetition is one sample, not the answer.  Take the
+            // median of the warm ones.
+            if (reps > 1)
+                fprintf(stderr, "ENCDEC rep %d enc=%.3fs dec_avg=%.1fms/token gen=%zu "
+                        "draws enc=%ld dec=%ld\n",
+                        rep, enc_s, out.empty() ? 0.0 : dec_ms / (double)out.size(),
+                        out.size(), d_enc - d0, d_dec);
         }
         printf("%s\n", app.tokenizer.decode(out).c_str());
         fprintf(stderr, "encdec: %zu target tokens:", out.size());
@@ -238,11 +270,10 @@ int main(int argc, char** argv) {
                 // source position (its cost is the *source's*), the decoder once
                 // a token.  The chat path's `TIMING prefill/decode` would report
                 // one of them as if it were the other.
-                const double dec_ms = std::chrono::duration<double, std::milli>(
-                    std::chrono::steady_clock::now() - t_enc).count();
-                fprintf(stderr, "TIMING enc=%.3fs dec_avg=%.1fms/token gen=%zu\n",
+                fprintf(stderr, "TIMING enc=%.3fs dec_avg=%.1fms/token gen=%zu "
+                        "draws enc=%ld dec=%ld\n",
                         enc_s, out.empty() ? 0.0 : dec_ms / (double)out.size(),
-                        out.size());
+                        out.size(), d_enc - d0, d_dec);
         }
         return 0;
     }

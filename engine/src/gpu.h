@@ -90,9 +90,22 @@ public:
     // `kind`/`layer`/`site_no`/`pos` are the dump's label only (ENCDEC_DUMP):
     // a bare counter could not be matched to a site of the reference's forward,
     // which is how a per-row number once got compared to a max over positions.
+    // `batch`/`batch_row`: write the normalised row into row `batch_row` of a
+    // batch texture instead of `out` (the v5 encoder keeps every position's
+    // output in one texture, so the cross-KV projection can read row b).  The
+    // apply's arithmetic is unchanged; only the render target's y moves.
     GLuint ln_q16(GLuint x, GLuint w, GLuint b, Target& out, float eps,
                   const char* kind = nullptr, int layer = -1, int site_no = -1,
-                  int pos = -1);
+                  int pos = -1, Target* batch = nullptr, int batch_row = -1);
+    // LN_BATCH: the split and reduce cover every row of a batch residual plane
+    // (2 + 1 draws a layer), then ln_apply_row normalises one row into the
+    // position's own target.  The arithmetic is ln_q16's three passes.
+    void ln_stats_batch(GLuint xbatch, int n);
+    GLuint ln_apply_row(GLuint xbatch, int row, GLuint w, GLuint b, Target& out, float eps,
+                        int out_row = 0);
+    Target ln_part_b_, ln_stat_b_;
+    Target ln_r1_, ln_r2_;
+    void alloc_ln_batch();
     // The q/k/v projection target's own layout: a fixed q16 pair (or I24)
     // shared with the rope/score/KV readers, not res_fmt_.  The bias add and
     // the bias upload use it, so the qkv path cannot drift with ACT/RES.
@@ -102,6 +115,7 @@ public:
         return att_qkv_pair_ ? XFormat::I16_2 : proj_fmt_;
     }
     Target& ln_stat_probe() { return ln_stat_; }
+    Target& ln_partial_probe() { return ln_partial_; }
     GLuint upload_bias(const vector<float>& b, XFormat f);
     GLuint upload_into(Target& t, const vector<float>& x);
     GLuint upload_into_fmt(Target& t, const vector<float>& x, XFormat f);
@@ -236,7 +250,23 @@ public:
     // wide by the source's length tall: `[K | V]` per row, the layout
     // `kv_rope_write` already produces for the self-attention's cache.
     vector<Target> cross_kv_;
+    // The per-layer K/V projections for *every* source position, one row a
+    // position: the batch store reads row b from here instead of the
+    // projection being rebuilt and stored a position at a time.  Same shape
+    // policy as cross_kv_ (att_seq_ tall, reused across translations).
+    Target cross_proj_;
+    // The encoder's per-position outputs, one row a position: the batch
+    // cross-KV projection reads row b from here (ln_q16 writes it).
+    Target enc_h_batch_;
     void alloc_cross_kv(int n);
+    void alloc_cross_proj();
+    void alloc_enc_h_batch();
+    // One q8 projection draw for every position (matvec_q8_batch); the
+    // per-position form is matvec_to_row.
+    void cross_matvec_batch(const Mat& m, GLuint xb, int n, Target& out);
+    // Both halves of every position's row in one draw (the per-position store
+    // is cross_kv_store).
+    void cross_kv_store_batch(int layer, GLuint proj, int n, bool v_half, GLuint bias = 0);
     const Target& att_scores_ref() const { return att_scores_; }
     GLuint cross_kv_tex(int l) const { return (size_t)l < cross_kv_.size() ? cross_kv_[(size_t)l].tex : 0; }
     void att_qrot_stage(int layer, int pos, int b, int n);
@@ -247,9 +277,29 @@ public:
     // pass reads.  One call, because the three steps share `qkv_target_` and a
     // caller reaching for it by name is how the width of the bias add gets
     // confused with the self-attention's 3*dim.
-    void att_scores_batch(int layer, int pos0, int n);
+    void att_scores_batch(int layer, int pos0, int n, GLuint q_tex = 0);
     void att_stats_row(int pos, int b, int n);
-    void att_v_row(int layer, int pos, int b, int n);
+    // One draw for every query's (max,sum), grid heads x n, into stats_batch_;
+    // att_v_row then reads row b of it (the fifth argument).
+    void att_stats_batch(int pos, int n);
+    void att_v_row(int layer, int pos, int b, int n, bool stats_batched = false);
+    void att_v_batch(int layer, int pos, int n);
+    Target stats_batch_;
+    void alloc_stats_batch();
+    Target enc_ctx_;
+    void alloc_enc_ctx();
+    // v5 encoder front: one projection plane (and one biased copy) with a row
+    // a source position, so the score and KV passes read row b instead of a
+    // per-position target and the qrot staging disappears.
+    Target qkv_batch_, qkv_bias_batch_;
+    GLuint enc_qkv_src_ = 0;
+    void alloc_qkv_batch();
+    void att_qkv_draw_to(const Mat& qkv, GLuint x, Target& dst, int row);
+    void att_qkv_batch(const Mat& qkv, GLuint x, int row);
+    void kv_write_batch(int layer, int n);
+    bool enc_front_batch_ok() const;
+    GLuint bias_add_f_row(GLuint x, GLuint b, Target& out, int dim, XFormat xf,
+                          XFormat f, int row);
     // N hidden upload slots and the per-position residual targets the group
     // loop ping-pongs through (grp_tmp_ is the shared wo output / x1 scratch).
     GLuint upload_hidden_grp(const vector<float>& x, int b, int n);
@@ -276,7 +326,12 @@ public:
     // adds into the previous LayerNorm's output.  The store is always
     // res_fmt_: that is what the next LayerNorm reads.
     void matvec_add_rf(const Mat& m, GLuint x, GLuint residual, Target& out,
-                       XFormat xf, XFormat rf);
+                       XFormat xf, XFormat rf, int out_row = 0);
+    // The same add with X in row `xrow` of a batch context plane (the residual
+    // is still this position's one-row target).  q8 + I16_2 X only; anything
+    // else falls back to matvec_add_rf.
+    void matvec_add_rf_xrow(const Mat& m, GLuint x, int xrow, GLuint residual, Target& out,
+                            XFormat xf, XFormat rf);
     // The same, with a bias folded into the write-back: one draw where the
     // caller would otherwise add another.  `bias` on a kernel without the arm
     // is ignored, so a caller must still pay its own `bias_add` there.
@@ -285,7 +340,7 @@ public:
         matvec_add_bias_rf(m, x, residual, bias, out, xf, res_fmt_);
     }
     void matvec_add_bias_rf(const Mat& m, GLuint x, GLuint residual, GLuint bias,
-                            Target& out, XFormat xf, XFormat rf);
+                            Target& out, XFormat xf, XFormat rf, int out_row = 0);
 
     // LFM2 conv block.  The three in_proj row slices are drawn into their own
     // 1024-wide targets (a 3072-wide draw would exceed VC4's 2048), the gates
@@ -381,6 +436,7 @@ public:
     void logits_pass_only(const vector<Mat>& tiles, GLuint x);
 
     vector<uint8_t> read_bytes(Target& t, int w, int h);
+    vector<uint8_t> read_row(const Target& t, int row);
 
     void sync();
     // Drop the bind caches.  Any code that touches glBindFramebuffer /
@@ -441,6 +497,8 @@ private:
     GLuint x_i4_pair(int rows, int cols);
     GLuint x_i4_pair_swiglu(int rows, int cols, int hs = 0, bool fmt4 = false);
     GLuint x_q8_add(int rows, int cols, XFormat xf, XFormat rf, bool wrow = false);
+    GLuint x_q8_add_xrow(int rows, int cols, XFormat xf, bool wrow = false);
+    GLuint x_q8_add_pair_xrow(int rows, int cols, XFormat xf, bool wrow = false);
     GLuint x_t3(const Mat& m, bool wrow = false);
     GLuint x_t3_add(const Mat& m, XFormat xf, XFormat rf, bool wrow = false);
     GLuint x_t3_pair(const Mat& m, bool wrow = false);
@@ -466,13 +524,16 @@ private:
     GLuint x_kv_rope(int segk = 0);
     GLuint x_qnorm();
     GLuint x_qrot(int segk = 0);
-    GLuint x_score(int segk = 0);
+    GLuint x_score(int segk = 0, bool q_from_qkv = false);
     GLuint x_stats(int segk = 0);
     // qbatch variants: the score grid is seq/2 x heads*n; stats/v address the
     // batched score rows through the qrow0 uniform (n baked into the text).
-    GLuint x_score_batch(int n);
+    GLuint x_score_batch(int n, bool q_from_qkv = false);
+    GLuint x_kv_batch(int n);
     GLuint x_stats_row(int n);
-    GLuint x_v_row(int n);
+    GLuint x_stats_batch(int n);
+    GLuint x_v_row(int n, bool stats_batched = false);
+    GLuint x_v_batch(int n);
     GLuint x_prob();
     GLuint x_top2_fast(int rows, int chunk);
     GLuint x_top2(int rows, int chunk);
@@ -721,6 +782,8 @@ private:  // matvec input (qkv/wo/gate/logits)
         // arm reads its base in (the activation stream); the plain one is
         // res for the separate bias_add.
         vector<GLuint> enc_fc2_b_rf;                                    // [enc layer]
+        vector<GLuint> enc_o_b_rf;                                      // [enc layer]
+        vector<GLuint> o_b_rf, co_b_rf, fc2_b_rf;                        // [dec layer]
         GLuint logits_b = 0;
         GLuint pos = 0;
         // Cleared on a release: these are the only handles of this set the
@@ -736,6 +799,8 @@ private:  // matvec input (qkv/wo/gate/logits)
                 cv_b.clear(); co_b.clear(); fc1_b.clear(); fc2_b.clear();
                 enc_qkv_b.clear(); enc_o_b.clear(); enc_fc1_b.clear(); enc_fc2_b.clear();
                 enc_fc2_b_rf.clear();
+                enc_o_b_rf.clear();
+                o_b_rf.clear(); co_b_rf.clear(); fc2_b_rf.clear();
                 logits_b = pos = 0;
         }    } enc_rows_;
     GLuint rwkv_mul(GLuint a, GLuint b, Target& out, int adiv);

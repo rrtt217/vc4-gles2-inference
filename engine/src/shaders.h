@@ -62,6 +62,30 @@ struct AttnConfig {
     // No rotation at all (v5): the block's positions are a table added to the
     // embedding, so the K write and the Q stage must not rotate either.
     bool rope_none = false;
+    // v5: the score pass reads Q straight out of the qkv projection target.
+    // With rope_none and no qk-norm the qrot pass is a q16 -> q16 copy, so the
+    // draw buys nothing; `q_width` is that target's texel width (the Q part is
+    // its first dim/2 texels, whatever the K/V half makes the texture wider).
+    bool q_from_qkv = false;
+    int q_width = 0;
+    // The Q texture's height when it is the projection plane (att_seq_), which
+    // is not QB: the score batch's rows are a block of QB queries, but the Q
+    // plane holds att_seq_ positions.
+    int q_rows = 0;
+    // v5 encoder: the stats pass covers every query in one draw (grid
+    // heads x n, the row from gl_FragCoord.y) and writes into a heads x att_seq_
+    // plane; the V pass then reads row qrow0 of that plane.  The scan and the
+    // arithmetic are the serial row kernel's.
+    bool stats_batched = false;
+    int stats_rows = 0;
+    // v5 encoder: the V pass covers every query in one draw (grid ow x n), the
+    // row from gl_FragCoord.y; the result is one context plane the wo add reads
+    // by row.  The arithmetic is the per-query kernel's.
+    bool v_batch = false;
+    // v5 encoder front: the KV write reads row y of a projection plane (one
+    // row a source position) and writes row y of the cache, grid
+    // kv_texels x n.  The QKV row is gl_FragCoord.y instead of 0.5.
+    bool qkv_batch = false;
     // The KV cache's layout, built once from `KV` in init_attention.  The
     // per-head V grid is part of it: 8-bit KV only, derived from the head max,
     // with K on the global KVSCALE grid (qk-normed, so already unit RMS).
@@ -152,6 +176,7 @@ std::string seg_uniforms(const AttnConfig& c, const std::string& base);
 std::string att_defs(const AttnConfig& c);
 // A projection's row into one half of a KV row (cross-attention, v5).
 std::string att_cross_kv(const AttnConfig& c, bool v_half, XFormat xf, bool bias);
+std::string att_cross_kv_batch(const AttnConfig& c, bool v_half, XFormat xf, bool bias);
 std::string att_helpers(const AttnConfig& c);
 
 std::string matvec_q8(int rows, int cols, XFormat xf, XFormat of, bool wrow = false);
@@ -195,8 +220,11 @@ std::string matvec_q8_pair_fused(int rows, int cols, XFormat xf, bool wrow = fal
 std::string matvec_q8_pair_logits(int rows, int cols, XFormat xf, bool wrow = false);
 std::string matvec_q8_add(int rows, int cols, XFormat xf, XFormat rf, XFormat of,
                           bool wrow = false);
+std::string matvec_q8_add_xrow(int rows, int cols, XFormat xf, XFormat rf, XFormat of,
+                               bool wrow = false);
 std::string matvec_q8_add_pair(int rows, int cols, XFormat xf, XFormat rf, XFormat of,
-                               bool inl = true, bool wrow = false, bool bias = false);
+                               bool inl = true, bool wrow = false, bool bias = false,
+                               const char* xrow = "0.5");
 std::string matvec_i16(int rows, int cols, XFormat xf, XFormat of);
 std::string matvec_i16_add(int rows, int cols, XFormat xf, XFormat rf, XFormat of);
 std::string matvec_i4(int rows, int cols, XFormat xf, XFormat of, bool inl = true);
@@ -326,7 +354,11 @@ std::string rwkv_wkv_out(int heads, int hs);
 std::string ln_stats_split(int dim, XFormat rf);
 std::string ln_stats_reduce(int dim);
 std::string ln_apply_q16(int dim, XFormat rf, XFormat out);
+std::string ln_stats_split_row(int dim, XFormat rf, int bh);
+std::string ln_stats_reduce_row(int dim, int bh);
+std::string ln_apply_q16_row(int dim, XFormat rf, XFormat out, int bh);
 std::string bias_add_q16(int dim, XFormat xf, XFormat f);
+std::string bias_add_q16_batch(int dim, XFormat xf, XFormat f, int rows);
 std::string act_swish(int dim, XFormat f);
 std::string act_swish_biased(int dim, XFormat xf, XFormat f);
 std::string act_sqrelu(int dim);

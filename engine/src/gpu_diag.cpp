@@ -99,6 +99,10 @@ vector<uint8_t> gpu_read_target_row(const Target& t, int row){
         return b;
 }
 
+vector<uint8_t> GPU::read_row(const Target& t, int row){
+        return gpu_read_target_row(t, row);
+}
+
 int q16_at(const vector<uint8_t>& b, int texel, int comp){
         const size_t o = (size_t)texel * 4 + (size_t)(comp ? 2 : 0);
         int v = (int)b[o] * 256 + (int)b[o + 1];
@@ -107,7 +111,10 @@ int q16_at(const vector<uint8_t>& b, int texel, int comp){
 }
 
 void GPU::dump_attention(int layer, int pos, GLuint kv){
-        if (qrot_target_.tex == 0 || att_scores_.tex == 0 || att_stats_.tex == 0) return;
+        // v5 NOROPE skips the qrot pass (the score reads the projection target
+        // directly), so the Q row lives in qkv_target_ in that mode.
+        if ((qrot_target_.tex == 0 && qkv_target_.tex == 0) ||
+            att_scores_.tex == 0 || att_stats_.tex == 0) return;
         // One meta line pins the shape and the grids, so the checker needs no
         // assumptions: value = int/256 for q and att_out, int/KVSCALE for K and
         // V, int/1024 for scores and the stats max, int/32 for the stats sum.
@@ -119,7 +126,7 @@ void GPU::dump_attention(int layer, int pos, GLuint kv){
                 meta = false;
         }
         {
-                const vector<uint8_t> b = gpu_read_target_row(qrot_target_, 0);
+                const vector<uint8_t> b = gpu_read_target_row(qrot_target_.tex ? qrot_target_ : qkv_target_, 0);
                 fprintf(stderr, "ATTD qrot %d %d %d", layer, pos, att_dim_);
                 for (int i = 0; i < att_dim_; ++i) fprintf(stderr, " %d", q16_at(b, i / 2, i & 1));
                 fprintf(stderr, "\n");

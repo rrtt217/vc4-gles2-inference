@@ -17,14 +17,15 @@ namespace {
 // QKV holds the q/k/v matvec output.  When the qkv matvec pairs two output
 // rows into one texel the reads become a half-width fetch plus a component
 // select; otherwise the original 24-bit fetch is emitted verbatim.
-string qkv_read(const AttnConfig& c, const char* tex, const char* macro) {
-    const string t(tex), m(macro);
+string qkv_read(const AttnConfig& c, const char* tex, const char* macro,
+                const char* row = "0.5") {
+    const string t(tex), m(macro), y(row);
     if (!c.qkv_pair)
         return "\n#define " + m + "(I) dec24q(texture2D(" + t +
-               ",vec2((float(I)+0.5)/float(QKVDIM),0.5)))\n";
+               ",vec2((float(I)+0.5)/float(QKVDIM)," + y + ")))\n";
     const string fn = string("qkvr_") + t;
     return "\nfloat " + fn + "(int i){int t=i/2;vec4 c=texture2D(" + t +
-           ",vec2((float(t)+0.5)/float(QKVTW),0.5));"
+           ",vec2((float(t)+0.5)/float(QKVTW)," + y + "));"
            "vec2 p=(((i-t*2)==0)?c.rg:c.ba);"
            "return x_q16dec_at(p,256.0);}\n"
            "#define " + m + "(I) " + fn + "(I)\n";
@@ -144,6 +145,36 @@ string att_cross_kv(const AttnConfig& c, bool v_half, XFormat xf, bool bias) {
     return fs;
 }
 
+// The same store for every source position in one draw: the projection rows
+// live in one `att_seq_`-tall plane, so a fragment takes its row from
+// gl_FragCoord.y instead of the projection being rebuilt per position.  The
+// arithmetic (value + bias, then the KV codec) is att_cross_kv's; only the row
+// coordinate moves, which is why the two are separate texts -- the shipped
+// single-row program keeps its bytes.
+string att_cross_kv_batch(const AttnConfig& c, bool v_half, XFormat xf, bool bias) {
+    need_attn(c);
+    const string TW = to_string(x_texels(c.kv_dim, xf));
+    (void)v_half;
+    // PROJ is I24_1 or F32, both one value a texel; `XROW` is the only new
+    // thing (X1 in x_glsl hardcodes row 0.5).
+    const string xrow = xf == XFormat::F32
+        ? "float xrow(sampler2D T,int j,int b){return x_f32(texture2D(T,vec2((float(j)+0.5)/float(" + TW + "),(float(b)+0.5)/NB)));}\n"
+        : "float xrow(sampler2D T,int j,int b){return x_q24(texture2D(T,vec2((float(j)+0.5)/float(" + TW + "),(float(b)+0.5)/NB)));}\n";
+    // The uniforms must precede `xrow`, which reads NB.
+    string fs = "precision highp float;\n" + att_defs(c) + att_helpers(c) + x_glsl(xf) +
+        "uniform sampler2D XS" + (bias ? ",BS" : "") + ";uniform float XOFF,NB;" + xrow +
+        "float rv(int j,int b){return xrow(XS,j,b)" +
+        (bias ? "+xrow(BS,j,b)" : "") + ";}"
+        "void main(){int x=int(gl_FragCoord.x-XOFF);int b=int(gl_FragCoord.y);";
+    if (c.kv.vpt == 4)
+        fs += "int i=4*x;gl_FragColor=encKV8(rv(i,b),rv(i+1,b),rv(i+2,b),rv(i+3,b));}";
+    else if (c.kv.vpt == 2)
+        fs += "int i=2*x;gl_FragColor=encKV(rv(i,b),rv(i+1,b));}";
+    else
+        fs += string("gl_FragColor=encKV1(xrow(XS,x,b)") + (bias ? "+xrow(BS,x,b)" : "") + ");}";
+    return fs;
+}
+
 string att_defs(const AttnConfig& c) {
     need_attn(c);
     return exp_poly_text(c) + string("#define DIM ") + to_string(c.dim) + "\n" +
@@ -246,13 +277,17 @@ string att_kv_rope(const AttnConfig& c) {
     // inside the segment (the viewport already put the draw there).  A write
     // kernel therefore fetches y = pos, not pos - SEGK*SEG.
     const string rt = seg_seq_tex(c, "RT"), vs = seg_seq_tex(c, "VS");
-    const string rty = c.nseg > 1 ? "((float(pos)+0.5)/float(SEG))"
-                                  : "(pos+0.5)/float(SEQ)";
+    const string rty = c.qkv_batch ? "float(gl_FragCoord.y)/float(SEQ)"
+                      : c.nseg > 1 ? "((float(pos)+0.5)/float(SEG))"
+                                   : "(pos+0.5)/float(SEQ)";
+    // The batch form reads row y of the projection plane (one row a source
+    // position) and writes row y of the cache; nothing else moves.
+    const string qkv_row = c.qkv_batch ? "float(gl_FragCoord.y)/float(SEQ)" : "0.5";
     return "precision highp float;\n" + att_defs(c) + att_helpers(c) +
         (c.nseg > 1 ? seg_uniforms(c, "RT") + seg_uniforms(c, "VS") +
                           "uniform sampler2D QKV,KN;"
                     : string("uniform sampler2D QKV,RT,KN,VS;")) +
-        "uniform float pos;" + qkv_read(c, "QKV", "QKVQ") +
+        "uniform float pos;" + qkv_read(c, "QKV", "QKVQ", qkv_row.c_str()) +
         "void main(){int x=int(gl_FragCoord.x);"
         "if(KVVPT==4){"
         "if(x<KVDIM/4){"
@@ -411,7 +446,12 @@ string att_score(const AttnConfig& c) {
     const string open = B ? "int r=int(gl_FragCoord.y);int h=r/QB;int b=r-h*QB;"
                           : "int h=int(gl_FragCoord.y);";
     const string ypos = B ? "pos+float(b)" : "pos";
-    const string qrow = B ? "(float(b)+0.5)/float(QB)" : "0.5";
+    // The Q plane is qrot_batch_ (QB rows) unless the v5 front reads the
+    // projection plane directly, which is att_seq_ rows tall.
+    const string qrow = B ? (c.q_from_qkv ? "(float(b)+0.5)/float(" +
+                                             std::to_string(c.q_rows) + ")"
+                                          : string("(float(b)+0.5)/float(QB)"))
+                          : "0.5";
     // Segmented: this program owns the pairs of one slice, so its own x is the
     // LOCAL pair index inside its score texture while the causal test needs the
     // GLOBAL position.  Both are derived from T here, once.
@@ -419,6 +459,12 @@ string att_score(const AttnConfig& c) {
     const SegRef kv1 = seg_ref(c, "KV", "t1", "KV", "(float(t1)+0.5)/float(SEQ)");
     const string g0 = c.nseg > 1 ? "(SEGK*SEG+2*T)" : "t0";
     const string g1 = c.nseg > 1 ? "(SEGK*SEG+2*T+1)" : "t1";
+    // The Q texture's width.  The serial Q plane is dim/2 wide; the v5 form
+    // reads the qkv projection's own target, whose width includes the K/V half
+    // (1536 rows -> 768 texels for the self-attention, 512 rows -> 256 for the
+    // cross, where the two agree).  Only the v5 form changes the text.
+    const string qden = c.q_from_qkv ? ("float(" + std::to_string(c.q_width) + ")")
+                                     : string("float(DIM/2)");
     return "precision highp float;\n" + att_defs(c) + att_helpers(c) +
         (c.nseg > 1 ? seg_uniforms(c, "KV") + "uniform sampler2D Q;"
                     : string("uniform sampler2D Q,KV;")) +
@@ -434,7 +480,7 @@ string att_score(const AttnConfig& c) {
         
         "if(!e0&&!e1){gl_FragColor=vec4(0.0,0.0,0.0,0.0);return;}"
         "for(int i=0;i<HEADDIM;i++){"
-        "vec4 qp=texture2D(Q,vec2((float((h*HEADDIM+i)/2)+0.5)/float(DIM/2)," + qrow + "));"
+        "vec4 qp=texture2D(Q,vec2((float((h*HEADDIM+i)/2)+0.5)/" + qden + "," + qrow + "));"
         "float q=(((h*HEADDIM+i)-(h*HEADDIM+i)/2*2)==0)?dec16(qp.rg):dec16(qp.ba);"
         "int ki=kvh*HEADDIM+i;int tx=ki/KVVPT;int odd=ki-tx*KVVPT;"
         "if(e0)s0+=q*decKV(texture2D(" + kv0.sampler + ",vec2((float(tx)+0.5)/float(KVWIDTH)," + kv0.y + ")),odd);"
@@ -446,9 +492,11 @@ string att_score(const AttnConfig& c) {
 string att_stats(const AttnConfig& c) {
     // qbatch > 1: the score texture is heads*QB rows tall and this position's
     // block starts at row qrow0 (= b, a uniform); the scan itself is unchanged.
+    // stats_batched: every query at once, the block row from gl_FragCoord.y.
     const bool B = c.qbatch > 1;
-    const string srow = B ? "((float(h*QB)+qrow0)+0.5)/float(HEADS*QB)"
-                          : "(float(h)+0.5)/float(HEADS)";
+    const string srow = c.stats_batched ? "((float(h*QB)+float(bh))+0.5)/float(HEADS*QB)"
+                       : B ? "((float(h*QB)+qrow0)+0.5)/float(HEADS*QB)"
+                           : "(float(h)+0.5)/float(HEADS)";
     // Segmented: this program scans the GLOBAL pair range it owns -- so the
     // causal break is right -- and fetches with the LOCAL pair index inside its
     // own score texture.  Its (max, sum) is the slice's own; the host fold in
@@ -478,15 +526,17 @@ string att_stats(const AttnConfig& c) {
         : string();
     const string mx_var = c.nseg > 1 ? "mxg" : "mx";
     return "precision highp float;\n" + att_defs(c) + att_helpers(c) + gm_decl +
-        (c.nseg > 1 ? seg_uniforms(c, "S") + (B ? "uniform float pos,qrow0;"
+        (c.nseg > 1 ? seg_uniforms(c, "S") + ((B && !c.stats_batched) ? "uniform float pos,qrow0;"
                                                 : "uniform float pos;")
-                    : (B ? string("uniform sampler2D S;uniform float pos,qrow0;")
+                    : ((B && !c.stats_batched) ? string("uniform sampler2D S;uniform float pos,qrow0;")
                          : string("uniform sampler2D S;uniform float pos;"))) +
         // One fragment per head: (max, sum) packed into a single texel as two q16
         // values.  Previously two fragments per head did the identical scan and
         // only differed in which of the two statistics they wrote.
         "vec2 qs(float v,float s){return x_q16enc_at(v,s);}"
-        "void main(){int h=int(gl_FragCoord.x);float mx=-1e30;"
+        "void main(){int h=int(gl_FragCoord.x);" +
+        string(c.stats_batched ? "int bh=int(gl_FragCoord.y);" : "") +
+        "float mx=-1e30;"
         // `pos` bounds the scan in *both* modes: causal, it is this query's
         // position; bidirectional, the host sets it to the last *valid* key.
         // Removing the bound instead scans the whole SEQ, and the positions past
@@ -533,8 +583,10 @@ string att_v(const AttnConfig& c, XFormat out) {
     // qbatch > 1: S is the batched score texture (row h*QB + qrow0); ST stays
     // this position's own (heads,1) stats target, and the V pass is unchanged.
     const bool B = c.qbatch > 1;
-    const string srow = B ? "((float(h*QB)+qrow0)+0.5)/float(HEADS*QB)"
-                          : "(float(h)+0.5)/float(HEADS)";
+    const bool VB = c.v_batch;
+    const string srow = VB ? "((float(h*QB)+float(int(gl_FragCoord.y)))+0.5)/float(HEADS*QB)"
+                       : B ? "((float(h*QB)+qrow0)+0.5)/float(HEADS*QB)"
+                           : "(float(h)+0.5)/float(HEADS)";
     // Segmented: the score texture, the KV cache and the V step plane are all
     // this slice's; ST stays the folded global stats.  The scan walks the global
     // pair range and fetches with the local index.
@@ -555,8 +607,13 @@ string att_v(const AttnConfig& c, XFormat out) {
     const string tloc = c.nseg > 1 ? "(T-(SEGK*SEG)/2)" : "T";
     const string sdiv = c.nseg > 1 ? "(SEG+1)/2" : "SEQ/2";
     const string prob_bind = "S,ST,KV,VS";
+    const string strow = VB
+        ? ("float(gl_FragCoord.y)/float(" + to_string(c.stats_rows) + ")")
+        : c.stats_batched
+        ? ("(float(qrow0)+0.5)/float(" + to_string(c.stats_rows) + ")")
+        : string("0.5");
     const string prob_body =
-        "vec4 st=texture2D(ST,vec2((float(h)+0.5)/float(HEADS),0.5));"
+        "vec4 st=texture2D(ST,vec2((float(h)+0.5)/float(HEADS)," + strow + "));"
         "float mx=dec16(st.rg)*SCSI;float sum=" +
         string(c.sum_log ? "exp2(dec16(st.ba)*SUM_LOG_INV)" : "dec16(st.ba)*SMSI") +
         ";"

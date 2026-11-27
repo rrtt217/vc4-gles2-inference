@@ -2435,34 +2435,181 @@ void Session::encdec_encode(const vector<int>& src) {
         // which is the 110.8 against the reference's 1.68.
         EncLap lap(gpu_, env_set("LAYER_PROFILE"),
                    env_set("LAYER_PROFILE") && gpu_.pc_available());
-        const bool enc_ffn_fused = env_flag("ENC_FFN_FUSED");
+        const bool enc_ffn_fused = !env_flag("ENC_FFN_SPLIT");
+        const bool wo_fused = !env_flag("ENC_WO_SPLIT");
+        // XPROJ_BATCH: the final LayerNorm writes every position into one
+        // batch plane, and the cross-KV projection is one matvec_q8_batch a
+        // layer and half.  Opt-in until the Pi logits A/B accepts it.
+        const bool xproj_batch = !env_flag("XPROJ_SERIAL");
+        if (xproj_batch) gpu_.alloc_enc_h_batch();
+        // STATS_SERIAL: the pre-batch stats shape (one draw a query).  The
+        // batched form is one draw a layer whose fragments only move the row
+        // they read and write.
+        const bool stats_batch = !env_flag("STATS_SERIAL");
+        // VB_SERIAL: the per-position V pass and wo reading its own target.
+        // The batch writes one context plane and the wo add reads row b of it.
+        const bool vb = stats_batch && env_flag("VB_BATCH");
+        // LN_BATCH: the residual and its two LayerNorms go through batch
+        // planes.  Phase A writes every position's R2 (wo + bias), one split
+        // and one reduce cover the whole plane, phase C runs the FFN per
+        // position into the R2 rows, and phase E applies LN2.  Opt-in until
+        // the Pi A/B; the serial chain below is the shipped path.
+        const bool lnb = !env_flag("LN_SERIAL") && !vb;
+        if (lnb) gpu_.alloc_ln_batch();
+        // ATTB_SERIAL: the per-position front (qkv, KV write and qrot staging
+        // a position).  The batch front writes each projection into a row of
+        // one plane, the score and KV passes read that row, and the qrot
+        // staging disappears (NOROPE: qval() is the identity).
+        const bool front_batch = !env_flag("ATTB_SERIAL") && gpu_.enc_front_batch_ok();
         for (int l = 0; l < E; ++l) {
                 lap.mark("encLN1", l);
                 gpu_.set_qkv_bias(gpu_.enc_rows_.enc_qkv_b[l]);
-                for (int b = 0; b < n; ++b) {
-                        lap.mark("encPhase1", l);
-                        gpu_.att_stage(m.u_enc_qkv[l], h[b], l, b, b, n);
-                        lap.mark("encAttStage", l);
+                if (front_batch) {
+                        for (int b = 0; b < n; ++b)
+                                gpu_.att_qkv_batch(m.u_enc_qkv[l], h[b], b);
+                        gpu_.set_qkv_bias(0);
+                        gpu_.kv_write_batch(l, n);
+                } else {
+                        for (int b = 0; b < n; ++b) {
+                                lap.mark("encPhase1", l);
+                                gpu_.att_stage(m.u_enc_qkv[l], h[b], l, b, b, n);
+                                lap.mark("encAttStage", l);
+                        }
+                        gpu_.set_qkv_bias(0);
                 }
-                gpu_.set_qkv_bias(0);
                 lap.mark("encQKV", l);
-                gpu_.att_scores_batch(l, n - 1, n);
+                gpu_.att_scores_batch(l, n - 1, n,
+                                      front_batch ? gpu_.enc_qkv_src_ : 0);
                 lap.mark("encScoresBatch", l);
                 lap.mark("encScores", l);
+                if (stats_batch) {
+                        // Every query's (max,sum) in one draw; the V pass reads
+                        // row b of it instead of a per-position target.
+                        gpu_.att_stats_batch(n - 1, n);
+                        lap.mark("encStatsBatch", l);
+                }
+                if (vb) gpu_.att_v_batch(l, n - 1, n);
+                if (lnb) {
+                        for (int b = 0; b < n; ++b) {
+                                if (!stats_batch) gpu_.att_stats_row(n - 1, b, n);
+                                gpu_.att_v_row(l, n - 1, b, n, stats_batch);
+                                if (wo_fused)
+                                        gpu_.matvec_add_bias_rf(
+                                                m.u_enc_wo[l], gpu_.att_out_.tex, h[b],
+                                                gpu_.enc_rows_.enc_o_b_rf[l], gpu_.ln_r1_,
+                                                gpu_.act_fmt_, gpu_.act_fmt_, b);
+                                else {
+                                        gpu_.matvec_add_rf(m.u_enc_wo[l], gpu_.att_out_.tex,
+                                                           h[b], gpu_.ln_r1_,
+                                                           gpu_.act_fmt_, gpu_.act_fmt_, b);
+                                        gpu_.bias_add_f_row(gpu_.ln_r1_.tex,
+                                                            gpu_.enc_rows_.enc_o_b[l],
+                                                            gpu_.ln_r2_, m.dim,
+                                                            gpu_.act_fmt_, gpu_.act_fmt_, b);
+                                }
+                        }
+                        const GLuint r1tex = wo_fused ? gpu_.ln_r1_.tex : gpu_.ln_r2_.tex;
+                        gpu_.ln_stats_batch(r1tex, n);
+                        if (env_flag("ENCDEC_DUMP") && l == 0) {
+                                const vector<uint8_t> q = gpu_.read_row(gpu_.ln_r2_, 0);
+                                unsigned long long hh = 1469598103934665603ull;
+                                for (uint8_t v : q) hh = (hh ^ v) * 1099511628211ull;
+                                cerr << "ENCDEC r2b n" << q.size() << " h" << hex << hh << dec;
+                                const vector<uint8_t> st = gpu_.read_row(gpu_.ln_stat_b_, 0);
+                                cerr << " stat " << x_unpack(st.data(), 0, XFormat::F32)
+                                     << " inv " << x_unpack(st.data(), 1, XFormat::F32);
+                                const vector<uint8_t> pp = gpu_.read_row(gpu_.ln_part_b_, 0);
+                                cerr << " sx_b";
+                                for (int i = 32; i < 35; ++i)
+                                        cerr << " " << x_unpack(pp.data(), i, XFormat::F32);
+                                cerr << "\n";
+                        }
+                        lap.mark("encLN1", l);
+                        for (int b = 0; b < n; ++b) {
+                                GLuint x1 = gpu_.ln_apply_row(r1tex, b,
+                                                              gpu_.enc_rows_.enc_ln1[l],
+                                                              gpu_.enc_rows_.enc_ln1b[l],
+                                                              gpu_.cd_a(), m.rms_eps);
+                                if (env_flag("ENCDEC_DUMP") && l == 0 && b == 0) {
+                                        const vector<uint8_t> q = gpu_.read_row(gpu_.cd_a(), 0);
+                                        unsigned long long hh = 1469598103934665603ull;
+                                        for (uint8_t v : q) hh = (hh ^ v) * 1099511628211ull;
+                                        cerr << "ENCDEC ln1_b n" << q.size() << " h" << hex << hh << dec << "\n";
+                                }
+                                gpu_.matvec_to(m.u_enc_w1[l], x1, gpu_.cd_d());
+                                GLuint hf = gpu_.act_swish_biased(gpu_.cd_d().tex,
+                                                                  gpu_.enc_rows_.enc_fc1_b[l],
+                                                                  gpu_.cd_b(), F,
+                                                                  gpu_.proj_fmt_, gpu_.act_fmt_);
+                                if (env_flag("ENCDEC_DUMP") && l == 0 && b == 0) {
+                                        const vector<uint8_t> qs = gpu_.read_row(gpu_.cd_b(), 0);
+                                        unsigned long long hh = 1469598103934665603ull;
+                                        for (uint8_t v : qs) hh = (hh ^ v) * 1099511628211ull;
+                                        cerr << "ENCDEC sw_b n" << qs.size() << " h" << hex << hh << dec << "\n";
+                                }
+                                // ENC_FFN_FUSED folds the fc2 bias into the w2
+                                // store (one rounding, one draw fewer); the
+                                // LayerNorm then reads that plane.
+                                gpu_.matvec_add_bias_rf(
+                                        m.u_enc_w2[l], hf, x1,
+                                        enc_ffn_fused ? gpu_.enc_rows_.enc_fc2_b_rf[l] : 0,
+                                        gpu_.ln_r1_, gpu_.act_fmt_, gpu_.act_fmt_, b);
+                                if (env_flag("ENCDEC_DUMP") && l == 0 && b == 0) {
+                                        const vector<uint8_t> q = gpu_.read_row(gpu_.ln_r1_, 0);
+                                        cerr << "ENCDEC w2_b";
+                                        for (int i = 0; i < 8 && i < (int)q.size(); ++i) cerr << " " << (int)q[i];
+                                        cerr << "\n";
+                                }
+                                if (!enc_ffn_fused)
+                                        gpu_.bias_add_f_row(gpu_.ln_r1_.tex,
+                                                            gpu_.enc_rows_.enc_fc2_b[l],
+                                                            gpu_.ln_r2_, m.dim,
+                                                            gpu_.act_fmt_, gpu_.act_fmt_, b);
+                        }
+                        if (env_flag("ENCDEC_DUMP") && l == 0) {
+                                const vector<uint8_t> q = gpu_.read_row(gpu_.ln_r2_, 0);
+                                cerr << "ENCDEC r2fc_b";
+                                for (int i = 0; i < 8 && i < (int)q.size(); ++i) cerr << " " << (int)q[i];
+                                cerr << "\n";
+                        }
+                        const GLuint r2tex = enc_ffn_fused ? gpu_.ln_r1_.tex : gpu_.ln_r2_.tex;
+                        gpu_.ln_stats_batch(r2tex, n);
+                        if (env_flag("ENCDEC_DUMP") && l == 0) {
+                                const vector<uint8_t> st = gpu_.read_row(gpu_.ln_stat_b_, 0);
+                                cerr << "ENCDEC ln2stat_b " << x_unpack(st.data(), 0, XFormat::F32)
+                                     << " " << x_unpack(st.data(), 1, XFormat::F32) << "\n";
+                        }
+                        lap.mark("encFC2b", l);
+                        for (int b = 0; b < n; ++b) {
+                                const bool to_batch = xproj_batch && l == E - 1;
+                                h[b] = gpu_.ln_apply_row(r2tex, b,
+                                                         gpu_.enc_rows_.enc_ln2[l],
+                                                         gpu_.enc_rows_.enc_ln2b[l],
+                                                         to_batch ? gpu_.enc_h_batch_
+                                                                  : gpu_.v5_h(b, n),
+                                                         m.rms_eps, to_batch ? b : 0);
+                        }
+                } else
                 for (int b = 0; b < n; ++b) {
                         lap.mark("encPhase3", l);
                         // `pos` is the last *valid* key under NOCAUSAL (the
                         // scan bound), not this query's position: the encoder
                         // fills n slots of a SEQ-wide cache and the rest must
                         // not enter the softmax.
-                        gpu_.att_stats_row(n - 1, b, n);
+                        if (!stats_batch) gpu_.att_stats_row(n - 1, b, n);
                         lap.mark("encStatsRow", l);
-                        gpu_.att_v_row(l, n - 1, b, n);
+                        if (!vb) gpu_.att_v_row(l, n - 1, b, n, stats_batch);
                         lap.mark("encVRow", l);
                         lap.mark("encStatsV", l);
                         // r1 = x + wo*att + o_b, then x1 = LN1(r1)
-                        gpu_.matvec_add_rf(m.u_enc_wo[l], gpu_.att_out_.tex,
-                                           h[b], gpu_.cd_b(), gpu_.act_fmt_, gpu_.act_fmt_);
+                        if (vb)
+                                gpu_.matvec_add_rf_xrow(m.u_enc_wo[l], gpu_.enc_ctx_.tex, b,
+                                                        h[b], gpu_.cd_b(),
+                                                        gpu_.act_fmt_, gpu_.act_fmt_);
+                        else
+                                gpu_.matvec_add_rf(m.u_enc_wo[l], gpu_.att_out_.tex,
+                                                   h[b], gpu_.cd_b(),
+                                                   gpu_.act_fmt_, gpu_.act_fmt_);
                         gpu_.bias_add(gpu_.cd_b().tex, gpu_.enc_rows_.enc_o_b[l], gpu_.cd_c());
                         lap.mark("encWo", l);
                         if (env_flag("ENCDEC_DUMP") && l == 0 && b == 0) {
@@ -2483,6 +2630,25 @@ void Session::encdec_encode(const vector<int>& src) {
                                                 gpu_.enc_rows_.enc_ln1b[l],
                                                 gpu_.cd_a(), m.rms_eps, "enc", l, 1, b);
                         lap.mark("encLN1b", l);
+                        if (env_flag("ENCDEC_DUMP") && l == 0 && b == 0) {
+                                const vector<uint8_t> sc = gpu_.read_row(gpu_.cd_c(), 0);
+                                unsigned long long hs = 1469598103934665603ull;
+                                for (uint8_t v : sc) hs = (hs ^ v) * 1099511628211ull;
+                                cerr << "ENCDEC r2s n" << sc.size() << " h" << hex << hs << dec;
+                                const vector<uint8_t> st = gpu_.read_row(gpu_.ln_stat_probe(), 0);
+                                const vector<uint8_t> si = gpu_.read_row(gpu_.ln_stat_probe(), 1);
+                                cerr << " stat " << x_unpack(st.data(), 0, XFormat::F32)
+                                     << " inv " << x_unpack(si.data(), 0, XFormat::F32) << "\n";
+                                const vector<uint8_t> q = gpu_.read_row(gpu_.cd_a(), 0);
+                                unsigned long long hh = 1469598103934665603ull;
+                                for (uint8_t v : q) hh = (hh ^ v) * 1099511628211ull;
+                                cerr << "ENCDEC ln1_s n" << q.size() << " h" << hex << hh << dec;
+                                const vector<uint8_t> pp = gpu_.read_row(gpu_.ln_partial_probe(), 0);
+                                cerr << " sx_s";
+                                for (int i = 32; i < 35; ++i)
+                                        cerr << " " << x_unpack(pp.data(), i, XFormat::F32);
+                                cerr << "\n";
+                        }
                         // f = fc2(swish(fc1(x1) + b1)) + b2, then r2 = x1 + f.
                         // cd_b holds the fc1 side, so x1 (cd_a) survives as the
                         // residual this adds into.
@@ -2510,6 +2676,12 @@ void Session::encdec_encode(const vector<int>& src) {
                                                           gpu_.enc_rows_.enc_fc1_b[l],
                                                           gpu_.cd_b(), F, gpu_.proj_fmt_,
                                                           gpu_.act_fmt_);
+                        if (env_flag("ENCDEC_DUMP") && l == 0 && b == 0) {
+                                const vector<uint8_t> qs = gpu_.read_row(gpu_.cd_b(), 0);
+                                unsigned long long hh = 1469598103934665603ull;
+                                for (uint8_t v : qs) hh = (hh ^ v) * 1099511628211ull;
+                                cerr << "ENCDEC sw_s n" << qs.size() << " h" << hex << hh << dec << "\n";
+                        }
                         lap.mark("encSwishB", l);
                         // hf lives in cd_b, so the add must not write there: a
                         // matvec reads X and draws into its target, and one
@@ -2528,9 +2700,19 @@ void Session::encdec_encode(const vector<int>& src) {
                                                 enc_ffn_fused ? gpu_.enc_rows_.enc_fc2_b_rf[l] : 0,
                                                 gpu_.cd_d(), gpu_.act_fmt_, gpu_.act_fmt_);
                         lap.mark("encW2", l);
+                        if (env_flag("ENCDEC_DUMP") && l == 0 && b == 0) {
+                                const vector<uint8_t> qw = gpu_.read_row(gpu_.cd_d(), 0);
+                                cerr << "ENCDEC w2_s";
+                                for (int i = 0; i < 8 && i < (int)qw.size(); ++i) cerr << " " << (int)qw[i];
+                                cerr << "\n";
+                        }
                         if (enc_ffn_fused) gpu_.cd_c() = gpu_.cd_d();
                         else gpu_.bias_add(gpu_.cd_d().tex, fb, gpu_.cd_c());
                         if (env_flag("ENCDEC_DUMP") && l == 0 && b == 0) {
+                                const vector<uint8_t> qb2 = gpu_.read_row(gpu_.cd_c(), 0);
+                                cerr << "ENCDEC r2fc_s";
+                                for (int i = 0; i < 8 && i < (int)qb2.size(); ++i) cerr << " " << (int)qb2[i];
+                                cerr << "\n";
                                 vector<float> rv = read_hidden(gpu_.cd_c());
                                 cerr << "ENCDEC r2[0..7]";
                                 for (int i = 0; i < 8 && i < (int)rv.size(); ++i)
@@ -2541,7 +2723,15 @@ void Session::encdec_encode(const vector<int>& src) {
                         // x = LN2(r2), straight into the group slot the next layer reads.
                         h[b] = gpu_.ln_q16(gpu_.cd_c().tex, gpu_.enc_rows_.enc_ln2[l],
                                            gpu_.enc_rows_.enc_ln2b[l],
-                                           gpu_.v5_h(b, n), m.rms_eps, "enc", l, 2, b);
+                                           gpu_.v5_h(b, n), m.rms_eps, "enc", l, 2, b,
+                                           (xproj_batch && l == E - 1) ? &gpu_.enc_h_batch_
+                                                                       : nullptr, b);
+                        if (env_flag("ENCDEC_DUMP") && l == 0 && b == 0) {
+                                const vector<uint8_t> s0 = gpu_.read_row(gpu_.ln_stat_probe(), 0);
+                                const vector<uint8_t> s1 = gpu_.read_row(gpu_.ln_stat_probe(), 1);
+                                cerr << "ENCDEC ln2stat_s " << x_unpack(s0.data(), 0, XFormat::F32)
+                                     << " " << x_unpack(s1.data(), 0, XFormat::F32) << "\n";
+                        }
                 }
                 lap.mark("encFFN", l);
         }
@@ -2558,8 +2748,11 @@ void Session::encdec_encode(const vector<int>& src) {
                         // residual, which is a different format as soon as the
                         // two axes differ (RES=f32 printed 3e38 against an
                         // encoder that was exact).
-                        const Target& t = gpu_.v5_h(b, n);
-                        vector<uint8_t> bytes = gpu_.read_bytes(const_cast<Target&>(t), t.w, 1);
+                        const Target& t = xproj_batch ? gpu_.enc_h_batch_
+                                                      : gpu_.v5_h(b, n);
+                        vector<uint8_t> bytes = xproj_batch
+                                ? gpu_.read_row(t, b)
+                                : gpu_.read_bytes(const_cast<Target&>(t), t.w, 1);
                         vector<float> row = decode_act_row(bytes, t.w, gpu_.act_fmt_);
                         memcpy(cd_enc_.data() + (size_t)b * D, row.data(),
                                sizeof(float) * D);
@@ -2586,13 +2779,52 @@ void Session::encdec_encode(const vector<int>& src) {
         // round trips to fill them, and the decoder then paid two more per token.
         gpu_.alloc_cross_kv(n);
         lap.mark("encAllocKV", 0);
+        // XKV_BATCH: the projections for every position go into one
+        // att_seq_-tall plane (a matvec_to_row a position, which is the same
+        // draw into another row), and then the two stores cover all rows in two
+        // draws instead of 2n.  The arithmetic is the shipped path's -- the
+        // store reads the same I24 value and adds the same bias -- so this is a
+        // row substitution, not a new rounding.  Without the switch the
+        // per-position sequence is the original.
+        const bool xkv_batch = !env_flag("XKV_SERIAL");
         for (int l = 0; l < m.layers; ++l) {
                 lap.mark("encCrossKV", l);
+                if (xproj_batch) {
+                        // The final LayerNorm already put every position's
+                        // output in enc_h_batch_; one q8 batch draw a layer and
+                        // half is the projection, the store batch writes the
+                        // rows.
+                        gpu_.alloc_cross_proj();
+                        gpu_.cross_matvec_batch(m.u_cross_k[l], gpu_.enc_h_batch_.tex, n,
+                                                gpu_.cross_proj_);
+                        gpu_.cross_kv_store_batch(l, gpu_.cross_proj_.tex, n,
+                                                  /*v_half=*/false, gpu_.enc_rows_.ck_b[l]);
+                        gpu_.cross_matvec_batch(m.u_cross_v[l], gpu_.enc_h_batch_.tex, n,
+                                                gpu_.cross_proj_);
+                        gpu_.cross_kv_store_batch(l, gpu_.cross_proj_.tex, n,
+                                                  /*v_half=*/true, gpu_.enc_rows_.cv_b[l]);
+                        continue;
+                }
+                if (xkv_batch) {
+                        gpu_.alloc_cross_proj();
+                        for (int b = 0; b < n; ++b)
+                                gpu_.matvec_to_row(m.u_cross_k[l], gpu_.v5_h(b, n).tex,
+                                                   gpu_.cross_proj_, b);
+                        gpu_.cross_kv_store_batch(l, gpu_.cross_proj_.tex, n,
+                                                  /*v_half=*/false, gpu_.enc_rows_.ck_b[l]);
+                        for (int b = 0; b < n; ++b)
+                                gpu_.matvec_to_row(m.u_cross_v[l], gpu_.v5_h(b, n).tex,
+                                                   gpu_.cross_proj_, b);
+                        gpu_.cross_kv_store_batch(l, gpu_.cross_proj_.tex, n,
+                                                  /*v_half=*/true, gpu_.enc_rows_.cv_b[l]);
+                        continue;
+                }
                 for (int b = 0; b < n; ++b) {
                         // The bias rides the store: `att_cross_kv` reads the
                         // projection's I24 row and its bias row with the same
-                        // reader, so the separate bias-add pass is gone
-                        // and this is two draws a position instead of four.
+                        // reader, so the separate bias-add pass is gone; one
+                        // position is four draws (K projection, K store, V
+                        // projection, V store).
                         gpu_.matvec_to(m.u_cross_k[l], gpu_.v5_h(b, n).tex, gpu_.cd_b());
                         gpu_.cross_kv_store(l, gpu_.cd_b().tex, b, /*v_half=*/false,
                                             gpu_.enc_rows_.ck_b[l]);
@@ -2616,6 +2848,10 @@ vector<float> Session::encdec_step(int token, int pos) {
         for (int i = 0; i < D; ++i) y[i] = y[i] * s + p[i];
         GLuint h = gpu_.upload_hidden_fmt(y, gpu_.act_fmt_);
         const int n = cd_n_;
+        // DEC_BIAS_FUSED: the three decoder biases ride their matvec-add's
+        // store (one rounding, one draw fewer); the LayerNorm then reads that
+        // target.  Opt-in until the Pi A/B and the text check.
+        const bool dec_fused = !env_flag("DEC_BIAS_SPLIT");
         for (int l = 0; l < m.layers; ++l) {
                 // Same post-norm order as the encoder: self-attention on the raw
                 // residual, then LN1; cross-attention from LN1's output, then
@@ -2623,9 +2859,16 @@ vector<float> Session::encdec_step(int token, int pos) {
                 gpu_.set_qkv_bias(gpu_.enc_rows_.qkv_b[l]);
                 GLuint at = gpu_.attention_block(m.qkv[l], h, l, pos);
                 gpu_.set_qkv_bias(0);
-                gpu_.matvec_add_rf(m.wo[l], at, h, gpu_.cd_b(), gpu_.act_fmt_, gpu_.act_fmt_);
-                gpu_.bias_add(gpu_.cd_b().tex, gpu_.enc_rows_.o_b[l], gpu_.cd_c());
-                GLuint y1 = gpu_.ln_q16(gpu_.cd_c().tex, gpu_.enc_rows_.ln1[l],
+                if (dec_fused)
+                        gpu_.matvec_add_bias_rf(m.wo[l], at, h, gpu_.enc_rows_.o_b_rf[l],
+                                                gpu_.cd_b(), gpu_.act_fmt_, gpu_.act_fmt_);
+                else {
+                        gpu_.matvec_add_rf(m.wo[l], at, h, gpu_.cd_b(),
+                                           gpu_.act_fmt_, gpu_.act_fmt_);
+                        gpu_.bias_add(gpu_.cd_b().tex, gpu_.enc_rows_.o_b[l], gpu_.cd_c());
+                }
+                GLuint y1 = gpu_.ln_q16(dec_fused ? gpu_.cd_b().tex : gpu_.cd_c().tex,
+                                        gpu_.enc_rows_.ln1[l],
                                         gpu_.enc_rows_.ln1b[l], gpu_.cd_a(), m.rms_eps,
                                         "dec", l, 1, pos);
                 // cross-attention: q from y1, k/v from the encoder (read-back
@@ -2650,19 +2893,33 @@ vector<float> Session::encdec_step(int token, int pos) {
                                                       gpu_.cross_kv_tex(l),
                                                       /*stage_kv=*/false);
                 gpu_.set_qkv_bias(0);
-                gpu_.matvec_add_rf(m.u_cross_o[l], ctx_tex, y1, gpu_.cd_b(),
-                                   gpu_.act_fmt_, gpu_.act_fmt_);
-                gpu_.bias_add(gpu_.cd_b().tex, gpu_.enc_rows_.co_b[l], gpu_.cd_c());
-                GLuint y2 = gpu_.ln_q16(gpu_.cd_c().tex, gpu_.enc_rows_.ln2[l],
+                if (dec_fused)
+                        gpu_.matvec_add_bias_rf(m.u_cross_o[l], ctx_tex, y1,
+                                                gpu_.enc_rows_.co_b_rf[l], gpu_.cd_b(),
+                                                gpu_.act_fmt_, gpu_.act_fmt_);
+                else {
+                        gpu_.matvec_add_rf(m.u_cross_o[l], ctx_tex, y1, gpu_.cd_b(),
+                                           gpu_.act_fmt_, gpu_.act_fmt_);
+                        gpu_.bias_add(gpu_.cd_b().tex, gpu_.enc_rows_.co_b[l], gpu_.cd_c());
+                }
+                GLuint y2 = gpu_.ln_q16(dec_fused ? gpu_.cd_b().tex : gpu_.cd_c().tex,
+                                        gpu_.enc_rows_.ln2[l],
                                         gpu_.enc_rows_.ln2b[l], gpu_.cd_a(), m.rms_eps,
                                         "dec", l, 2, pos);
                 gpu_.matvec_to(m.w1[l], y2, gpu_.cd_d());
                 GLuint hid = gpu_.act_swish_biased(gpu_.cd_d().tex, gpu_.enc_rows_.fc1_b[l],
                                                    gpu_.cd_b(), F, gpu_.proj_fmt_,
                                                    gpu_.act_fmt_);
-                gpu_.matvec_add_rf(m.w2[l], hid, y2, gpu_.cd_d(), gpu_.act_fmt_, gpu_.act_fmt_);
-                gpu_.bias_add(gpu_.cd_d().tex, gpu_.enc_rows_.fc2_b[l], gpu_.cd_c());
-                h = gpu_.ln_q16(gpu_.cd_c().tex, gpu_.enc_rows_.ln3[l],
+                if (dec_fused)
+                        gpu_.matvec_add_bias_rf(m.w2[l], hid, y2, gpu_.enc_rows_.fc2_b_rf[l],
+                                                gpu_.cd_d(), gpu_.act_fmt_, gpu_.act_fmt_);
+                else {
+                        gpu_.matvec_add_rf(m.w2[l], hid, y2, gpu_.cd_d(),
+                                           gpu_.act_fmt_, gpu_.act_fmt_);
+                        gpu_.bias_add(gpu_.cd_d().tex, gpu_.enc_rows_.fc2_b[l], gpu_.cd_c());
+                }
+                h = gpu_.ln_q16(dec_fused ? gpu_.cd_d().tex : gpu_.cd_c().tex,
+                                gpu_.enc_rows_.ln3[l],
                                 gpu_.enc_rows_.ln3b[l], gpu_.cd_d(), m.rms_eps,
                                 "dec", l, 3, pos);
         }
@@ -2673,10 +2930,25 @@ vector<float> Session::encdec_step(int token, int pos) {
         // can *pick* the token (minecraft's step-0 argmax is 6590, while the
         // pre-bias argmax this dump used to print was 8).
         for (size_t i = 0; i < lg.size() && i < m_.logits_bias.size(); ++i) lg[i] += m_.logits_bias[i];
-        if (env_flag("ENCDEC_DUMP") && pos == 0 && !lg.empty()) {
-                int best = 0;
-                for (int v = 1; v < (int)lg.size(); ++v) if (lg[v] > lg[best]) best = v;
-                cerr << "ENCDEC step0 argmax " << best << "\n";
+        if (env_flag("ENCDEC_DUMP") && !lg.empty()) {
+                // A per-step FNV over the logits' bit patterns: the decoder's
+                // acceptance is "the same logits", and the greedy text alone
+                // hides an LSB that a folded pass moves.  Different hook from
+                // the chat path's LOGITS_OUT because a v5 container has no
+                // prompt/turn to attach a file to.
+                unsigned long long h = 1469598103934665603ull;
+                for (float v : lg) {
+                        uint32_t u;
+                        memcpy(&u, &v, sizeof u);
+                        h = (h ^ u) * 1099511628211ull;
+                }
+                if (pos == 0) {
+                        int best = 0;
+                        for (int v = 1; v < (int)lg.size(); ++v) if (lg[v] > lg[best]) best = v;
+                        cerr << "ENCDEC step0 argmax " << best << "\n";
+                }
+                cerr << "ENCDEC logits p" << pos << " n" << lg.size()
+                     << " h" << hex << h << dec << "\n";
         }
         return lg;
 }

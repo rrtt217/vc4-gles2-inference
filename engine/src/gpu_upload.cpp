@@ -383,11 +383,13 @@ void GPU::upload_v5_rows(const Model& m, XFormat qkf){
         r.enc_ln1.assign(E, 0); r.enc_ln1b.assign(E, 0);
         r.enc_ln2.assign(E, 0); r.enc_ln2b.assign(E, 0);
         r.qkv_b.assign(L, 0); r.o_b.assign(L, 0);
+        r.o_b_rf.assign(L, 0); r.co_b_rf.assign(L, 0); r.fc2_b_rf.assign(L, 0);
         r.cq_b.assign(L, 0); r.ck_b.assign(L, 0); r.cv_b.assign(L, 0); r.co_b.assign(L, 0);
         r.fc1_b.assign(L, 0); r.fc2_b.assign(L, 0);
         r.enc_qkv_b.assign(E, 0); r.enc_o_b.assign(E, 0);
         r.enc_fc1_b.assign(E, 0); r.enc_fc2_b.assign(E, 0);
         r.enc_fc2_b_rf.assign(E, 0);
+        r.enc_o_b_rf.assign(E, 0);
         for (int l = 0; l < L; ++l) {
                 const int B = m.dec_bias_row(l, Model::kRowQ);
                 r.ln1[l] = wrow(m.bias_dim_row(B + Model::kRowLn1W), D);
@@ -434,6 +436,10 @@ void GPU::upload_v5_rows(const Model& m, XFormat qkf){
                 r.co_b[l] = one(m.bias_dim_row(B + Model::kRowCO), D);
                 r.fc1_b[l] = one_act(m.bias_ffn_row(l), F);
                 r.fc2_b[l] = one(m.bias_dim_row(B + Model::kRowFc2B), D);
+                // The fused decoder-bias arm reads these in the activation format.
+                r.o_b_rf[l] = one_act(m.bias_dim_row(B + Model::kRowO), D);
+                r.co_b_rf[l] = one_act(m.bias_dim_row(B + Model::kRowCO), D);
+                r.fc2_b_rf[l] = one_act(m.bias_dim_row(B + Model::kRowFc2B), D);
         }
         for (int l = 0; l < E; ++l) {
                 const int B = m.enc_row(l, 0);
@@ -451,6 +457,8 @@ void GPU::upload_v5_rows(const Model& m, XFormat qkf){
                 // The fused w2 arm reads its base in the activation format, so
                 // the bias it folds must be encoded the same way.
                 r.enc_fc2_b_rf[l] = one_act(m.bias_dim_row(B + 8), D);
+                // The fused wo arm reads its base in the activation format too.
+                r.enc_o_b_rf[l] = one_act(m.bias_dim_row(B + 3), D);
         }
         // No logits-bias texture: a 65k-row bias is 32,501 texels wide, over
         // every GL target limit, and the head's bias is added on the host where

@@ -237,7 +237,7 @@ void GPU::init_attention(int dim, int kv_dim, int heads, int kv_heads, int head_
 
     }
 
-void GPU::att_qkv_draw(const Mat& qkv, GLuint x){
+void GPU::att_qkv_draw_to(const Mat& qkv, GLuint x, Target& dst, int row){
         if (att_qkv_pair_ && wf_can(qkv.type, WStage::QkvPair)) {
             const bool wr = qkv.has_row_scale();
             const int pairs = (qkv.rows + 1) / 2;
@@ -250,8 +250,8 @@ void GPU::att_qkv_draw(const Mat& qkv, GLuint x){
                                     to_string(qkv.cols) + "_" + x_format_name(act_fmt_) +
                                     (wr ? "_wr" : ""),
                                     matvec_q8_pair_logits(qkv.rows, qkv.cols, act_fmt_, wr));
-            bind_fbo(qkv_target_.fbo);
-            glViewport(0, 0, pairs, 1);
+            bind_fbo(dst.fbo);
+            glViewport(0, row, pairs, 1);
             use_program(p);
             bind_tex(0, qkv.tex); set_sampler(p, "W", 0);
             bind_tex(1, x); set_sampler(p, "X", 1);
@@ -260,8 +260,12 @@ void GPU::att_qkv_draw(const Mat& qkv, GLuint x){
             setup_attrib(p);
             glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         } else {
-            matvec_to(qkv, x, qkv_target_);
+            matvec_to_row(qkv, x, dst, row);
         }
+}
+
+void GPU::att_qkv_draw(const Mat& qkv, GLuint x){
+        att_qkv_draw_to(qkv, x, qkv_target_, 0);
         // v5: a block whose projection carries a bias (Marian biases q/k/v
         // separately).  The add writes into a second target and the two swap, so
         // kv_rope_write and att_qrot_stage keep reading `qkv_target_` and none of
@@ -277,6 +281,62 @@ void GPU::att_qkv_draw(const Mat& qkv, GLuint x){
                            qkv_fmt(), qkv_fmt());
                 std::swap(qkv_target_, qkv_biased_);
         }
+}
+
+void GPU::alloc_qkv_batch(){
+        const int rows = att_dim_ + 2 * att_kv_dim_;
+        const int w = att_qkv_pair_ ? (rows + 1) / 2 : rows;
+        if (qkv_batch_.tex && qkv_batch_.w == w && qkv_batch_.h == att_seq_ &&
+            qkv_bias_batch_.tex)
+                return;
+        qkv_batch_ = make_target(w, att_seq_);
+        qkv_bias_batch_ = make_target(w, att_seq_);
+}
+
+void GPU::att_qkv_batch(const Mat& qkv, GLuint x, int row){
+        alloc_qkv_batch();
+        att_qkv_draw_to(qkv, x, qkv_batch_, row);
+        if (att_qkv_bias_) {
+                // The same rounding chain as att_qkv_draw: projection into the
+                // plane row, then this bias pass into the second plane row.  It
+                // is two draws an input, as before -- what the batch changes is
+                // who reads the result (the score and KV passes, by row).
+                bias_add_f_row(qkv_batch_.tex, att_qkv_bias_, qkv_bias_batch_,
+                               3 * att_dim_, qkv_fmt(), qkv_fmt(), row);
+                enc_qkv_src_ = qkv_bias_batch_.tex;
+        } else {
+                enc_qkv_src_ = qkv_batch_.tex;
+        }
+}
+
+bool GPU::enc_front_batch_ok() const{
+        // NOROPE, no qk-norm, one KV segment and the q16 pair projection: the
+        // shape the row substitution was written for.  Anything else keeps the
+        // per-position front.
+        return att_rope_none_ && !att_qk_norm_ && att_nseg_ == 1 && att_qkv_pair_ &&
+               !kv_.vstep;
+}
+
+void GPU::kv_write_batch(int layer, int n){
+        if (!enc_front_batch_ok() || n <= 0 || enc_qkv_src_ == 0) return;
+        GLuint p = x_kv_batch(n);
+        bind_fbo(kv_part(layer, 0).fbo);
+        glViewport(0, 0, kv_.texels, n);
+        use_program(p);
+        const int u_qkv = uloc(p, "QKV");
+        if (u_qkv != 0) forget_state();
+        bind_tex(u_qkv < 0 ? 0 : u_qkv, enc_qkv_src_);
+        set_sampler(p, "QKV", u_qkv < 0 ? 0 : u_qkv);
+        // NOROPE prunes the rope table and KVSTEP prunes the V step plane; a
+        // qk-normed model would still need KN, so ask only for what exists.
+        const int u_kn = att_qk_norm_ ? uloc(p, "KN") : -1;
+        if (att_qk_norm_) {
+                bind_tex(u_kn < 0 ? 1 : u_kn, k_norm_tex_[layer]);
+                set_sampler(p, "KN", u_kn < 0 ? 1 : u_kn);
+        }
+        setup_attrib(p);
+        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+        att_finish();
 }
 
 GLuint GPU::attention_block(const Mat& qkv, GLuint x, int layer, int pos,
@@ -420,43 +480,53 @@ void GPU::att_scores(int layer, int pos, GLuint kv){
             if (attn_dup("qknorm")) go();
             slap("qknorm");
         }
-        if (qrot_target_.tex == 0 || qrot_target_.w != att_dim_ / 2)
-            qrot_target_ = make_target(att_dim_ / 2, 1);
-        // The rope table is segmented with the KV cache, so the rotated-Q pass
-        // reads the plane for *this* position's segment.  A one-segment session
-        // is segment 0 and the shipped text, so this is the identical call.
-        const int qseg = seg_of(pos);
-        GLuint pr = x_qrot(qseg);
-        auto go_qrot = [&]{
-            bind_fbo(qrot_target_.fbo);
-            glViewport(0, 0, att_dim_ / 2, 1);
-            use_program(pr);
-            // NOROPE: the compiler drops RT and pos, so the host does not ask
-            // for them (a "uniform not found" here reads like a typo).
-            const int u_r = uloc(pr, "R");
-            const int u_rt = att_rope_none_ ? -1 : uloc(pr, "RT");
-            if (u_r != 0 || u_rt != 1) forget_state();
-            bind_tex(u_r < 0 ? 0 : u_r, qkv_target_.tex);
-            set_sampler(pr, "R", u_r < 0 ? 0 : u_r);
-            if (!att_rope_none_) {
-                bind_tex(u_rt < 0 ? 1 : u_rt, rope_parts_[qseg]);
-                set_sampler(pr, "RT", u_rt < 0 ? 1 : u_rt);
-            }
-            if (att_qk_norm_) {
-                const int u_qn = uloc(pr, "QN"), u_qs = uloc(pr, "QS");
-                bind_tex(u_qn < 0 ? 2 : u_qn, q_norm_tex_[layer]);
-                set_sampler(pr, "QN", u_qn < 0 ? 2 : u_qn);
-                bind_tex(u_qs < 0 ? 3 : u_qs, qscale_target_.tex);
-                set_sampler(pr, "QS", u_qs < 0 ? 3 : u_qs);
-            }
-            if (!att_rope_none_) glUniform1f(uloc(pr, "pos"), (float)pos);
-            setup_attrib(pr);
-            glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
-            att_finish();
-        };
-        go_qrot();
-        if (attn_dup("qrot")) go_qrot();
-        slap("qrot");
+        // v5 with no rope and no qk-norm: the qrot pass is a q16 -> q16 copy of
+        // the Q the qkv draw already wrote (qval() returns qv unchanged), so the
+        // score pass reads that target directly and the draw disappears.  The
+        // self-attention's projection target also holds K/V and is dim/2 + the
+        // K/V half wide, so its program divides by that width instead of dim/2;
+        // the cross-attention's 512-row projection is dim/2 wide and keeps the
+        // shipped score text.
+        const bool q_direct = att_rope_none_ && !att_qk_norm_ && !env_flag("QROT_COPY");
+        if (!q_direct) {
+            if (qrot_target_.tex == 0 || qrot_target_.w != att_dim_ / 2)
+                qrot_target_ = make_target(att_dim_ / 2, 1);
+            // The rope table is segmented with the KV cache, so the rotated-Q pass
+            // reads the plane for *this* position's segment.  A one-segment session
+            // is segment 0 and the shipped text, so this is the identical call.
+            const int qseg = seg_of(pos);
+            GLuint pr = x_qrot(qseg);
+            auto go_qrot = [&]{
+                bind_fbo(qrot_target_.fbo);
+                glViewport(0, 0, att_dim_ / 2, 1);
+                use_program(pr);
+                // NOROPE: the compiler drops RT and pos, so the host does not ask
+                // for them (a "uniform not found" here reads like a typo).
+                const int u_r = uloc(pr, "R");
+                const int u_rt = att_rope_none_ ? -1 : uloc(pr, "RT");
+                if (u_r != 0 || u_rt != 1) forget_state();
+                bind_tex(u_r < 0 ? 0 : u_r, qkv_target_.tex);
+                set_sampler(pr, "R", u_r < 0 ? 0 : u_r);
+                if (!att_rope_none_) {
+                    bind_tex(u_rt < 0 ? 1 : u_rt, rope_parts_[qseg]);
+                    set_sampler(pr, "RT", u_rt < 0 ? 1 : u_rt);
+                }
+                if (att_qk_norm_) {
+                    const int u_qn = uloc(pr, "QN"), u_qs = uloc(pr, "QS");
+                    bind_tex(u_qn < 0 ? 2 : u_qn, q_norm_tex_[layer]);
+                    set_sampler(pr, "QN", u_qn < 0 ? 2 : u_qn);
+                    bind_tex(u_qs < 0 ? 3 : u_qs, qscale_target_.tex);
+                    set_sampler(pr, "QS", u_qs < 0 ? 3 : u_qs);
+                }
+                if (!att_rope_none_) glUniform1f(uloc(pr, "pos"), (float)pos);
+                setup_attrib(pr);
+                glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+                att_finish();
+            };
+            go_qrot();
+            if (attn_dup("qrot")) go_qrot();
+            slap("qrot");
+        }
 
         auto go_score = [&]{
             // Long context: one program and one draw a segment.  Segment k's
@@ -465,7 +535,9 @@ void GPU::att_scores(int layer, int pos, GLuint kv){
             // and the fetch on the global index, so the union of the draws is
             // the same work the single draw did.
             for (int k = 0; k < att_nseg_; ++k) {
-                GLuint p = x_score(k);
+                // Only the self-attention's projection is wider than dim/2;
+                // the cross one can reuse the shipped score text.
+                GLuint p = x_score(k, q_direct && qkv_target_.w != att_dim_ / 2);
                 // The last slice can be shorter than `seg` when the window does
                 // not divide evenly.  Drawing its full width would score pairs
                 // that hold no position, which then feed the stats scan and the
@@ -474,7 +546,7 @@ void GPU::att_scores(int layer, int pos, GLuint kv){
                 bind_fbo(score_parts_[k].fbo);
                 glViewport(0, 0, (rows + 1) / 2, att_heads_);
                 use_program(p);
-                bind_tex(0, qrot_target_.tex);
+                bind_tex(0, q_direct ? qkv_target_.tex : qrot_target_.tex);
                 set_sampler(p, "Q", 0);
                 bind_tex(1, (kv && k == 0) ? kv : kv_part(layer, k).tex);
                 set_sampler(p, "KV", 1);
@@ -867,15 +939,94 @@ void GPU::att_qrot_stage(int layer, int pos, int b, int n){
 }
 
 void GPU::alloc_cross_kv(int n){
-        cross_kv_.assign((size_t)kv_cache_.size(), Target());
         // Height `att_seq_`, not `n`: every attention kernel addresses the KV plane
         // with the compile-time `SEQ` (`(pos+0.5)/SEQ`), so a plane six rows tall
         // put the source positions in the top tenth of a 64-row grid and every
         // query read row 0.  The self-attention's cache has this height for the
         // same reason.
         (void)n;
+        // These planes are a per-container singleton: the shape is
+        // (kv_.texels x att_seq_) whatever the source length is, and a second
+        // encode overwrites the same rows.  Rebuilding them every call allocated
+        // a fresh texture and FBO and left the previous pair in the scene
+        // ledger until release_scene(): one translation leaked
+        // kv_cache_.size() * kv_.texels * att_seq_ * 4 B (6.3 MB at 512x512),
+        // and a repeat of three exhausted the board's CMA and hung the GPU
+        // (the board's watchdog then rebooted it).  Reuse them.
+        const bool stale = cross_kv_.size() != kv_cache_.size() ||
+                           (!cross_kv_.empty() &&
+                            (cross_kv_[0].tex == 0 || cross_kv_[0].w != kv_.texels ||
+                             cross_kv_[0].h != att_seq_));
+        if (!stale) return;
+        cross_kv_.assign((size_t)kv_cache_.size(), Target());
         for (size_t l = 0; l < cross_kv_.size(); ++l)
                 cross_kv_[l] = make_target(kv_.texels, att_seq_);
+}
+
+void GPU::alloc_cross_proj(){
+        const int w = x_texels(att_kv_dim_, proj_fmt_);
+        if (cross_proj_.tex && cross_proj_.w == w && cross_proj_.h == att_seq_) return;
+        cross_proj_ = make_target(w, att_seq_);
+}
+
+void GPU::alloc_enc_h_batch(){
+        const int w = x_texels(att_dim_, act_fmt_);
+        if (enc_h_batch_.tex && enc_h_batch_.w == w && enc_h_batch_.h == att_seq_) return;
+        enc_h_batch_ = make_target(w, att_seq_);
+}
+
+void GPU::cross_matvec_batch(const Mat& m, GLuint xb, int n, Target& out){
+        if (n <= 0 || m.rows <= 0 || xb == 0) return;
+        const bool wrow = wf(m.type).wrow && wf_can(m.type, WStage::Batch) && m.has_row_scale();
+        const GLuint p = x_q8_batch(m.rows, m.cols, wrow);
+        bind_fbo(out.fbo);
+        use_program(p);
+        bind_tex(0, m.tex);
+        set_sampler(p, "W", 0);
+        bind_tex(1, xb);
+        set_sampler(p, "X", 1);
+        if (wrow) { bind_tex(3, m.row_scale_tex); set_sampler(p, "WS", 3); }
+        // Both divisors are the textures' own dimensions: the X plane is a row
+        // of the activation layout, the outputs land in rows 0..n-1 of `out`.
+        glUniform1f(uloc(p, "xh"), (float)out.h);
+        glUniform1f(uloc(p, "xw"), (float)x_texels(m.cols, act_fmt_));
+        glUniform1f(uloc(p, "ws"), m.scale);
+        setup_attrib(p);
+        // VC4's 1024-fragment draw cap: a batch of n rows shrinks the strip so
+        // width*n stays inside it (the RWKV chunked path's rule).  On a
+        // finish-per-draw backend the draws are serial anyway, so the cap is
+        // the board's correctness bound, not a performance choice.
+        int strip = std::min(kDrawCap, m.rows);
+        if (needs_finish()) strip = std::max(1, std::min(strip, kDrawCap / n));
+        for (int x0 = 0; x0 < m.rows; x0 += std::max(1, strip)) {
+                const int w = std::min(std::max(1, strip), m.rows - x0);
+                glViewport(x0, 0, w, n);
+                glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+        }
+        layer_finish("NF_MAT");
+}
+
+void GPU::cross_kv_store_batch(int layer, GLuint proj, int n, bool v_half, GLuint bias){
+        if (layer < 0 || (size_t)layer >= cross_kv_.size() || cross_kv_[layer].tex == 0 ||
+            proj == 0 || n <= 0) return;
+        const int half = kv_.texels / 2;
+        GLuint p = x_prog(string("xkvqb_") + (v_half ? "v" : "k") + "_" +
+                              to_string(kv_.texels) + "_" + to_string((int)kv_.codec) +
+                              "_" + x_format_name(proj_fmt_),
+                          ::att_cross_kv_batch(att_cfg(), v_half, proj_fmt_, bias != 0));
+        bind_fbo(cross_kv_[layer].fbo);
+        // Rows 0..n-1 of both planes; the row is gl_FragCoord.y in the shader,
+        // and NB is the shared height (att_seq_), not n, because the KV plane
+        // is addressed with the compile-time SEQ.
+        glViewport(v_half ? half : 0, 0, half, n);
+        use_program(p);
+        bind_tex(0, proj);
+        set_sampler(p, "XS", 0);
+        if (bias) { bind_tex(1, bias); set_sampler(p, "BS", 1); }
+        glUniform1f(uloc(p, "XOFF"), v_half ? (float)half : 0.0f);
+        glUniform1f(uloc(p, "NB"), (float)att_seq_);
+        setup_attrib(p);
+        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
 }
 
 // One half of one row of the cross plane.  The viewport is where the values go --
@@ -899,15 +1050,15 @@ void GPU::cross_kv_store(int layer, GLuint x, int b, bool v_half, GLuint bias){
         glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
 }
 
-void GPU::att_scores_batch(int layer, int pos0, int n){
+void GPU::att_scores_batch(int layer, int pos0, int n, GLuint q_tex){
         if (scores_batch_.tex == 0 || scores_batch_.w != att_seq_ / 2 ||
             scores_batch_.h != att_heads_ * n)
             scores_batch_ = make_target(att_seq_ / 2, att_heads_ * n);
-        GLuint p = x_score_batch(n);
+        GLuint p = x_score_batch(n, q_tex != 0);
         bind_fbo(scores_batch_.fbo);
         glViewport(0, 0, att_seq_ / 2, att_heads_ * n);
         use_program(p);
-        bind_tex(0, qrot_batch_.tex);
+        bind_tex(0, q_tex ? q_tex : qrot_batch_.tex);
         set_sampler(p, "Q", 0);
         bind_tex(1, kv_cache_[layer].tex);
         set_sampler(p, "KV", 1);
@@ -940,14 +1091,64 @@ void GPU::att_stats_row(int pos, int b, int n){
         att_finish();
 }
 
-void GPU::att_v_row(int layer, int pos, int b, int n){
-        GLuint p = x_v_row(n);
+void GPU::alloc_stats_batch(){
+        if (stats_batch_.tex && stats_batch_.w == att_heads_ && stats_batch_.h == att_seq_)
+                return;
+        stats_batch_ = make_target(att_heads_, att_seq_);
+}
+
+void GPU::att_stats_batch(int pos, int n){
+        if (n <= 0) return;
+        alloc_stats_batch();
+        GLuint p = x_stats_batch(n);
+        bind_fbo(stats_batch_.fbo);
+        glViewport(0, 0, att_heads_, n);
+        use_program(p);
+        bind_tex(0, scores_batch_.tex);
+        set_sampler(p, "S", 0);
+        glUniform1f(uloc(p, "pos"), (float)pos);
+        setup_attrib(p);
+        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+        att_finish();
+}
+
+void GPU::alloc_enc_ctx(){
+        const int w = x_texels(att_dim_, act_fmt_);
+        if (enc_ctx_.tex && enc_ctx_.w == w && enc_ctx_.h == att_seq_) return;
+        enc_ctx_ = make_target(w, att_seq_);
+}
+
+void GPU::att_v_batch(int layer, int pos, int n){
+        if (n <= 0) return;
+        alloc_enc_ctx();
+        GLuint p = x_v_batch(n);
+        bind_fbo(enc_ctx_.fbo);
+        glViewport(0, 0, enc_ctx_.w, n);
+        use_program(p);
+        bind_tex(0, scores_batch_.tex);
+        set_sampler(p, "S", 0);
+        bind_tex(2, stats_batch_.tex);
+        set_sampler(p, "ST", 2);
+        bind_tex(1, kv_cache_[layer].tex);
+        set_sampler(p, "KV", 1);
+        if (kv_.vstep) {
+                bind_tex(3, vs_targets_[layer].tex);
+                set_sampler(p, "VS", 3);
+        }
+        glUniform1f(uloc(p, "pos"), (float)pos);
+        setup_attrib(p);
+        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+        att_finish();
+}
+
+void GPU::att_v_row(int layer, int pos, int b, int n, bool stats_batched){
+        GLuint p = x_v_row(n, stats_batched);
         bind_fbo(att_out_.fbo);
         glViewport(0, 0, att_out_.w, 1);
         use_program(p);
         bind_tex(0, scores_batch_.tex);
         set_sampler(p, "S", 0);
-        bind_tex(2, att_stats_.tex);
+        bind_tex(2, stats_batched ? stats_batch_.tex : att_stats_.tex);
         set_sampler(p, "ST", 2);
         bind_tex(1, kv_cache_[layer].tex);
         set_sampler(p, "KV", 1);

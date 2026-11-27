@@ -483,6 +483,94 @@ std::string ln_stats_split(int dim, XFormat rf) {
         "gl_FragColor=x_f32enc(s);}";
 }
 
+// The split scan for one row of a batch residual plane: the same lanes, the
+// same sum, the row from gl_FragCoord.y.  Written as a separate text so the
+// shipped one-row kernel keeps its bytes (gate/shader_hashes.sh); the X decode
+// is per format because Y1 hardcodes row 0.5.
+std::string ln_stats_split_row(int dim, XFormat rf, int bh) {
+    need_dim("ln_stats_split_row", dim);
+    const string D = to_string(dim), RW = to_string(x_texels(dim, rf));
+    const string PER = to_string((dim + 31) / 32);
+    // A macro, not a function: Y1 in x_residual_glsl is a macro whose two-fetch
+    // ternary the driver inlines one way; a helper taking the same fetches made
+    // the square sums reassociate by one LSB (the mean matched, the inverse
+    // standard deviation did not).  Same text shape, row substituted.
+    const string ROWV = "(float(gl_FragCoord.y)/float(BH))";
+    string xv;
+    if (rf == XFormat::I16_2)
+        xv = "#define XV(I) ((((I)/2)*2)==(I) ? x_i16(texture2D(X,vec2((float((I)/2)+0.5)/float(" + RW +
+             ")," + ROWV + ")).rg) : x_i16(texture2D(X,vec2((float((I)/2)+0.5)/float(" + RW +
+             ")," + ROWV + ")).ba))\n";
+    else if (rf == XFormat::I16_1)
+        xv = "#define XV(I) x_i16(texture2D(X,vec2((float(I)+0.5)/float(" + RW + ")," + ROWV + ")).rg)\n";
+    else if (rf == XFormat::I24_1)
+        xv = "#define XV(I) x_q24(texture2D(X,vec2((float(I)+0.5)/float(" + RW + ")," + ROWV + ")))\n";
+    else
+        xv = "#define XV(I) x_f32(texture2D(X,vec2((float(I)+0.5)/float(" + RW + ")," + ROWV + ")))\n";
+    return head(kLnPairFmt) + "#define BH " + to_string(bh) + "\n" +
+        x_residual_glsl(rf) + x_codec_glsl(XFormat::F32) +
+        "uniform sampler2D X;\n" + xv +
+        "void main(){int j=int(gl_FragCoord.x);int lane=j-(j/32)*32;bool sq=(j>=32);"
+        "int i0=lane*" + PER + ";float s=0.0;"
+        "for(int k=0;k<" + PER + ";k++){int i=i0+k;if(i<" + D + "){"
+        "float v=XV(i);s+=sq?v*v:v;}}"
+        "gl_FragColor=x_f32enc(s);}";
+}
+
+// The reduce for every row: grid (2, n), x=0 mean and x=1 1/sd, both f32, into
+// a (2, seq) plane.  The loop is ln_stats_reduce's.
+std::string ln_stats_reduce_row(int dim, int bh) {
+    return head(kLnPairFmt) + "#define BH " + to_string(bh) + "\n" +
+        x_codec_glsl(XFormat::F32) +
+        "uniform sampler2D S;uniform float eps;"
+        "void main(){int b=int(gl_FragCoord.y);float sx=0.0,sxx=0.0;"
+        "for(int p=0;p<32;p++){"
+        "sx+=x_f32(texture2D(S,vec2((float(p)+0.5)/64.0,(float(b)+0.5)/float(BH))));"
+        "sxx+=x_f32(texture2D(S,vec2((float(p+32)+0.5)/64.0,(float(b)+0.5)/float(BH))));}"
+        "float mean=sx/float(" + to_string(dim) + ");"
+        "float sd=sqrt(max(sxx/float(" + to_string(dim) + ")-mean*mean,0.0)+eps);"
+        "if(gl_FragCoord.x<1.0)gl_FragColor=x_f32enc(mean);"
+        "else gl_FragColor=x_f32enc(1.0/sd);}";
+}
+
+// The apply for one row: X row `xr`, the (mean, 1/sd) at (0/1, xr) of the batch
+// statistics plane, the output still this position's one-row target.  The
+// expression is ln_apply_q16's.
+std::string ln_apply_q16_row(int dim, XFormat rf, XFormat out, int bh) {
+    need_dim("ln_apply_q16_row", dim);
+    const string RW = to_string(x_texels(dim, rf));
+    const string WW = to_string(x_texels(dim, kLnPairFmt));
+    const auto term = [&](const string& k) {
+        return "(XV(" + k + ")-mu)*inv*wv(" + k + ")+bv(" + k + ")";
+    };
+    const string xv = rf == XFormat::I16_2
+        ? "float XV(int i){vec4 c=texture2D(X,vec2((float(i/2)+0.5)/float(" + RW +
+          "),xr));return ((i/2)*2==i)?x_i16(c.rg):x_i16(c.ba);}"
+        : "float XV(int i){return x_q24(texture2D(X,vec2((float(i)+0.5)/float(" + RW + "),xr)));}";
+    string body =
+        "float wv(int i){vec4 c=texture2D(W,vec2((float(i/2)+0.5)/float(" + WW + "),0.5));"
+        "return ((i/2)*2==i)?x_i16(c.rg):x_i16(c.ba);}\n"
+        "float bv(int i){vec4 c=texture2D(B,vec2((float(i/2)+0.5)/float(" + WW + "),0.5));"
+        "return ((i/2)*2==i)?x_i16(c.rg):x_i16(c.ba);}\n" + xv +
+        "void main(){float mu=x_f32(texture2D(S,vec2(0.25,xr)));"
+        "float inv=x_f32(texture2D(S,vec2(0.75,xr)));";
+    const int n = x_per_texel(out);
+    if (n == 4)
+        body += "int t=int(gl_FragCoord.x);int i0=4*t;"
+                "gl_FragColor=XST4(" + term("i0") + "," + term("i0+1") + ","
+                + term("i0+2") + "," + term("i0+3") + ");}";
+    else if (n == 2)
+        body += "int t=int(gl_FragCoord.x);int i0=2*t;"
+                "float v0=" + term("i0") + ";float v1=" + term("i0+1") + ";"
+                "gl_FragColor=XST2(v0,v1);}";
+    else
+        body += "int i0=int(gl_FragCoord.x);"
+                "gl_FragColor=XST1(" + term("i0") + ");}";
+    return head(out) + "#define BH " + to_string(bh) + "\n" +
+        x_residual_glsl(rf) + x_codec_glsl(XFormat::F32) +
+        "uniform sampler2D X,S,W,B;uniform float xr;" + body;
+}
+
 std::string ln_stats_reduce(int dim) {
     const string D = to_string(dim);
     // Row 0 is the mean, row 1 the inverse standard deviation, both f32.  The
@@ -540,6 +628,44 @@ std::string ln_apply_q16(int dim, XFormat rf, XFormat out) {
                 "gl_FragColor=XST1(" + term("i0") + ");}";
     return head(out) + x_residual_glsl(rf) + x_codec_glsl(XFormat::F32) +
         "uniform sampler2D X,S,W,B;" + body;
+}
+
+// The bias pass for one row of a batch plane: X is read at the row the draw
+// writes (gl_FragCoord.y), B is still the one-row bias.  The arithmetic is
+// bias_add_q16's; the row substitution is the only change, which is why it is a
+// separate text rather than a flag in the hotspot.
+std::string bias_add_q16_batch(int dim, XFormat xf, XFormat f, int rows) {
+    need_dim("bias_add_q16_batch", dim);
+    const string AS = to_string(x_texels(dim, xf));
+    const string BS = to_string(x_texels(dim, f));
+    const bool pr = x_per_texel(f) == 2;
+    // The two X layouts the qkv plane can have (PROJ is I24_1 or F32; the qkv
+    // store is the p16 pair).  XV(I) returns X's value at index I for row y.
+    string xv;
+    if (xf == XFormat::I24_1)
+        xv = "float XV(int i){return x_q24(texture2D(X,vec2((float(i)+0.5)/float(" + AS +
+             "),(float(gl_FragCoord.y)+0.5)/float(BROWS))));}";
+    else if (xf == XFormat::F32)
+        xv = "float XV(int i){return x_f32(texture2D(X,vec2((float(i)+0.5)/float(" + AS +
+             "),(float(gl_FragCoord.y)+0.5)/float(BROWS))));}";
+    else
+        xv = "float XV(int i){vec4 c=texture2D(X,vec2((float(i/2)+0.5)/float(" + AS +
+             "),float(gl_FragCoord.y)/float(BROWS)));"
+             "return ((i/2)*2==i)?x_i16(c.rg):x_i16(c.ba);}";
+    const auto val = [&](const string& k) {
+        return "XV(" + k + ")+X1(B," + k + "," + BS + ".0)";
+    };
+    string body = "void main(){";
+    if (pr)
+        body += "int t=int(gl_FragCoord.x);int i0=2*t;"
+                "gl_FragColor=XST2(" + val("i0") + "," + val("i0+1") + ");";
+    else
+        body += "int i0=int(gl_FragCoord.x);"
+                "gl_FragColor=XST1(" + val("i0") + ");";
+    // x_residual_glsl(xf) already carries the X codec and the X1/XST helpers
+    // for this format; x_glsl(xf) on top redefined them.
+    return head(f) + "#define BROWS " + to_string(rows) + "\n" + x_residual_glsl(xf) +
+        "uniform sampler2D X,B;" + xv + body + "}";
 }
 
 std::string bias_add_q16(int dim, XFormat xf, XFormat f) {

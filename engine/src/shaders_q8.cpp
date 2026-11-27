@@ -552,12 +552,42 @@ string matvec_q8_add(int rows, int cols, XFormat xf, XFormat rf, XFormat of, boo
         "gl_FragColor=" + ST + "(s*" + SC + "+res);}";
 }
 
+// The matvec-add for one row of a batch context plane: X is read at the row
+// `xr` (a normalized coordinate) while the residual R stays this position's
+// one-row target.  The arithmetic and the single encode are matvec_q8_add's;
+// only X's row moves, which is what lets the v pass write one context plane
+// and the wo add read row b of it.  I16_2 X only (the v5 activation stream):
+// any other format returns an empty string and the caller keeps the serial
+// kernel.
+string matvec_q8_add_xrow(int rows, int cols, XFormat xf, XFormat rf, XFormat of, bool wrow) {
+    if (xf != XFormat::I16_2) return string();
+    need_shape("matvec_q8_add_xrow", rows, cols, 4);
+    const int axw = x_texels(cols, xf);
+    const string ROWS = to_string(rows), COLS4 = to_string(cols / 4), AXW = to_string(axw);
+    const string WD = wrow ? wrow_scale(rows) : "";
+    const string SC = wrow ? "wsr(r)" : "ws";
+    const string ST = (of == rf) ? std::string("YST1Q") : std::string("xs1");
+    return head(xf) + x_residual_glsl(rf) + (of == rf ? std::string() : x_store_glsl(of)) +
+        "uniform sampler2D W,X,R;uniform float ws;uniform float xr;" + WD +
+        "vec2 X2R(int b){return x_i16pairq(texture2D(X,vec2((float(b/2)+0.5)/float(" + AXW +
+        "),xr)));}"
+        "void main(){int r=int(gl_FragCoord.x);float s=0.0;"
+        "for(int q=0;q<" + COLS4 + ";q++){"
+        "vec4 c=texture2D(W,vec2((float(q)+0.5)/float(" + COLS4 + "),"
+        "(float(r)+0.5)/float(" + ROWS + ")));"
+        "vec4 w=c*255.0-128.0;"
+        "vec2 p0=X2R(q*4),p1=X2R(q*4+2);"
+        "s+=w.x*p0.x+w.y*p0.y+w.z*p1.x+w.w*p1.y;}"
+        "float res=Y1Q(R,r," + to_string(x_texels(rows, rf)) + ".0);"
+        "gl_FragColor=" + ST + "(s*" + SC + "+res);}";
+}
+
 // `bias` folds a separate `bias_add` pass into this one.  The bias rides the
 // output row, so the two rows a fragment writes are two reads of the bias plane
 // and no extra draw is issued.  It is **not** byte-identical to a `bias_add`
 // after the matvec: the sum rounds once here and twice there, by up to 1/256.
 string matvec_q8_add_pair(int rows, int cols, XFormat xf, XFormat rf, XFormat of, bool inl,
-                          bool wrow, bool bias) {
+                          bool wrow, bool bias, const char* xrow) {
     need_shape("matvec_q8_add_pair", rows, cols, 4);
     const int axw = x_texels(cols, xf);
     const int rw = (rows + 1) / 2;
@@ -581,13 +611,23 @@ string matvec_q8_add_pair(int rows, int cols, XFormat xf, XFormat rf, XFormat of
              : std::string();
     const string B0 = bias ? "+b0" : "", B1 = bias ? "+b1" : "";
     const string BS = bias ? ",B" : "";
+    // The batch-context form reads X at the row `xr` (a normalized coordinate)
+    // while the residual stays the position's one-row target.  `xrow == "0.5"`
+    // emits the shipped text byte for byte.
+    const bool XR = string(xrow) != "0.5";
+    const string XY = xrow;
+    const string XR_UN = XR ? "uniform float xr;" : "";
+    const string XR_FN = XR
+        ? "vec2 X2R(int b){return x_i16pairq(texture2D(X,vec2((float(b/2)+0.5)/float(" +
+              AXW + "),xr)));}\n"
+        : std::string();
     // Inline I16_2 decode, the form matvec_q8_pair already uses: the generic
     // X4Q helper takes its two texel fetches as macro arguments and VC4 compiles
     // that loop measurably slower.  r0 is always even and r1 always odd, so the
     // two residuals are the halves of one I16_2 texel.  Accumulation order and
     // the q16 rounding are unchanged, so the packed output is bit-identical.
     if (inl && xf == XFormat::I16_2 && rf == XFormat::I16_2 && of == XFormat::I16_2) {
-        return "precision highp float;uniform sampler2D W,X,R" + BS + ";uniform float ws;" + WD +
+        return "precision highp float;uniform sampler2D W,X,R" + BS + ";uniform float ws;" + XR_UN + WD +
                kDec16A + kDec16B
                + kEnc16Raw +
                "void main(){int t=int(gl_FragCoord.x);int r0=2*t;int r1=r0+1;" + SP +
@@ -600,8 +640,8 @@ string matvec_q8_add_pair(int rows, int cols, XFormat xf, XFormat rf, XFormat of
                "vec4 c1=texture2D(W,vec2((float(q)+0.5)/float(" + COLS4 + "),"
                "(float(min(r1," + to_string(rows - 1) + "))+0.5)/float(" + ROWS + ")));"
                "vec4 w0=c0*255.0-128.0;vec4 w1=c1*255.0-128.0;"
-               "vec4 xa=texture2D(X,vec2((float(2*q)+0.5)/float(" + AXW + "),0.5));"
-               "vec4 xb=texture2D(X,vec2((float(2*q+1)+0.5)/float(" + AXW + "),0.5));"
+               "vec4 xa=texture2D(X,vec2((float(2*q)+0.5)/float(" + AXW + ")," + XY + "));"
+               "vec4 xb=texture2D(X,vec2((float(2*q+1)+0.5)/float(" + AXW + ")," + XY + "));"
                "float a0=dA(xa),a1=dB(xa),a2=dA(xb),a3=dB(xb);"
                "s0+=w0.x*a0+w0.y*a1+w0.z*a2+w0.w*a3;"
                "s1+=w1.x*a0+w1.y*a1+w1.z*a2+w1.w*a3;}"
@@ -610,7 +650,7 @@ string matvec_q8_add_pair(int rows, int cols, XFormat xf, XFormat rf, XFormat of
                "gl_FragColor=vec4(p1.x,p1.y,p2.x,p2.y);}";
     }
     return head(xf) + x_pair2_glsl(of) + x_residual_glsl(rf) +
-        "uniform sampler2D W,X,R" + BS + ";uniform float ws;" + WD +
+        "uniform sampler2D W,X,R" + BS + ";uniform float ws;" + XR_UN + WD + XR_FN +
         "void main(){int t=int(gl_FragCoord.x);int r0=2*t;int r1=r0+1;" + SP +
         "float res0=Y1Q(R,r0," + RTW + ".0);"
         "float res1=Y1Q(R,r1," + RTW + ".0);" + BIAS_GEN +
@@ -621,7 +661,7 @@ string matvec_q8_add_pair(int rows, int cols, XFormat xf, XFormat rf, XFormat of
         "vec4 c1=texture2D(W,vec2((float(q)+0.5)/float(" + to_string(cols / 4) + "),"
         "(float(min(r1," + to_string(rows - 1) + "))+0.5)/float(" + to_string(rows) + ")));"
         "vec4 w0=c0*255.0-128.0;vec4 w1=c1*255.0-128.0;"
-        "vec4 x=X4Q(X,q*4," + to_string(axw) + ".0);"
+        "vec4 x=" + (XR ? std::string("vec4(X2R(q*4),X2R(q*4+2))") : ("X4Q(X,q*4," + to_string(axw) + ".0)")) + ";"
         "s0+=w0.x*x.x+w0.y*x.y+w0.z*x.z+w0.w*x.w;"
         "s1+=w1.x*x.x+w1.y*x.y+w1.z*x.z+w1.w*x.w;}"
         "gl_FragColor=x_p2_stq(s0*" + SC0 + "+res0" + B0 + ",s1*" + SC1 + "+res1" + B1 + ");}";

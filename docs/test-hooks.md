@@ -59,7 +59,7 @@ The rows below are the registry, one per switch, grouped by the axis they move.
 diagnostic or a pricing arm; `retired` is gone (`--dump-switches` prints the
 same table with what *this* environment resolved to).
 
-155 switches: 30 permanent, 111 probe, 14 retired; 16 legacy spellings are translated.
+165 switches: 30 permanent, 121 probe, 14 retired; 16 legacy spellings are translated.
 
 ### The activation streams
 
@@ -134,7 +134,8 @@ same table with what *this* environment resolved to).
 | `ATTN_DUP` | value | replay one attention pass; the end-to-end delta is its marginal cost |
 | `DRAWCOUNT` | value | draws per decoded token |
 | `DUP_PROFILE` | `=1` | with a *_DUP replay, price the replay itself: wall against gpu cycles |
-| `ENC_FFN_FUSED` | `=1` | v5: fold the encoder FFN's fc2 bias into the w2 add (one draw, one rounding) |
+| `ENC_FFN_SPLIT` | `=1` | v5: keep the encoder FFN's fc2 bias as a separate add (default: folded into w2, one rounding) |
+| `ENC_WO_SPLIT` | `=1` | v5: keep the encoder wo bias as a separate add (default: folded into the add) |
 | `LAYER_PROFILE` | `=1` | per-pass marks inside a layer |
 | `LOGITS_PERFCNT` | `=1` | with PERFCNT, the logits pass's own counters (its wall time cannot separate work from waiting) |
 | `PAIR_PROFILE` | value | the same for the two-position prefill pair |
@@ -236,7 +237,16 @@ same table with what *this* environment resolved to).
 
 | Switch | Takes | What it moves |
 |---|---|---|
+| `ATTB_SERIAL` | `=1` | v5 encoder: keep the per-position qkv/KV-write/qrot front (default: one projection plane) |
+| `DEC_BIAS_SPLIT` | `=1` | v5 decoder: keep the wo/cross-o/fc2 biases as separate adds (default: folded) |
 | `ENCDEC_DUMP` | `=1` | print the encoder/decoder stage magnitudes and the first step's argmax |
+| `ENCDEC_REPEAT` | n | repeat encode+greedy decode n times in one process and report the last (warms shaders and clocks) |
+| `LN_SERIAL` | `=1` | v5 encoder: keep the per-position LayerNorm passes (default: split/reduce over a batch plane) |
+| `QROT_COPY` | `=1` | v5: keep the qrot copy draw that NOROPE skips, for the byte-identical A/B |
+| `STATS_SERIAL` | `=1` | v5 encoder: keep the per-position stats draw (default: one draw for every query) |
+| `VB_BATCH` | `=1` | v5 encoder: one V draw for every query (opt-in; measured ~0.4 s slower than the per-position pass on Pi) |
+| `XKV_SERIAL` | `=1` | v5 encoder: keep the per-position cross-KV store (default: all rows in two stores) |
+| `XPROJ_SERIAL` | `=1` | v5 encoder: keep the per-position cross-KV projection (default: one batch matvec a layer) |
 
 ### Loading, memory and the container
 

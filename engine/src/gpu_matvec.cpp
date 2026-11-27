@@ -40,14 +40,49 @@ void GPU::matvec_add(const Mat& m, GLuint x, GLuint residual, Target& out, XForm
 }
 
 void GPU::matvec_add_rf(const Mat& m, GLuint x, GLuint residual, Target& out,
-                        XFormat xf, XFormat rf){
-        matvec_add_bias_rf(m, x, residual, 0, out, xf, rf);
+                        XFormat xf, XFormat rf, int out_row){
+        matvec_add_bias_rf(m, x, residual, 0, out, xf, rf, out_row);
+}
+
+void GPU::matvec_add_rf_xrow(const Mat& m, GLuint x, int xrow, GLuint residual,
+                             Target& out, XFormat xf, XFormat rf){
+        if (m.type != WeightType::INT8 || xf != XFormat::I16_2) {
+                matvec_add_rf(m, x, residual, out, xf, rf);
+                return;
+        }
+        const bool wr = wf(m.type).wrow && m.has_row_scale();
+        // Mirror matvec_add_bias_rf's choice *and* its lazy target sizing: the
+        // packed residual uses the pair kernel, whose store is the I16_2 layout
+        // the next pass reads, and the target is (rows+1)/2 texels wide.
+        const bool pair = res_pack_;
+        const int ow = pair ? (m.rows + 1) / 2 : m.rows;
+        if (out.tex == 0 || out.w != ow) out = make_target(ow, 1);
+        GLuint p = pair ? x_q8_add_pair_xrow(m.rows, m.cols, xf, wr)
+                        : x_q8_add_xrow(m.rows, m.cols, xf, wr);
+        bind_fbo(out.fbo);
+        use_program(p);
+        bind_tex(0, m.tex); set_sampler(p, "W", 0);
+        bind_tex(1, x); set_sampler(p, "X", 1);
+        bind_tex(2, residual); set_sampler(p, "R", 2);
+        glUniform1f(uloc(p, "ws"), m.scale);
+        // The pair form emits `xr`; the non-pair xrow form does too.
+        // The context plane is att_seq_ tall; the row is the source position.
+        glUniform1f(uloc(p, "xr"), ((float)xrow + 0.5f) / (float)att_seq_);
+        if (wr) { bind_tex(3, m.row_scale_tex); set_sampler(p, "WS", 3); }
+        setup_attrib(p);
+        const int strip = std::min(kDrawCap, m.rows);
+        for (int x0 = 0; x0 < m.rows; x0 += strip) {
+                const int w = std::min(strip, m.rows - x0);
+                glViewport(x0, 0, w, 1);
+                glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+        }
+        layer_finish("NF_MAT");
 }
 
 // `bias` folds the following `bias_add` into this draw, for the kernels that
 // carry the arm (the q8 row-pair one).  Zero is the shipped form, unchanged.
 void GPU::matvec_add_bias_rf(const Mat& m, GLuint x, GLuint residual, GLuint bias,
-                             Target& out, XFormat xf, XFormat rf){
+                             Target& out, XFormat xf, XFormat rf, int out_row){
         if (!wf_accepts(m.type, xf)) wf_no_activation("matvec_add", m.type, xf);
         const bool pair = res_pack_ && (m.type == WeightType::INT8 ||
                                         m.type == WeightType::T3);
@@ -129,7 +164,7 @@ void GPU::matvec_add_bias_rf(const Mat& m, GLuint x, GLuint residual, GLuint bia
         const int strip = min(cap, ow);
         for (int x0 = 0; x0 < ow; x0 += strip) {
             int w = min(strip, ow - x0);
-            glViewport(x0, 0, w, 1);
+            glViewport(x0, out_row, w, 1);
             glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
         }
         layer_finish("NF_MAT");

@@ -222,6 +222,21 @@ GLuint GPU::x_q8_add(int rows, int cols, XFormat xf, XFormat rf, bool wrow){
                       matvec_q8_add(rows, cols, xf, rf, res_fmt_, wrow));
     }
 
+GLuint GPU::x_q8_add_xrow(int rows, int cols, XFormat xf, bool wrow){
+        return x_prog("xq8ax_" + to_string(rows) + "_" + to_string(cols) + "_" +
+                          x_format_name(xf) + "_" + x_format_name(res_fmt_) +
+                          (wrow ? "_wr" : ""),
+                      matvec_q8_add_xrow(rows, cols, xf, res_fmt_, res_fmt_, wrow));
+}
+
+GLuint GPU::x_q8_add_pair_xrow(int rows, int cols, XFormat xf, bool wrow){
+        return x_prog("xq8apx_" + to_string(rows) + "_" + to_string(cols) + "_" +
+                          x_format_name(xf) + "_" + x_format_name(res_fmt_) +
+                          (wrow ? "_wr" : ""),
+                      matvec_q8_add_pair(rows, cols, xf, res_fmt_, res_fmt_,
+                                         /*inl=*/true, wrow, /*bias=*/false, "xr"));
+}
+
 GLuint GPU::x_q8_add_pair(int rows, int cols, XFormat xf, XFormat rf, bool wrow, bool bias){
         // The inline I16_2 decode is the default; Q8AP_INLINE=0 restores the
         // generic X4Q form in the same binary, so the two can be A/B-ed
@@ -344,7 +359,15 @@ GLuint GPU::x_qnorm(){ return x_prog("xqn", att_qnorm_scale(att_cfg())); }
 
 GLuint GPU::x_qrot(int segk){ return x_prog("xqr" + seg_suffix(segk), att_qrot(att_cfg(segk))); }
 
-GLuint GPU::x_score(int segk){ return x_prog("xsc" + seg_suffix(segk), att_score(att_cfg(segk))); }
+GLuint GPU::x_score(int segk, bool q_from_qkv){
+        AttnConfig c = att_cfg(segk);
+        c.q_from_qkv = q_from_qkv;
+        // The Q values live at the head of the projection's own target, whose
+        // width is the qkv pair count (1536 rows -> 768), not dim/2.
+        c.q_width = q_from_qkv ? qkv_target_.w : c.dim / 2;
+        return x_prog("xsc" + seg_suffix(segk) + (q_from_qkv ? "_qkvq" : ""),
+                      att_score(c));
+    }
 
 GLuint GPU::x_stats(int segk){ return x_prog("xst" + seg_suffix(segk), ::att_stats(att_cfg(segk))); }
 
@@ -356,10 +379,21 @@ GLuint GPU::x_stats(int segk){ return x_prog("xst" + seg_suffix(segk), ::att_sta
 // n, causal -- and got the encoder's text ("uniform 'pos' not found", because
 // the bidirectional build prunes it).  The dump's labels are the registry's, not
 // these, so the name is free to grow.
-GLuint GPU::x_score_batch(int n){
+GLuint GPU::x_score_batch(int n, bool q_from_qkv){
         AttnConfig c = att_cfg(); c.qbatch = n;
+        c.q_from_qkv = q_from_qkv;
+        c.q_width = q_from_qkv ? qkv_batch_.w : c.dim / 2;
+        c.q_rows = q_from_qkv ? qkv_batch_.h : n;
         return x_prog("xscb_" + to_string(n) + (c.causal ? "_c" : "_bi") +
-                          (c.rope_none ? "_nr" : ""), att_score(c));
+                          (c.rope_none ? "_nr" : "") +
+                          (q_from_qkv ? "_qkvq" : ""), att_score(c));
+}
+
+GLuint GPU::x_kv_batch(int n){
+        (void)n;
+        AttnConfig c = att_cfg(); c.qkv_batch = true;
+        return x_prog("xkvqb_" + to_string(kv_.texels) + "_" + to_string((int)kv_.codec) +
+                          (c.rope_none ? "_nr" : ""), att_kv_rope(c));
 }
 
 GLuint GPU::x_stats_row(int n){
@@ -368,10 +402,31 @@ GLuint GPU::x_stats_row(int n){
                           (c.rope_none ? "_nr" : ""), ::att_stats(c));
 }
 
-GLuint GPU::x_v_row(int n){
+GLuint GPU::x_stats_batch(int n){
         AttnConfig c = att_cfg(); c.qbatch = n;
-        return x_prog("xvr_" + to_string(n) + "_" + x_format_name(act_fmt_) +
+        c.stats_batched = true;
+        c.stats_rows = att_seq_;
+        return x_prog("xstb_" + to_string(n) + (c.causal ? "_c" : "_bi") +
+                          (c.rope_none ? "_nr" : ""), ::att_stats(c));
+}
+
+GLuint GPU::x_v_batch(int n){
+        AttnConfig c = att_cfg(); c.qbatch = n;
+        c.v_batch = true;
+        c.stats_batched = true;
+        c.stats_rows = att_seq_;
+        return x_prog("xvb_" + to_string(n) + "_" + x_format_name(act_fmt_) +
                           (c.causal ? "_c" : "_bi") + (c.rope_none ? "_nr" : ""),
+                      ::att_v(c, act_fmt_));
+}
+
+GLuint GPU::x_v_row(int n, bool stats_batched){
+        AttnConfig c = att_cfg(); c.qbatch = n;
+        c.stats_batched = stats_batched;
+        c.stats_rows = att_seq_;
+        return x_prog("xvr_" + to_string(n) + "_" + x_format_name(act_fmt_) +
+                          (c.causal ? "_c" : "_bi") + (c.rope_none ? "_nr" : "") +
+                          (stats_batched ? "_sb" : ""),
                       ::att_v(c, act_fmt_));
 }
 

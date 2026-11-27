@@ -16,7 +16,8 @@ using std::string;
 using std::to_string;
 
 GLuint GPU::ln_q16(GLuint x, GLuint w, GLuint b, Target& out, float eps,
-                   const char* kind, int layer, int site_no, int pos){
+                   const char* kind, int layer, int site_no, int pos,
+                   Target* batch, int batch_row){
         const int dim = att_dim_;
         const int ow = x_texels(dim, act_fmt_);
         if (out.tex == 0 || out.w != ow) out = make_target(ow, 1);
@@ -74,8 +75,16 @@ GLuint GPU::ln_q16(GLuint x, GLuint w, GLuint b, Target& out, float eps,
         GLuint pn = x_prog("lna_" + to_string(dim) + "_" + to_string((int)res_fmt_) +
                            "_" + to_string((int)act_fmt_),
                            ln_apply_q16(dim, res_fmt_, act_fmt_));
-        bind_fbo(out.fbo);
-        glViewport(0, 0, ow, 1);
+        // A batch target keeps the row in row `batch_row` and leaves `out`
+        // alone; the arithmetic is the apply's, only the render target's y
+        // moves (the v5 encoder's cross-KV projection reads row b).
+        if (batch) {
+                bind_fbo(batch->fbo);
+                glViewport(0, batch_row, ow, 1);
+        } else {
+                bind_fbo(out.fbo);
+                glViewport(0, 0, ow, 1);
+        }
         use_program(pn);
         bind_tex(0, x); set_sampler(pn, "X", 0);
         bind_tex(1, ln_stat_.tex); set_sampler(pn, "S", 1);
@@ -83,7 +92,7 @@ GLuint GPU::ln_q16(GLuint x, GLuint w, GLuint b, Target& out, float eps,
         bind_tex(3, b); set_sampler(pn, "B", 3);
         setup_attrib(pn);
         glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
-        return out.tex;
+        return batch ? batch->tex : out.tex;
 }
 
 
@@ -103,6 +112,79 @@ GLuint GPU::bias_add_f(GLuint x, GLuint b, Target& out, int dim, XFormat xf, XFo
                           bias_add_q16(dim, xf, f));
         bind_fbo(out.fbo);
         glViewport(0, 0, tw, 1);
+        use_program(p);
+        bind_tex(0, x); set_sampler(p, "X", 0);
+        bind_tex(1, b); set_sampler(p, "B", 1);
+        setup_attrib(p);
+        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+        return out.tex;
+}
+
+void GPU::alloc_ln_batch(){
+        const int w = x_texels(att_dim_, res_fmt_);
+        if (ln_r1_.tex && ln_r1_.w == w && ln_r1_.h == att_seq_ &&
+            ln_r2_.tex && ln_part_b_.tex && ln_stat_b_.tex)
+                return;
+        ln_r1_ = make_target(w, att_seq_);
+        ln_r2_ = make_target(w, att_seq_);
+        ln_part_b_ = make_target(64, att_seq_);
+        ln_stat_b_ = make_target(2, att_seq_);
+}
+
+void GPU::ln_stats_batch(GLuint xbatch, int n){
+        if (n <= 0) return;
+        alloc_ln_batch();
+        GLuint ps = x_prog("lnspr_" + to_string(att_dim_) + "_" + x_format_name(res_fmt_) +
+                               "_" + to_string(att_seq_),
+                           ln_stats_split_row(att_dim_, res_fmt_, att_seq_));
+        bind_fbo(ln_part_b_.fbo);
+        glViewport(0, 0, 64, n);
+        use_program(ps);
+        bind_tex(0, xbatch); set_sampler(ps, "X", 0);
+        setup_attrib(ps);
+        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+        layer_finish("NF_LN");
+        GLuint pr = x_prog("lnrdr_" + to_string(att_dim_) + "_" + to_string(att_seq_),
+                           ln_stats_reduce_row(att_dim_, att_seq_));
+        bind_fbo(ln_stat_b_.fbo);
+        glViewport(0, 0, 2, n);
+        use_program(pr);
+        bind_tex(0, ln_part_b_.tex); set_sampler(pr, "S", 0);
+        glUniform1f(uloc(pr, "eps"), rms_eps_);
+        setup_attrib(pr);
+        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+        layer_finish("NF_LN");
+}
+
+GLuint GPU::ln_apply_row(GLuint xbatch, int row, GLuint w, GLuint b, Target& out,
+                         float eps, int out_row){
+        (void)eps;
+        const int ow = x_texels(att_dim_, act_fmt_);
+        if (out.tex == 0 || out.w != ow) out = make_target(ow, 1);
+        GLuint p = x_prog("lnar_" + to_string(att_dim_) + "_" + x_format_name(res_fmt_) +
+                              "_" + x_format_name(act_fmt_) + "_" + to_string(att_seq_),
+                          ln_apply_q16_row(att_dim_, res_fmt_, act_fmt_, att_seq_));
+        bind_fbo(out.fbo);
+        glViewport(0, out_row, ow, 1);
+        use_program(p);
+        bind_tex(0, xbatch); set_sampler(p, "X", 0);
+        bind_tex(1, ln_stat_b_.tex); set_sampler(p, "S", 1);
+        bind_tex(2, w); set_sampler(p, "W", 2);
+        bind_tex(3, b); set_sampler(p, "B", 3);
+        glUniform1f(uloc(p, "xr"), ((float)row + 0.5f) / (float)att_seq_);
+        setup_attrib(p);
+        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+        return out.tex;
+}
+
+GLuint GPU::bias_add_f_row(GLuint x, GLuint b, Target& out, int dim, XFormat xf,
+                           XFormat f, int row){
+        const int tw = x_texels(dim, f);
+        GLuint p = x_prog("baddb_" + to_string(dim) + "_" + to_string((int)xf) + "_" +
+                              to_string((int)f),
+                          bias_add_q16_batch(dim, xf, f, out.h));
+        bind_fbo(out.fbo);
+        glViewport(0, row, tw, 1);
         use_program(p);
         bind_tex(0, x); set_sampler(p, "X", 0);
         bind_tex(1, b); set_sampler(p, "B", 1);
