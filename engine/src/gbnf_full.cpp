@@ -186,7 +186,13 @@ void GbnfGrammar::prune_partial(Stacks& s, uint32_t value, int remain) const {
     kept.reserve(s.size());
     const PartialUtf8 p{value, remain};
     for (const Stack& st : s) {
-        if (st.empty() || match_partial(st.back(), p)) kept.push_back(st);
+        // An *empty* stack is a finished parse: it accepts only kEnd, so a
+        // partial character cannot be consumed there.  Keeping it (the old
+        // `st.empty() ||` guard, written only to dodge st.back()) made every
+        // token that ends mid-character legal at a done state; one drawn such
+        // token then dead-ended the machine (mask empty) and the rest of the
+        // turn ran on argmax over all -1e30, i.e. one repeated token.
+        if (!st.empty() && match_partial(st.back(), p)) kept.push_back(st);
     }
     s = std::move(kept);
 }

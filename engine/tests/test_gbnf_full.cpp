@@ -237,6 +237,34 @@ ws     ::= [ \t\n\r]*
         CHECK(jc.allows(EOS));
     }
 
+    {
+        // A *finished* parse accepts EOS and nothing else.  A token that ends
+        // in the middle of a character must therefore be refused there: the
+        // empty stack that says "done" cannot also be waiting for continuation
+        // bytes.  When it was allowed (the `st.empty() ||` guard in
+        // prune_partial), a drawn lead byte dead-ended the matcher -- every
+        // later step found nothing legal -- and the turn continued on argmax
+        // over all -1e30, i.e. one token repeated to max_tokens.  Seen from a
+        // client as "the forced prefix came out, then the model rambled".
+        GbnfGrammar done_g = parse_ok("root ::= \"ab\"");
+        GbnfConstraint jc;
+        jc.init(tok, VOCAB, {EOS}, done_g);
+        CHECK(feed(jc, "ab"));
+        CHECK(jc.done());
+        CHECK(jc.allows(EOS));
+        CHECK(!jc.allows(CJK_MID));        // 0xe4: a lead byte, not a new token
+        CHECK(!jc.allows(0xe4));
+        CHECK(!jc.allows((int)'a'));
+        // The same token stays legal while a character is still expected, so
+        // the fix is "no partial at a done state", not "no partial at all".
+        GbnfGrammar wait_g = parse_ok("root ::= \"ab\" .");
+        GbnfConstraint wc;
+        wc.init(tok, VOCAB, {EOS}, wait_g);
+        CHECK(feed(wc, "ab"));
+        CHECK(!wc.done());
+        CHECK(wc.allows(0xe4));
+    }
+
     if (checks::g_fail) { std::fprintf(stderr, "%d check(s) failed\n", checks::g_fail); return 1; }
     std::printf("test_gbnf_full: all checks passed\n");
     return 0;
