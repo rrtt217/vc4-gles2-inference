@@ -45,6 +45,7 @@ Deep dives live here; the component READMEs carry quick starts.
 | [lfm2.5-230m.md](lfm2.5-230m.md) | **LFM2.5-230M, the hybrid (conv + attention) model**: containers, run commands, quality numbers, what is still broken |
 | [bitcpm.md](bitcpm.md) | **BitCPM-CANN-0.5B, the ternary model**: the container, its rope table and tokenizer prefix, `k = 1/scale_emb`, `RMS_STORE=f32`, the quality numbers, what is not done |
 | [smollm2-135m.md](smollm2-135m.md) | **SmolLM2-135M, the model that needs `RMS_STORE=f32`**: why the rmsnorm accumulator was the limit, the per-switch isolation, the open Pi-vs-Xe divergence |
+| [miniyuanyuan.md](miniyuanyuan.md) | **MiniYuanYuan, the BiCrossGate FFN**: a block the dense path does not have, metadata key 23 and kinds 0x3D/0x3E, its three kernels, the flat longest-match tokenizer, and the two releases it does not run |
 | [rwkv7.md](rwkv7.md) | **RWKV-7 (Goose), the recurrent one**: no KV cache and no attention, the v4 container's key 16/17, the third layer loop, the per-machine numbers, the chat-marker traps, and why the speed work stopped |
 
 ## Building for the Pi, and VC4 hardware
