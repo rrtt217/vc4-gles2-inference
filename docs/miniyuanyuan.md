@@ -202,6 +202,7 @@ work does not remove the pass.
 | the MoE variant | `m12l_d384_moe_ep3_fp16.pt` is a different release: 6 routed experts, **top-2**, a shared expert, and routers on layers 6–9 only | the v3 reader refuses all three by name (top-1 only, no shared expert, no mixed sparse/dense).  Porting it is a container-format change, not a kernel one |
 | the 4Q arena models | `model_1126.py`'s 4 parallel Q sets with no `W_K`/`W_V` and a per-head gate | no container form for a projection the attention does not have, and no published weights |
 | q8 on VC4 | the row-pair int8 qkv kernel is refused by vc4's register allocator (`program 'xkv' did not draw`) | `QKV_PAIR=0` answers the same text for the same PPL; the paired form is a speed arm on Xe, not a numeric one |
+| the fused FFN kernel is q8-only | `matvec_q8_ffn_mulgate` asks for q8 weights, an I16_2 activation and an I16_2 hidden -- the same three conditions `ffn_pair_swiglu_chunk` asks for | q4 and i16 keep the two-pass `mul2` and so pay the ~5% the fusion saves; the same kernel family for those weight types is the next step, not a redesign |
 
 ## Measuring it
 
