@@ -1,0 +1,13 @@
+{%- for message in messages -%}
+{%- if message['role'] == 'system' -%}
+<bos><system>{{ message['content'] }}<sep>
+{%- elif message['role'] == 'user' -%}
+{%- if loop.first %}<bos>{% endif -%}
+<user>{{ message['content'] }}<sep>
+{%- elif message['role'] == 'assistant' -%}
+<assistant>{{ message['content'] }}<sep>
+{%- endif -%}
+{%- endfor -%}
+{%- if add_generation_prompt -%}
+<assistant>
+{%- endif -%}

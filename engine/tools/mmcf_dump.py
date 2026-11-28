@@ -145,6 +145,15 @@ def main():
             import struct as _s
             have_eps = True
             print(f"rms eps     {_s.unpack('<f', bytes(payload[:4]))[0]:g}")
+        elif key == 23 and ln >= 2:
+            # A BiCrossGate FFN: the two activations, act1 on q1*x and act2 on
+            # q2*x.  Printed because the block's tensor kinds (0x3D/0x3E) say
+            # *which matrices* are there but not *what the FFN computes*, and a
+            # reader that missed this key would run a SwiGLU over w1/w2.
+            names = {1: "silu", 2: "gelu"}
+            print("ffn block   bicross gate: act1 %s, act2 %s"
+                  % (names.get(payload[0], "code %d" % payload[0]),
+                     names.get(payload[1], "code %d" % payload[1])))
         elif key == 19 and ln >= 1:
             # The rms partial sums' store: absent = 24-bit fixed point, 1 = f32.
             # A model that saturates the 24-bit store needs the f32 bit, and the

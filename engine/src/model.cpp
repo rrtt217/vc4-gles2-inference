@@ -1530,6 +1530,13 @@ bool Model::read_tables() {
                 else if (kind == 0x15 && layer < (int)layers_w2.size()) layers_w2[layer] = m;
                 else if (kind == 0x17 && layer < (int)layers_conv_in.size()) layers_conv_in[layer] = m;
                 else if (kind == 0x19 && layer < (int)layers_conv_out.size()) layers_conv_out[layer] = m;
+                // A q4 body is deferred to here, so every kind that can be a q4
+                // matrix needs a case in this chain as well as in the switch
+                // above.  Missing 0x3D/0x3E left the BiCross block's two
+                // matrices empty on a q4 container while the same file loaded at
+                // i16 -- the block then drew a 0-wide target.
+                else if (kind == 0x3D && layer < (int)bicross_q.size()) bicross_q[layer] = m;
+                else if (kind == 0x3E && layer < (int)bicross_gate.size()) bicross_gate[layer] = m;
                 else if (kind >= 0x24 && kind <= 0x2B) {
                         Mat* dst = rwkv_mat(kind, layer);
                         if (dst) *dst = m;

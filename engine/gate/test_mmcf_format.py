@@ -126,6 +126,56 @@ def check_alias(path):
     return True, "  alias %-52s %d shared blob(s)" % (path.name, len(shared))
 
 
+def check_bicross(path):
+    """(ok, message) for a BiCrossGate FFN container (metadata key 23).
+
+    The block is declared by a key and carried by two tensor kinds, and neither
+    half alone is enough: the kinds without the key would run a SwiGLU over the
+    w1/w2 slots and answer nonsense, and the key without the kinds has no `q` or
+    `gate_proj` to read.  So a file that has one must have the other, and both
+    kinds must cover every layer.
+
+    Only the header, the metadata and the record table are read: a 200 MB MoE
+    container must not be slurped to check 64-byte records (the first version of
+    this did, and the gate went from seconds to minutes).
+    """
+    with path.open("rb") as f:
+        head = f.read(fmt.HEADER_SIZE)
+        h = fmt.parse_header(head)
+        f.seek(h.meta_off)
+        md = f.read(h.meta_size)
+        f.seek(h.data_off - h.n_tensors * h.rec_size)
+        table = f.read(h.n_tensors * h.rec_size)
+    key23 = False
+    layers = 0
+    p = 0
+    while p + 8 <= len(md):
+        k, _t, ln = struct.unpack_from("<HHI", md, p)
+        if k == 23:
+            key23 = True
+        elif k == 1 and ln >= 28:
+            layers = struct.unpack_from("<7i", md, p + 8)[2]
+        p += 8 + ln
+    ks = {}
+    for i in range(h.n_tensors):
+        tid = fmt.rec_unpack(table[i * h.rec_size:][:h.rec_size])[0]
+        if (tid >> 14) == 0:
+            ks.setdefault(tid & 0xFF, set()).add((tid >> 8) & 0x3F)
+    q, g = ks.get(0x3D, set()), ks.get(0x3E, set())
+    if key23 and not (q and g):
+        return False, "%s: key 23 declares a BiCrossGate FFN but the 0x3D/0x3E " \
+                      "records are %s/%s" % (path.name, sorted(q), sorted(g))
+    if not key23 and (q or g):
+        return False, "%s: bicross tensor kinds without key 23, so a reader would " \
+                      "run a SwiGLU over them" % path.name
+    if key23 and layers and (len(q) != layers or len(g) != layers):
+        return False, "%s: key 23 over %d layers but %d/%d bicross matrices" % (
+            path.name, layers, len(q), len(g))
+    if key23:
+        return True, "  bicross %-48s key23, %d layers" % (path.name, len(q))
+    return True, ""
+
+
 def check_cpp():
     """(ok, messages) comparing the module's constants with model.cpp's."""
     cpp = cpp_constants()
@@ -156,6 +206,13 @@ def main() -> int:
             if not ok:
                 print("FAIL  " + msg)
                 bad += 1
+        if ok:
+            ok, msg = check_bicross(path)
+            if not ok:
+                print("FAIL  " + msg)
+                bad += 1
+            elif msg:
+                print(msg)
 
     ok, msgs = check_cpp()
     for m in msgs:

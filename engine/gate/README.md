@@ -31,5 +31,5 @@ no row, or a row with no file, fails the gate.
 | `check_draw_cap.sh` | no bare `1024` in the strip loops of `src/gpu*.cpp` | — | `make check`, CI |
 | `check_target_reset.sh` | every scratch `Target` member is cleared by `reset_targets()` | — | `make check`, CI, regression |
 | `check_weight_formats.py` | every `WeightType` has a `kWeightFormats` row, and `wf_from_dtype` covers exactly the packer's matrix dtypes | — | `make check`, CI |
-| `test_mmcf_format.py` | every container round-trips through `tools/mmcf_format.py`, its constants match `model.cpp`, and any record that shares a blob with another keeps the 16-byte alignment and the kind/dtype that blob belongs to | a model store for the round trip (CI has none: constants only) | `make check`, CI |
+| `test_mmcf_format.py` | every container round-trips through `tools/mmcf_format.py`, its constants match `model.cpp`, any record that shares a blob keeps the 16-byte alignment and the kind/dtype that blob belongs to, and a BiCrossGate FFN carries both metadata key 23 and the 0x3D/0x3E records for every layer (either one alone would make a reader run a SwiGLU) | a model store for the round trip (CI has none: constants only) | `make check`, CI |
 | `check_scripts.py` | this table and the three below match their directories | — | `docs_check.sh` |
