@@ -352,16 +352,20 @@ def build(meta, tensors, tok_blob, args):
     # only looks at two bytes sees the old policy, which is why the byte is
     # appended rather than put in a key of its own.
     if (args.add_bos is not None or args.add_eos is not None
-            or meta.get("sp_prefix") or meta.get("tok_unigram")):
+            or meta.get("sp_prefix") or meta.get("tok_unigram")
+            or meta.get("tok_greedy")):
         body = struct.pack("<BB", 255 if args.add_bos is None else args.add_bos,
                            255 if args.add_eos is None else args.add_eos)
         # Third byte: the per-run space marker.  Fourth: the segmentation
         # algorithm (1 = SentencePiece unigram), because the same blob layout
         # carries both and only the kind says how the score column reads.
-        if meta.get("sp_prefix") or meta.get("tok_unigram"):
+        # Fifth (2026-11-28): 1 = longest match over a flat vocabulary, no
+        # merges at all.  A blob with no scores must not reach the BPE pass.
+        if meta.get("sp_prefix") or meta.get("tok_unigram") or meta.get("tok_greedy"):
             body += struct.pack("<B", 1 if meta.get("sp_prefix") else 0)
-        if meta.get("tok_unigram"):
-            body += struct.pack("<B", 1)
+        if meta.get("tok_unigram") or meta.get("tok_greedy"):
+            body += struct.pack("<B", 1 if meta.get("tok_unigram") else 0)
+            body += struct.pack("<B", 1 if meta.get("tok_greedy") else 0)
         md += tlv(10, 1, body)
     # key 14: one byte per layer, 0 = attention, 1 = the LFM2 conv block.
     # Absent means "every layer is attention", which is every other model.
@@ -529,6 +533,10 @@ def main():
     ap.add_argument("--tok-unigram", action="store_true",
                     help="the embedded .tok is a SentencePiece unigram table "
                          "(key 10 byte 4); build it with make_tok_spm.py")
+    ap.add_argument("--tok-greedy", action="store_true",
+                    help="the embedded .tok is a flat vocabulary segmented by longest "
+                         "match, with no merges at all (key 10 byte 5); build it with "
+                         "make_tok_flat.py")
     ap.add_argument("--enc-seq", type=int, default=0,
                     help="encoder sequence capacity (v5 only); 0 takes the model's "
                          "own capacity from its position table, which is the only "
@@ -620,6 +628,11 @@ def main():
                                         tok=args.tok)
         if args.tok_unigram:
             meta['tok_unigram'] = True
+        if args.tok_greedy:
+            meta['tok_greedy'] = True
+        if args.tok_unigram and args.tok_greedy:
+            raise SystemExit("--tok-unigram and --tok-greedy are two segmentation "
+                             "algorithms; pick one")
         if _cfg.get("tie_word_embeddings") is False:
             # load_minimind refuses a false tie with no lm_head, so reaching here
             # means the head really is the checkpoint's own matrix.

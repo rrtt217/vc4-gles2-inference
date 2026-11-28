@@ -193,6 +193,10 @@ public:
     // byte grew) is the BPE merge pass.  Distinct from `tok_kind` above, which
     // is key 4's tokenizer *name*.
     bool tok_unigram = false;
+    // Metadata key 10's fifth byte: longest-match segmentation over a flat
+    // vocabulary (a list of strings with no merges).  The special-token table is
+    // kept, unlike the RWKV mode that shares the encoder.
+    bool tok_greedy = false;
     // How much of the body arrived as a 2-bit ternary record (dtype 7) and had
     // to be expanded to q8 on the host.  Zero for every other container; a load
     // that leaves it non-zero says so, because until the GPU kernel exists

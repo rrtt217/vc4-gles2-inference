@@ -114,7 +114,7 @@ Each record is `<HHI>` (key, type, length) followed by the payload; `type` is 1
 | 7 | `<i` tokenizer blob length |
 | 8 | `<6i` bos, eos, stop, pad, unk, im_start (all `-1` = absent) |
 | 9 | `u8 n`, then n × (`name\0`, `u32 len`, **Jinja template text**).  The default variant is stored with an empty name and read as `default` |
-| 10 | `<BB`, then optionally a third byte: add_bos, add_eos (`255` = not stated; `-1` in memory), `sp_prefix` (1 = the tokenizer prefixes every text run with its space marker, see below) |
+| 10 | `<BB`, then optionally `sp_prefix` (1 = the tokenizer prefixes every text run with its space marker), `tok_kind` (0 = BPE merge, 1 = SentencePiece unigram) and `greedy` (1 = longest match over a flat vocabulary).  See below |
 | 12 | `<B` residual width: absent or 0 = q16 (the historical grid), 1 = q24 |
 | 11 | `<f` `rms_norm_eps`.  Absent = the engine's historical 1e-5, compiled as a literal.  A file that states one switches the norm shader to a uniform, which is **not** numerically neutral on this driver (MiniMind3 PPL 270.3170 -> 269.9303 with the same value), so the default path stays literal |
 | 14 | one byte per layer: `0` attention, `1` the LFM2 conv block.  Absent = every layer is attention.  A file with conv tensors and no key 14 is refused, not guessed |
@@ -145,8 +145,24 @@ cosine 0.912 -- so the container states which one it wants instead of the engine
 guessing from the template.  A two-byte payload keeps the historical behaviour,
 which is why the byte was appended rather than put in a key of its own.
 
-Neither key changes the tensor table, so both are version-2 additions that an
-older reader skips.
+**Key 10's fourth and fifth bytes — the segmentation algorithm.**  The blob
+layout is the same for every vocabulary (`i32 maxlen`, then `f32 score, i32 len,
+bytes` per id), so only the kind says how the score column reads.  `0 = BPE
+merge`, which takes the highest-scoring merge over the whole sequence; `1 =
+SentencePiece unigram`, the piece sequence with the largest sum of log
+probabilities.  The fifth byte selects `1 = longest match`: the vocabulary is a
+flat list with no merges at all (MiniYuanYuan's `vocab_v2.json`), every score is
+`0.0`, and at each position the longest entry that fits is taken.
+
+The fifth byte exists because the BPE pass is **not** a no-op on such a blob:
+`0.0` beats the merge scan's `-1e30` sentinel, so it merges by insertion order
+and silently rewrites correct ids.  Greedy mode also keeps the special-token
+table, which the RWKV mode it shares an encoder with does not: a prompt spells
+`<user>`/`<sep>` literally and those characters are ordinary entries, so matching
+them as text would succeed and produce the wrong ids instead of failing.
+
+Neither key changes the tensor table, so all of these are version-2 additions
+that an older reader skips.
 
 ### The t3 body: 2-bit ternary
 

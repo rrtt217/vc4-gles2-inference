@@ -211,6 +211,52 @@ void test_unigram() {
     CHECK_INTS(t.encode("abz", false, false), 0, 9);
 }
 
+// Longest-match segmentation over a flat vocabulary (metadata key 10's fifth
+// byte).  Three things separate it from the unigram and RWKV modes and each one
+// has a failure it must not have:
+//   - the longest entry wins (a flat vocabulary has no scores to weigh);
+//   - the special-token table is live, because a prompt spells `<|s|>` and the
+//     characters `<`, `|`, `s`, `>` exist as ordinary entries -- matching them
+//     as text would succeed and produce the wrong ids instead of erroring;
+//   - whitespace maps to its named entry, since no entry contains a space and
+//     the byte lookup would otherwise fall through to <unk>.
+void test_greedy() {
+    const std::vector<Entry> flat = {
+        {"a", 0.0f},        // 0
+        {"b", 0.0f},        // 1
+        {"c", 0.0f},        // 2
+        {"abc", 0.0f},      // 3: longest match, and the only right answer here
+        {"<", 0.0f},        // 4: the characters of the special, as ordinary entries
+        {"|", 0.0f},        // 5
+        {"s", 0.0f},        // 6
+        {">", 0.0f},        // 7
+        {"<|s|>", 0.0f},    // 8: the special itself
+        {"<space>", 0.0f},  // 9: whitespace by name, as the reference states it
+        {"<newline>", 0.0f},// 10
+    };
+    Tokenizer t = load(flat);
+    t.set_greedy(true);
+    // Greedy takes the longest entry at this position, not the first.
+    CHECK_INTS(t.encode("abc", false, false), 3);
+    CHECK_INTS(t.encode("ab", false, false), 0, 1);
+    // The special wins over its own characters: 8, not 4 5 6 7.
+    CHECK_INTS(t.encode("<|s|>", false, false), 8);
+    // ...even mid-text, where the greedy scan would otherwise match "abc" first.
+    CHECK_INTS(t.encode("a<|s|>c", false, false), 0, 8, 2);
+    // A space is <space> and a newline is <newline>; neither is in the table as
+    // a byte, so without the mapping both would be <unk> (id -1 here, absent).
+    CHECK_INTS(t.encode("a b", false, false), 0, 9, 1);
+    CHECK_INTS(t.encode("a\nb", false, false), 0, 10, 1);
+    // No merge pass: "ab" stays two ids even though a BPE blob would join it,
+    // and no dummy prefix is pushed -- the space token would be a real token the
+    // reference never emits for this text.
+    CHECK_INTS(t.encode("ab", false, true), 0, 1);
+    // encode_parts joins before segmenting, so a marker split across two parts
+    // still becomes one id.
+    const std::vector<PromptPart> parts = {{"a<|s", false}, {"|>c", false}};
+    CHECK_INTS(t.encode_parts(parts, false, false), 0, 8, 2);
+}
+
 }  // namespace
 
 int main() {
@@ -222,10 +268,12 @@ int main() {
     test_truncated();
     test_seg_prefix();
     test_unigram();
+    test_greedy();
     if (checks::g_fail) {
         std::fprintf(stderr, "test_tokenizer: %d check(s) failed\n", checks::g_fail);
         return 1;
     }
-    std::printf("test_tokenizer: blob, BPE rank, unigram, specials, parts, decode and reload pass\n");
+    std::printf("test_tokenizer: blob, BPE rank, unigram, greedy, specials, "
+                "parts, decode and reload pass\n");
     return 0;
 }

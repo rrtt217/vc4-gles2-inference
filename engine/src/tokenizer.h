@@ -37,6 +37,21 @@ public:
     void set_unigram(bool u) { unigram_ = u; }
     bool unigram() const { return unigram_; }
     bool rwkv() const { return rwkv_; }
+    // A vocabulary that is a plain list of strings with no merges at all, so the
+    // text is segmented by taking the *longest* entry that starts at each
+    // position (metadata key 10's fifth byte).  RWKV's mode is the same
+    // algorithm, which is why it reuses encode_greedy(), but this one keeps the
+    // special-token table: MiniYuanYuan's prompt is literal
+    // `<bos><user>…<sep><assistant>` and those markers have to become one id
+    // each, where RWKV's vocabulary carries them as ordinary entries and
+    // matching them first could only shorten a match.
+    //
+    // It also does not fold spaces into the next token: a vocabulary like this
+    // states its whitespace as named entries (`<space>`, `<newline>`), and no
+    // entry in it contains a space at all, so the BPE path's leading-space token
+    // would be a token the vocabulary does not have.
+    void set_greedy(bool g) { greedy_ = g; }
+    bool greedy() const { return greedy_; }
 
     vector<int> encode(const string& text, bool bos = true, bool dummy_prefix = true);
     // Encode a rendered prompt.  Special-token matching is enabled only for
@@ -85,6 +100,9 @@ private:
     bool seg_prefix_ = false;
     bool rwkv_ = false;
     bool unigram_ = false;
+    // Metadata key 10's fifth byte: longest-match segmentation over a flat
+    // vocabulary, with the special-token table kept.
+    bool greedy_ = false;
     // Longest entry in the blob.  Greedy matching scans downwards from
     // min(maxlen, bytes left); taken from the entries themselves, not from the
     // header's i32, so a stale header cannot hide a long entry.

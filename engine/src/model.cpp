@@ -802,12 +802,25 @@ bool Model::parse_metadata() {
                         // Fourth byte (2026-11-23): the segmentation algorithm.
                         // 0 = BPE merge, 1 = SentencePiece unigram.  Appended
                         // for the same reason the third byte was.
+                        //
+                        // Fifth byte (2026-11-28): 1 = longest-match over a flat
+                        // vocabulary (no merges at all).  The container has to
+                        // say it: on such a vocabulary the BPE merge pass
+                        // rewrites correct ids, because the scores that order a
+                        // BPE blob are absent and the pass then merges by
+                        // insertion order.
                         if (len >= 4 && payload[3] > 1) {
                                 cerr << "mmcf: tokenizer kind " << (int)payload[3]
                                      << " is unknown (0 = BPE, 1 = unigram)\n";
                                 return false;
                         }
                         tok_unigram = len >= 4 && payload[3] == 1;
+                        tok_greedy = len >= 5 && payload[4] == 1;
+                        if (tok_greedy && tok_unigram) {
+                                cerr << "mmcf: tokenizer kind says both unigram and "
+                                        "longest-match; pick one\n";
+                                return false;
+                        }
                 } else if (key == 18 && type == 1 && len >= 4 && (len % 4) == 0) {
                         // A longrope model's static per-dimension rope table.
                         rope_factors.resize(len / 4);

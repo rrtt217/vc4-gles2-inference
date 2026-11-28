@@ -150,6 +150,36 @@ void Tokenizer::encode_greedy(const string& text, vector<int>& t) const {
         const size_t n = text.size();
         size_t i = 0;
         while (i < n) {
+            // Greedy mode keeps the special-token table, which RWKV's does not:
+            // MiniYuanYuan's vocabulary is a flat list where `<user>`/`<sep>`
+            // are added tokens laid onto their ids, so a prompt that spells them
+            // has to emit one id each rather than the four characters `<user>`
+            // -- `<` and `>` are ordinary entries there, so the characters would
+            // tokenise "successfully" and produce the wrong ids silently.
+            if (greedy_ && specials_.size()) {
+                bool matched = false;
+                for (auto& sp : specials_) {
+                    if (text.compare(i, sp.first.size(), sp.first) == 0) {
+                        t.push_back(sp.second);
+                        i += sp.first.size();
+                        matched = true;
+                        break;
+                    }
+                }
+                if (matched) continue;
+            }
+            // Greedy mode's vocabulary states whitespace as named entries and
+            // has no entry containing a space, so the byte cannot be looked up:
+            // map it instead.  The reference tokenizer does the same
+            // (tools/tokenizer.py `_ws_map`), and without it every space in a
+            // prompt is an <unk>.
+            if (greedy_) {
+                const char w = text[i];
+                if (w == ' ' || w == '\t' || w == '\n') {
+                    auto it = lookup_.find(w == '\n' ? "<newline>" : "<space>");
+                    if (it != lookup_.end()) { t.push_back(it->second); ++i; continue; }
+                }
+            }
             // No entry starts with this byte -> nothing can match here; skip
             // straight to the fallback instead of 128 failed lookups.
             size_t len = max_len_ < n - i ? max_len_ : n - i;
@@ -294,6 +324,13 @@ vector<int> Tokenizer::encode(const string& text, bool bos , bool dummy_prefix )
         // else; the vocabulary already carries the <|...|> markers as ordinary
         // entries, so matching them first could only ever shorten a match.
         if (rwkv_) { encode_greedy(text, t); return t; }
+        // Greedy mode (a flat vocabulary, no merges): no dummy prefix and no
+        // merge pass.  The prefix would be the space token -- pushed *before*
+        // the text, and this vocabulary has a `<space>` entry, so the run would
+        // gain a token the reference never emits.  The merge pass is worse:
+        // with no scores a BPE blob's `1e6 - rank` ordering is absent and the
+        // pass merges by insertion order, silently rewriting correct ids.
+        if (greedy_) { encode_greedy(text, t); return t; }
         if (unigram_) {
             encode_into_unigram(text, /*allow_specials=*/true, t,
                                 /*lead=*/dummy_prefix && !text.empty(),
@@ -334,6 +371,18 @@ vector<int> Tokenizer::encode_parts(const vector<PromptPart>& parts, bool bos, b
         // spans a template/message seam.  Nothing is given up by joining --
         // this mode does not treat template text as special.
         if (rwkv_) {
+            string all;
+            for (auto& p : parts) all += p.text;
+            encode_greedy(all, t);
+            return t;
+        }
+        // Greedy mode joins for the same reason, and additionally because the
+        // special-token rule has to see the whole rendered prompt: the template
+        // emits `<user>`/`<sep>` as literals and a part boundary can fall inside
+        // one.  Nothing is given up by joining -- a user message's `is_input`
+        // flag only suppresses special matching, which this path applies to the
+        // whole joined string, so the markers here are the template's own.
+        if (greedy_) {
             string all;
             for (auto& p : parts) all += p.text;
             encode_greedy(all, t);

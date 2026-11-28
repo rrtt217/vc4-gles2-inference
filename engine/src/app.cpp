@@ -119,6 +119,10 @@ bool App::setup_from_model() {
     // what makes a swap out of (or into) an RWKV container set it correctly.
     tokenizer.set_rwkv(model.is_rwkv());
     tokenizer.set_unigram(model.tok_unigram);
+    // A flat vocabulary segmented by longest match (metadata key 10's fifth
+    // byte).  Like the two above, the mode belongs to the container, so a
+    // /model swap into or out of such a file sets it here.
+    tokenizer.set_greedy(model.tok_greedy);
     return true;
 }
 
