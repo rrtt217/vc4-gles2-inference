@@ -45,18 +45,38 @@ WORK=$(mktemp -d) || exit 2
 trap 'rm -rf "$WORK"' EXIT
 
 # The axes and their closed sets, as `--dump-switches` prints them.
-ACT="i16 bf16 f32"          # i8 is refused for a q4 qkv, so it is not a format here
-RES="i16 i24 f32"
-FFN="i16 bf16 f32"
-PROJ="i24 f32"
-KV="q16 bf16"
+#
+# The names carry an AX_ prefix on purpose.  They used to be ACT/RES/PROJ/KV, the
+# switch names themselves, and a caller who exported one -- `KV=q16 script.sh`,
+# which is the natural thing to do because the container wants it -- silently
+# re-exported the *list* to every child the moment this line ran: the engine then
+# read `switch KV=q16 bf16` and refused 35 of 43 runs while the four KV rows
+# passed, because those override it on the command line.  A local name that
+# shadows an exported one is not local.
+AX_ACT="i16 bf16 f32"       # i8 is refused for a q4 qkv, so it is not a format here
+AX_RES="i16 i24 f32"
+AX_FFN="i16 bf16 f32"
+AX_PROJ="i24 f32"
+AX_KV="q16 bf16"
 
-run() {   # run VAR=VAL... -> the assistant line, or a marker
-    local line
-    line=$(timeout 180 env GPU_LAYER=1 "$@" "$ENGINE" --model "$MODEL" --chat \
-             --prompt "你好，你是谁？" --gen 24 --greedy 2>&1 \
-           | grep -a "^Assistant" | sed 's/\[stopped.*//' | head -1)
-    printf '%s' "${line:-<no answer>}"
+# A container can *require* a switch on a host -- MiniYuanYuan's q8 refuses to
+# load on VC4 without QKV_PAIR=0 -- and that switch is not one of the axes, so it
+# belongs to every run rather than to one.  EXTRA holds KEY=VAL tokens; inheriting
+# them from the caller's environment instead is how the first board sweep ran 35
+# of 43 axes into `program 'xkv' did not draw` while its four KV rows passed.
+: "${EXTRA:=}"
+run() {   # run VAR=VAL... -> the assistant line, or a marker that says why
+    local raw line why
+    raw=$(timeout 180 env GPU_LAYER=1 $EXTRA "$@" "$ENGINE" --model "$MODEL" --chat \
+            --prompt "你好，你是谁？" --gen 24 --greedy 2>&1)
+    line=$(printf '%s\n' "$raw" | grep -a "^Assistant" | sed 's/\[stopped.*//' | head -1)
+    if [ -n "$line" ]; then printf '%s' "$line"; return; fi
+    # "no answer" alone cost an hour on the board: the failures were the load, not
+    # the axis, and the reason was on stderr that this line used to throw away.
+    # Anything that is not a chat banner is the reason, last line first.
+    why=$(printf '%s\n' "$raw" | grep -avE '^(template|chat template|tokenizer|specials|alias|formats|PREFIX_CACHE|checkpoint|model|rope|quant|name|caps|system|rms|residual|ffn block|seq|tokens|tokenizer:)' \
+          | grep -av '^$' | tail -1)
+    printf '%s (%s)' "<no answer>" "${why:0:160}"
 }
 
 n=0
@@ -75,19 +95,19 @@ add() {   # add TAG VAR=VAL...
 # One list of KEY=VAL tokens: a bare value is an env command name, which is how
 # the first version of this script ran `i16` and reported 30 missing answers.
 one=""
-for a in $ACT; do one="$one ACT=$a"; done
-for a in $RES; do one="$one RES=$a"; done
-for a in $FFN; do one="$one FFN_HID=$a"; done
-for a in $PROJ; do one="$one PROJ=$a"; done
-for a in $KV; do one="$one KV=$a"; done
+for a in $AX_ACT; do one="$one ACT=$a"; done
+for a in $AX_RES; do one="$one RES=$a"; done
+for a in $AX_FFN; do one="$one FFN_HID=$a"; done
+for a in $AX_PROJ; do one="$one PROJ=$a"; done
+for a in $AX_KV; do one="$one KV=$a"; done
 for t in $one; do add "$t" "$t"; done
 # Pairs are where the two mistakes above lived: one axis moved, the other's
 # hardcoded format stayed behind.
-for a in $ACT; do
-    for b in $RES; do add "ACT=$a RES=$b" "ACT=$a" "RES=$b"; done
-    for b in $FFN; do add "ACT=$a FFN_HID=$b" "ACT=$a" "FFN_HID=$b"; done
-    for b in $PROJ; do add "ACT=$a PROJ=$b" "ACT=$a" "PROJ=$b"; done
-    for b in $KV; do add "ACT=$a KV=$b" "ACT=$a" "KV=$b"; done
+for a in $AX_ACT; do
+    for b in $AX_RES; do add "ACT=$a RES=$b" "ACT=$a" "RES=$b"; done
+    for b in $AX_FFN; do add "ACT=$a FFN_HID=$b" "ACT=$a" "FFN_HID=$b"; done
+    for b in $AX_PROJ; do add "ACT=$a PROJ=$b" "ACT=$a" "PROJ=$b"; done
+    for b in $AX_KV; do add "ACT=$a KV=$b" "ACT=$a" "KV=$b"; done
 done
 
 want=$(printf 'Assistant: %s' "$EXPECT")

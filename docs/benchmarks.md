@@ -55,8 +55,8 @@ is a rough guide only: rows come from different builds, and the engine has gaine
 | vertex15 q4 | **196.9** | 512 | 2026-11-13 | stops at EOS after 7 tokens |
 | MiniMind2 i16 | **216.0** | 512 | 2026-11-13 | cheap q16 decode; 326.8 with `Q16_DECODE=exact` |
 | vertex35 q4 | **241.4** | 512 | 2026-11-13 | stops after 7 tokens |
-| **MiniYuanYuan q8** | **266.1** | 512 | **2026-11-28** | BiCrossGate FFN, 12L d384; `QKV_PAIR=0` required on VC4 (the row-pair int8 qkv kernel is refused); PPL 69.8373 |
-| MiniYuanYuan q4 | **279.5** | 512 | **2026-11-28** | the same block; PPL 69.3326 — q4 is *slower* than q8 here, unlike MiniMind3 |
+| **MiniYuanYuan q8** | **252.2** | 512 | **2026-11-28** | BiCrossGate FFN, 12L d384; `QKV_PAIR=0` required on VC4 (the row-pair int8 qkv kernel is refused); the gate folded into the up matvec, 266.1 with `BICROSS_FUSE=0`; PPL 69.8373 either way |
+| MiniYuanYuan q4 | **279.5** | 512 | **2026-11-28** | the same block on the two-pass path (the fused kernel is q8-only); PPL 69.3326 — q4 is *slower* than q8 here, unlike MiniMind3 |
 | MiniYuanYuan i16 | **342.3** | 512 | **2026-11-28** | the same block, 46.0 MB; PPL 70.1238 |
 | **OPUS-MT en-zh q8** | **375** | 512 | **2026-11-27** | 77M encoder-decoder; encode 3.53 s for a 29-token source, 199 draws/token, `IGNORE_EOS` runs the full 16 tokens (the translation stops at 14) |
 | MiniMind3-MoE q4 | **222.8** | 768 | 2026-11-21 | 131 MB, top-1 routing; median of three (222.8 / 216.9 / 227.2), was 322.0 on the 2026-11-13 build |

@@ -109,9 +109,10 @@ median of three, warm (one discarded run).
 
 | container | decode | prefill | note |
 |---|---:|---:|---|
-| **q8** | **266.1 ms/token** | 6.15 s | needs `QKV_PAIR=0` on VC4 |
-| q4 | 279.5 ms/token | 7.89 s | |
-| i16 | 342.3 ms/token | 6.85 s | |
+| **q8** | **252.2 ms/token** | 6.0 s | `QKV_PAIR=0` on VC4; the gate folded into the up matvec |
+| q8, `BICROSS_FUSE=0` | 266.1 ms/token | 6.2 s | the two-pass form, for the A/B |
+| q4 | 279.5 ms/token | 7.89 s | two passes: the fused kernel is q8-only |
+| i16 | 342.3 ms/token | 6.85 s | two passes, and the widest stream |
 
 q8 is faster *and* smaller than i16 by more than the file size suggests, and it
 beats q4 despite carrying 37% more weights: q4's eight-wide gate is not enough to
@@ -124,21 +125,21 @@ vc4's register allocator refusing the row-pair int8 qkv kernel.  The workaround 
 numerically neutral -- Xe PPL 69.6895 with pairing and 69.6895 without (measured
 2026-11-28).
 
-**Why a 19.7M model is slower here than the 64M MiniMind3.**  Measured 2026-11-28
-with `DRAWCOUNT=1`.  VC4 is draw-bound,
-so the currency is `DRAWCOUNT` draws a token, not parameters:
+**Why a 19.7M model is slower here than the 64M MiniMind3.**  Measured 2026-11-28.
+The unit is the pass -- a matvec or an elementwise kernel, one state change --
+not the parameter count and not the draw:
 
-| model | layers | dim/hidden | draws/token | ms/draw |
-|---|---:|---|---:|---:|
-| MiniMind3 q4 | 8 | 768/2432 | 143 | 1.30 |
-| feng30m q8 | 11 | 448/896 | 178 | — |
-| MiniYuanYuan q4 | 12 | 384/1152 | 248 | 1.13 |
+| model | layers | dim/hidden | passes/layer | draws/token | decode |
+|---|---:|---|---:|---:|---:|
+| MiniMind3 q4 | 8 | 768/2432 | 19 | 143 | 185.7 |
+| feng30m q8 | 11 | 448/896 | — | 178 | — |
+| MiniYuanYuan q4 | 12 | 384/1152 | 22 | 248 | 279.5 |
 
-A layer costs about 17 draws whatever its width, because a draw's cost is the
-fragment's fixed overhead and a 384-wide row leaves the same lanes idle that a
-768-wide one fills.  So the depth is the whole gap: 248 × 8/12 = 165 draws, at
-MiniYuanYuan's 1.13 ms/draw, is 187 ms -- MiniMind3 q4's 185.7.  This model pays
-1.5x for having 12 layers instead of 8, and its per-draw cost is *lower*.
+A pass costs ~1.1 ms whatever it carries, so a quarter of MiniMind3's FLOPs in
+one layer costs the same 23 ms: 12 layers here against 8 is the whole gap, and
+8 layers of this model would decode in ~187 ms -- MiniMind3's 185.7.  The draw
+count is a *shape* symptom, not the bill; the next section is the experiment that
+settles it.
 
 `LAYER_PROFILE` puts the block's cost where it belongs.  Per layer, draws:
 
@@ -177,12 +178,22 @@ reached the same conclusion from the other end on 2026-11-20 -- moving an
 rmsnorm's work into its consumer does not remove the pass and buys 0.4%.
 
 The block's own overhead is therefore **one pass a layer** (14% of its draws, but
-4% of the time): `bicross_act` into the `gate` matvec and `mul2` into `down` would
-each remove one, **8.6% or ~24 ms/token for the pair**, at the price of a
-per-format fused kernel -- the shape `ffn_pair_swiglu_chunk` and
-`ffn_pair_i4_swiglu_chunk` already have for SwiGLU behind `wf_can(type,
-WStage::FfnFusedGate)`.  Not attempted.  The six rmsnorm passes a layer are 27%
-of the token and are shared with every dense model here.
+4-5% of the time), and `matvec_q8_ffn_mulgate` removes it: the gate's projection
+store is read inside the up matvec, so `mul2` stops existing.  Measured
+2026-11-28 on the board, q8, median of three: **266.1 -> 252.2 ms/token (-5.2%)**
+and PPL 69.8373 either way.  Draws fall 248 -> 224; the 24 and not 12 is because
+the fused kernel draws the whole 576-fragment plane in one call where the matvec
+loop had split at `kDrawCap` and `mul2` was a pass.
+
+`BICROSS_FUSE=0` restores the two passes for the A/B.  The kernel exists for q8
+weights with an I16_2 activation and an I16_2 hidden -- the same three conditions
+`ffn_pair_swiglu_chunk` asks for -- so q4 and i16 keep the two passes and the
+next ~5% is the `bicross_act` pass folded into the `gate` matvec, which needs the
+same kernel family for those two weight types.
+
+The six rmsnorm passes a layer are 27% of the token and are shared with every
+dense model here; `rmsfuse_probe` priced folding them at 0.4%, because moving the
+work does not remove the pass.
 
 ## Known gaps
 
@@ -217,11 +228,20 @@ bash engine/scripts/format_sweep.sh ../models/miniyuanyuan/miniyuanyuan.q4.mmcf 
   "我是沅沅，来自湘西龙舟之乡沅陵县。<sep>"
 ```
 
-On the board the same script runs from the runtime directory with
-`ENGINE=bin/engine_mm3_pi.myy` (and `KV=q16`, plus `QKV_PAIR=0` for q8).
-That is a *different* claim: VC4 answers "does this kernel exist on this
-compiler at all", which is how the q8 qkv pair above was found, while Xe answers
-"does this kernel follow the axis".
+On the board the same script runs from the runtime directory:
+
+```bash
+ENGINE=bin/engine_mm3_pi.myy EXTRA='QKV_PAIR=0' KV=q16 bash tools/format_sweep.sh \
+  models/miniyuanyuan/miniyuanyuan.q8.mmcf "我是沅沅，来自湘西龙舟之乡沅陵县。"
+```
+
+`EXTRA` carries the switch the container *requires* on that host and which is not
+an axis -- `QKV_PAIR=0` here.  That is a *different* claim than the laptop's: VC4
+answers "does this kernel exist on this compiler at all", which is how the q8 qkv
+pair above was found, while Xe answers "does this kernel follow the axis".
+Inheriting the required switch from the caller's environment instead of naming it
+ran 35 of 43 axes into `<no answer>` and left the four KV rows passing, because
+the failure was the load, not the axis.
 
 Run it after touching any kernel that reads or writes two streams.  Two formats
 were hardcoded in this block at first (`bicross_act` stored q16 whatever the
