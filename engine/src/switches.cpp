@@ -20,6 +20,8 @@ static const SwitchDef kSwitches[] = {
      "the 2-bit body's tile geometry as the uploader made it and as the shader reads it -- two machines comparing numbers need this to be the same lines"},
     {"STAGE_DUMP", "", SwKind::Str, "", SwStatus::Probe, SwAxis::Dump,
      "per-layer xb/att/x1/xbf/hid/hidA as q16 texels (the pair path adds x1b/p2in/p2part); diff_paths.sh reads it"},
+    {"BICROSS_DUMP", "", SwKind::Flag, "", SwStatus::Probe, SwAxis::Dump,
+     "the BiCrossGate FFN's per-stage values (bicq/bicac/bicg/bicup/bichid), each in the format it is stored in -- the only way to bisect a block whose three kernels feed each other"},
     {"HIDDEN_DUMP", "", SwKind::Str, "", SwStatus::Probe, SwAxis::Dump,
      "the same for the layer output on the GPU path (GPU_LAYER 0 vs 1)"},
     {"DUMP_F32", "", SwKind::Str, "", SwStatus::Probe, SwAxis::Dump,

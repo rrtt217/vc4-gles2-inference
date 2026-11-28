@@ -715,18 +715,18 @@ GLuint Session::ffn_hidden(const Mat& w1, const Mat& w3, const Mat& w13,
         // is actually stored in.  It is the only way to bisect this FFN: the
         // three kernels feed each other, and a wrong intermediate shows up as a
         // bad PPL three stages later.
-        if (getenv("BICROSS_DUMP")) gpu_.dump_target(gpu_.bic_q_, "bicq", 16, gpu_.proj_fmt_);
+        if (env_set("BICROSS_DUMP")) gpu_.dump_target(gpu_.bic_q_, "bicq", 16, gpu_.proj_fmt_);
         gpu_.bicross_act(gpu_.bic_q_.tex, x, m_.dim,
                          (m_.bicross_acts & 0xFF) | (((m_.bicross_acts >> 8) & 0xFF) << 8),
                          0, gpu_.bic_ac_);
-        if (getenv("BICROSS_DUMP")) gpu_.dump_target(gpu_.bic_ac_, "bicac", 16);
+        if (env_set("BICROSS_DUMP")) gpu_.dump_target(gpu_.bic_ac_, "bicac", 16);
         gpu_.matvec_to(m_.bicross_gate[l], gpu_.bic_ac_.tex, gpu_.bic_g_);
-        if (getenv("BICROSS_DUMP")) gpu_.dump_target(gpu_.bic_g_, "bicg", 16, gpu_.proj_fmt_);
+        if (env_set("BICROSS_DUMP")) gpu_.dump_target(gpu_.bic_g_, "bicg", 16, gpu_.proj_fmt_);
         gpu_.matvec_to(w1, x, gpu_.bic_up_);
-        if (getenv("BICROSS_DUMP")) gpu_.dump_target(gpu_.bic_up_, "bicup", 16, gpu_.proj_fmt_);
+        if (env_set("BICROSS_DUMP")) gpu_.dump_target(gpu_.bic_up_, "bicup", 16, gpu_.proj_fmt_);
         GLuint r = gpu_.mul2(gpu_.bic_g_.tex, gpu_.proj_fmt_, gpu_.bic_up_.tex,
                             gpu_.proj_fmt_, m_.hidden, gpu_.bic_m_);
-        if (getenv("BICROSS_DUMP")) gpu_.dump_target(gpu_.bic_m_, "bichid", 16);
+        if (env_set("BICROSS_DUMP")) gpu_.dump_target(gpu_.bic_m_, "bichid", 16);
         return r;
     }
     if (w1.rows) return gpu_.ffn_split(w1, w3, x, width, hs);

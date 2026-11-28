@@ -59,7 +59,7 @@ The rows below are the registry, one per switch, grouped by the axis they move.
 diagnostic or a pricing arm; `retired` is gone (`--dump-switches` prints the
 same table with what *this* environment resolved to).
 
-165 switches: 30 permanent, 121 probe, 14 retired; 16 legacy spellings are translated.
+166 switches: 30 permanent, 122 probe, 14 retired; 16 legacy spellings are translated.
 
 ### The activation streams
 
@@ -160,6 +160,7 @@ same table with what *this* environment resolved to).
 | `PPL_STRIDE` | value | window stride for --ppl (0 restores the cold pre-2026-11-12 windows) |
 | `ARGMAX_DUMP` | value | with the greedy fast path, print the chunk winners |
 | `ATT_DUMP` | value | the score/softmax integers at one position, for check_att.py |
+| `BICROSS_DUMP` | `=1` | the BiCrossGate FFN's per-stage values (bicq/bicac/bicg/bicup/bichid), each in the format it is stored in -- the only way to bisect a block whose three kernels feed each other |
 | `CHAT_CACHE` | value | the cache split of every model call (cached / prefill / prompt) |
 | `CHAT_DUMP` | `=1` | the rendered prompt on stderr, segment by segment |
 | `CONV_DEBUG` | value | the LFM2 conv block's stages for layer 0, next to the CPU reference |
