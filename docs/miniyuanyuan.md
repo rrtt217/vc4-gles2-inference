@@ -158,10 +158,31 @@ token, 14%.
 
 That is the block as designed, not a fallback: `bicross_act` and `mul2` are
 separate kernels because the chain has three operands, and SwiGLU's single
-`swiglu_pair` has two.  Folding `mul2` into the `down` matvec's activation
-decode (the way `Q8AP_INLINE` folds a projection store) would recover 1-2 draws
-a layer, ~10%, ~28 ms/token; not attempted.  The six rmsnorm draws a layer are
-12% of the token and are shared with every dense model here.
+`swiglu_pair` has two.
+
+### What a pass costs (and why the draw count is not the currency)
+
+Measured 2026-11-28 on the board, in that order, because the first answer was
+wrong:
+
+| experiment | result |
+|---|---|
+| `MATVEC_STRIP=1152` (hidden 1152 is just over `kDrawCap` 1024, so `gate`/`up` split) | 248 -> 224 draws a token, PPL identical (69.3326 / 69.8373), decode 277.4 and 279.0 against 279.5: **no time saved** |
+| `SYNCCOUNT=1` | **1** host<->GPU synchronisation a token, not one a pass |
+| decode/12 layers against MiniMind3's decode/8 | 23.3 ms against 23.2 -- equal, at a quarter of the FLOPs |
+
+So the unit is the pass: 22 a layer here, 19 there, at roughly 1.1 ms each, and a
+draw inside an existing pass (the tail strip) is free.  `engine/probes/rmsfuse_probe`
+reached the same conclusion from the other end on 2026-11-20 -- moving an
+rmsnorm's work into its consumer does not remove the pass and buys 0.4%.
+
+The block's own overhead is therefore **one pass a layer** (14% of its draws, but
+4% of the time): `bicross_act` into the `gate` matvec and `mul2` into `down` would
+each remove one, **8.6% or ~24 ms/token for the pair**, at the price of a
+per-format fused kernel -- the shape `ffn_pair_swiglu_chunk` and
+`ffn_pair_i4_swiglu_chunk` already have for SwiGLU behind `wf_can(type,
+WStage::FfnFusedGate)`.  Not attempted.  The six rmsnorm passes a layer are 27%
+of the token and are shared with every dense model here.
 
 ## Known gaps
 
