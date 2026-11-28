@@ -214,6 +214,15 @@ and then, for either stream:
 | hidden > 127.996 | warning with the cut depth, packs |
 | either > 4x the rail (512) | **refuses**, exit 1, names the ratio and points at `models/README.md` |
 
+Both widths are decided from that measurement unless the operator overrides it:
+`--res auto` (the default) writes metadata key 12 (q24) only when the residual
+peak passes the q16 rail, and `--rms-store auto` (the default) writes key 19 (f32
+partial sums) only when a lane sum can pass 2048.  The residual width is a
+*format pin* -- it changes which readers the kernels draw -- so a model that
+fits q16 must not get q24 by default; the rms store is not a pin but a silent
+correctness failure, which is why its bound is written into the file rather than
+left to a run-time switch.
+
 `--allow-over-rail` packs anyway; `--no-rail-check` skips the calibration.  A
 legacy source has no float weights to run, so the packer prints a note instead
 of guessing.  A residual over the rail is a packing decision; a *hidden* over

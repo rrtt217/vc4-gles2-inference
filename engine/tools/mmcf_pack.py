@@ -610,10 +610,11 @@ def main():
                          "chat_template).  Default: read it from tokenizer_config.json next to --in")
     ap.add_argument("--chat-template-variant", metavar="NAME=FILE", action="append", default=[],
                     help="additional named template variant (repeatable)")
-    ap.add_argument("--res", choices=["q16", "q24"], default="q16",
-                    help="residual stream width: q16 (default, ±128) or q24 "
-                         "(same 1/256 step, ±32768).  q24 is what a model that "
-                         "trips the residual-rail check needs")
+    ap.add_argument("--res", choices=["auto", "q16", "q24"], default="auto",
+                    help="residual stream width: q16 (±128), q24 (same 1/256 step, "
+                         "±32768), or auto (default) which writes q24 only when the "
+                         "calibration says the residual passes the q16 rail.  q24 is a "
+                         "format pin: it is not numerically free")
     ap.add_argument("--rms-store", choices=["auto", "i24"], default="auto",
                     help="the rms partial sums' store.  auto (default) writes key 19 = f32 "
                          "when the residual calibration says a lane sum can pass the "
@@ -722,6 +723,18 @@ def main():
     # past the rail unless told otherwise.
     peaks = meta.get("res_peaks")
     if peaks:
+        # `--res auto` decides here, before build() reads args.res for key 12:
+        # q24 is a *format pin*, not a free widening (the residual's reader is
+        # the one every kernel draws against), so a model that fits q16 must not
+        # get it.  The measured count of dims over the q16 rail is the input --
+        # MiniYuanYuan's peak is one value at one position out of 4224, which is
+        # still a clipped value and so still a reason to widen, just a different
+        # one from supra2's 2300.
+        if args.res == "auto":
+            worst = max(peaks)
+            args.res = "q24" if worst > RESIDUAL_RAIL else "q16"
+            print("res: auto -> %s (peak %.1f, q16 rail %.1f)"
+                  % (args.res, worst, RESIDUAL_RAIL))
         # The rail the container will actually be *read* at.  --res q24 stores
         # one value a texel at the same 1/256 step but +-32768 (key 12), so a
         # model that only trips the q16 rail is representable; using the q16
