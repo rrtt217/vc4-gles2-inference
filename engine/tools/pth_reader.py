@@ -74,8 +74,33 @@ class _Unpickler(pickle.Unpickler):
         return ("storage", dtype, arr)
 
 
-def load(path):
-    """{tensor name: numpy array}, every one widened to float32."""
+def _unwrap(obj):
+    """The state dict, and whatever else the checkpoint boxed next to it.
+
+    A HF export pickles the state dict at the top level, but a training script
+    usually saves a wrapper: `{"model": state_dict, "cfg": {...}, "step": 34000}`.
+    MiniYuanYuan publishes exactly that, and reading it as a flat name->tensor
+    map silently yields {} rather than an error -- the empty dict looks like "no
+    tensors" and the caller packs nothing.  So unwrap one level: the state dict
+    is the first value that is itself a dict of tensors, and the rest is
+    returned for a caller that wants the architecture config.
+    """
+    if any(isinstance(v, dict) and "storage" in v for v in obj.values()):
+        return obj, {}
+    for key in ("model", "state_dict", "model_state_dict"):
+        sub = obj.get(key)
+        if isinstance(sub, dict) and any(isinstance(v, dict) and "storage" in v
+                                         for v in sub.values()):
+            return sub, {k: v for k, v in obj.items() if k != key}
+    return obj, {}
+
+
+def load(path, meta=False):
+    """{tensor name: numpy array}, every one widened to float32.
+
+    `meta=True` returns `(tensors, rest)`, where `rest` holds the wrapper's
+    non-tensor entries (a training script's `cfg`, `step`, `best_val`).
+    """
     with zipfile.ZipFile(path) as z:
         pkl = [n for n in z.namelist() if n.endswith("data.pkl")]
         if not pkl:
@@ -83,6 +108,7 @@ def load(path):
         prefix = pkl[0][: -len("data.pkl")]
         obj = _Unpickler(z.open(pkl[0]), z, prefix).load()
 
+    obj, rest = _unwrap(obj) if isinstance(obj, dict) else (obj, {})
     out = {}
     for name, rec in obj.items():
         if not isinstance(rec, dict) or "storage" not in rec:
@@ -104,4 +130,4 @@ def load(path):
         elif dtype != "float32":
             a = a.astype(np.float32)
         out[name] = a.reshape(size)
-    return out
+    return (out, rest) if meta else out
