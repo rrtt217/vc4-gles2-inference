@@ -119,6 +119,22 @@ inline size_t mat_bytes(const Mat& m) {
     return n;
 }
 
+// The borrowed bytes of a Mat, or null when it owns a copy.  Two Mats that
+// borrow the same mapping at the same address hold the same matrix, which is
+// what lets the upload make one texture for a container that aliases its FFN
+// across a layer pair (`app.cpp`'s upload loop).  A materialised Mat has no
+// borrowed pointer, and equal sizes there say nothing about equal bytes.
+inline const void* mat_borrowed_ptr(const Mat& m) {
+    switch (m.type) {
+        case WeightType::INT8: return m.ext8;
+        case WeightType::INT16: return m.ext16;
+        case WeightType::INT4: return m.ext4;
+        case WeightType::INT6: return m.ext6_lo;
+        case WeightType::T3: return m.ext3;
+    }
+    return nullptr;
+}
+
 struct Target {
     GLuint tex = 0, fbo = 0;
     int w = 0, h = 0;

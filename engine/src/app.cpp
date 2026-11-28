@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "common.h"
@@ -212,8 +213,58 @@ void App::upload_weights() {
     // instead of landing inside the next glTexImage2D.  The window is one
     // matrix, which the drop_pages() below keeps resident-free.
     const bool prefetch = !env_zero("UPLOAD_PREFETCH");
+    // A container may alias: two records can name the same bytes, which is how a
+    // block whose FFN is shared by layer pairs stores six groups for twelve
+    // layers.  The reader gives each record its own `Mat` pointing into the same
+    // mapping, so without this the GPU would make one texture per *record* and
+    // pay the duplicated size in CMA -- the sharing would buy disk and page
+    // cache and nothing else, which on the Pi is the least valuable resource.
+    //
+    // The rule is the bytes: a Mat that borrows the same mapping at the same
+    // offset for the same length is the same matrix, so it reuses the first
+    // one's handles.  Copied Mats (MODEL_BORROW=0, or a rewrite path that
+    // materialised them) have no borrowed pointer and never alias, which is
+    // correct -- equal size there does not mean equal bytes.
+    struct AliasKey {
+        const void* p; size_t bytes; int rows, cols;
+        bool operator==(const AliasKey& o) const {
+            return p == o.p && bytes == o.bytes && rows == o.rows && cols == o.cols;
+        }
+    };
+    struct AliasKeyHash {
+        size_t operator()(const AliasKey& k) const {
+            size_t h = std::hash<const void*>()(k.p);
+            h ^= std::hash<size_t>()(k.bytes) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+            h ^= (size_t)k.rows * 1315423911u + (size_t)k.cols;
+            return h;
+        }
+    };
+    std::unordered_map<AliasKey, const Mat*, AliasKeyHash> uploaded;
+    size_t aliased = 0;
+    uint64_t saved_bytes = 0;
     for (size_t i = 0; i < mats.size(); ++i) {
         Mat* m = mats[i];
+        const void* bytes = mat_borrowed_ptr(*m);
+        if (bytes) {
+            AliasKey k{bytes, mat_bytes(*m), m->rows, m->cols};
+            auto it = uploaded.find(k);
+            if (it != uploaded.end()) {
+                // Same blob: take the first one's handles instead of uploading
+                // again.  `tex_lo/tex_hi` and the q4 planes travel with `tex`
+                // because a borrowed Mat is never rewritten after the upload.
+                m->tex = it->second->tex;
+                m->q4_param_tex = it->second->q4_param_tex;
+                m->row_scale_tex = it->second->row_scale_tex;
+                m->tex_lo = it->second->tex_lo;
+                m->tex_hi = it->second->tex_hi;
+                ++aliased;
+                saved_bytes += mat_bytes(*m);
+                done += mat_bytes(*m);
+                g_progress.set(done);
+                continue;
+            }
+            uploaded.emplace(k, m);
+        }
         if (prefetch && i + 1 < mats.size()) model.prefetch(*mats[i + 1]);
         gpu.upload(*m);
         // The bytes just consumed are dead: drop their pages now instead of
@@ -227,6 +278,13 @@ void App::upload_weights() {
     }
     gpu.upload_batch_end();
     g_progress.end();
+    if (aliased) {
+        // Say it out loud: the container's sharing bought its CMA saving here,
+        // and a run that reports the file size against the texture size looks
+        // like a leak without this line.
+        std::cerr << "alias: " << aliased << " tensor(s) reused another's texture"
+                  << " (" << (saved_bytes / 1024) << " KiB not uploaded twice)\n";
+    }
     // The v5 bias/LayerNorm rows are NOT uploaded here: they are packed in the
     // container's formats, which the Session decides, so Session's constructor
     // uploads them after it has.  Doing it here sent them out one-value-a-texel

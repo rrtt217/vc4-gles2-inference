@@ -243,6 +243,35 @@ The `group` byte of a q4 body is **32** in files written since 2026-11-12 and
 always used 32 from metadata key 3 and never read the record's copy).  Both
 parse; a reader should take the group size from key 3.
 
+### Two records may share one blob
+
+`offset` is **per record**, so nothing requires two records to name different
+bytes: a block whose FFN is shared by pairs of layers stores one group and
+references it from both layers' ids.  `mmcf_pack.py` writes this by default
+(`--no-alias` duplicates instead), keying on the payload, dtype, shape and group
+so two different matrices cannot collide into one blob.
+
+Three rules a reader and a writer keep:
+
+- **Alignment still holds.**  A shared blob is 16-byte aligned like any other
+  because it *is* another record's blob, not a second pointer into the middle of
+  one.
+- **The CRC stays per record** and still covers that record's own bytes, so
+  `--check` verifies a shared body once per referring record and agrees.
+- **Kind and dtype belong to the blob.**  An alias is only legal between records
+  that read the same bytes the same way — the per-layer FFN kinds sharing across
+  layers — never between e.g. an embedding and a matrix.
+  `gate/test_mmcf_format.py` checks all three from the record table alone,
+  because every other property of an aliased record still looks correct.
+
+**What it buys depends on the reader.**  The format saves the file and the page
+cache; it does *not* automatically save the GPU.  The engine's upload keys on the
+borrowed bytes (`mat_borrowed_ptr`) and reuses the first record's texture
+handles, printing `alias: N tensor(s) reused another's texture`, so a shared FFN
+costs one texture rather than two.  A reader that uploads per record pays the
+duplicated size in device memory — which on the Pi is the resource that matters,
+so the dedupe is what makes the sharing worth anything there.
+
 Dtypes: `0` f32, `1` i16, `2` q8u8 (biased by 128), `3` q8i8 (signed), `4` q4
 (nibbles, plus a scale plane as part 1 and a min plane as part 2), `5` blob
 (the tokenizer), `6` q6 (two planes, `--head-q6`) and `7` **t3**: a 2-bit

@@ -216,7 +216,16 @@ def main():
         scale, = struct.unpack_from("<f", r, 34)
         aux, = struct.unpack_from("<H", r, 38) if rsize >= 64 else (0,)
         rows.append((tid, dt, rws, cls, off, blen, crc, scale, aux))
-    total = sum(t[5] for t in rows)
+    # Aliased records share one blob, so summing per-record lengths counts the
+    # same bytes twice -- and on a container whose FFN is shared by layer pairs
+    # that made the figure exceed the file and print as negative padding.  The
+    # reported size is the bytes the file actually holds; the second line says
+    # how many records point into another one's blob.
+    shared = {}
+    for t in rows:
+        shared.setdefault((t[4], t[5]), []).append(t[0])
+    total = sum(blen for _off, blen in shared)
+    n_alias = sum(len(v) - 1 for v in shared.values() if len(v) > 1)
     # part 3 of a tensor id is a per-row q8 scale plane: one f32 per output row,
     # the row's scale divided by the matrix unit the record carries.
     rplanes = [t for t in rows if (t[0] >> 14) == 3]
@@ -250,7 +259,8 @@ def main():
         print("rwkv lora   " + (" ".join("%s %d/%d" % (k, v[0], v[1])
                                           for k, v in sorted(pairs.items()))
                                 or "none"))
-    print(f"tensor data {total} B in {n} tensors, {len(raw) - total - table} B of headers/padding")
+    print(f"tensor data {total} B in {n} tensors, {len(raw) - total - table} B of headers/padding"
+          + (f"; {n_alias} record(s) share another's blob" if n_alias else ""))
     if args.tensors:
         for tid, dt, rws, cls, off, blen, crc, scale, aux in rows:
             kind = tid & 0xFF

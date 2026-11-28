@@ -425,6 +425,25 @@ def build(meta, tensors, tok_blob, args):
     table = bytearray()
     data = bytearray()
     data_off = table_off + len(tensors) * rsize
+    # Aliasing: two records may name the same bytes.  The format has always
+    # allowed it -- `off` is per record and the reader only bounds-checks it --
+    # but nothing wrote it, because every consumer assumed one record per blob.
+    # A block whose FFN is shared by layer pairs (MiniYuanYuan pairs every two
+    # layers onto one group) needs it: six groups for twelve layers, written
+    # once and referenced twice.
+    #
+    # The key is the payload itself, not the tensor id: a shared FFN group is
+    # the *same matrix* at four ids (w1/w1, w2/w2 across a pair), so equal bytes
+    # mean equal tensor and there is no way for two different matrices to
+    # collide into one blob.  Hashing 1152x384 at i16 is cheap next to writing
+    # it a second time.
+    #
+    # `--no-alias` turns it off, so a container can still be produced with every
+    # record owning its bytes for an A/B against a file that aliases.
+    alias = not getattr(args, "no_alias", False)
+    seen_payload = {}
+    n_aliased = 0
+    saved = 0
     for rec in tensors:
         # dense producers append 7-tuples; an expert tensor carries an 8th
         # element, the expert index, which lands in the v3 aux field.
@@ -436,13 +455,28 @@ def build(meta, tensors, tok_blob, args):
         if dt == DT_Q8I8 and (tid & 0xFF) != T_EMB:
             payload = bytes((b ^ 0x80) for b in payload)
             dt = DT_Q8U8
-        while (data_off + len(data)) % ALIGN:
-            data.append(0)
-        off = len(data)
-        data += payload
+        # The key covers the record shape and the encoding as well as the bytes,
+        # because two records may hold equal payloads that mean different things
+        # (a 1152x384 body and a 384x1152 one do not, but a t3 body and its
+        # scale plane could share a length).
+        key = (dt, rows, cols, group, payload) if alias else None
+        off = seen_payload.get(key) if key is not None else None
+        if off is None:
+            while (data_off + len(data)) % ALIGN:
+                data.append(0)
+            off = len(data)
+            data += payload
+            if key is not None:
+                seen_payload[key] = off
+        else:
+            n_aliased += 1
+            saved += len(payload)
         crc = zlib.crc32(payload) & 0xFFFFFFFF
         table += pack_rec(tid, dt, 0, group, rows, cols, off, len(payload), crc, scale,
                           aux=aux, size=rsize)
+    if n_aliased:
+        print("alias: %d record(s) share a blob with an earlier one (%d bytes saved)"
+              % (n_aliased, saved))
     data_off_final = table_off + len(tensors) * rsize
     file_size = data_off_final + len(data)
     body = MAGIC + struct.pack("<HHIIIIQQ", version, HEADER_SIZE, len(tensors),
@@ -494,12 +528,20 @@ def verify(path, tensors, tok=None):
         raise SystemExit("verify: %d records but %d source tensors" % (n, len(want)))
     bad = 0
     field_bad = 0
+    # Aliasing is invisible to a field-by-field comparison -- every aliased
+    # record still carries the right id, shape and scale, and the CRC still
+    # matches because the bytes are the same bytes -- so `off` is checked here,
+    # positively: a container that was written with sharing has to show it, and
+    # one that was not must not silently acquire it.  `verify` reads the offsets
+    # anyway, so this costs a set.
+    offsets = {}
     for i in range(n):
         rec = raw[table + i * rsize: table + (i + 1) * rsize]
         tid, dt, _flags, group, rows, cols, off, blen, crc, scale, aux = rec_unpack(rec)
         body = raw[doff + off: doff + off + blen]
         if zlib.crc32(body) & 0xFFFFFFFF != crc:
             bad += 1
+        offsets.setdefault((off, blen), []).append(tid)
         wtid, wdt, wrows, wcols, wgroup, wscale, waux = want[i]
         mism = []
         if tid != wtid:
@@ -522,6 +564,10 @@ def verify(path, tensors, tok=None):
     if field_bad:
         raise SystemExit("verify: %d record(s) do not match the source tensor table"
                          % field_bad)
+    shared = [ids for ids in offsets.values() if len(ids) > 1]
+    if shared:
+        print("verify: %d blob(s) shared by %d record(s) — aliasing intact"
+              % (len(shared), sum(len(ids) for ids in shared)))
     return n, caps, mo, ms, doff, len(raw), bad
 
 
@@ -592,6 +638,11 @@ def main():
     ap.add_argument("--seq", type=int, default=512,
                     help="KV length to record for a HuggingFace source (default 512)")
     ap.add_argument("--verify", action="store_true")
+    ap.add_argument("--no-alias", action="store_true",
+                    help="give every record its own bytes.  By default two records whose "
+                         "payload, dtype and shape are identical share one blob, which is "
+                         "what a block with a shared FFN needs; this flag writes the "
+                         "duplicated file for an A/B against it")
     args = ap.parse_args()
 
     # Fail on a name this build does not know before touching any weights: an

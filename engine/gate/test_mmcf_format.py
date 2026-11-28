@@ -82,6 +82,50 @@ def check_container(path):
     return True, "ok    %-52s v%d  %3d records" % (rel, h.version, h.n_tensors)
 
 
+def check_alias(path):
+    """(ok, message) for a container whose records share one blob.
+
+    Aliasing is legal (`off` is per record and the reader only bounds-checks it)
+    and a block with an FFN shared by layer pairs depends on it, but nothing else
+    in the gate would notice a file that aliases *wrongly*: every record still
+    carries the right id, shape and scale, and each CRC still matches its own
+    bytes.  Two invariants are checkable from the table alone:
+
+    - every offset is 16-byte aligned (the same rule a non-aliased record keeps),
+      so a shared blob lands where the reader's copy path expects it;
+    - two records with the same offset and length decode to the same kind of
+      body, which catches an embedding aliased onto a matrix (both are bytes, so
+      a CRC check cannot tell).
+    """
+    with path.open("rb") as f:
+        head = f.read(fmt.HEADER_SIZE)
+        h = fmt.parse_header(head)
+        f.seek(h.data_off - h.n_tensors * h.rec_size)
+        table = f.read(h.n_tensors * h.rec_size)
+    by_off = {}
+    for i in range(h.n_tensors):
+        tid, dt, _flags, _group, _rows, _cols, off, blen, _crc, _scale, _aux = \
+            fmt.rec_unpack(table[i * h.rec_size:][:h.rec_size])
+        if off % 16:
+            return False, "%s: record %d's offset %d is not 16-byte aligned" % (
+                path.name, i, off)
+        by_off.setdefault((off, blen), []).append((tid, dt))
+    shared = {k: v for k, v in by_off.items() if len(v) > 1}
+    for (_off, _blen), recs in shared.items():
+        kinds = {tid & 0xFF for tid, _dt in recs}
+        dts = {dt for _tid, dt in recs}
+        if len(dts) > 1:
+            return False, "%s: one blob is read as dtypes %s" % (path.name, sorted(dts))
+        # A per-layer kind may only share with the same per-layer kind (a shared
+        # FFN group at w1[l0]/w1[l1] is the intended case); anything else means
+        # two different tensors were collapsed into one.
+        per_layer = {k for k in kinds if k in fmt.PER_LAYER_KINDS}
+        if per_layer and kinds - per_layer:
+            return False, "%s: a per-layer matrix shares its blob with kind(s) %s" % (
+                path.name, sorted(kinds - per_layer))
+    return True, "  alias %-52s %d shared blob(s)" % (path.name, len(shared))
+
+
 def check_cpp():
     """(ok, messages) comparing the module's constants with model.cpp's."""
     cpp = cpp_constants()
@@ -107,6 +151,11 @@ def main() -> int:
         ok, msg = check_container(path)
         print(("ok    " if ok else "FAIL  ") + msg if not ok else "  " + msg)
         bad += 0 if ok else 1
+        if ok:
+            ok, msg = check_alias(path)
+            if not ok:
+                print("FAIL  " + msg)
+                bad += 1
 
     ok, msgs = check_cpp()
     for m in msgs:
