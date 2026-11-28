@@ -791,6 +791,18 @@ bool Model::parse_metadata() {
                 } else if (key == 21 && type == 1 && len >= 4) {
                         bias_dim_rows = rd16(payload);
                         bias_ffn_rows = rd16(payload + 2);
+                } else if (key == 19 && type == 1 && len >= 1) {
+                        // The rms partial sums' store: 0 = 24-bit fixed point
+                        // (the historical default, pins at a lane sum of 2048),
+                        // 1 = bit-cast f32.  Appended as its own key rather than
+                        // a byte of another one because a reader that predates
+                        // it must skip it, not misread a neighbour.
+                        if (payload[0] > 1) {
+                                cerr << "mmcf: rms store " << (int)payload[0]
+                                     << " is unknown (0 = i24, 1 = f32)\n";
+                                return false;
+                        }
+                        rms_store_f32 = payload[0] == 1;
                 } else if (key == 15 && type == 1 && len >= 1) {
                         hid_scale.assign(payload, payload + len);
                 } else if (key == 10 && type == 1 && len >= 2) {

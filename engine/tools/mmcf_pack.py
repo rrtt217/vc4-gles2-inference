@@ -330,6 +330,12 @@ def build(meta, tensors, tok_blob, args):
         md += tlv(12, 1, struct.pack("<B", 1))
     if args.rms_eps is not None:
         md += tlv(11, 1, struct.pack("<f", args.rms_eps))
+    # key 19: the rms partial sums' store.  Written only when f32 is needed --
+    # absent means the historical 24-bit fixed point, which is what every
+    # container packed before this key expects, so the default path is
+    # unchanged and no existing file acquires a new meaning.
+    if meta.get('rms_store_f32'):
+        md += tlv(19, 1, struct.pack("<B", 1))
     # key 20: the encoder-decoder block (version 5).  <BBHH>: encoder layers,
     # flags (bit0 post-norm, bit1 scale-embedding, bit2 non-gated FFN), the
     # encoder's sequence capacity, its FFN width.  key 21 is the two bias row
@@ -608,6 +614,10 @@ def main():
                     help="residual stream width: q16 (default, ±128) or q24 "
                          "(same 1/256 step, ±32768).  q24 is what a model that "
                          "trips the residual-rail check needs")
+    ap.add_argument("--rms-store", choices=["auto", "i24"], default="auto",
+                    help="the rms partial sums' store.  auto (default) writes key 19 = f32 "
+                         "when the residual calibration says a lane sum can pass the "
+                         "24-bit rail (2048); i24 forces the historical store for an A/B")
     ap.add_argument("--allow-over-rail", action="store_true",
                     help="pack even when the residual stream exceeds the engine's q16 rail")
     ap.add_argument("--no-rail-check", action="store_true",
@@ -760,13 +770,33 @@ def main():
     # 7.7157 with RMS_STORE=f32, same container, one switch).  A v5 block does
     # not have that store: its LayerNorm is the split scan (f32 lane sums, a
     # pair store), so the bound does not apply.
+    #
+    # The bound uses the *worst measured residual*, which is what makes the
+    # estimate sound rather than typical: `sum <= (dim/32) * peak^2` needs every
+    # value in a lane at the peak, and in practice the measured lane sums track
+    # it closely (MiniYuanYuan: bound 1.2e6, measured 6.7e4 -- the bound is 18x
+    # pessimistic and still the right side of the rail to decide on).
+    #
+    # The decision is written into the file as metadata key 19 rather than left
+    # as advice, because the failure is silent and the operator is not in the
+    # loop at run time.  `--rms-store i24` overrides it for an A/B, and
+    # `RMS_STORE=f32|i24` still overrides at run time.
     if peaks and not meta.get('encdec'):
         lanebound = worst * worst * (int(meta.get('dim') or 0) / 32.0)
-        if lanebound > RMS_LANE_RAIL:
+        if args.rms_store == 'i24':
+            if lanebound > RMS_LANE_RAIL:
+                print("rms store: i24 forced, but a lane sum can reach %.1e against the "
+                      "rail %.0f; inv_rms will be wrong after the peak"
+                      % (lanebound, RMS_LANE_RAIL))
+        elif lanebound > RMS_LANE_RAIL:
+            meta['rms_store_f32'] = True
             print("rms store: a lane sum can reach %.1e against the 24-bit rail %.0f "
-                  "(%.0e x over); run the engine with RMS_STORE=f32, or inv_rms is "
-                  "wrong for every layer after the peak"
+                  "(%.0e x over); writing key 19 = f32, because the 24-bit store pins "
+                  "and inv_rms is then wrong for every layer after the peak"
                   % (lanebound, RMS_LANE_RAIL, lanebound / RMS_LANE_RAIL))
+        else:
+            print("rms store: lane bound %.0f is inside the 24-bit rail %.0f; leaving "
+                  "the default store" % (lanebound, RMS_LANE_RAIL))
     # The FFN SwiGLU hidden goes through the same q16 activation format and is
     # clamped at the same rail.  It is not the residual, so the check above
     # cannot see it: MiniMind3-MoE's expert hidden reaches 250 at the chat

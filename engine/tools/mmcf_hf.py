@@ -2085,7 +2085,11 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
         # 1/256, rail +-127.996) by the norm passes.  They are O(1) in every
         # container packed so far, but that is an observation; this records the
         # number so mmcf_pack.py can say it rather than assume it.
-        if m.get('rms_att'):
+        # `m['rms_att']` is a numpy array, whose truth value is ambiguous -- an
+        # `if m.get('rms_att')` here raised ValueError on every dense source and
+        # took the whole --in path down with it.  The test is "is it present",
+        # which is what the None default means.
+        if m.get('rms_att') is not None:
             meta['norm_peaks'] = [
                 float(max(np.abs(np.asarray(m['rms_att'][l], dtype=np.float32)).max(),
                           np.abs(np.asarray(m['rms_ffn'][l], dtype=np.float32)).max()))

@@ -73,6 +73,7 @@ def main():
     tok_bytes = 0
     has_moe = False
     have_eps = False
+    have_rms_store = False
     has_rwkv = False
     tmpls = {}
     while p + 8 <= mo + ms:
@@ -144,6 +145,12 @@ def main():
             import struct as _s
             have_eps = True
             print(f"rms eps     {_s.unpack('<f', bytes(payload[:4]))[0]:g}")
+        elif key == 19 and ln >= 1:
+            # The rms partial sums' store: absent = 24-bit fixed point, 1 = f32.
+            # A model that saturates the 24-bit store needs the f32 bit, and the
+            # reader has no other way to tell which container it is looking at.
+            have_rms_store = True
+            print(f"rms store   {'f32' if payload[0] == 1 else 'i24'}")
         elif key == 13 and ln >= 16:
             ne, tk, mh, mf = struct.unpack_from("<4i", payload)
             has_moe = True

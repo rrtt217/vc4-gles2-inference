@@ -208,6 +208,13 @@ public:
     // hardcode 1e-5, which is 10x MiniMind3's (and feng30m's, and supra2's)
     // 1e-6; that was invisible until a model turned out to be sensitive to it.
     float rms_eps = 1e-5f;
+    // Metadata key 19: the rms partial sums' store width.  False (absent) keeps
+    // the historical 24-bit fixed point, whose lane sum pins at 2048; true means
+    // bit-cast f32.  It is a property of the *checkpoint*, not a tuning knob: a
+    // model whose residual peaks past ~13 saturates the 24-bit store on its own
+    // text and answers from a wrong `inv_rms` in every deeper layer, and the
+    // failure is silent, so a file that needs f32 has to say so.
+    bool rms_store_f32 = false;
     // Metadata key 14: one byte per layer, 0 = attention, 1 = the LFM2 conv
     // block.  Empty means every layer is attention (every model before LFM2).
     vector<uint8_t> layer_type;

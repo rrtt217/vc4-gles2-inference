@@ -24,8 +24,21 @@ constexpr float kAttnSumLogScale = 2048.0f;  // sum stored as log2(sum)*this
 // one fixed grid cannot serve both.
 constexpr XFormat kLnPairFmt = XFormat::I16_2;
 
-// The XFormat RMS_STORE selects for the rms partial sums: S24_1 (default) or
-// F32.  One accessor so the host dump decodes with the shader's format.
+// The XFormat the rms partial sums are stored in: S24_1 (default) or F32.  One
+// accessor so the host dump decodes with the shader's format.
+//
+// Two inputs, in this order: the container's metadata key 19, then the
+// `RMS_STORE` switch.  The container comes first because a model that saturates
+// the 24-bit store must not depend on the operator remembering a variable --
+// SmolLM2 answered *empty* until `RMS_STORE=f32` was set by hand, and that is a
+// property of the checkpoint, not of a run.  The switch stays as the override
+// and as the A/B, exactly like `RES` overrides key 12.
+//
+// `set_rms_store_f32` must be called before the first program that writes a
+// partial sum is built; the choice is baked into the emitted text (the S_ST /
+// S_LD aliases), so it is not a uniform and cannot change under a live program.
+void set_rms_store_f32(bool on);
+bool rms_store_f32_from_container();
 XFormat rms_store_format();
 
 // The KV cache's layout, built once from the `KV` value.  A codec is an

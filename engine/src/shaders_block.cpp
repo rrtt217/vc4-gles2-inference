@@ -22,12 +22,21 @@ namespace {
 // which is the drift this module exists to remove.  Sharing `F32` here cannot
 // confuse a scale: the format states no step, so the sum and a value stream
 // decode by the same, step-free rule.
+// False until a container states metadata key 19; the switch is the second
+// input and the container wins, because a model that saturates the 24-bit store
+// answers wrongly without f32 and the operator cannot be relied on to set it.
+static bool g_rms_f32_container = false;
+
 static XFormat rms_store_fmt() {
-    static const XFormat f = [] {
-        const char* v = sw_str("RMS_STORE");
-        return (v && !strcmp(v, "f32")) ? XFormat::F32 : XFormat::S24_1;
-    }();
-    return f;
+    // Not a function-local static: `/model` swaps the container and the answer
+    // has to change with it.  Shader builders run once per program (x_prog
+    // caches by name and validates the text's hash), so this is not hot, and a
+    // latch here would make the second model write the first model's partial
+    // sums -- which is the failure `prog_key_hash_` exists to catch one layer
+    // further down.
+    if (g_rms_f32_container) return XFormat::F32;
+    const char* v = sw_str("RMS_STORE");
+    return (v && !strcmp(v, "f32")) ? XFormat::F32 : XFormat::S24_1;
 }
 // The aliases the rms builders use, pointed at the selected format's own
 // functions (`x_codec_glsl` below is what defines them).
@@ -42,6 +51,9 @@ static string encs_glsl() { return x_codec_glsl(rms_store_fmt()) + rms_store_gls
 }  // namespace
 
 XFormat rms_store_format() { return rms_store_fmt(); }
+
+void set_rms_store_f32(bool on) { g_rms_f32_container = on; }
+bool rms_store_f32_from_container() { return g_rms_f32_container; }
 
 string swiglu_pair(int hidden, XFormat out, int hs) {
     need_dim("swiglu_pair", hidden);

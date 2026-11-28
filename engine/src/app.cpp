@@ -134,6 +134,11 @@ void App::upload_weights() {
     // model's value: invisible when reloading the same file, wrong for any
     // other container.
     gpu.set_rms_eps(model.rms_eps, model.rms_eps_stated);
+    // Metadata key 19: the rms partial sums' width, a property of the
+    // checkpoint (see shaders.h).  Set beside the epsilon and for the same
+    // reason -- it changes the emitted text, so a swap has to restate it or the
+    // second model runs the first one's store.
+    set_rms_store_f32(model.rms_store_f32);
     // One list of everything that reaches a texture.  It exists so the progress
     // bar can know the total before the first texture does, and so a new tensor
     // group cannot be uploaded but forgotten in the count.  Empty Mats are the
