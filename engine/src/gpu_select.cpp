@@ -79,6 +79,17 @@ GLuint GPU::x_q8_pair_swiglu(int rows, int cols, bool wrow, int hs){
                       matvec_q8_pair_swiglu(rows, cols, act_fmt_, inl, wrow, hs));
     }
 
+GLuint GPU::x_q8_ffn_mulgate(int rows, int cols, bool wrow){
+        // The two formats are in the key for the same reason every other getter
+        // carries them: the text embeds both decoders, so a key that named only
+        // (rows, cols) would hand the first caller's program to the second
+        // model's formats.
+        return x_prog("xq8mg_" + to_string(rows) + "_" + to_string(cols) + "_" +
+                      x_format_name(act_fmt_) + "_" + x_format_name(proj_fmt_) +
+                      (wrow ? "_wr" : ""),
+                      matvec_q8_ffn_mulgate(rows, cols, act_fmt_, proj_fmt_, wrow));
+    }
+
 GLuint GPU::x_q8_gate2(int rows, int cols){
         return x_prog("xq8g2_" + to_string(rows) + "_" + to_string(cols),
                       matvec_q8_gate2(rows, cols));

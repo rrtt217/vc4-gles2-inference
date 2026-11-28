@@ -214,6 +214,10 @@ std::string matvec_t3_p2_add_p2(int rows, int cols, bool wrow, int t3_th, int t3
 std::string matvec_q8_batch(int rows, int cols, XFormat xf, XFormat of, bool wrow = false);
 std::string matvec_q8_pair(int rows, int cols, XFormat xf, bool wrow = false);
 std::string matvec_q8_pair_swiglu(int rows, int cols, XFormat xf, bool inl = true, bool wrow = false, int hs = 0);
+// BiCrossGate: up(x) with the gate's projection store folded in, so the block's
+// `mul2` pass disappears.  I16_2 activations and an I16_2 store only; the block
+// falls back to the two-pass path otherwise.
+std::string matvec_q8_ffn_mulgate(int rows, int cols, XFormat xf, XFormat proj, bool wrow = false);
 std::string matvec_q8_gate2(int rows, int cols);
 std::string matvec_q8_p2(int rows, int cols, bool wrow = false);
 std::string rms_stats2(int dim, XFormat rf);

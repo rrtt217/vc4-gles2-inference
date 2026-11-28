@@ -258,6 +258,17 @@ vector<Case> cases() {
                                                         XFormat::I24_1, XFormat::I24_1); });
     add(v, "mul2_1152_i24_i24_to_f32", [] { return mul2(1152, XFormat::F32,
                                                         XFormat::I24_1, XFormat::I24_1); });
+    // The fused replacement, with and without a per-row weight scale: this is
+    // the kernel BICROSS_FUSE=0 exists to compare against, and the reason it is
+    // digested is that a fused kernel that drifts is a wrong FFN two stages
+    // later with nothing in between to see.
+    add(v, "q8_mulgate_1152x384_i16_i24", [] { return matvec_q8_ffn_mulgate(1152, 384,
+                                                                          XFormat::I16_2,
+                                                                          XFormat::I24_1); });
+    add(v, "q8_mulgate_1152x384_i16_i24_wr", [] { return matvec_q8_ffn_mulgate(1152, 384,
+                                                                             XFormat::I16_2,
+                                                                             XFormat::I24_1,
+                                                                             true); });
 
     // --- attention, one tag per layout the container can ask for
     AttnConfig c = attn_base();

@@ -402,6 +402,62 @@ string matvec_q8_gate2_p2(int rows, int cols, bool wrow) {
         "sl(qz(s11*" + C1 + "),qz(s21*" + C2 + ")));}";
 }
 
+// BiCrossGate's last matvec: up(x) with the gate's projection store folded in.
+//
+// The block used to run `mul2` as its own pass -- gate[i]*up[i] into the FFN
+// stream -- and on VC4 a pass costs ~1 ms whatever it carries, so folding it
+// into the consumer is the only way to stop paying for it
+// (docs/miniyuanyuan.md, "What a pass costs").  This is
+// matvec_q8_pair_swiglu's text with the second *weight* replaced by the first
+// operand's *store*: one fragment still writes two hidden values per texel, the
+// dot product is still q16 units, and `sl()` becomes a plain multiply because
+// the gate needs no SiLU.
+//
+// The 1/256 is not a magic scale.  `qz(s*ws)` is the row's dot in q16 units,
+// `x_projdec` returns the real value `x_projenc` stored, and q16 x real / 256 is
+// therefore the product in activation units -- the number `mul2` wrote and the
+// one `down` reads.  Both operands sit on the 1/256 lattice either way, so this
+// is the same product, computed one pass earlier.
+string matvec_q8_ffn_mulgate(int rows, int cols, XFormat xf, XFormat proj, bool wrow) {
+    need_shape("matvec_q8_ffn_mulgate", rows, cols, 4);
+    // The pair store is x_st2, which only the I16_2 codec defines, and the
+    // inline decode below is I16_2's.  The caller falls back to the two-pass
+    // mul2 path for any other pair of formats rather than this exiting.
+    if (xf != XFormat::I16_2) {
+        fprintf(stderr, "matvec_q8_ffn_mulgate: activation must be i16 pairs, not %s\n",
+                x_format_name(xf));
+        exit(2);
+    }
+    const int axw = x_texels(cols, xf);
+    const string ROWS = to_string(rows), COLS4 = to_string(cols / 4), AXW = to_string(axw);
+    const string WD = wrow ? wrow_scale(rows) : "";
+    const string S0 = wrow ? "wsr(r0)" : "ws", S1 = wrow ? "wsr(r1)" : "ws";
+    const string WR0 = "vec2((float(q)+0.5)/float(" + COLS4 + "),(float(r0)+0.5)/float(" + ROWS + "))";
+    const string WR1 = "vec2((float(q)+0.5)/float(" + COLS4 + "),(float(r1)+0.5)/float(" + ROWS + "))";
+    const string GR0 = "vec2((float(r0)+0.5)/float(" + ROWS + "),0.5)";
+    const string GR1 = "vec2((float(r1)+0.5)/float(" + ROWS + "),0.5)";
+    return head(xf) + x_proj_glsl(proj) + qz_sl() +
+        "uniform sampler2D W,X,G;uniform float ws;" + WD +
+        kDec16A + kDec16B +
+        "void main(){int t=int(gl_FragCoord.x);int r0=2*t;"
+        "int r1=min(r0+1," + to_string(rows - 1) + ");"
+        "float s0=0.0,s1=0.0;"
+        "for(int q=0;q<" + COLS4 + ";q++){"
+        "vec4 xa=texture2D(X,vec2((float(2*q)+0.5)/float(" + AXW + "),0.5));"
+        "vec4 xb=texture2D(X,vec2((float(2*q+1)+0.5)/float(" + AXW + "),0.5));"
+        "float a0=dA(xa),a1=dB(xa),a2=dA(xb),a3=dB(xb);"
+        "vec4 c=texture2D(W," + WR0 + ");vec4 w=c*255.0-128.0;"
+        "s0+=w.x*a0+w.y*a1+w.z*a2+w.w*a3;"
+        "c=texture2D(W," + WR1 + ");w=c*255.0-128.0;"
+        "s1+=w.x*a0+w.y*a1+w.z*a2+w.w*a3;}"
+        "float g0=x_projdec(texture2D(G," + GR0 + "));"
+        "float v0=qz(s0*" + S0 + ")*0.00390625*g0;"
+        "float v1=0.0;"
+        "if(r0+1<" + ROWS + "){float g1=x_projdec(texture2D(G," + GR1 + "));"
+        "v1=qz(s1*" + S1 + ")*0.00390625*g1;}"
+        "gl_FragColor=x_st2(v0,v1);}";
+}
+
 // Two-position w2 whose residual is the previous w2 chunk output, which is
 // already P2: one texel carries both positions value r, so the add reads one
 // texel instead of two and the add itself is the same expression.

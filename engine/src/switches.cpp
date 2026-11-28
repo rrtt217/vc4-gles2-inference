@@ -22,6 +22,8 @@ static const SwitchDef kSwitches[] = {
      "per-layer xb/att/x1/xbf/hid/hidA as q16 texels (the pair path adds x1b/p2in/p2part); diff_paths.sh reads it"},
     {"BICROSS_DUMP", "", SwKind::Flag, "", SwStatus::Probe, SwAxis::Dump,
      "the BiCrossGate FFN's per-stage values (bicq/bicac/bicg/bicup/bichid), each in the format it is stored in -- the only way to bisect a block whose three kernels feed each other"},
+    {"BICROSS_FUSE", "", SwKind::Flag, "", SwStatus::Probe, SwAxis::Ffn,
+     "the BiCrossGate FFN's gate store folded into the up matvec (default on); BICROSS_FUSE=0 restores the mul2 pass"},
     {"HIDDEN_DUMP", "", SwKind::Str, "", SwStatus::Probe, SwAxis::Dump,
      "the same for the layer output on the GPU path (GPU_LAYER 0 vs 1)"},
     {"DUMP_F32", "", SwKind::Str, "", SwStatus::Probe, SwAxis::Dump,

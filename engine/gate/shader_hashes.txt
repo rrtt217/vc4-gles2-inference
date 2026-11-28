@@ -153,6 +153,8 @@ cf6e33ef8934b673    6336 q4shift1/matvec_i4_add_pair_768x768_i16_2_gen
 053ec71dbdf5435f    4631 q4shift1/matvec_i4_pair_2432x768_i16_2
 dfbd53153279151b    5266 q4shift1/matvec_i4_pair_swiglu_2432x768_i16_2_gen
 cacef64c6268e4f8    6742 q4shift1/matvec_i4_pair_swiglu_2432x768_i16_2_inl
+7942066e34d8553f    6725 q8_mulgate_1152x384_i16_i24
+c3f33c25c354c6e0    7067 q8_mulgate_1152x384_i16_i24_wr
 d92497f47c0daecf    4977 rms_norm_768_i16_1_i8_4
 d21b0e0c79db30eb    5349 rms_norm_768_i16_2_i16_2_fused_eps
 ac80f2a3c1633fad    5941 rms_norm_pair2_768_i16_1_eps

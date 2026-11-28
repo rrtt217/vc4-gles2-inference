@@ -59,7 +59,7 @@ The rows below are the registry, one per switch, grouped by the axis they move.
 diagnostic or a pricing arm; `retired` is gone (`--dump-switches` prints the
 same table with what *this* environment resolved to).
 
-166 switches: 30 permanent, 122 probe, 14 retired; 16 legacy spellings are translated.
+167 switches: 30 permanent, 123 probe, 14 retired; 16 legacy spellings are translated.
 
 ### The activation streams
 
@@ -103,6 +103,7 @@ same table with what *this* environment resolved to).
 
 | Switch | Takes | What it moves |
 |---|---|---|
+| `BICROSS_FUSE` | `=1` | the BiCrossGate FFN's gate store folded into the up matvec (default on); BICROSS_FUSE=0 restores the mul2 pass |
 | `FFN_FLUSH` | `=1` | flush policy after the FFN (FFN_FLUSH=0 keeps the default) |
 | `FFN_FUSE` | `=1` | the fused gate+swiglu (default on); FFN_FUSE=0 restores the two-pass path |
 | `FFN_PAIR` | `=1` | two output rows per FFN fragment (default on); FFN_PAIR=0 disables |

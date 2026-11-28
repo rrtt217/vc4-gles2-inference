@@ -135,6 +135,10 @@ public:
     // not the activation stream, and decoding them as the latter read an
     // i24 texel as two q16 pairs -- every second value came out 0.25.
     GLuint mul2(GLuint a, XFormat af, GLuint b, XFormat bf, int n, Target& out);
+    // BiCrossGate's last matvec: up(x) times the gate's projection store, in one
+    // pass instead of `mul2` + the down matvec.  q8 weights only for now; the
+    // block keeps the two-pass path for every other weight type.
+    GLuint ffn_mulgate(const Mat& up, GLuint x, GLuint gate, int n, Target& out);
     // swish(x + b) in one pass: the bias add and the activation are one
     // elementwise expression and two formats.
     GLuint act_swish_biased(GLuint x, GLuint b, Target& out, int dim, XFormat xf, XFormat f);
@@ -492,6 +496,7 @@ private:
     GLuint x_q6(int rows, int cols, bool wrow = false);
     GLuint x_q8_pair(int rows, int cols, bool wrow = false);
     GLuint x_q8_pair_swiglu(int rows, int cols, bool wrow = false, int hs = 0);
+    GLuint x_q8_ffn_mulgate(int rows, int cols, bool wrow = false);
     GLuint x_q8_gate2(int rows, int cols);
     GLuint x_q8_p2(int rows, int cols, bool wrow = false);
     GLuint x_rms_stats2();

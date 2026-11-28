@@ -729,6 +729,20 @@ GLuint Session::ffn_hidden(const Mat& w1, const Mat& w3, const Mat& w13,
         if (env_set("BICROSS_DUMP")) gpu_.dump_target(gpu_.bic_ac_, "bicac", 16);
         gpu_.matvec_to(m_.bicross_gate[l], gpu_.bic_ac_.tex, gpu_.bic_g_);
         if (env_set("BICROSS_DUMP")) gpu_.dump_target(gpu_.bic_g_, "bicg", 16, gpu_.proj_fmt_);
+        // The gate's store and up(x) meet in one pass, so the block pays one
+        // pass a layer instead of two: on VC4 a pass is ~1 ms whatever it
+        // carries (docs/miniyuanyuan.md, "What a pass costs").  The fused kernel
+        // exists for q8 weights with an I16_2 activation and an I16_2 hidden;
+        // everything else -- i16, q4, or either format axis moved off i16 pairs
+        // -- keeps the two passes below, which is why the axis sweep and the
+        // i16 reference container still exercise the old path.
+        static const bool fuse = !env_zero("BICROSS_FUSE");
+        if (fuse && w1.type == WeightType::INT8 &&
+            gpu_.act_fmt_ == XFormat::I16_2 && gpu_.ffn_fmt_ == XFormat::I16_2) {
+            GLuint r = gpu_.ffn_mulgate(w1, x, gpu_.bic_g_.tex, m_.hidden, gpu_.bic_m_);
+            if (env_set("BICROSS_DUMP")) gpu_.dump_target(gpu_.bic_m_, "bichid", 16);
+            return r;
+        }
         gpu_.matvec_to(w1, x, gpu_.bic_up_);
         if (env_set("BICROSS_DUMP")) gpu_.dump_target(gpu_.bic_up_, "bicup", 16, gpu_.proj_fmt_);
         GLuint r = gpu_.mul2(gpu_.bic_g_.tex, gpu_.proj_fmt_, gpu_.bic_up_.tex,

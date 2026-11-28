@@ -283,6 +283,32 @@ GLuint GPU::mul2(GLuint a, XFormat af, GLuint b, XFormat bf, int dim, Target& ou
         return out.tex;
 }
 
+GLuint GPU::ffn_mulgate(const Mat& up, GLuint x, GLuint gate, int n, Target& out){
+        // The result is the FFN hidden stream, so the target is sized in
+        // ffn_fmt_, not act_fmt_ -- the same rule mul2 follows and the same one
+        // that made ACT=bf16 answer garbage when it was act_fmt_.
+        const int ow = x_texels(n, ffn_fmt_);
+        if (out.tex == 0 || out.w != ow) out = make_target(ow, 1);
+        const bool wr = up.type == WeightType::INT8 && up.has_row_scale();
+        GLuint p = x_q8_ffn_mulgate(n, up.cols, wr);
+        bind_fbo(out.fbo);
+        glViewport(0, 0, ow, 1);
+        use_program(p);
+        bind_tex(0, up.tex); set_sampler(p, "W", 0);
+        bind_tex(1, x); set_sampler(p, "X", 1);
+        bind_tex(2, gate); set_sampler(p, "G", 2);
+        glUniform1f(uloc(p, "ws"), up.scale);
+        if (wr) { bind_tex(3, up.row_scale_tex); set_sampler(p, "WS", 3); }
+        setup_attrib(p);
+        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+        // The same finish as ffn_pair_swiglu_chunk: this is a fused FFN producer
+        // and the down matvec samples it next.
+        if (ffn_flush_wanted(layer_fast_finish_)) glFlush();
+        else layer_finish("NF_FFN");
+        ffn_sync();
+        return out.tex;
+}
+
 GLuint GPU::rmsnorm(GLuint x, GLuint w, Target& out){        const int aw = x_texels(att_dim_, act_fmt_);
         if (out.tex == 0 || out.w != aw) out = make_target(aw, 1);
         if (rms_stats_.tex == 0) rms_stats_ = make_target(1, 1);
