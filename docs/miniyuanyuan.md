@@ -111,6 +111,21 @@ GPU_LAYER=1 LOGITS_OUT=/tmp/eng.bin ./engine_mm3 \
 python3 engine/scripts/cmp_logits.py /tmp/ref.bin /tmp/eng.bin
 ```
 
+The block follows the format axes -- `ACT`, `RES`, `FFN_HID`, `PROJ` and `KV` all
+produce the same answer, alone and paired -- and `engine/scripts/format_sweep.sh`
+is what proves it:
+
+```bash
+bash engine/scripts/format_sweep.sh ../models/miniyuanyuan/miniyuanyuan.q4.mmcf \
+  "我是沅沅，来自湘西龙舟之乡沅陵县。<sep>"
+```
+
+Run it after touching any kernel that reads or writes two streams.  Two formats
+were hardcoded in this block at first (`bicross_act` stored q16 whatever the
+stream was, `mul2` wrote the activation stream where the FFN_HID stream belongs)
+and both were invisible on the default plan, where every axis carries the same
+value.
+
 The ids are the check: a template that renders `<bos>你` instead of
 `<bos><user>你<sep><assistant>` produces a different sequence and every
 comparison after that is against a different prompt.  `TOKENS_OUT` dumps what the
