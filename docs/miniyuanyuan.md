@@ -140,12 +140,28 @@ fragment's fixed overhead and a 384-wide row leaves the same lanes idle that a
 MiniYuanYuan's 1.13 ms/draw, is 187 ms -- MiniMind3 q4's 185.7.  This model pays
 1.5x for having 12 layers instead of 8, and its per-draw cost is *lower*.
 
-About 36 of the 248 are the block's own three extra passes (`q`, `gate`, `up`,
-`mul2`, `down` against SwiGLU's `w13`, pair, `w2`), i.e. 14%; the two rmsnorm
-passes are 3 draws each, 72 a token or 29%, and that is shared with every dense
-model here.  The one un-fused step the block owns is `mul2`, which could fold
-into the `down` matvec's activation decode the way `Q8AP_INLINE` folds a
-projection store; worth ~24 draws (10%, ~28 ms/token), not measured.
+`LAYER_PROFILE` puts the block's cost where it belongs.  Per layer, draws:
+
+| pass | MiniMind3 q4 | MiniYuanYuan q4 |
+|---|---:|---:|
+| `rms_att` / `rms_ffn` | 3 / 3 | 3 / 3 |
+| `attn` (with the qkv matvec) | 8 | 7 |
+| `wo` | 1 | 1 |
+| `ffn` (w13, or the block's `q`/`gate`/`up`/`act`/`mul2`) | 2 | 7 |
+| `w2` / `down` | 2 | 1 |
+| **per layer** | **19** | **22** |
+
+The FFN is 8 draws against SwiGLU's 4 -- four matvecs and three elementwise
+passes instead of two matvecs and one fused pair -- while this model's
+12Q/2KV attention saves the draw MiniMind3 spends on KV.  Net +3 a layer, 36 a
+token, 14%.
+
+That is the block as designed, not a fallback: `bicross_act` and `mul2` are
+separate kernels because the chain has three operands, and SwiGLU's single
+`swiglu_pair` has two.  Folding `mul2` into the `down` matvec's activation
+decode (the way `Q8AP_INLINE` folds a projection store) would recover 1-2 draws
+a layer, ~10%, ~28 ms/token; not attempted.  The six rmsnorm draws a layer are
+12% of the token and are shared with every dense model here.
 
 ## Known gaps
 
