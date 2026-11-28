@@ -243,6 +243,21 @@ vector<Case> cases() {
     add(v, "mul_act_1024_24_16",
         [] { return mul_act(1024, XFormat::I16_2, XFormat::I24_1, XFormat::I16_2); });
     add(v, "conv_copy_1024", [] { return copy_act(1024, XFormat::I16_2); });
+    // The BiCrossGate FFN (metadata key 23).  Registered because the block's
+    // kernels are where a format gets hardcoded by accident: `bicross_act` stored
+    // a hand-picked q16 while the axis said bf16, and `mul2` wrote the activation
+    // stream where the FFN_HID stream belongs.  Neither would have shown up in a
+    // digest that did not cover them.
+    add(v, "bicross_384_gelu_silu_i16", [] { return bicross_act(384, XFormat::I24_1,
+                                                                XFormat::I16_2,
+                                                                XFormat::I16_2, 0x102); });
+    add(v, "bicross_384_gelu_silu_bf16", [] { return bicross_act(384, XFormat::I24_1,
+                                                                 XFormat::BF16,
+                                                                 XFormat::BF16, 0x102); });
+    add(v, "mul2_1152_i24_i24_to_i16", [] { return mul2(1152, XFormat::I16_2,
+                                                        XFormat::I24_1, XFormat::I24_1); });
+    add(v, "mul2_1152_i24_i24_to_f32", [] { return mul2(1152, XFormat::F32,
+                                                        XFormat::I24_1, XFormat::I24_1); });
 
     // --- attention, one tag per layout the container can ask for
     AttnConfig c = attn_base();

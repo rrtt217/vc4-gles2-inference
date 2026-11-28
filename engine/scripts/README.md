@@ -18,6 +18,7 @@ the load guard and the statistics.
 | `bench_plain_ab.sh` | the same for a plain (non-chat) prompt | GPU + models | manual |
 | `longctx.sh` | how the timing and the quality move with `SEQ` | GPU + model | manual |
 | `supra2-battery.sh` | a smoke battery for the supra2 CPU path | model | manual |
+| `format_sweep.sh` | every value of every stream axis (`ACT`, `RES`, `FFN_HID`, `PROJ`, `KV`), alone and paired with `ACT`, produces the *same* assistant text -- a format hardcoded inside a kernel is invisible until the axis moves | GPU + a chat container with a pinned answer (~43 runs) | manual, after touching a kernel that reads or writes two streams |
 | `swap_matrix.py` | `/model` swaps are byte-identical to a fresh process | GPU + models (~3 min) | manual, before touching the loader |
 | `verify_packing.sh` | the packed-activation layout against a known-good binary | a reference binary | manual |
 | `diff_paths.sh` | which stage differs between the CPU and GPU paths | GPU + model | manual, with `dump_diff.awk` |

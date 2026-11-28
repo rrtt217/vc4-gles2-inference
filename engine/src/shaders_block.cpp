@@ -870,18 +870,18 @@ std::string bicross_act(int dim, XFormat pf, XFormat xf, XFormat out, int act) {
                "*X1(X,i1-" + D + "*h1," + XW + ".0);"
                "float a0=(h0==0)?" + A1v("v0") + ":" + A2v("v0") + ";"
                "float a1=(h1==0)?" + A1v("v1") + ":" + A2v("v1") + ";"
-               // The consumer is a matvec, which reads the activation stream in
-               // *raw q16* (X2Q).  XST2 stores a value (it scales by 256 inside),
-               // so writing it here made every gate dot product 256x too large
-               // and the projection saturated at 127.996.  x_st2q takes the raw
-               // units the reader expects.
-               "gl_FragColor=x_st2q(a0*256.0,a1*256.0);}";
+               // The store is `XST2`, the macro `head(out)` defines for this
+               // stream's format -- not a hand-rolled q16.  The matvec that reads
+               // it converts to q16 units itself (`X2Q` is `X2*256` for bf16 and
+               // a raw pair read for I16_2), so a fixed q16 store here made
+               // ACT=bf16 decode bf16 bytes as q16 and answer garbage.
+               "gl_FragColor=XST2(a0,a1);}";
     else
         body = "void main(){int o=int(gl_FragCoord.x);int h=o/" + D + ";"
                "float v=x_projdec(texture2D(A,vec2((float(o)+0.5)/float(" + PW + "),0.5)))"
                "*X1(X,o-" + D + "*h," + XW + ".0);"
                "float a=(h==0)?" + A1v("v") + ":" + A2v("v") + ";"
-               "gl_FragColor=x_st1q(a*256.0);}";
+               "gl_FragColor=XST1(a);}";
     return head(out) + poly_src() + x_proj_glsl(pf) + erf_src() + gelu_fwd() +
         "uniform sampler2D A,X;uniform float dummy;" + body;
 }

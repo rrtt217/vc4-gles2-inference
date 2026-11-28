@@ -262,11 +262,17 @@ GLuint GPU::bicross_act(GLuint q, GLuint x, int dim, int act, int half, Target& 
 // swiglu family reads both operands from one texture, and the tree's two A*B
 // kernels are the LFM2 conv block's and RWKV's.
 GLuint GPU::mul2(GLuint a, XFormat af, GLuint b, XFormat bf, int dim, Target& out){
-        const int ow = x_texels(dim, act_fmt_);
+        // The result is the *FFN hidden* stream, so it is the FFN_HID axis's
+        // format, not the activation stream's.  It was `act_fmt_`, which is the
+        // same value on the default plan and the wrong one the moment either
+        // axis moves: ACT=bf16 wrote a bf16 hidden that the w2 matvec read as
+        // q16, and FFN_HID=bf16 read an i16 hidden as bf16.  Both answered
+        // garbage while the control model was fine.
+        const int ow = x_texels(dim, ffn_fmt_);
         if (out.tex == 0 || out.w != ow) out = make_target(ow, 1);
         GLuint p = x_prog("mul2_" + to_string(dim) + "_" + to_string((int)af) + "_" +
-                              to_string((int)bf) + "_" + to_string((int)act_fmt_),
-                          ::mul2(dim, act_fmt_, af, bf));
+                              to_string((int)bf) + "_" + to_string((int)ffn_fmt_),
+                          ::mul2(dim, ffn_fmt_, af, bf));
         bind_fbo(out.fbo);
         glViewport(0, 0, ow, 1);
         use_program(p);
