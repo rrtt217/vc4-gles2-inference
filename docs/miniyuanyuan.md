@@ -32,8 +32,15 @@ kinds.  The two activations are key 23's two bytes, in that order.
 
 | file | size | precision | runs |
 |---|---:|---|---|
-| `miniyuanyuan.i16.mmcf` | 46.0 MB | i16 | laptop, and the reference for the q4 |
-| `miniyuanyuan.q4.mmcf` | 16.9 MB | q4 | laptop; the one the board wants |
+| `miniyuanyuan.i16.mmcf` | 46.0 MB | i16 | laptop, and the reference for the two quantised ones |
+| `miniyuanyuan.q8.mmcf` | 23.1 MB | q8 | laptop; **the one to prefer** |
+| `miniyuanyuan.q4.mmcf` | 16.9 MB | q4 | laptop and board; the smallest |
+
+**Prefer q8, then q4.**  On the board q8 is the *fastest* of the three
+(266 ms/token against q4's 279 and i16's 342 -- see Quality) and its PPL is
+within 0.7% of q4's, so the 6 MB q4 saves cost a little speed rather than buying
+any.  q4 stays the answer when the file size is the constraint: it is half of q8
+and 37% of i16.
 
 ```bash
 python3 engine/tools/mmcf_pack.py --in <release>/weights/m12l_d384_ep2_fp16.pt \
@@ -62,6 +69,11 @@ GPU_LAYER=1 ./engine_mm3 --model ../models/miniyuanyuan/miniyuanyuan.q4.mmcf \
 there.  Without it the layer loop runs on the host and `CPU_FFN=1` selects the
 block's own CPU oracle (`Session::bicross_ffn`).
 
+On the Pi Zero the same command runs with `KV=q16` and, for the q8 container
+only, `QKV_PAIR=0` (see Quality).  The rms partial sums need no switch: the
+container states metadata key 19, the container wins over `RMS_STORE`, and the
+`formats:` line names the result `rms f32 (container key 19)`.
+
 `BICROSS_DUMP=1` prints the block's five stages in the format each is stored in
 (`bicq`/`bicac`/`bicg`/`bicup`/`bichid`).  It is the only way to bisect the
 block: the three kernels feed each other, so a wrong intermediate shows up as a
@@ -69,22 +81,71 @@ bad PPL two stages later.
 
 ## Quality
 
-Measured 2026-11-28 on Intel Iris Xe, `GPU_LAYER=1`, corpus
-`engine/data/ppl_test.txt` (377 tokens), one 512-token window:
+Measured 2026-11-28 on both machines, one protocol: `GPU_LAYER=1`, `KV=q16`, corpus
+`engine/data/ppl_test.txt` (md5 `dc0c8b7c`), one 512-token window
+(`SEQ=512 PPL_STRIDE=256`), which is 378 predicted tokens for this tokenizer.
 
-| container | PPL | nll | size |
+| container | Xe PPL | Pi Zero PPL | size |
 |---|---:|---:|---:|
-| i16 | 70.0440 | 4.2491 | 46.0 MB |
-| q4 | 69.4882 | 4.2412 | 16.9 MB |
-| float32 reference (`ref_forward_pth.py`) | 81.4485 | 4.4000 | — |
+| i16 | 70.0440 | 70.1238 | 46.0 MB |
+| q8 | 69.6895 | 69.8373 | 23.1 MB |
+| q4 | 69.4882 | 69.3326 | 16.9 MB |
+| float32 reference (`ref_forward_pth.py`) | 81.4485 | — | — |
 
-Both precisions produce the same greedy text,
-`我是沅沅，来自湘西龙舟之乡沅陵县。<sep>`.
+The three precisions produce the same greedy text,
+`我是沅沅，来自湘西龙舟之乡沅陵县。<sep>`, on both machines.  The board tracks
+Xe to 0.1-0.2% on every container, so VC4's own compiler limits change the speed
+(see below) but not the arithmetic.
 
 The engine sits *below* the float32 reference because its per-layer activation
 quantisation is not the same function as the reference's float pass; the
 comparison that matters is logits against the oracle, which agree at
 **corr 0.99963 with the same argmax** on the ids `2,5,606,4,6`.
+
+### Speed on the board
+
+Measured 2026-11-28 on the Pi Zero, ARMv6/VFPv2: `TIMING=1`, `--gen 48 --greedy`,
+median of three, warm (one discarded run).
+
+| container | decode | prefill | note |
+|---|---:|---:|---|
+| **q8** | **266.1 ms/token** | 6.15 s | needs `QKV_PAIR=0` on VC4 |
+| q4 | 279.5 ms/token | 7.89 s | |
+| i16 | 342.3 ms/token | 6.85 s | |
+
+q8 is faster *and* smaller than i16 by more than the file size suggests, and it
+beats q4 despite carrying 37% more weights: q4's eight-wide gate is not enough to
+pay for the byte unpacking here, which is the opposite of MiniMind3 on the same
+board.  That is a per-model fact, so measure it per model.
+
+`QKV_PAIR=0` is required for q8 on VC4 and is the only switch this model needs
+beyond `GPU_LAYER=1`: without it the load dies in `program 'xkv' did not draw`,
+vc4's register allocator refusing the row-pair int8 qkv kernel.  The workaround is
+numerically neutral -- Xe PPL 69.6895 with pairing and 69.6895 without (measured
+2026-11-28).
+
+**Why a 19.7M model is slower here than the 64M MiniMind3.**  Measured 2026-11-28
+with `DRAWCOUNT=1`.  VC4 is draw-bound,
+so the currency is `DRAWCOUNT` draws a token, not parameters:
+
+| model | layers | dim/hidden | draws/token | ms/draw |
+|---|---:|---|---:|---:|
+| MiniMind3 q4 | 8 | 768/2432 | 143 | 1.30 |
+| feng30m q8 | 11 | 448/896 | 178 | — |
+| MiniYuanYuan q4 | 12 | 384/1152 | 248 | 1.13 |
+
+A layer costs about 17 draws whatever its width, because a draw's cost is the
+fragment's fixed overhead and a 384-wide row leaves the same lanes idle that a
+768-wide one fills.  So the depth is the whole gap: 248 × 8/12 = 165 draws, at
+MiniYuanYuan's 1.13 ms/draw, is 187 ms -- MiniMind3 q4's 185.7.  This model pays
+1.5x for having 12 layers instead of 8, and its per-draw cost is *lower*.
+
+About 36 of the 248 are the block's own three extra passes (`q`, `gate`, `up`,
+`mul2`, `down` against SwiGLU's `w13`, pair, `w2`), i.e. 14%; the two rmsnorm
+passes are 3 draws each, 72 a token or 29%, and that is shared with every dense
+model here.  The one un-fused step the block owns is `mul2`, which could fold
+into the `down` matvec's activation decode the way `Q8AP_INLINE` folds a
+projection store; worth ~24 draws (10%, ~28 ms/token), not measured.
 
 ## Known gaps
 
@@ -92,8 +153,7 @@ comparison that matters is logits against the oracle, which agree at
 |---|---|---|
 | the MoE variant | `m12l_d384_moe_ep3_fp16.pt` is a different release: 6 routed experts, **top-2**, a shared expert, and routers on layers 6–9 only | the v3 reader refuses all three by name (top-1 only, no shared expert, no mixed sparse/dense).  Porting it is a container-format change, not a kernel one |
 | the 4Q arena models | `model_1126.py`'s 4 parallel Q sets with no `W_K`/`W_V` and a per-head gate | no container form for a projection the attention does not have, and no published weights |
-| q8 | not packed yet | q4 fits the board and measures better here; q8's reason to exist is other models |
-| Pi Zero | not measured | the block is fine numerically but the board still needs `RMS_STORE=f32` (key 19) and a cross build |
+| q8 on VC4 | the row-pair int8 qkv kernel is refused by vc4's register allocator (`program 'xkv' did not draw`) | `QKV_PAIR=0` answers the same text for the same PPL; the paired form is a speed arm on Xe, not a numeric one |
 
 ## Measuring it
 
@@ -119,6 +179,12 @@ is what proves it:
 bash engine/scripts/format_sweep.sh ../models/miniyuanyuan/miniyuanyuan.q4.mmcf \
   "我是沅沅，来自湘西龙舟之乡沅陵县。<sep>"
 ```
+
+On the board the same script runs from the runtime directory with
+`ENGINE=bin/engine_mm3_pi.myy` (and `KV=q16`, plus `QKV_PAIR=0` for q8).
+That is a *different* claim: VC4 answers "does this kernel exist on this
+compiler at all", which is how the q8 qkv pair above was found, while Xe answers
+"does this kernel follow the axis".
 
 Run it after touching any kernel that reads or writes two streams.  Two formats
 were hardcoded in this block at first (`bicross_act` stored q16 whatever the

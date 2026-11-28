@@ -66,6 +66,10 @@ add() {   # add TAG VAR=VAL...
     local got; got=$(run "$@")
     printf '%s\t%s\n' "$got" "$tag" >> "$WORK/out"
     n=$((n + 1))
+    # Progress on stderr, one line a run.  A 43-run sweep on the board is ten
+    # minutes of silence otherwise, and a silent long run is indistinguishable
+    # from a hung one -- the summary still goes to stdout alone.
+    printf '  [%2d] %s\n' "$n" "$tag" >&2
 }
 
 # One list of KEY=VAL tokens: a bare value is an env command name, which is how
