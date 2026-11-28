@@ -18,13 +18,25 @@
 # refused by name at load (`exit 2` with a message), which the engine's conv and
 # FFN_HID paths do, and a silent wrong answer is the bug this exists to catch.
 set -u
-cd "$(dirname "$0")/../.." || exit 2
-ENGINE=engine/engine_mm3
 MODEL=${1:-}
 EXPECT=${2:-}
 if [ -z "$MODEL" ] || [ -z "$EXPECT" ]; then
     sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
+fi
+# Absolute before any cd: the container is named relative to the caller's cwd,
+# which on the board is the runtime directory, not the checkout.
+case "$MODEL" in /*) ;; *) MODEL=$PWD/$MODEL ;; esac
+# `ENGINE` from the environment is how the sweep runs on the board: the Pi has no
+# checkout, only a runtime directory, and a kernel that VC4's register allocator
+# refuses (the q8 row-pair qkv did) is a failure the laptop cannot show.
+ENGINE=${ENGINE:-}
+if [ -z "$ENGINE" ]; then
+    cd "$(dirname "$0")/../.." || exit 2
+    ENGINE=engine/engine_mm3
+else
+    cd "$(dirname "$ENGINE")" || exit 2
+    ENGINE=./$(basename "$ENGINE")
 fi
 [ -x "$ENGINE" ] || { echo "format_sweep: no $ENGINE (build it first)" >&2; exit 2; }
 [ -f "$MODEL" ] || { echo "format_sweep: no $MODEL" >&2; exit 2; }
