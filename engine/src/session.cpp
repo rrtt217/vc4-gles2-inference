@@ -414,12 +414,19 @@ Session::Session(Model& model, GPU& gpu) : m_(model), gpu_(gpu){
                             : gpu_.kv_.codec == KvCodec::F32 ? "f32"
                             : gpu_.kv_.bits == 16 ? "q16"
                             : gpu_.kv_.bits == 8 ? "q8" : "i24";
-            const char* rms = sw_str("RMS_STORE");
+            // The *effective* store, not the switch.  Echoing `sw_str("RMS_STORE")`
+            // reported `rms i24` on the board for a container whose key 19 says
+            // f32 -- a line whose whole purpose is "say which stream this run
+            // asked for" answering with the axis's unset value.  The container
+            // wins over the switch, so the answer comes from the format itself,
+            // and the one case where the two inputs disagree says so.
+            const char* rms = x_format_name(rms_store_format());
             fprintf(stderr, "formats: act %s res %s ffn %s proj %s | kv %s width %d | "
-                            "qkv_pair %d | rms %s\n",
+                            "qkv_pair %d | rms %s%s\n",
                     x_format_name(gpu_.act_fmt_), x_format_name(gpu_.res_fmt_),
                     x_format_name(gpu_.ffn_fmt_), x_format_name(gpu_.proj_fmt_), kvs,
-                    gpu_.kv_.texels, (int)gpu_.att_qkv_pair_, rms ? rms : "i24");
+                    gpu_.kv_.texels, (int)gpu_.att_qkv_pair_, rms,
+                    rms_store_f32_from_container() ? " (container key 19)" : "");
             // The parse above is inside `if (gpu_layer_)`; saying so is the
             // difference between "the axis was applied" and "the axis was
             // ignored and the defaults ran".
