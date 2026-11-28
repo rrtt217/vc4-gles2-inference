@@ -91,6 +91,12 @@ void GPU::reset_targets(){
         ffn_b_ = Target();
         ffn_h_ = Target();
         ffn_ab_ = Target();
+        // The BiCrossGate FFN's three scratch targets (metadata key 23).
+        bic_ac_ = Target();
+        bic_g_ = Target();
+        bic_up_ = Target();
+        bic_m_ = Target();
+        bic_q_ = Target();
         ffn_ab_a_ = Target();
         ffn_ab_b_ = Target();
         ffn_h_a_ = Target();

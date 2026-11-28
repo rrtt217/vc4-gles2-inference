@@ -43,6 +43,9 @@ T_QKV, T_WO, T_W1, T_W3, T_W13, T_W2 = 0x10, 0x11, 0x12, 0x13, 0x14, 0x15
 (T_CROSS_Q, T_CROSS_K, T_CROSS_V, T_CROSS_O) = (0x35, 0x36, 0x37, 0x38)
 T_BIAS_DIM, T_BIAS_FFN, T_LOGITS_BIAS, T_POS = 0x39, 0x3A, 0x3B, 0x3C
 T_ROUTER = 0x16   # the per-layer MoE gate: rows = experts, cols = dim
+# The BiCrossGate FFN's two matrices a SwiGLU does not have (metadata key 23).
+# `up`/`down` keep the w1/w2 slots, so these are the only new ids.
+T_BICROSS_Q, T_BICROSS_GATE = 0x3D, 0x3E
 # LFM2's "conv" blocks (the Liquid implicit convolution): a 3*dim projection,
 # a depthwise causal kernel, and a dim projection back.  A reader that predates
 # them ignores the ids and runs attention on a conv layer, which fails on the
@@ -1464,6 +1467,21 @@ def rail_peaks_rwkv7(m, seq=8):
     m['final_ln_peak'] = fin
     return res, hid
 
+def _act_np(code, x):
+    """One of the BiCrossGate block's two activations, as metadata key 23 codes.
+
+    1 = silu, 2 = gelu in the exact erf form -- PyTorch's `F.gelu` default, which
+    is what the reference calls.  The tanh approximation is a different function
+    where the operand is large, and this block's operand reaches |15|.
+    """
+    if code == 1:
+        return x / (1.0 + np.exp(-x))
+    if code == 2:
+        import math
+        return 0.5 * x * (1.0 + np.vectorize(math.erf)(x / math.sqrt(2.0)))
+    raise SystemExit("activation code %r is not in key 23's set (1 silu, 2 gelu)" % (code,))
+
+
 def rail_peaks(m, seq=8):
     """(residual peaks, FFN hidden peaks) from a float32 forward pass.
 
@@ -1567,11 +1585,28 @@ def rail_peaks(m, seq=8):
                     hpeaks[l] = max(hpeaks[l], float(np.abs(hh).max()))
                     x[t] = x1[t] + hh @ w2e.T
             else:
-                g = h2 @ m['w1'][l].T
-                u = h2 @ m['w3'][l].T
-                hh = (g / (1 + np.exp(-g))) * u
-                hpeaks[l] = max(hpeaks[l], float(np.abs(hh).max()))
-                x = x1 + hh @ m['w2'][l].T
+                if m.get('bicross'):
+                    # The BiCrossGate FFN: q1,q2 = q(h).chunk(2); a = act1(q1*h);
+                    # c = act2(q2*h); y = down(gate(concat(a,c)) * up(h)).  The
+                    # calibration has to run the real block or both rails are
+                    # measured against a model that does not exist -- and this is
+                    # the model whose residual is one value at one position.
+                    b = m['bicross']
+                    qq = h2 @ b['q'][l].T
+                    q1, q2 = qq[..., :dim], qq[..., dim:]
+                    a = _act_np(b['act1'], q1 * h2)
+                    c = _act_np(b['act2'], q2 * h2)
+                    gate = np.concatenate([a, c], -1) @ b['gate'][l].T
+                    u = h2 @ m['w1'][l].T
+                    hh = gate * u
+                    hpeaks[l] = max(hpeaks[l], float(np.abs(hh).max()))
+                    x = x1 + hh @ m['w2'][l].T
+                else:
+                    g = h2 @ m['w1'][l].T
+                    u = h2 @ m['w3'][l].T
+                    hh = (g / (1 + np.exp(-g))) * u
+                    hpeaks[l] = max(hpeaks[l], float(np.abs(hh).max()))
+                    x = x1 + hh @ m['w2'][l].T
             mx = float(np.abs(x).max())
             if not np.isfinite(mx):
                 raise SystemExit("residual calibration produced %s at layer %d; the "
@@ -1986,6 +2021,18 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
                 # key 10's third byte: the tokenizer's per-run space marker.
                 rope_factors=m.get('rope_factors'),
                 sp_prefix=int(m.get('sp_prefix') or 0))
+    # key 23: a BiCrossGate FFN.  The tensor kinds alone do not say the FFN is a
+    # different block -- a reader that saw only 0x3D/0x3E would still run a
+    # SwiGLU over w1/w2 and answer nonsense -- so the block is declared here and
+    # the reader refuses the kinds without it.
+    if m.get('bicross'):
+        meta['bicross'] = dict(m['bicross'])
+    # A loader that knows its own eps states it: the engine's compiled default is
+    # 1e-5 and this family is 1e-6, which is a real numeric difference (key 11
+    # switches the norm shader from a literal to a uniform, so it is not free --
+    # but not stating it is wrong by 10x).
+    if m.get('rms_eps'):
+        meta['rms_eps'] = float(m['rms_eps'])
     # v5: the LayerNorm weight rows are read by ln_apply in kLnPairFmt (q16,
     # rail +-127.996) and clamp silently.  Record their peaks for the packer's
     # line; the residual stream still has no encoder-decoder calibration, which
@@ -2323,8 +2370,15 @@ def tensors_from_hf(model_dir, scheme, seq, m=None, rail_check=True, vocab_limit
                 mat(T_W3, l, m['expert_w3'][l][e], aux=e)
                 mat(T_W2, l, m['expert_w2'][l][e], aux=e)
         elif split:
+            # A BiCrossGate block has no w3: its gate_proj is 2*dim -> hidden and
+            # got its own kind.  `split` is still true (it is what the loader
+            # requires for a w1/w2 pair), so the w3 write is what is skipped.
             mat(T_W1, l, m['w1'][l])
-            mat(T_W3, l, m['w3'][l])
+            if m.get('bicross'):
+                mat(T_BICROSS_Q, l, m['bicross']['q'][l])
+                mat(T_BICROSS_GATE, l, m['bicross']['gate'][l])
+            else:
+                mat(T_W3, l, m['w3'][l])
         else:
             mat(T_W13, l, np.concatenate([m['w1'][l], m['w3'][l]], axis=0))
         if not moe:

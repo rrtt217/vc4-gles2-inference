@@ -803,6 +803,21 @@ bool Model::parse_metadata() {
                                 return false;
                         }
                         rms_store_f32 = payload[0] == 1;
+                } else if (key == 23 && type == 1 && len >= 2) {
+                        // A BiCrossGate FFN (MiniYuanYuan).  Two bytes, the two
+                        // activations, in the reference's order: act1 applies to
+                        // q1*x and act2 to q2*x.  1 = silu, 2 = gelu(erf).  The
+                        // block carries its own tensor kinds (0x3D/0x3E) and
+                        // reuses w1/w2 for up/down, so the key is what tells a
+                        // reader the FFN is that block rather than a SwiGLU.
+                        bicross_acts = (int)payload[0] | ((int)payload[1] << 8);
+                        for (int a : { (int)payload[0], (int)payload[1] }) {
+                                if (a != 1 && a != 2) {
+                                        cerr << "mmcf: bicross activation " << a
+                                             << " is unknown (1 = silu, 2 = gelu)\n";
+                                        return false;
+                                }
+                        }
                 } else if (key == 15 && type == 1 && len >= 1) {
                         hid_scale.assign(payload, payload + len);
                 } else if (key == 10 && type == 1 && len >= 2) {
@@ -1139,6 +1154,10 @@ bool Model::read_tables() {
         layers_conv_w.resize(layers);
         if (quant_split_) { layers_w1.resize(layers); layers_w3.resize(layers); }
         else layers_w13.resize(layers);
+        // A BiCrossGate FFN's two extra matrices, sized only when the container
+        // says it has one: an empty vector is "this model does not use the
+        // block", which the session tests before drawing its kernels.
+        if (is_bicross()) { bicross_q.resize(layers); bicross_gate.resize(layers); }
         vector<Mat> layers_router;
         vector<vector<MoeExpert>> layers_moe;
         if (experts > 0) {
@@ -1339,6 +1358,37 @@ bool Model::read_tables() {
                         const float* pf = (const float*)(fbase_ + data_off_ + r.off);
                         dst.assign(pf, pf + (size_t)r.rows * r.cols);
                         if (base == 0x3C) pos_rows = (int)r.rows;
+                        break;
+                }
+                case 0x3D: case 0x3E: {
+                        // The BiCrossGate FFN's two matrices that a SwiGLU does
+                        // not have: `q` is dim -> 2*dim and `gate_proj` is
+                        // 2*dim -> hidden.  `up`/`down` reuse w1/w2.  Checked
+                        // against the metadata's dim/hidden, because this is the
+                        // one place a wrong width would otherwise load and
+                        // compute silently -- the dense path validates almost no
+                        // matrix shape.
+                        if (!is_bicross()) {
+                                cerr << "mmcf: bicross tensor 0x" << hex << base << dec
+                                     << " in a container with no key 23\n";
+                                return false;
+                        }
+                        if (layer >= layers) {
+                                cerr << "mmcf: bicross tensor of layer " << layer
+                                     << " is outside the block (" << layers << " layers)\n";
+                                return false;
+                        }
+                        const int want_rows = (base == 0x3D) ? 2 * dim : hidden;
+                        const int want_cols = (base == 0x3D) ? dim : 2 * dim;
+                        if ((int)r.rows != want_rows || (int)r.cols != want_cols) {
+                                cerr << "mmcf: bicross tensor 0x" << hex << base << dec
+                                     << " of layer " << layer << " is " << r.rows << "x"
+                                     << r.cols << ", the block wants " << want_rows << "x"
+                                     << want_cols << "\n";
+                                return false;
+                        }
+                        Mat& dst = (base == 0x3D) ? bicross_q[layer] : bicross_gate[layer];
+                        as_mat(r, dst);
                         break;
                 }
                 // RWKV-7: nine f32 vector groups and eight low-rank pairs.  The
@@ -1768,7 +1818,8 @@ bool Model::read_tables() {
                      << " seq=" << seq << " theta=" << rope_theta << " half=" << rope_half
                      << " ropef=" << rope_factors.size()
                      << " segprefix=" << (sp_prefix ? 1 : 0)
-                     << " qknorm=" << qk_norm << " quant_split_=" << quant_split_
+                     << " qknorm=" << qk_norm << " bicross=" << bicross_acts
+                     << " quant_split_=" << quant_split_
                      << " experts=" << experts << " top_k=" << top_k
                      << " moe_hidden=" << moe_hidden << "\n";
                 cerr << "MMCF qkv[0]=" << qkv[0].rows << "x" << qkv[0].cols << " scale=" << qkv[0].scale

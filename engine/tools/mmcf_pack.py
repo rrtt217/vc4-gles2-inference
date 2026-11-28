@@ -336,6 +336,14 @@ def build(meta, tensors, tok_blob, args):
     # unchanged and no existing file acquires a new meaning.
     if meta.get('rms_store_f32'):
         md += tlv(19, 1, struct.pack("<B", 1))
+    # key 23: a BiCrossGate FFN, as the two activation codes in the reference's
+    # order (act1 on q1*x, act2 on q2*x).  The tensor kinds 0x3D/0x3E alone do not
+    # say the FFN is a different block, so a reader that saw them without this key
+    # would run a SwiGLU over w1/w2 and answer nonsense; the loader refuses them
+    # in a file with no key 23.
+    if meta.get('bicross'):
+        b = meta['bicross']
+        md += tlv(23, 1, struct.pack("<BB", int(b['act1']), int(b['act2'])))
     # key 20: the encoder-decoder block (version 5).  <BBHH>: encoder layers,
     # flags (bit0 post-norm, bit1 scale-embedding, bit2 non-gated FFN), the
     # encoder's sequence capacity, its FFN width.  key 21 is the two bias row
@@ -662,7 +670,36 @@ def main():
         raise SystemExit("unknown --template %r; known: %s"
                          % (args.template, ", ".join(sorted(TEMPLATE_KINDS))))
 
-    if os.path.isdir(args.src):
+    # A torch zip the training script wrapped (`{"model", "cfg"}`): MiniYuanYuan
+    # publishes that and nothing else, and it is not a HF directory, so it needs
+    # a reader of its own.  Tried before the legacy parser, which would otherwise
+    # call it an unknown magic.
+    _pt = False
+    if os.path.isfile(args.src) and args.src.endswith((".pt", ".pth")):
+        import mmcf_bicross
+        print("source: %s (a wrapped state dict; the block comes from its cfg)"
+              % args.src)
+        _m = mmcf_bicross.load_pt(args.src, seq=args.seq or None)
+        if args.seq:
+            _m['seq'] = args.seq
+        if args.rms_eps is None and _m.get('rms_eps'):
+            # The block's own eps, stated rather than left to the compiled 1e-5.
+            args.rms_eps = float(_m['rms_eps'])
+            print("rms eps: %g from the checkpoint's cfg (metadata key 11)" % args.rms_eps)
+        _ntok = tok_entry_count(args.tok) if args.tok else 0
+        meta, tensors = tensors_from_hf("", args.quant, _m['seq'], m=_m,
+                                        rail_check=not args.no_rail_check,
+                                        vocab_limit=_ntok or None,
+                                        q8_row=args.q8_row_scale,
+                                        head_dedup=args.head_dedup,
+                                        head_q6=args.head_q6,
+                                        enc_seq=args.enc_seq,
+                                        tok=args.tok)
+        _pt = True
+
+    if _pt:
+        pass
+    elif os.path.isdir(args.src):
         # Straight from HuggingFace: no intermediate checkpoint, and the rope
         # comes from config.json rather than a flag.
         print("source: %s (quant %s, seq %d)" % (args.src, args.quant, args.seq))

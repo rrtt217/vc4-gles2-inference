@@ -7,6 +7,7 @@
 // passes.  The shader text is in shaders_block.cpp; the block's layer order is
 // Session's.
 #include "gpu.h"
+#include "gpu_internal.h"
 #include "switches.h"
 
 #include <string>
@@ -117,6 +118,7 @@ GLuint GPU::bias_add_f(GLuint x, GLuint b, Target& out, int dim, XFormat xf, XFo
         bind_tex(1, b); set_sampler(p, "B", 1);
         setup_attrib(p);
         glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+        ffn_sync();
         return out.tex;
 }
 
@@ -226,8 +228,56 @@ GLuint GPU::act_swish(GLuint x, Target& out, int dim, XFormat f){
         return out.tex;
 }
 
-GLuint GPU::rmsnorm(GLuint x, GLuint w, Target& out){
-        const int aw = x_texels(att_dim_, act_fmt_);
+// One half of the BiCrossGate gate: act(qk * x), stored into the activation
+// stream.  `half` selects which `dim`-wide slice of the 2*dim matvec output is
+// read, so the two halves are two draws of one program.
+GLuint GPU::bicross_act(GLuint q, GLuint x, int dim, int act, int half, Target& out){
+        // The target is 2*dim wide: the shader stores half `hsel` at i and the
+        // other at i+dim, so one texture holds concat(a,c) and the gate matvec
+        // reads it as one 2*dim row.  Sizing it `dim` here wrote the second half
+        // past the end of the viewport and the block's gate input was garbage
+        // (PPL 23634 against the reference's 59).
+        const int ow = x_texels(2 * dim, act_fmt_);
+        if (out.tex == 0 || out.w != ow) out = make_target(ow, 1);
+        GLuint p = x_prog("bicross_" + to_string(dim) + "_" + to_string(act) + "_" +
+                              to_string((int)proj_fmt_) + "_" + to_string((int)act_fmt_),
+                          ::bicross_act(dim, proj_fmt_, act_fmt_, act_fmt_, act));
+        bind_fbo(out.fbo);
+        glViewport(0, 0, ow, 1);
+        use_program(p);
+        bind_tex(0, q); set_sampler(p, "A", 0);
+        bind_tex(1, x); set_sampler(p, "X", 1);
+        (void)half;   // one draw fills both halves; the argument keeps the call sites symmetric
+        setup_attrib(p);
+        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+        // Every other FFN kernel ends with this: the next draw reads the target
+        // as a texture, and without the sync the gate matvec could sample the
+        // pre-draw contents (all zeros on a fresh target, which is what made the
+        // block's output a pattern of 0 and 127).
+        ffn_sync();
+        return out.tex;
+}
+
+// Two full-width streams multiplied.  The dense path had no such kernel: the
+// swiglu family reads both operands from one texture, and the tree's two A*B
+// kernels are the LFM2 conv block's and RWKV's.
+GLuint GPU::mul2(GLuint a, XFormat af, GLuint b, XFormat bf, int dim, Target& out){
+        const int ow = x_texels(dim, act_fmt_);
+        if (out.tex == 0 || out.w != ow) out = make_target(ow, 1);
+        GLuint p = x_prog("mul2_" + to_string(dim) + "_" + to_string((int)af) + "_" +
+                              to_string((int)bf) + "_" + to_string((int)act_fmt_),
+                          ::mul2(dim, act_fmt_, af, bf));
+        bind_fbo(out.fbo);
+        glViewport(0, 0, ow, 1);
+        use_program(p);
+        bind_tex(0, a); set_sampler(p, "A", 0);
+        bind_tex(1, b); set_sampler(p, "B", 1);
+        setup_attrib(p);
+        glDrawArrays(GL_TRIANGLES, 0, 3); ++draws_;
+        return out.tex;
+}
+
+GLuint GPU::rmsnorm(GLuint x, GLuint w, Target& out){        const int aw = x_texels(att_dim_, act_fmt_);
         if (out.tex == 0 || out.w != aw) out = make_target(aw, 1);
         if (rms_stats_.tex == 0) rms_stats_ = make_target(1, 1);
         if (rms_partial_.tex == 0 || rms_partial_.w != RMS_PARTIALS)

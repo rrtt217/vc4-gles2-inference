@@ -196,4 +196,13 @@ private:
     vector<float> swiglu(const vector<float>& h, int n);
 
     vector<float> swiglu(const vector<float>& h);
+    // The BiCrossGate FFN (metadata key 23), CPU.  The oracle for the fused
+    // path, not a fast path: CPU_FFN=1 has to be able to say whether the three
+    // new kernels agree.
+    vector<float> bicross_ffn(const vector<float>& x, int l);
+    // The FFN's hidden stream on the fused path, for all three block shapes
+    // (SwiGLU pair, fused W13, BiCrossGate).  Empty Mats mean "this model does
+    // not use that form"; a BiCross model has no w3 at all.
+    GLuint ffn_hidden(const Mat& w1, const Mat& w3, const Mat& w13,
+                      int width, int l, GLuint x, int hs);
 };

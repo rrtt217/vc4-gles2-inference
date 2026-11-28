@@ -778,6 +778,156 @@ std::string act_swish_biased(int dim, XFormat xf, XFormat f) {
     return head(f) + x_residual_glsl(xf) + "uniform sampler2D X,B;" + body + "}";
 }
 
+// ---- the BiCrossGate FFN's elementwise passes ------------------------------
+// Three passes no other block needs.  The block is
+//
+//     q1,q2 = q(x).chunk(2);  a = act1(q1*x);  c = act2(q2*x)
+//     y = down( gate(concat(a,c)) * up(x) )
+//
+// so a kernel has to (a) multiply a matvec output by the activation stream,
+// (b) apply gelu to one half and silu to the other, and (c) multiply two
+// full-width activation streams.  None of the existing kernels can do it:
+// `swiglu*` read both operands from *one* texture (two rows, two lanes or two
+// x-halves), `mul_act` is gated to the LFM2 conv block and exits unless its
+// output is I16_2, and `rwkv_mul` is I24_1-only and gated to RWKV.
+//
+// The erf here is the Abramowitz-Stegun 7.1.26 form, |error| < 1.5e-7 -- the
+// exact-form GELU PyTorch's F.gelu computes.  `tanh(0.7979(x+0.044715x^3))` is
+// the other common spelling and it is a *different function* where this block's
+// operand lives (it reaches |15|), so it is not substituted.  Horner on
+// `t = 1/(1+p|x|)` keeps it to one reciprocal and no branch, which is what
+// VC4 wants (docs/vc4-glsl-costs.md: a data-dependent branch costs a quad).
+static string erf_src() {
+    // Abramowitz-Stegun 7.1.26, |error| < 1.5e-7 -- the exact-form GELU
+    // PyTorch's F.gelu computes.  EXP() is resolved here, at build time, so
+    // EXP=poly reaches it like every other kernel's exponential.
+    return string("float erf_a(float z){float s=z<0.0?-1.0:1.0;float x=abs(z);"
+                  "float t=1.0/(1.0+0.3275911*x);"
+                  "float y=t*(0.254829592+t*(-0.284496736+t*(1.421413741+"
+                  "t*(-1.453152027+t*1.061405429))));"
+                  "return s*(1.0-y*") + EXP("-x*x") + ");}\n";
+}
+static string gelu_fwd() {
+    return "float gelu_a(float v){return 0.5*v*(1.0+erf_a(v*0.70710678));}\n";
+}
+
+// One half of the BiCrossGate gate: `act(qk * x)` for the k-th half of a 2*dim
+// matvec output.  Two draws, one a half, so each fragment reads one value of the
+// matvec result and one of the activation stream and writes one -- no
+// cross-fragment addressing and no second program text per half (`half` is a
+// uniform).
+std::string bicross_act(int dim, XFormat pf, XFormat xf, XFormat out, int act) {
+    need_dim("bicross_act", dim);
+    const string D = to_string(dim), PW = to_string(x_texels(2 * dim, pf));
+    const string XW = to_string(x_texels(dim, xf));
+    // `half` picks the slice of the 2*dim matvec output, and `dst` where the
+    // result lands: both halves are written into ONE 2*dim activation texture
+    // (at i and i+dim), so the following gate matvec reads it as a single row.
+    const string q = "x_projdec(texture2D(A,vec2((float(i)+0.5)/float(" + PW + "),0.5)))";
+    const string v = q + "*X1(X,i," + XW + ".0)";
+    const string neg = "-(" + v + ")";
+    const string silu = "(" + v + "/(1.0+" + EXP(neg.c_str()) + "))";
+    // `act` carries both codes: low byte for q1*x, high byte for q2*x.
+    const int act1 = act & 0xFF, act2 = (act >> 8) & 0xFF;
+    const string a = (act1 == 2) ? ("gelu_a(" + v + ")") : silu;
+    // The store index is `i + hsel*dim`, so the output texture is 2*dim wide and
+    // the two draws fill it without a second target or a concatenate pass.
+    // `head(out)` already carries X1/XST1 for the output stream and the
+    // projection's own reader, so `x_projdec` comes from there; X1 for the
+    // *activation* stream is the one thing it does not define, and asking
+    // x_residual_glsl for it when the two streams are the same format would
+    // redefine Y1/Y2/YST1 and fail the preprocessor.
+    // The store is the *output* stream's, and I16_2 defines XST2 only -- a
+    // one-value store there is XST2(v,0) (the .rg half), which is what the
+    // gate matvec's X1 reads back.  Writing XST1 unconditionally compiled for
+    // i24/f32 and failed for the default i16.
+    // The 2*dim output is `concat(a, c)`, so output index o < dim is act1's and
+    // o >= dim is act2's.  For I16_2 a fragment at texel t holds values 2t and
+    // 2t+1, which always land in the same half (dim is even), so the two lanes
+    // share one activation -- no cross-half pairing, which is what an earlier
+    // version of this kernel got wrong (it paired i with i+dim and the gate
+    // then read a mixture of the two halves).
+    const bool pr = x_per_texel(out) == 2;
+    // One expression a half; the same text is used for both lanes, so the
+    // activation is chosen by the lane's half index at run time.
+    auto A1v = [&](const char* v) {
+        const string t(v);
+        return (act1 == 2) ? ("gelu_a(" + t + ")")
+                           : ("(" + t + "/(1.0+" + EXP(("-(" + t + ")").c_str()) + "))");
+    };
+    auto A2v = [&](const char* v) {
+        const string t(v);
+        return (act2 == 2) ? ("gelu_a(" + t + ")")
+                           : ("(" + t + "/(1.0+" + EXP(("-(" + t + ")").c_str()) + "))");
+    };
+    string body;
+    if (pr)
+        body = "void main(){int t=int(gl_FragCoord.x);int i0=2*t;int i1=i0+1;"
+               "int h0=i0/" + D + ";int h1=i1/" + D + ";"
+               "float v0=x_projdec(texture2D(A,vec2((float(i0)+0.5)/float(" + PW + "),0.5)))"
+               "*X1(X,i0-" + D + "*h0," + XW + ".0);"
+               "float v1=x_projdec(texture2D(A,vec2((float(i1)+0.5)/float(" + PW + "),0.5)))"
+               "*X1(X,i1-" + D + "*h1," + XW + ".0);"
+               "float a0=(h0==0)?" + A1v("v0") + ":" + A2v("v0") + ";"
+               "float a1=(h1==0)?" + A1v("v1") + ":" + A2v("v1") + ";"
+               // The consumer is a matvec, which reads the activation stream in
+               // *raw q16* (X2Q).  XST2 stores a value (it scales by 256 inside),
+               // so writing it here made every gate dot product 256x too large
+               // and the projection saturated at 127.996.  x_st2q takes the raw
+               // units the reader expects.
+               "gl_FragColor=x_st2q(a0*256.0,a1*256.0);}";
+    else
+        body = "void main(){int o=int(gl_FragCoord.x);int h=o/" + D + ";"
+               "float v=x_projdec(texture2D(A,vec2((float(o)+0.5)/float(" + PW + "),0.5)))"
+               "*X1(X,o-" + D + "*h," + XW + ".0);"
+               "float a=(h==0)?" + A1v("v") + ":" + A2v("v") + ";"
+               "gl_FragColor=x_st1q(a*256.0);}";
+    return head(out) + poly_src() + x_proj_glsl(pf) + erf_src() + gelu_fwd() +
+        "uniform sampler2D A,X;uniform float dummy;" + body;
+}
+
+// A*B, two different samplers, both full-width activation streams, result in
+// the activation stream.  The dense path had no such kernel (see the note
+// above); this is it, and it stays generic over the two input formats so
+// ACT=i16 / i8 / bf16 / f32 all reach it through xformat's own decoders.
+// A*B elementwise, two samplers, each operand in its own stream format.  The
+// BiCrossGate block needs it because its two operands are the *projection*
+// store (matvec outputs) while the result belongs in the activation stream --
+// and no existing kernel reads two operands with two non-activation formats.
+std::string mul2(int dim, XFormat out, XFormat af, XFormat bf) {
+    need_dim("mul2", dim);
+    const string AW = to_string(x_texels(dim, af)), BW = to_string(x_texels(dim, bf));
+    const string D = to_string(dim);
+    const bool pr = x_per_texel(out) == 2;
+    // The projection store is addressed by value index -- which is what the
+    // multiply below needs; the q16 stream is addressed by pair.
+    auto rd = [&](const char* tex, XFormat f, const string& i) {
+        if (f == XFormat::I16_2) {
+            const string TW = to_string(x_texels(dim, f));
+            return string("x_i16(texture2D(") + tex + ",vec2((float(int(" + i +
+                   ")/2)+0.5)/" + TW + ".0,0.5))." +
+                   "(((" + i + ")&1)==0?rg:ba)";
+        }
+        return string("x_projdec(texture2D(") + tex + ",vec2((float(" + i +
+               ")+0.5)/" + to_string(dim) + ".0,0.5)))";
+    };
+    string body;
+    if (pr)
+        body = "void main(){int t=int(gl_FragCoord.x);int i0=2*t;"
+               "float a0=" + rd("A", af, "i0") + ";float a1=" + rd("A", af, "i0+1") + ";"
+               "float b0=" + rd("B", bf, "i0") + ";float b1=" + rd("B", bf, "i0+1") + ";"
+               "gl_FragColor=XST2(a0*b0,a1*b1);}";
+    else
+        body = "void main(){int i=int(gl_FragCoord.x);"
+               "gl_FragColor=XST1(" + rd("A", af, "i") + "*" + rd("B", bf, "i") + ");}";
+    // x_projdec comes from x_proj_glsl for whichever operand uses it; the q16
+    // macro X1 is NOT used here, because it is defined by the *output* format
+    // (head(out)) and reading a projection texel through it produced 0.25 every
+    // second value.
+    return head(out) + x_codec_glsl(af) + x_proj_glsl(af) + x_proj_glsl(bf) +
+        "uniform sampler2D A,B;" + body;
+}
+
 // Squared ReLU on the I24 stream.  The formula is generic; the stream is fixed
 // because the RWKV block writes every activation in I24_1.  A caller with
 // another stream would take the format as a parameter, as act_swish does.

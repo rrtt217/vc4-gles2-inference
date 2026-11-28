@@ -621,7 +621,10 @@ vector<float> Session::forward(int token, int pos){
             bool gpu_ffn = m_.is_moe() || !m_.w1.empty();
             if (getenv("CPU_FFN")) gpu_ffn = false;
             else if (getenv("GPU_FFN")) gpu_ffn = atoi(getenv("GPU_FFN")) != 0;
-            if (!gpu_ffn) {
+            if (!gpu_ffn && m_.is_bicross()) {
+                // One block, one call: the CPU oracle for the fused path.
+                o2 = bicross_ffn(xbf, l);
+            } else if (!gpu_ffn) {
                 vector<float> h;
                 if (m_.ffn_chunked) {
                     vector<float> h1 = gpu_.matvec_s(*f.w1a, xbf);
@@ -675,15 +678,60 @@ vector<float> Session::forward(int token, int pos){
                     } else {
                         o2 = add_q16(gpu_.matvec_from(*f.w2a, ha), gpu_.matvec_from(*f.w2b, hb));
                     }
-                } else if (f.w1 && f.w1->rows) htex = gpu_.ffn_split(*f.w1, *f.w3, xtex, f.width, hs);
-                else htex = gpu_.ffn_fused(*f.w13, xtex, f.width, hs);
-                if (!m_.ffn_chunked) o2 = gpu_.matvec_from(*f.w2, htex);
+                }
+                if (!m_.ffn_chunked) {
+                    htex = ffn_hidden(f.w1 ? *f.w1 : Mat(), f.w3 ? *f.w3 : Mat(),
+                                      f.w13 ? *f.w13 : Mat(), f.width, l, xtex, hs);
+                    o2 = gpu_.matvec_from(*f.w2, htex);
+                }
             }
             x = add_q16(x1, o2);
             if (getenv("HIDDEN_DUMP")) gpu_.dump_cpu_row(x, gpu_.act_fmt_, "hidA", 4096);
         }
         return x;
     }
+
+// The FFN's hidden stream, on the fused path.  One place, because the block now
+// has three shapes and every call site used to spell the choice out: a SwiGLU
+// pair (w1/w3), a fused W13, or the BiCrossGate block (q + gate + w1-as-up).
+// A BiCross model has no w3 at all, so the old `f.w1 && f.w1->rows` test was
+// true and `ffn_split` was handed a null w3 -- which surfaced as a 0-wide
+// target rather than as a wrong answer, but only because the width came from
+// the empty Mat.
+GLuint Session::ffn_hidden(const Mat& w1, const Mat& w3, const Mat& w13,
+                          int width, int l, GLuint x, int hs){
+    if (m_.is_bicross()) {
+        //   a = act1(q1*x), c = act2(q2*x)   (two draws into one 2*dim target)
+        //   g = gate(concat(a,c))            (an ordinary matvec)
+        //   y = g * up(x)                    (w1 is up; the two-stream multiply)
+        // One draw: the kernel reads both halves of q(x) and writes
+        // concat(act1(q1*x), act2(q2*x)) into the 2*dim target.
+        // q(x) must be *drawn* first: bicross_act reads its 2*dim output, not
+        // the weight matrix.  Passing the Mat and letting the kernel fetch
+        // `q.tex` read the weights themselves -- every value then saturated and
+        // the gate input was a pattern of 0 and 127.
+        gpu_.matvec_to(m_.bicross_q[l], x, gpu_.bic_q_);
+        // BICROSS_DUMP=1 prints every stage of the block in the format each one
+        // is actually stored in.  It is the only way to bisect this FFN: the
+        // three kernels feed each other, and a wrong intermediate shows up as a
+        // bad PPL three stages later.
+        if (getenv("BICROSS_DUMP")) gpu_.dump_target(gpu_.bic_q_, "bicq", 16, gpu_.proj_fmt_);
+        gpu_.bicross_act(gpu_.bic_q_.tex, x, m_.dim,
+                         (m_.bicross_acts & 0xFF) | (((m_.bicross_acts >> 8) & 0xFF) << 8),
+                         0, gpu_.bic_ac_);
+        if (getenv("BICROSS_DUMP")) gpu_.dump_target(gpu_.bic_ac_, "bicac", 16);
+        gpu_.matvec_to(m_.bicross_gate[l], gpu_.bic_ac_.tex, gpu_.bic_g_);
+        if (getenv("BICROSS_DUMP")) gpu_.dump_target(gpu_.bic_g_, "bicg", 16, gpu_.proj_fmt_);
+        gpu_.matvec_to(w1, x, gpu_.bic_up_);
+        if (getenv("BICROSS_DUMP")) gpu_.dump_target(gpu_.bic_up_, "bicup", 16, gpu_.proj_fmt_);
+        GLuint r = gpu_.mul2(gpu_.bic_g_.tex, gpu_.proj_fmt_, gpu_.bic_up_.tex,
+                            gpu_.proj_fmt_, m_.hidden, gpu_.bic_m_);
+        if (getenv("BICROSS_DUMP")) gpu_.dump_target(gpu_.bic_m_, "bichid", 16);
+        return r;
+    }
+    if (w1.rows) return gpu_.ffn_split(w1, w3, x, width, hs);
+    return gpu_.ffn_fused(w13, x, width, hs);
+}
 
 // ---- RWKV-7: the block's layer loop (docs/engine-internals.md) ------
 //
@@ -1757,10 +1805,18 @@ GLuint Session::forward_gpu_hidden(int token, int pos, bool want_logits){
                 h = gpu_.hidden_b_.tex;
             if (getenv("HIDDEN_DUMP"))
                 gpu_.dump_cpu_row(read_hidden(gpu_.hidden_b_), gpu_.act_fmt_, "hidA", 4096);
+            } else if (m_.is_bicross() && getenv("CPU_FFN")) {
+                // The oracle for the fused BiCross path.  Without this the
+                // block's three kernels had no reference in the loop `--ppl` and
+                // `--gen` actually run, so a wrong gate input could only be seen
+                // as a bad PPL with no way to tell which stage did it.
+                vector<float> xb = read_hidden(gpu_.xbf_);
+                vector<float> y = bicross_ffn(xb, l);
+                h = gpu_.upload_hidden_fmt(y, gpu_.ffn_fmt_);
             } else {
                 GLuint hffn;
-                if (f.w1 && f.w1->rows) hffn = gpu_.ffn_split(*f.w1, *f.w3, xbf, f.width, hs);
-                else hffn = gpu_.ffn_fused(*f.w13, xbf, f.width, hs);
+                hffn = ffn_hidden(f.w1 ? *f.w1 : Mat(), f.w3 ? *f.w3 : Mat(),
+                                  f.w13 ? *f.w13 : Mat(), f.width, l, xbf, hs);
                 mark("ffn", l);
                 gpu_.matvec_add(*f.w2, hffn, x1, gpu_.hidden_a_, gpu_.ffn_fmt_);
                 mark("w2", l);
@@ -2014,8 +2070,8 @@ vector<float> Session::step_group(const vector<int>& toks, int pos0, bool want_l
                     gpu_.matvec_add(*f.w2b, hb, gpu_.grp_w2a().tex, gpu_.grp_h(b, n), gpu_.ffn_fmt_);
                 } else {
                     GLuint hffn;
-                    if (f.w1 && f.w1->rows) hffn = gpu_.ffn_split(*f.w1, *f.w3, xbf, f.width, hs);
-                    else hffn = gpu_.ffn_fused(*f.w13, xbf, f.width, hs);
+                    hffn = ffn_hidden(f.w1 ? *f.w1 : Mat(), f.w3 ? *f.w3 : Mat(),
+                                  f.w13 ? *f.w13 : Mat(), f.width, l, xbf, hs);
                     gpu_.matvec_add(*f.w2, hffn, x1, gpu_.grp_h(b, n), gpu_.ffn_fmt_);
                 }
                 h[b] = gpu_.grp_h(b, n).tex;
@@ -2321,7 +2377,40 @@ vector<float> Session::swiglu(const vector<float>& h, int n){
 
 vector<float> Session::swiglu(const vector<float>& h){
         return swiglu(h, m_.hidden);
+}
+
+// The BiCrossGate FFN, CPU.  This is the *oracle* for the fused path rather
+// than a fast path: `GPU_LAYER=1` draws three new kernels for the block and
+// CPU_FFN=1 has to be able to say whether they agree, so the arithmetic here is
+// the reference's, in float.
+//
+//   q1,q2 = q(x).chunk(2); a = act1(q1*x); c = act2(q2*x)
+//   y = down( gate(concat(a,c)) * up(x) )
+//
+// The gelu is the exact erf form (PyTorch's F.gelu default); the tanh
+// approximation is a different function at this block's operand scale.
+vector<float> Session::bicross_ffn(const vector<float>& x, int l){
+    const int d = m_.dim, i = m_.hidden;
+    const float* act = (const float*)(const void*)&m_.bicross_acts;
+    (void)act;
+    const int a1 = m_.bicross_acts & 0xFF, a2 = (m_.bicross_acts >> 8) & 0xFF;
+    auto f = [](int code, float v) -> float {
+        if (code == 2) return 0.5f * v * (1.0f + erff(v * 0.70710678f));
+        return v / (1.0f + expf(-v));
+    };
+    // q(x) is one 2*dim draw; its halves feed the two activations.
+    vector<float> q = gpu_.matvec_s(m_.bicross_q[l], x);
+    vector<float> cat(2 * d), up(i);
+    for (int k = 0; k < d; ++k) {
+        cat[k]         = quantize_act_f(f(a1, q[k] * x[k]));
+        cat[d + k]     = quantize_act_f(f(a2, q[d + k] * x[k]));
     }
+    up = gpu_.matvec_s(m_.w1[l], x);                 // up(x), the w1 slot
+    vector<float> gate = gpu_.matvec_s(m_.bicross_gate[l], cat);
+    vector<float> hid(i);
+    for (int k = 0; k < i; ++k) hid[k] = quantize_act_f(gate[k] * up[k]);
+    return gpu_.matvec_s(m_.w2[l], hid);             // down(x), the w2 slot
+}
 
 // ---- v5: the encoder-decoder path -----------------------------------------
 // The encoder is run layer-outer over every source position, which is the same

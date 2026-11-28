@@ -121,12 +121,20 @@ KINDS = {
     0x31: "enc_qkv", 0x32: "enc_wo", 0x33: "enc_w1", 0x34: "enc_w2",
     0x35: "cross_q", 0x36: "cross_k", 0x37: "cross_v", 0x38: "cross_o",
     0x39: "bias_dim", 0x3A: "bias_ffn", 0x3B: "logits_bias", 0x3C: "pos_table",
+    # The BiCrossGate FFN's two matrices a SwiGLU does not have (metadata key
+    # 23).  `up`/`down` reuse w1/w2, so only these two are new.  A reader that
+    # predates them ignores the ids, and the container still loads -- but it
+    # then runs a SwiGLU over w1/w2 and answers nonsense, which is why key 23 is
+    # what makes the block readable at all: the kinds alone do not say the FFN
+    # is a different block.
+    0x3D: "bicross_q", 0x3E: "bicross_gate",
 }
 
 # Kinds a per-layer record uses (the layer bits are 0 for the model-wide
 # vector records and for the two global norms).
 PER_LAYER_KINDS = frozenset([0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16,
                               0x17, 0x18, 0x19,
+                              0x3D, 0x3E,
                               0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B])
 
 # The RWKV-7 ids as named constants, so the packer, the dump tool and the

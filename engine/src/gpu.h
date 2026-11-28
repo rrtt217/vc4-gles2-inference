@@ -127,6 +127,14 @@ public:
     // They are different axes and the same format only by accident.
     GLuint bias_add_f(GLuint x, GLuint b, Target& out, int dim, XFormat xf, XFormat f);
     GLuint act_swish(GLuint x, Target& out, int n, XFormat f);
+    // The BiCrossGate FFN (metadata key 23): one half of act(qk*x) into the
+    // activation stream, and the two-stream multiply the block closes with.
+    GLuint bicross_act(GLuint qtex, GLuint x, int n, int act, int half, Target& out);
+    // The two operands are separate streams and each carries its own format:
+    // in the BiCrossGate block they are both the *projection* store (i24),
+    // not the activation stream, and decoding them as the latter read an
+    // i24 texel as two q16 pairs -- every second value came out 0.25.
+    GLuint mul2(GLuint a, XFormat af, GLuint b, XFormat bf, int n, Target& out);
     // swish(x + b) in one pass: the bias add and the activation are one
     // elementwise expression and two formats.
     GLuint act_swish_biased(GLuint x, GLuint b, Target& out, int dim, XFormat xf, XFormat f);
@@ -444,6 +452,9 @@ public:
     // this, or a later bind_tex()/bind_fbo() will skip a needed bind.
     void forget_state();
     void dump_target(const Target& t, const char* name, int n);
+    // The same, in an explicit format: a target does not carry one, and
+    // guessing it is what made an i24 row read as saturated q16.
+    void dump_target(const Target& t, const char* name, int n, XFormat f);
     // CPU path: the same bytes and the same printer, so HIDDEN_DUMP under
     // GPU_LAYER=0 is diffable against GPU_LAYER=1 (see dump_row in gpu.cpp).
     void dump_cpu_row(const vector<float>& v, XFormat f, const char* name, int n);
@@ -605,6 +616,10 @@ private:
     Target argmax_chunk_, argmax_group_, argmax_tile_;
     Target sum_target_;
     Target ffn_a_, ffn_b_, ffn_h_, ffn_ab_;
+    // The BiCrossGate FFN's scratch: the two activated halves, the gate matvec
+    // output and the up-projection it multiplies.  Registered in
+    // reset_targets() like every other member (gate/check_target_reset.sh).
+    Target bic_ac_, bic_g_, bic_up_, bic_m_, bic_q_;
     Target ffn_ab_a_, ffn_ab_b_, ffn_h_a_, ffn_h_b_;
     Target ln_stat_;   // v5: row 0 (mean, sd)*2^-k, row 1 k
     Target ln_partial_; // v5: 64 lanes, sum(x) then sum(x^2), f32 bit-cast

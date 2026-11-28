@@ -44,6 +44,18 @@ static void dump_row(const uint8_t* p, int w, const char* name, int n){
 }
 
 void GPU::dump_target(const Target& t, const char* name, int n){
+        // The format is the caller's, because the target does not carry one and
+        // a raw RGBA print does not either.  It used to print four bytes a texel
+        // and leave the reader to guess: reading an I24_1 row as q16 pairs (the
+        // default activation layout) gives 0x7fff for every value, which looks
+        // like a saturated kernel and is not -- it cost a whole bisect.  The
+        // decoded values are printed instead, one a line's field, with the
+        // format named, so the row can be compared to a numpy reference without
+        // a decoder on this side.
+        dump_target(t, name, n, act_fmt_);
+}
+
+void GPU::dump_target(const Target& t, const char* name, int n, XFormat f){
         if (t.tex == 0) return;
         vector<uint8_t> b((size_t)t.w * 4);
         glFinish();
@@ -51,7 +63,11 @@ void GPU::dump_target(const Target& t, const char* name, int n){
         glPixelStorei(GL_PACK_ALIGNMENT, 1);
         glReadPixels(0, 0, t.w, 1, GL_RGBA, GL_UNSIGNED_BYTE, &b[0]);
         gl_state_forget_bindings();
-        dump_row(&b[0], t.w, name, n);
+        const int count = t.w * x_per_texel(f);
+        if (n > count) n = count;
+        fprintf(stderr, "DUMPV %s fmt=%s n=%d", name, x_format_name(f), count);
+        for (int i = 0; i < n; ++i) fprintf(stderr, " %.7g", (double)x_unpack(&b[0], i, f));
+        fprintf(stderr, "\n");
 }
 
 // The CPU path has no target to read back: the activation is a plain float

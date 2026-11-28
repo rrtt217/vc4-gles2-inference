@@ -215,6 +215,17 @@ public:
     // text and answers from a wrong `inv_rms` in every deeper layer, and the
     // failure is silent, so a file that needs f32 has to say so.
     bool rms_store_f32 = false;
+    // A BiCrossGate FFN (metadata key 23).  The block is
+    //
+    //     q1,q2 = q(x).chunk(2);  a = act1(q1*x);  c = act2(q2*x)
+    //     y = down( gate(concat(a,c)) * up(x) )
+    //
+    // which is not a SwiGLU and has no kernel: `q` and `gate_proj` carry their
+    // own kinds (0x3D, 0x3E), `up`/`down` reuse w1/w2.  Zero means the ordinary
+    // gated FFN, so every existing container is unchanged.
+    int bicross_acts = 0;   // 0 = none; else act1 | act2 << 8 (1 silu, 2 gelu)
+    bool is_bicross() const { return bicross_acts != 0; }
+    vector<Mat> bicross_q, bicross_gate;
     // Metadata key 14: one byte per layer, 0 = attention, 1 = the LFM2 conv
     // block.  Empty means every layer is attention (every model before LFM2).
     vector<uint8_t> layer_type;

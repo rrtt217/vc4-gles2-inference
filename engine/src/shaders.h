@@ -374,4 +374,11 @@ std::string bias_add_q16(int dim, XFormat xf, XFormat f);
 std::string bias_add_q16_batch(int dim, XFormat xf, XFormat f, int rows);
 std::string act_swish(int dim, XFormat f);
 std::string act_swish_biased(int dim, XFormat xf, XFormat f);
+// The BiCrossGate FFN's two elementwise passes (metadata key 23).  `bicross_act`
+// is act(qk*x) for one half of a 2*dim matvec output -- act 1 = silu, 2 =
+// gelu(erf) -- and `mul2` multiplies two full-width streams from two samplers.
+// Neither existed: the swiglu family reads both operands from one texture, and
+// the two A*B kernels in the tree are gated to the LFM2 conv block and to RWKV.
+std::string bicross_act(int dim, XFormat pf, XFormat xf, XFormat out, int act);
+std::string mul2(int dim, XFormat out, XFormat af, XFormat bf);
 std::string act_sqrelu(int dim);

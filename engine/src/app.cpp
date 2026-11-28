@@ -169,6 +169,13 @@ void App::upload_weights() {
     add(model.conv_in_x);
     add(model.conv_out);
     add(model.w13);
+    // The BiCrossGate FFN's two extra matrices (metadata key 23).  They were
+    // missing from this list, so every bicross draw read an unbound texture and
+    // returned zero -- the model loaded, ran, and answered from a block whose
+    // q/gate projections were all zero.  The list is the one place a tensor
+    // group can be uploaded but forgotten, which is exactly what happened.
+    add(model.bicross_q);
+    add(model.bicross_gate);
     // RWKV chunked (VC4) draws the cm halves, not the full 3072-row key/value;
     // uploading the full w1/w2 too would exceed the 2048-row texture limit.
     if (!model.is_rwkv() || !model.ffn_chunked) { add(model.w1); add(model.w2); }
